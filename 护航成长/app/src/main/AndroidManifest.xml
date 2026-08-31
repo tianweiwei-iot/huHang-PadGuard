@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 网络与运行状态读取 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- 开机 / 覆盖安装后自启守护服务 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 前台服务：常驻守护 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Android 13+ 通知运行时权限 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      锁屏/拦截覆盖层不需要 SYSTEM_ALERT_WINDOW：
+      它们是普通 Activity（NEW_TASK 拉起），靠 setShowWhenLocked 在锁屏之上显示，
+      属于系统豁免范围，不强制申请悬浮窗权限。
+    -->
+
+    <application
+        android:name=".PadGuardApplication"
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.PadGuard"
+        android:supportsRtl="true">
+
+        <!-- 入口：设备绑定 / 状态查看 -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 设备绑定流程：在 MainActivity 检测到未绑定时拉起 -->
+        <activity
+            android:name=".bind.BindActivity"
+            android:exported="false"
+            android:theme="@style/Theme.PadGuard" />
+
+        <!-- 锁屏覆盖层：无解锁入口 -->
+        <activity
+            android:name=".ui.lock.LockScreenActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.PadGuard.Lock" />
+
+        <!-- 应用违规拦截覆盖层 -->
+        <activity
+            android:name=".ui.block.AppBlockActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.PadGuard.Lock" />
+
+        <!-- 管理员消息/公告全屏弹窗 -->
+        <activity
+            android:name=".ui.message.MessageActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.PadGuard.Lock" />
+
+        <!-- 常驻守护服务（GuardService） -->
+        <service
+            android:name=".service.GuardService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|specialUse">
+            <!-- API 34+ 用 specialUse 必须声明子类型理由，否则安装/启动报 SecurityException -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="device management / parental-control guard service" />
+        </service>
+
+        <!-- 设备管理器 / Device Owner 锚点 -->
+        <receiver
+            android:name=".receiver.PadGuardDeviceAdminReceiver"
+            android:exported="false"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 开机 / 覆盖安装广播：拉起守护服务 -->
+        <receiver
+            android:name=".receiver.BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <!-- 部分国产 ROM 快速开机替代广播 -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

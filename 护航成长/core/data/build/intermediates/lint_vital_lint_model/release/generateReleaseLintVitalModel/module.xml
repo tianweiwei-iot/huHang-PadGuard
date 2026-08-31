@@ -1,0 +1,19 @@
+<lint-module
+    format="1"
+    dir="D:\Project\Android\护航PadGuard\护航成长\core\data"
+    name=":core:data"
+    type="LIBRARY"
+    maven="PadGuardChild.core:data:unspecified"
+    agpVersion="8.7.3"
+    buildFolder="build"
+    bootClassPath="E:\Tools\Android\SDK\platforms\android-35\android.jar;E:\Tools\Android\SDK\build-tools\34.0.0\core-lambda-stubs.jar"
+    javaSourceLevel="17"
+    compileTarget="android-35"
+    neverShrinking="true">
+  <lintOptions
+      abortOnError="true"
+      absolutePaths="true"
+      checkReleaseBuilds="true"
+      explainIssues="true"/>
+  <variant name="release"/>
+</lint-module>

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  设备管理器策略声明。
+
+  这里声明的是"本应用打算使用哪些 DeviceAdmin 能力"。
+  注意区分两件事：
+  1. 本文件决定 DEVICE_ADMIN（普通设备管理器）级别能用哪些 API；
+  2. Device Owner / Profile Owner 的能力（用户限制、LockTask、防卸载等）
+     由是否为 owner 决定，与本文件无关，不需要也无法在这里声明。
+
+  因此即使本文件写得再全，没有 DO 身份也拿不到管控能力 —— 这是 Android 的设计，
+  端上无法绕过。部署文档必须写清 DO 的设置方式（adb dpm / QR 预置）。
+
+  reset-password 在 Android 8.0+ 对 DO 已失效（resetPassword 抛异常），
+  这里仍保留声明只为兼容旧设备，代码里不会调用它。
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <!-- 远程锁屏：lockNow() -->
+        <force-lock />
+        <!-- 远程擦除：wipeData()，仅在管控端二次确认后执行 -->
+        <wipe-data />
+        <!-- 禁用摄像头：setCameraDisabled() -->
+        <disable-camera />
+        <!-- 锁屏界面特性裁剪：setKeyguardDisabledFeatures() -->
+        <disable-keyguard-features />
+        <!-- 密码策略与失败次数监控 -->
+        <limit-password />
+        <watch-login />
+        <expire-password />
+        <encrypted-storage />
+        <!-- 兼容旧设备，Android 8+ 不再调用 -->
+        <reset-password />
+    </uses-policies>
+</device-admin>

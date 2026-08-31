@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.padguard.core.data" >
+    <!--
+        数据模块仅做本地持久化。
+        注意：不申请任何危险权限，所有敏感权限由 app 模块统一声明。
+    -->
+    <uses-sdk android:minSdkVersion="26" />
+
+</manifest>

@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>护航管控 · 家长端 APK 界面原型（按文档家庭场景优化）</title>
+<style>
+  :root{
+    --bg:#FBF7F3; --surface:#FFFFFF; --surface-2:#F6F1EC;
+    --primary:#F5874E; --primary-soft:#FFEFE6; --primary-ink:#C25E22;
+    --text:#2A211B; --text-2:#8A7B70; --text-3:#B6A89C;
+    --success:#22B573; --danger:#F0506E; --warn:#F5A623; --info:#7C5CFC;
+    --border:#F0E7DD; --radius:16px; --shadow:0 6px 22px rgba(120,80,40,.08); --shadow-s:0 2px 8px rgba(120,80,40,.06);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    background:#EDE4DA;color:var(--text);display:flex;align-items:center;justify-content:center;gap:36px;flex-wrap:wrap;padding:24px;min-height:100vh}
+  .phone{width:390px;height:844px;background:var(--bg);border-radius:44px;box-shadow:0 30px 70px rgba(80,50,20,.28);
+    position:relative;overflow:hidden;border:10px solid #2a211b;flex:0 0 auto;display:flex;flex-direction:column}
+  .statusbar{height:44px;flex:0 0 44px;display:flex;align-items:center;justify-content:space-between;padding:0 26px;font-size:13px;font-weight:600;position:relative;z-index:5}
+  .statusbar .right{display:flex;align-items:center;gap:6px}
+  .screen{flex:1;overflow:hidden;position:relative;display:flex;flex-direction:column}
+  .scroll{flex:1;overflow-y:auto;overflow-x:hidden;padding:0 16px 92px;-webkit-overflow-scrolling:touch}
+  .scroll::-webkit-scrollbar{display:none}
+  .appbar{display:flex;align-items:center;justify-content:space-between;padding:6px 16px 12px;position:sticky;top:0;background:var(--bg);z-index:4}
+  .appbar h1{font-size:20px;margin:0;font-weight:800;letter-spacing:.3px}
+  .appbar .sub{font-size:12px;color:var(--text-2);margin-top:2px;font-weight:500}
+  .pill{background:var(--primary-soft);color:var(--primary-ink);font-size:12px;font-weight:700;padding:5px 11px;border-radius:999px;display:inline-flex;align-items:center;gap:5px}
+  .bell{position:relative;width:40px;height:40px;border-radius:12px;background:var(--surface);box-shadow:var(--shadow-s);display:flex;align-items:center;justify-content:center;cursor:pointer;border:none}
+  .bell .dot{position:absolute;top:7px;right:8px;width:9px;height:9px;border-radius:50%;background:var(--danger);border:2px solid #fff}
+  .nav{position:absolute;left:0;right:0;bottom:0;height:74px;background:var(--surface);border-top:1px solid var(--border);display:flex;z-index:6;padding-bottom:env(safe-area-inset-bottom);border-radius:0 0 34px 34px}
+  .nav button{flex:1;background:none;border:none;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:var(--text-3);font-size:11px;font-weight:600;padding-top:8px}
+  .nav button.active{color:var(--primary)}
+  .nav button svg{width:23px;height:23px}
+  .view{display:none;flex:1;flex-direction:column;min-height:100%}
+  .view.active{display:flex}
+  .card{background:var(--surface);border-radius:var(--radius);box-shadow:var(--shadow-s);padding:14px;margin-bottom:12px}
+  .row{display:flex;align-items:center;gap:10px}.between{justify-content:space-between}
+  .chip{background:var(--surface-2);border:1px solid var(--border);color:var(--text-2);font-size:12px;font-weight:600;padding:7px 12px;border-radius:999px;cursor:pointer;white-space:nowrap}
+  .chip.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+  .chiprow{display:flex;gap:8px;overflow-x:auto;padding:2px 0 4px}.chiprow::-webkit-scrollbar{display:none}
+  .seg{display:flex;background:var(--surface-2);border-radius:12px;padding:4px;gap:4px;margin:4px 0 12px}
+  .seg button{flex:1;border:none;background:none;border-radius:9px;padding:8px 0;font-size:13px;font-weight:700;color:var(--text-2);cursor:pointer}
+  .seg button.active{background:var(--surface);color:var(--primary);box-shadow:var(--shadow-s)}
+  .sec-title{font-size:13px;font-weight:800;color:var(--text-2);margin:14px 4px 8px;letter-spacing:.4px}
+  .muted{color:var(--text-2);font-size:12px}
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:6px}
+  .stat{background:var(--surface);border-radius:14px;padding:12px 10px;box-shadow:var(--shadow-s);text-align:center}
+  .stat .ico{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;margin:0 auto 6px}
+  .stat .num{font-size:20px;font-weight:800;line-height:1}.stat .lbl{font-size:11px;color:var(--text-2);margin-top:4px}
+  .dev{border-radius:14px;padding:12px;margin-bottom:10px;background:var(--surface);box-shadow:var(--shadow-s);display:flex;align-items:center;gap:12px;cursor:pointer;position:relative}
+  .dev .av{width:46px;height:46px;border-radius:13px;background:var(--primary-soft);display:flex;align-items:center;justify-content:center;flex:0 0 46px;color:var(--primary-ink);font-weight:800;font-size:15px}
+  .dev .meta{flex:1;min-width:0}
+  .dev .meta .nm{font-weight:700;font-size:15px;display:flex;align-items:center;gap:7px}
+  .dot-s{width:8px;height:8px;border-radius:50%;flex:0 0 8px}.dot-on{background:var(--success)}.dot-off{background:var(--text-3)}.dot-warn{background:var(--warn)}
+  .dev .meta .ln{font-size:12px;color:var(--text-2);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lockbtn{width:38px;height:38px;border-radius:11px;background:var(--surface-2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text-2);cursor:pointer;flex:0 0 38px}
+  .banner{background:linear-gradient(100deg,#FFE9ED,#FFF2F4);border:1px solid #FBD3DA;border-radius:14px;padding:12px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:12px}
+  .banner .b-ico{width:34px;height:34px;border-radius:10px;background:#fff;display:flex;align-items:center;justify-content:center;color:var(--danger)}
+  .banner .b-t{font-weight:700;font-size:13px;color:#C8324B}.banner .b-s{font-size:11px;color:#D8637A;margin-top:2px}
+  .ring{width:128px;height:128px;border-radius:50%;display:flex;align-items:center;justify-content:center;position:relative;flex:0 0 128px}
+  .ring .inner{width:96px;height:96px;border-radius:50%;background:var(--surface);display:flex;flex-direction:column;align-items:center;justify-content:center}
+  .ring .inner .big{font-size:22px;font-weight:800}.ring .inner .sm{font-size:10px;color:var(--text-2)}
+  .ubar{margin:10px 0}.ubar .top{display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px}
+  .ubar .track{height:8px;background:var(--surface-2);border-radius:6px;overflow:hidden}.ubar .fill{height:100%;border-radius:6px}
+  .qa{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+  .qa .q{background:var(--surface);border-radius:13px;box-shadow:var(--shadow-s);padding:10px 4px;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer}
+  .qa .q .qi{width:36px;height:36px;border-radius:11px;background:var(--primary-soft);color:var(--primary-ink);display:flex;align-items:center;justify-content:center}
+  .qa .q .qt{font-size:10px;color:var(--text-2);font-weight:600}
+  .li{display:flex;align-items:center;gap:12px;padding:12px 4px;border-bottom:1px solid var(--surface-2)}
+  .li:last-child{border-bottom:none}
+  .li .li-ico{width:38px;height:38px;border-radius:11px;background:var(--surface-2);display:flex;align-items:center;justify-content:center;flex:0 0 38px;color:var(--primary)}
+  .li .li-meta{flex:1;min-width:0}.li .li-meta .t{font-size:14px;font-weight:600}.li .li-meta .s{font-size:11px;color:var(--text-2);margin-top:2px}
+  .switch{width:44px;height:26px;border-radius:999px;background:var(--border);position:relative;flex:0 0 44px;cursor:pointer;transition:.2s}
+  .switch.on{background:var(--success)}.switch::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+  .switch.on::after{left:21px}
+  .badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px}
+  .b-danger{background:#FDE7EC;color:var(--danger)}.b-warn{background:#FEF1DD;color:#C9871A}.b-info{background:var(--primary-soft);color:var(--primary-ink)}.b-ok{background:#E4F6EE;color:var(--success)}
+  .btn{background:var(--primary);color:#fff;border:none;border-radius:12px;padding:13px;font-size:15px;font-weight:700;width:100%;cursor:pointer;box-shadow:0 6px 16px rgba(245,135,78,.35)}
+  .back{background:none;border:none;cursor:pointer;color:var(--text);display:flex;align-items:center;gap:6px;font-size:15px;font-weight:600;padding:0}
+  .profile-h{display:flex;align-items:center;gap:14px;padding:8px 4px 16px}
+  .profile-h .av{width:58px;height:58px;border-radius:18px;background:linear-gradient(135deg,#F5874E,#F5A623);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:20px}
+  .tabletmock{height:300px;border-radius:18px;background:linear-gradient(135deg,#3a2a22,#5a3a2a);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#fff}
+  .tabletmock .app{text-align:center}.tabletmock .app .n{font-size:18px;font-weight:700}.tabletmock .app .t{font-size:12px;opacity:.7;margin-top:4px}
+  .tabletmock .live{position:absolute;top:12px;left:12px;background:rgba(240,80,110,.9);font-size:10px;font-weight:700;padding:3px 8px;border-radius:999px;display:flex;align-items:center;gap:4px}
+  .tabletmock .live i{width:6px;height:6px;border-radius:50%;background:#fff;display:inline-block}
+  .map{height:280px;border-radius:18px;background:
+    linear-gradient(0deg,rgba(245,135,78,.07) 1px,transparent 1px) 0 0/100% 28px,
+    linear-gradient(90deg,rgba(245,135,78,.07) 1px,transparent 1px) 0 0/28px 100%,
+    radial-gradient(circle at 65% 35%, #f3ece4, #fbf7f3);
+    position:relative;overflow:hidden}
+  .map .road{position:absolute;background:#fff;opacity:.9}
+  .map .pin{position:absolute;left:62%;top:34%;transform:translate(-50%,-100%);color:var(--danger)}
+  .login{position:absolute;inset:0;background:linear-gradient(160deg,#F5874E,#F5A623 60%,#F8C28A);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:34px;z-index:20}
+  .login .logo{width:74px;height:74px;border-radius:22px;background:#fff;display:flex;align-items:center;justify-content:center;color:var(--primary);font-weight:800;font-size:26px;box-shadow:0 10px 30px rgba(0,0,0,.2)}
+  .login h2{color:#fff;font-size:24px;margin:18px 0 4px}.login .tagline{color:rgba(255,255,255,.9);font-size:13px;margin-bottom:26px}
+  .login .lcard{width:100%;background:#fff;border-radius:20px;padding:20px;box-shadow:0 16px 40px rgba(0,0,0,.2)}
+  .login .field{display:flex;align-items:center;gap:8px;background:var(--surface-2);border-radius:12px;padding:12px;margin-bottom:10px}
+  .login .field input{border:none;background:none;outline:none;flex:1;font-size:14px;color:var(--text)}
+  .login .codebtn{background:none;border:none;color:var(--primary);font-weight:700;font-size:13px;cursor:pointer;white-space:nowrap}
+  .login .auto{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-2);margin:4px 2px 16px}
+  .notes{width:340px;flex:0 0 340px;background:var(--surface);border-radius:20px;box-shadow:var(--shadow);padding:22px;align-self:flex-start;max-height:844px;overflow-y:auto}
+  .notes h2{font-size:18px;margin:0 0 4px}.notes h3{font-size:14px;margin:18px 0 6px;color:var(--primary-ink)}
+  .notes p,.notes li{font-size:12.5px;line-height:1.7;color:#374151}.notes ul{padding-left:18px;margin:6px 0}
+  .tag{display:inline-block;background:var(--primary-soft);color:var(--primary-ink);font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;margin:2px 4px 2px 0}
+  .legend{display:flex;gap:14px;font-size:11px;color:var(--text-2);margin-top:8px;flex-wrap:wrap}
+  .legend i{width:9px;height:9px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:middle}
+  .hr{height:1px;background:var(--border);margin:16px 0}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs>
+  <symbol id="i-home" viewBox="0 0 24 24"><path fill="currentColor" d="M4 11.5 12 4l8 7.5V20a1 1 0 0 1-1 1h-4v-6h-6v6H5a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2 4 5v6c0 5 3.4 8.7 8 11 4.6-2.3 8-6 8-11V5zm0 6a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path fill="currentColor" d="M5 3h2v18H5zm12 8h2v10h-2zM12 8h2v13h-2z"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a6 6 0 0 0-6 6c0 4-1.5 5.5-2 6h16c-.5-.5-2-2-2-6a6 6 0 0 0-6-6m0 20a2.5 2.5 0 0 0 2.4-2H9.6A2.5 2.5 0 0 0 12 22"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><path fill="currentColor" d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8m0 2c-4 0-8 2-8 5v1h16v-1c0-3-4-5-8-5"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><path fill="currentColor" d="M6 10V8a6 6 0 1 1 12 0v2h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1zm2 0h8V8a4 4 0 1 0-8 0z"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path fill="currentColor" d="M12 3a1 1 0 0 1 1 1v8a1 1 0 1 1-2 0V4a1 1 0 0 1 1-1M5 12a7 7 0 1 0 14 0 1 1 0 1 1-2 0 5 5 0 1 1-10 0 1 1 0 0 1-2 0"/></symbol>
+  <symbol id="i-locate" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a7 7 0 0 0-7 7c0 5 7 13 7 13s7-8 7-13a7 7 0 0 0-7-7m0 9.5A2.5 2.5 0 1 1 12 6a2.5 2.5 0 0 1 0 5.5"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path fill="currentColor" d="M12 5C5 5 2 12 2 12s3 7 10 7 10-7 10-7-3-7-10-7m0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8m0-2a2 2 0 1 0 0-4 2 2 0 0 0 0 4"/></symbol>
+  <symbol id="i-mega" viewBox="0 0 24 24"><path fill="currentColor" d="M4 10v4a1 1 0 0 0 1 1h2l9 5V4L7 9H5a1 1 0 0 0-1 1m14 2a4 4 0 0 0-2-3.5v7A4 4 0 0 0 18 12"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path fill="currentColor" d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path fill="currentColor" d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20m1 10V6h-2v8h6v-2z"/></symbol>
+  <symbol id="i-app" viewBox="0 0 24 24"><path fill="currentColor" d="M4 4h7v7H4zm9 0h7v7h-7zM4 13h7v7H4zm9 0h7v7h-7z"/></symbol>
+  <symbol id="i-web" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20m0 2c1.5 0 3 3.6 3.4 8H8.6C9 7.6 10.5 4 12 4M4.3 11H8c.3 4 1.4 7 2.6 8.3A8 8 0 0 1 4.3 11M12 20c-1.3 0-2.6-3-3-7h6c-.4 4-1.7 7-3 7m5.1-2.7C18.4 16 19.5 13 19.7 11h-3.7c.3 4.1 1.4 7 2.1 7.3"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><path fill="currentColor" d="M7 7h10v10H7zm2 2v6h6V9zM4 9H2v6h2v-2H4zm16 0h2v6h-2v-2h-2zm-8-7h2v3h-2zM9 19h6v2H9z"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2 1 21h22zm0 6 7.5 12h-15zM11 10v5h2v-5zm0 7v2h2v-2z"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><path fill="currentColor" d="M14 2a6 6 0 0 0-5.7 8L2 16.3V22h5.7l1.7-1.7V18h2v-2h2l1-1A6 6 0 1 0 14 2m2.5 4.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path fill="currentColor" d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24"><path fill="currentColor" d="M3 3h8v8H3zm2 2v4h4V5zm6 0h2v2h-2zm0 4h2v2h-2zM3 13h2v2H3zm4 0h2v2H7zm-4 4h8v8H3zm2 2v4h4v-4zm12-8h2v2h-2zm0 4h2v2h-2zm-4 4h2v2h-2zm4 0h2v2h-2zm0 4h2v2h-2zm-4 0h2v2h-2z"/></symbol>
+</defs></svg>
+
+<div class="phone" id="phone">
+  <div class="statusbar">
+    <span>17:10</span>
+    <span class="right">
+      <svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="M2 17h3v-7H2zm5 0h3V7H7zm5 0h3v-3h-3zm5 0h3V4h-3z"/></svg>
+      <svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentColor" d="M12 4C7 4 2.7 6 0 9l12 14L24 9c-2.7-3-7-5-12-5" transform="translate(0 2)"/></svg>
+      <span style="display:inline-block;width:22px;height:12px;border:1.5px solid #2A211B;border-radius:3px;position:relative"><i style="position:absolute;right:-3px;top:3px;width:2px;height:6px;background:#2A211B;border-radius:1px"></i><i style="position:absolute;left:1.5px;top:1.5px;width:15px;height:7px;background:#2A211B;border-radius:1px"></i></span>
+    </span>
+  </div>
+
+  <div class="screen">
+    <!-- ============ LOGIN (家长) ============ -->
+    <div class="login" id="v-login">
+      <div class="logo">护</div>
+      <h2>护航管控</h2>
+      <div class="tagline">家长端 · 守护孩子的平板</div>
+      <div class="lcard">
+        <div class="field"><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-user"/></svg><input placeholder="手机号" value="13800001234"/></div>
+        <div class="field"><input placeholder="验证码" style="flex:1"/><button class="codebtn" onclick="toast('验证码已发送')">获取验证码</button></div>
+        <div class="field"><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-lock"/></svg><input placeholder="密码（可选）" type="password"/></div>
+        <div class="auto"><span class="switch on" onclick="toggle(this)"></span> 自动登录 · 一机多家长共管</div>
+        <button class="btn" onclick="enterApp()">登 录</button>
+        <div class="muted" style="text-align:center;margin-top:10px">登录即代表同意《隐私协议》与《服务条款》</div>
+      </div>
+    </div>
+
+    <!-- ============ OVERVIEW (孩子设备) ============ -->
+    <div class="view" id="v-overview">
+      <div class="appbar">
+        <div><h1>护航管控</h1><div class="sub">下午好，家长 · 家庭守护</div></div>
+        <button class="bell" onclick="show('v-alerts')"><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-bell"/></svg><span class="dot"></span></button>
+      </div>
+      <div class="scroll">
+        <div class="stats">
+          <div class="stat"><div class="ico" style="background:var(--primary-soft);color:var(--primary-ink)"><svg width="17" height="17" viewBox="0 0 24 24"><use href="#i-user"/></svg></div><div class="num">2</div><div class="lbl">孩子设备</div></div>
+          <div class="stat"><div class="ico" style="background:#E4F6EE;color:var(--success)"><svg width="17" height="17" viewBox="0 0 24 24"><use href="#i-clock"/></svg></div><div class="num">3.1<small style="font-size:12px;color:var(--text-3)">h</small></div><div class="lbl">今日总时长</div></div>
+          <div class="stat"><div class="ico" style="background:#FDE7EC;color:var(--danger)"><svg width="17" height="17" viewBox="0 0 24 24"><use href="#i-warn"/></svg></div><div class="num">1</div><div class="lbl">待处理</div></div>
+        </div>
+        <div class="banner" onclick="show('v-alerts')"><div class="b-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-warn"/></svg></div><div style="flex:1"><div class="b-t">1 条告警待处理</div><div class="b-s">小雨 的平板 · 访问娱乐网站被拦截</div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:#C8324B"><use href="#i-chev"/></svg></div>
+
+        <div class="sec-title">防沉迷总览</div>
+        <div class="card row between">
+          <div><div style="font-weight:700">李明 的平板</div><div class="muted" style="margin-top:3px">今日已用 3.1h · 剩余 0.9h</div></div>
+          <div class="ring" style="background:conic-gradient(var(--primary) 0 78%,var(--surface-2) 78% 100%)"><div class="inner"><div class="big">3.1h</div><div class="sm">/ 4h 限额</div></div></div>
+        </div>
+
+        <div class="card row between" onclick="toast('打开扫码绑定')" style="cursor:pointer">
+          <div class="row" style="gap:12px"><div class="li-ico" style="background:var(--primary-soft);color:var(--primary-ink)"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-qr"/></svg></div><div class="li-meta"><div class="t">绑定孩子平板</div><div class="s">扫码一键绑定新设备</div></div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg>
+        </div>
+
+        <div class="sec-title">孩子设备</div>
+        <div class="dev" onclick="onDev('李明')"><div class="av">李</div><div class="meta"><div class="nm">李明 的平板 <span class="dot-s dot-on"></span></div><div class="ln">前台：数学帮帮 · 防沉迷中 · 电量 82%</div></div><button class="lockbtn" onclick="event.stopPropagation();toast('已下发锁屏指令')"><svg width="17" height="17" viewBox="0 0 24 24"><use href="#i-lock"/></svg></button></div>
+        <div class="dev" onclick="onDev('小雨')"><div class="av" style="background:#FEF1DD;color:#C9871A">雨</div><div class="meta"><div class="nm">小雨 的平板 <span class="dot-s dot-on"></span></div><div class="ln">前台：英语流利说 · 防沉迷中 · 电量 67%</div></div><button class="lockbtn" onclick="event.stopPropagation();toast('已下发锁屏指令')"><svg width="17" height="17" viewBox="0 0 24 24"><use href="#i-lock"/></svg></button></div>
+
+        <div class="sec-title">柔性管控 & 学情</div>
+        <div class="card row between" onclick="toast('发起临时授权')" style="cursor:pointer"><div class="row" style="gap:12px"><div class="li-ico" style="background:var(--primary-soft);color:var(--primary-ink)"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-key"/></svg></div><div class="li-meta"><div class="t">临时授权</div><div class="s">限时放开时长 / 解禁应用 / 开放上网</div></div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg></div>
+        <div class="card row between" onclick="show('v-insights')" style="cursor:pointer"><div class="row" style="gap:12px"><div class="li-ico" style="background:var(--primary-soft);color:var(--primary-ink)"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-chart"/></svg></div><div class="li-meta"><div class="t">本周学情周报</div><div class="s">学习 18h · 娱乐 5h · 可分享微信</div></div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg></div>
+        <div style="height:8px"></div>
+      </div>
+    </div>
+
+    <!-- ============ DEVICE DETAIL ============ -->
+    <div class="view" id="v-device">
+      <div class="appbar">
+        <button class="back" onclick="show('v-overview')"><svg width="20" height="20" viewBox="0 0 24 24" style="transform:rotate(180deg)"><use href="#i-chev"/></svg> 设备</button>
+        <span class="pill" id="d-status"><span class="dot-s dot-on"></span> 在线</span>
+      </div>
+      <div class="scroll">
+        <div class="card row between">
+          <div><div style="font-size:17px;font-weight:800" id="d-name">李明 的平板</div><div class="muted" style="margin-top:3px">华为 MatePad · HarmonyOS 4 · 绑定 86 天</div></div>
+          <div class="ring" style="background:conic-gradient(var(--primary) 0 78%,var(--surface-2) 78% 100%)"><div class="inner"><div class="big" id="d-used">3.1h</div><div class="sm">/ 4h 限额</div></div></div>
+        </div>
+        <div class="sec-title">快捷指令</div>
+        <div class="qa">
+          <div class="q" onclick="toast('已下发：锁屏')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-lock"/></svg></div><div class="qt">锁屏</div></div>
+          <div class="q" onclick="toast('已下发：重启')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-power"/></svg></div><div class="qt">重启</div></div>
+          <div class="q" onclick="openLoc()"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-locate"/></svg></div><div class="qt">定位</div></div>
+          <div class="q" onclick="openScreen(currentDevice)"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-eye"/></svg></div><div class="qt">看屏幕</div></div>
+          <div class="q" onclick="toast('发起临时授权')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-key"/></svg></div><div class="qt">授权</div></div>
+        </div>
+        <div class="sec-title">实时状态</div>
+        <div class="card">
+          <div class="li"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-app"/></svg></div><div class="li-meta"><div class="t">当前前台应用</div><div class="s">数学帮帮 · 已连续使用 38 分钟</div></div></div>
+          <div class="li"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-cpu"/></svg></div><div class="li-meta"><div class="t">系统状态</div><div class="s">电量 82% · WiFi · 温度 36℃</div></div></div>
+          <div class="li"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-locate"/></svg></div><div class="li-meta"><div class="t">实时定位</div><div class="s">家 · 客厅 · 更新于 1 分钟前</div></div></div>
+        </div>
+        <div class="sec-title">管控入口（一键直达）</div>
+        <div class="card" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div class="q" style="box-shadow:none;background:var(--surface-2)" onclick="show('v-controls');setTab('t-time')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-clock"/></svg></div><div class="qt">时长管控</div></div>
+          <div class="q" style="box-shadow:none;background:var(--surface-2)" onclick="show('v-controls');setTab('t-app')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-app"/></svg></div><div class="qt">应用管控</div></div>
+          <div class="q" style="box-shadow:none;background:var(--surface-2)" onclick="show('v-controls');setTab('t-web')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-web"/></svg></div><div class="qt">上网管控</div></div>
+          <div class="q" style="box-shadow:none;background:var(--surface-2)" onclick="show('v-controls');setTab('t-sys')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-cpu"/></svg></div><div class="qt">系统外设</div></div>
+        </div>
+        <div class="sec-title">今日应用时长</div>
+        <div class="card">
+          <div class="ubar"><div class="top"><span>数学帮帮</span><span>1.6h</span></div><div class="track"><div class="fill" style="width:80%;background:var(--success)"></div></div></div>
+          <div class="ubar"><div class="top"><span>英语流利说</span><span>1.1h</span></div><div class="track"><div class="fill" style="width:55%;background:#4F8DF7"></div></div></div>
+          <div class="ubar"><div class="top"><span>抖音（已限）</span><span>0.4h</span></div><div class="track"><div class="fill" style="width:20%;background:var(--warn)"></div></div></div>
+          <div class="ubar"><div class="top"><span>其他</span><span>0.0h</span></div><div class="track"><div class="fill" style="width:8%;background:var(--text-3)"></div></div></div>
+        </div>
+        <div class="sec-title">实时行为动态</div>
+        <div class="card">
+          <div class="li"><div class="li-ico" style="background:#FEF1DD;color:#C9871A"><svg width="16" height="16" viewBox="0 0 24 24"><use href="#i-warn"/></svg></div><div class="li-meta"><div class="t">访问娱乐网站被拦截</div><div class="s">10:24 · 已自动拦截</div></div><span class="badge b-warn">已拦截</span></div>
+          <div class="li"><div class="li-ico"><svg width="16" height="16" viewBox="0 0 24 24"><use href="#i-clock"/></svg></div><div class="li-meta"><div class="t">解锁设备</div><div class="s">09:30 · 上学时段自动解锁</div></div><span class="badge b-ok">正常</span></div>
+          <div class="li"><div class="li-ico"><svg width="16" height="16" viewBox="0 0 24 24"><use href="#i-app"/></svg></div><div class="li-meta"><div class="t">启动 数学帮帮</div><div class="s">09:35 · 学习类应用</div></div><span class="badge b-ok">正常</span></div>
+          <div class="li"><div class="li-ico"><svg width="16" height="16" viewBox="0 0 24 24"><use href="#i-locate"/></svg></div><div class="li-meta"><div class="t">离开家电子围栏</div><div class="s">16:40 · 已推送提醒</div></div><span class="badge b-info">提醒</span></div>
+        </div>
+        <div style="height:8px"></div>
+      </div>
+    </div>
+
+    <!-- ============ SCREEN MONITOR ============ -->
+    <div class="view" id="v-screen">
+      <div class="appbar">
+        <button class="back" onclick="show('v-overview')"><svg width="20" height="20" viewBox="0 0 24 24" style="transform:rotate(180deg)"><use href="#i-chev"/></svg> 实时屏幕</button>
+        <span class="pill">单设备</span>
+      </div>
+      <div class="scroll">
+        <div class="tabletmock">
+          <div class="live"><i></i> LIVE</div>
+          <div class="app"><div class="n" id="sc-app">数学帮帮</div><div class="t">实时画面 · 无感知截屏</div></div>
+        </div>
+        <div class="card"><div class="li-meta" style="flex:1"><div class="t" id="sc-dev">李明 的平板</div><div class="s muted">画面延迟 0.3s · 加密传输 · 仅家长可见</div></div></div>
+        <div class="sec-title">操作</div>
+        <div class="qa">
+          <div class="q" onclick="toast('已截屏留存')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-eye"/></svg></div><div class="qt">截屏</div></div>
+          <div class="q" onclick="toast('已下发锁屏')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-lock"/></svg></div><div class="qt">锁定</div></div>
+          <div class="q" onclick="nextChild()"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-user"/></svg></div><div class="qt">另一孩</div></div>
+          <div class="q" onclick="toast('结束查看')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-power"/></svg></div><div class="qt">退出</div></div>
+        </div>
+        <div style="height:8px"></div>
+      </div>
+    </div>
+
+    <!-- ============ LOCATION ============ -->
+    <div class="view" id="v-location">
+      <div class="appbar">
+        <button class="back" onclick="show('v-overview')"><svg width="20" height="20" viewBox="0 0 24 24" style="transform:rotate(180deg)"><use href="#i-chev"/></svg> 定位与轨迹</button>
+        <span class="pill"><svg width="13" height="13" viewBox="0 0 24 24"><use href="#i-locate"/></svg> 实时</span>
+      </div>
+      <div class="scroll">
+        <div class="map">
+          <div class="road" style="left:0;top:42%;width:100%;height:10px"></div>
+          <div class="road" style="left:46%;top:0;width:10px;height:100%"></div>
+          <div class="pin"><svg width="30" height="30" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2a7 7 0 0 0-7 7c0 5 7 13 7 13s7-8 7-13a7 7 0 0 0-7-7m0 9.5A2.5 2.5 0 1 1 12 6a2.5 2.5 0 0 1 0 5.5"/></svg></div>
+        </div>
+        <div class="card">
+          <div class="li"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-locate"/></svg></div><div class="li-meta"><div class="t" id="loc-dev">李明 的平板</div><div class="s">家 · 客厅 · 更新于 1 分钟前</div></div></div>
+          <div class="li"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-clock"/></svg></div><div class="li-meta"><div class="t">今日轨迹</div><div class="s">家 08:10 出门 → 学校 08:40 → 已回家 16:30</div></div></div>
+        </div>
+        <div class="qa">
+          <div class="q" onclick="toast('位置已刷新')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-locate"/></svg></div><div class="qt">刷新</div></div>
+          <div class="q" onclick="toast('查看历史轨迹')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-clock"/></svg></div><div class="qt">轨迹</div></div>
+          <div class="q" onclick="toast('查看 7 日轨迹')"><div class="qi"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-chart"/></svg></div><div class="qt">7日</div></div>
+        </div>
+        <div class="sec-title">安全围栏（家庭守护）</div>
+        <div class="card"><div class="li"><div class="li-meta"><div class="t">离开家/学校范围告警</div><div class="s">设备离开电子围栏自动推送家长</div></div><span class="switch on" onclick="toggle(this)"></span></div></div>
+        <div style="height:8px"></div>
+      </div>
+    </div>
+
+    <!-- ============ CONTROLS ============ -->
+    <div class="view" id="v-controls">
+      <div class="appbar">
+        <button class="back" onclick="show('v-overview')"><svg width="20" height="20" viewBox="0 0 24 24" style="transform:rotate(180deg)"><use href="#i-chev"/></svg> 管控策略</button>
+        <span class="pill"><svg width="13" height="13" viewBox="0 0 24 24"><use href="#i-app"/></svg> <span id="c-dev">李明 的平板</span></span>
+      </div>
+      <div class="scroll">
+        <div class="chiprow" style="margin:2px 0 4px">
+          <span class="chip" onclick="applyTpl('上学日')">⚡ 上学日</span>
+          <span class="chip" onclick="applyTpl('周末')">⚡ 周末</span>
+          <span class="chip" onclick="applyTpl('假期')">⚡ 假期</span>
+          <span class="chip" onclick="applyTpl('夜间锁机')">⚡ 夜间锁机</span>
+        </div>
+        <div class="seg">
+          <button class="active" id="t-time" onclick="setTab('t-time')">时长</button>
+          <button id="t-app" onclick="setTab('t-app')">应用</button>
+          <button id="t-web" onclick="setTab('t-web')">上网</button>
+          <button id="t-sys" onclick="setTab('t-sys')">系统</button>
+        </div>
+        <div class="tab-pane" id="p-t-time">
+          <div class="card row between"><div><div style="font-weight:700">每日总时长上限</div><div class="muted" style="margin-top:3px">耗尽自动锁屏，当日不可私解</div></div><div class="ring" style="background:conic-gradient(var(--primary) 0 78%,var(--surface-2) 78% 100%)"><div class="inner"><div class="big">4h</div><div class="sm">已用 3.1h</div></div></div></div>
+          <div class="card">
+            <div class="li"><div class="li-meta"><div class="t">上学日时段</div><div class="s">08:00–11:30 可用 · 12:00–14:00 锁屏</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">周末时段</div><div class="s">09:00–21:00 可用</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">夜间锁机</div><div class="s">22:00–07:00 禁用</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">护眼强制休息</div><div class="s">连续 40 分钟 → 休息 10 分钟</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+          </div>
+          <div class="card">
+            <div class="sec-title" style="margin:0 0 6px">单应用限额</div>
+            <div class="li"><div class="li-meta"><div class="t">游戏类</div><div class="s">每日 30 分钟</div></div><span class="badge b-warn">已限</span></div>
+            <div class="li"><div class="li-meta"><div class="t">短视频类</div><div class="s">每日 20 分钟</div></div><span class="badge b-warn">已限</span></div>
+            <div class="li"><div class="li-meta"><div class="t">学习类</div><div class="s">不限制</div></div><span class="badge b-ok">放行</span></div>
+          </div>
+          <div class="card"><div class="li-meta" style="flex:1"><div class="t" style="font-weight:700">临时授权（柔性）</div><div class="s muted">限时加时 / 解禁应用 / 开放上网，到期自动恢复</div></div><button class="chip" onclick="toast('发起临时授权')">发起</button></div>
+          <button class="btn" onclick="toast('策略已下发至设备')">保存并下发</button>
+        </div>
+        <div class="tab-pane" id="p-t-app" style="display:none">
+          <div class="card row between"><div class="li-meta" style="flex:1"><div class="t" style="font-weight:700">管控模式</div><div class="s muted">黑名单禁用 / 白名单仅放行</div></div><span class="pill">黑名单</span></div>
+          <div class="card">
+            <div class="li"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-app"/></svg></div><div class="li-meta"><div class="t">游戏中心</div><div class="s">游戏类 · 已禁</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-app"/></svg></div><div class="li-meta"><div class="t">抖音</div><div class="s">短视频类 · 已限 20 分钟</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-app"/></svg></div><div class="li-meta"><div class="t">应用商店</div><div class="s">系统应用 · 已禁安装</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-app"/></svg></div><div class="li-meta"><div class="t">数学帮帮</div><div class="s">学习类 · 放行</div></div><span class="switch" onclick="toggle(this)"></span></div>
+          </div>
+          <button class="chip" style="width:100%;justify-content:center;padding:12px" onclick="toast('远程静默安装学习软件')">远程静默安装学习软件</button>
+          <div style="height:8px"></div>
+          <button class="btn" onclick="toast('应用策略已下发')">保存并下发</button>
+        </div>
+        <div class="tab-pane" id="p-t-web" style="display:none">
+          <div class="card">
+            <div class="li"><div class="li-meta"><div class="t">网址黑名单</div><div class="s">已拦截 12 类违规站点</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">智能敏感词过滤</div><div class="s">内置合规词库 + 自定义词</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">仅放行学习浏览器</div><div class="s">禁用系统/第三方浏览器</div></div><span class="switch" onclick="toggle(this)"></span></div>
+          </div>
+          <div class="card"><div class="sec-title" style="margin:0 0 6px">已添加黑名单网站</div><div class="li"><div class="li-meta"><div class="t">game-xxx.com</div></div><span class="badge b-danger">已拦截</span></div><div class="li"><div class="li-meta"><div class="t">video-yyy.net</div></div><span class="badge b-danger">已拦截</span></div></div>
+          <button class="chip" style="width:100%;justify-content:center;padding:12px" onclick="toast('添加网址规则')">+ 添加网址</button>
+          <div style="height:8px"></div>
+          <button class="btn" onclick="toast('上网策略已下发')">保存并下发</button>
+        </div>
+        <div class="tab-pane" id="p-t-sys" style="display:none">
+          <div class="card">
+            <div class="li"><div class="li-meta"><div class="t">WiFi</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">蓝牙</div></div><span class="switch" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">摄像头</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">USB 调试</div></div><span class="switch" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">最大音量 / 亮度锁定</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+            <div class="li"><div class="li-meta"><div class="t">屏幕水印（溯源）</div></div><span class="switch on" onclick="toggle(this)"></span></div>
+          </div>
+          <div class="card row between"><div class="li-meta" style="flex:1"><div class="t" style="font-weight:700;color:var(--primary-ink)">纯净桌面 Kiosk 模式</div><div class="s muted">锁定仅运行授权应用，屏蔽状态栏/设置，专注学习</div></div><span class="switch" onclick="toggle(this)"></span></div>
+          <button class="btn" onclick="toast('系统策略已下发')">保存并下发</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ INSIGHTS (学情) ============ -->
+    <div class="view" id="v-insights">
+      <div class="appbar">
+        <div><h1>学情周报</h1><div class="sub" id="in-sub">家庭 · 本周</div></div>
+        <button class="chip" onclick="toast('已分享至微信/QQ')">分享周报</button>
+      </div>
+      <div class="scroll">
+        <div class="chiprow" style="margin:2px 0 6px"><span class="chip active">日</span><span class="chip">周</span><span class="chip">月</span></div>
+        <div class="card row between">
+          <div><div style="font-weight:700">学习 vs 娱乐</div><div class="muted" style="margin-top:3px">学习 18h · 娱乐 5h</div>
+            <div class="legend"><span><i style="background:var(--success)"></i>学习</span><span><i style="background:var(--warn)"></i>娱乐</span><span><i style="background:var(--text-3)"></i>闲置</span></div></div>
+          <div class="ring" style="background:conic-gradient(var(--success) 0 72%,var(--warn) 72% 92%,var(--surface-2) 92% 100%)"><div class="inner"><div class="big">23h</div><div class="sm">本周总时长</div></div></div>
+        </div>
+        <div class="sec-title">近 7 日使用时长</div>
+        <div class="card"><div style="display:flex;align-items:flex-end;gap:10px;height:120px;padding:6px 2px">
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px"><div style="width:100%;background:var(--primary-soft);border-radius:6px 6px 0 0;height:46px"></div><span class="muted">一</span></div>
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px"><div style="width:100%;background:var(--primary-soft);border-radius:6px 6px 0 0;height:70px"></div><span class="muted">二</span></div>
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px"><div style="width:100%;background:var(--primary-soft);border-radius:6px 6px 0 0;height:60px"></div><span class="muted">三</span></div>
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px"><div style="width:100%;background:var(--primary);border-radius:6px 6px 0 0;height:96px"></div><span class="muted" style="color:var(--primary);font-weight:700">四</span></div>
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px"><div style="width:100%;background:var(--primary-soft);border-radius:6px 6px 0 0;height:54px"></div><span class="muted">五</span></div>
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px"><div style="width:100%;background:var(--primary-soft);border-radius:6px 6px 0 0;height:80px"></div><span class="muted">六</span></div>
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px"><div style="width:100%;background:var(--primary-soft);border-radius:6px 6px 0 0;height:38px"></div><span class="muted">日</span></div>
+        </div></div>
+        <div class="sec-title">应用时长排行</div>
+        <div class="card">
+          <div class="ubar"><div class="top"><span>数学帮帮</span><span>6.2h</span></div><div class="track"><div class="fill" style="width:80%;background:var(--success)"></div></div></div>
+          <div class="ubar"><div class="top"><span>英语流利说</span><span>4.5h</span></div><div class="track"><div class="fill" style="width:55%;background:#4F8DF7"></div></div></div>
+          <div class="ubar"><div class="top"><span>抖音（已限）</span><span>1.4h</span></div><div class="track"><div class="fill" style="width:20%;background:var(--warn)"></div></div></div>
+        </div>
+        <div class="sec-title">上网与违规</div>
+        <div class="card">
+          <div class="li"><div class="li-ico" style="background:#FDE7EC;color:var(--danger)"><svg width="16" height="16" viewBox="0 0 24 24"><use href="#i-warn"/></svg></div><div class="li-meta"><div class="t">违规拦截</div><div class="s">本周 8 次 · 游戏/娱乐站点</div></div><span class="badge b-danger">8</span></div>
+          <div class="li"><div class="li-ico"><svg width="16" height="16" viewBox="0 0 24 24"><use href="#i-web"/></svg></div><div class="li-meta"><div class="t">高频访问</div><div class="s">学习资源站 · 12 次</div></div><span class="badge b-info">12</span></div>
+        </div>
+        <div style="height:8px"></div>
+      </div>
+    </div>
+
+    <!-- ============ PROFILE (家长) ============ -->
+    <div class="view" id="v-profile">
+      <div class="appbar"><h1>我的</h1></div>
+      <div class="scroll">
+        <div class="profile-h"><div class="av">长</div><div><div style="font-size:18px;font-weight:800">张家长</div><div class="muted">13800001234 · 主管理员（共管）</div></div></div>
+        <div class="li" style="background:var(--surface);border-radius:12px;box-shadow:var(--shadow-s);margin-bottom:8px"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-user"/></svg></div><div class="li-meta"><div class="t">家庭多人共管</div><div class="s">管理协同家长 · 解绑子家长</div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg></div>
+        <div class="li" style="background:var(--surface);border-radius:12px;box-shadow:var(--shadow-s);margin-bottom:8px"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-shield"/></svg></div><div class="li-meta"><div class="t">账号与安全</div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg></div>
+        <div class="li" style="background:var(--surface);border-radius:12px;box-shadow:var(--shadow-s);margin-bottom:8px"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-qr"/></svg></div><div class="li-meta"><div class="t">孩子设备管理</div><div class="s">绑定 / 解绑 / 备注命名</div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg></div>
+        <div class="li" style="background:var(--surface);border-radius:12px;box-shadow:var(--shadow-s);margin-bottom:8px"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-bell"/></svg></div><div class="li-meta"><div class="t">消息推送设置</div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg></div>
+        <div class="li" style="background:var(--surface);border-radius:12px;box-shadow:var(--shadow-s);margin-bottom:8px"><div class="li-ico"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-app"/></svg></div><div class="li-meta"><div class="t">深色模式</div></div><span class="switch" onclick="toggle(this)"></span></div>
+        <div style="height:6px"></div>
+        <div class="li" style="background:var(--surface);border-radius:12px;box-shadow:var(--shadow-s);margin-bottom:8px"><div class="li-meta"><div class="t">帮助中心</div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg></div>
+        <div class="li" style="background:var(--surface);border-radius:12px;box-shadow:var(--shadow-s);margin-bottom:8px"><div class="li-meta"><div class="t">隐私协议</div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg></div>
+        <div class="li" style="background:var(--surface);border-radius:12px;box-shadow:var(--shadow-s);margin-bottom:8px"><div class="li-meta"><div class="t">关于护航管控 v1.0</div></div><svg width="18" height="18" viewBox="0 0 24 24" style="color:var(--text-3)"><use href="#i-chev"/></svg></div>
+        <div style="height:8px"></div>
+      </div>
+    </div>
+
+    <!-- ============ ALERTS ============ -->
+    <div class="view" id="v-alerts">
+      <div class="appbar">
+        <button class="back" onclick="show('v-overview')"><svg width="20" height="20" viewBox="0 0 24 24" style="transform:rotate(180deg)"><use href="#i-chev"/></svg> 风险告警</button>
+        <span class="pill" style="background:#FDE7EC;color:var(--danger)">1 待处理</span>
+      </div>
+      <div class="scroll">
+        <div class="chiprow" style="margin:2px 0 6px"><span class="chip active">全部</span><span class="chip">高危</span><span class="chip">普通</span><span class="chip">提醒</span></div>
+        <div class="card" style="border-left:4px solid var(--warn)">
+          <div class="row between"><div class="row" style="gap:8px"><span class="badge b-warn">提醒</span><b>访问娱乐网站被拦截</b></div><span class="muted">10:24</span></div>
+          <div class="muted" style="margin:8px 0">小雨 的平板 · 已自动拦截，可查看详情</div>
+          <button class="btn" onclick="toast('已标记处理')">标记已处理</button>
+        </div>
+        <div class="card" style="border-left:4px solid var(--danger)">
+          <div class="row between"><div class="row" style="gap:8px"><span class="badge b-danger">高危</span><b>尝试卸载管控软件</b></div><span class="muted">昨天</span></div>
+          <div class="muted" style="margin:8px 0">李明 的平板 · 触发高危风险，疑似绕过管控</div>
+          <button class="btn" style="background:var(--danger);box-shadow:0 6px 16px rgba(240,80,110,.35)" onclick="toast('已标记处理')">标记已处理</button>
+        </div>
+        <div class="card" style="border-left:4px solid var(--info)">
+          <div class="row between"><div class="row" style="gap:8px"><span class="badge b-info">系统</span><b>策略下发成功</b></div><span class="muted">12:10</span></div>
+          <div class="muted" style="margin:8px 0">李明 的平板 · 「上学日模板」已生效</div>
+          <button class="btn" style="background:var(--text-3)" onclick="toast('已读')">已读</button>
+        </div>
+        <div style="height:8px"></div>
+      </div>
+    </div>
+
+    <!-- ============ BOTTOM NAV ============ -->
+    <div class="nav">
+      <button class="active" onclick="show('v-overview')"><span class="nb-ico"><svg viewBox="0 0 24 24"><use href="#i-home"/></svg></span>孩子</button>
+      <button onclick="show('v-controls')"><span class="nb-ico"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg></span>管控</button>
+      <button onclick="show('v-insights')"><span class="nb-ico"><svg viewBox="0 0 24 24"><use href="#i-chart"/></svg></span>学情</button>
+      <button onclick="show('v-profile')"><span class="nb-ico"><svg viewBox="0 0 24 24"><use href="#i-user"/></svg></span>我的</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ SIDE NOTES ============ -->
+<div class="notes">
+  <h2>护航管控 · 家长端（纯家庭）</h2>
+  <p class="muted">已按文档家庭场景优化：移除校园端，聚焦单设备防沉迷 / 娱乐限制 / 上网安全 / 实时屏幕 / 学情 / 临时授权 / 家庭共管。</p>
+  <h3>① 对照文档家庭场景</h3>
+  <span class="tag">扫码绑定</span><span class="tag">防沉迷圆环</span><span class="tag">分时段模板</span><span class="tag">单应用限额</span><span class="tag">临时授权</span><span class="tag">实时屏幕</span><span class="tag">定位轨迹+围栏</span><span class="tag">纯净桌面</span><span class="tag">学情周报</span><span class="tag">分级告警</span><span class="tag">家庭多人共管</span>
+  <h3>② 信息架构</h3>
+  <ul>
+    <li><b>孩子</b>：设备卡 + 防沉迷总览 + 扫码绑定 + 临时授权 / 学情入口</li>
+    <li><b>管控</b>：时长 / 应用 / 上网 / 系统（4 标签页 + 家庭模板）</li>
+    <li><b>学情</b>：学习vs娱乐、7日图、应用排行、违规统计、分享</li>
+    <li><b>我的</b>：家庭多人共管、账号安全、设备管理、推送、深色</li>
+    <li><b>告警</b>：铃铛 + 分级闭环</li>
+  </ul>
+  <h3>③ 借鉴来源</h3>
+  <span class="tag">Google Family Link</span><span class="tag">Apple 屏幕时间</span><span class="tag">华为健康使用平板</span><span class="tag">Qustodio</span>
+  <div class="hr"></div>
+  <p class="muted" style="font-size:11px">体验：家长登录 → 孩子/管控/学情/我的；设备详情看屏幕/定位；临时授权；家庭模板一键套用。校园端已整体移除。</p>
+</div>
+
+<script>
+  let currentDevice='李明 的平板';
+  const children=['李明','小雨'];
+  function show(id){document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));document.getElementById(id).classList.add('active');
+    const map={'v-overview':0,'v-controls':1,'v-insights':2,'v-profile':3};
+    if(map[id]!==undefined) document.querySelectorAll('.nav button').forEach((b,i)=>b.classList.toggle('active',i===map[id]));
+    document.querySelector('.scroll')?.scrollTo?.(0,0);}
+  function toggle(el){el.classList.toggle('on');}
+  function enterApp(){document.getElementById('v-login').style.display='none';show('v-overview');toast('已进入家庭守护');}
+  function onDev(name){currentDevice=name;document.getElementById('d-name').textContent=name+' 的平板';document.getElementById('c-dev').textContent=name+' 的平板';show('v-device');}
+  function openScreen(name){document.getElementById('sc-dev').textContent=(name||currentDevice)+' 的平板';document.getElementById('sc-app').textContent='数学帮帮';show('v-screen');}
+  function nextChild(){const i=(children.indexOf(currentDevice)+1)%children.length;currentDevice=children[i];document.getElementById('sc-dev').textContent=currentDevice+' 的平板';toast('切换到 '+currentDevice);}
+  function openLoc(){document.getElementById('loc-dev').textContent=currentDevice+' 的平板';show('v-location');}
+  function setTab(t){['t-time','t-app','t-web','t-sys'].forEach(x=>{document.getElementById(x).classList.toggle('active',x===t);document.getElementById('p-'+x).style.display=(x===t?'block':'none');});}
+  function applyTpl(n){toast('已套用模板：'+n);}
+  function toast(msg){let t=document.createElement('div');t.textContent=msg;t.style.cssText='position:absolute;left:50%;bottom:110px;transform:translateX(-50%);background:rgba(42,33,27,.92);color:#fff;padding:10px 18px;border-radius:12px;font-size:13px;z-index:99;box-shadow:0 8px 24px rgba(0,0,0,.3);transition:.25s;opacity:0';document.getElementById('phone').appendChild(t);requestAnimationFrame(()=>{t.style.opacity=1});setTimeout(()=>{t.style.opacity=0;setTimeout(()=>t.remove(),250)},1400);}
+</script>
+</body>
+</html>

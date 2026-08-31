@@ -1,0 +1,10 @@
+[
+    {
+        "merged": "com.padguard.child.app-debug-66:/drawable_ic_guard_notification.xml.flat",
+        "source": "com.padguard.child.app-main-68:/drawable/ic_guard_notification.xml"
+    },
+    {
+        "merged": "com.padguard.child.app-debug-66:/xml_device_admin.xml.flat",
+        "source": "com.padguard.child.app-main-68:/xml/device_admin.xml"
+    }
+]

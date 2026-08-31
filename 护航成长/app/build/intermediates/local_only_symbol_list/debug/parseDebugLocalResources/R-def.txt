@@ -1,0 +1,15 @@
+R_DEF: Internal format may change without notice
+local
+drawable ic_guard_notification
+string admin_disable_warning
+string app_name
+string guard_channel_desc
+string guard_channel_name
+string guard_notification_text
+string guard_notification_title
+string guard_state_connecting
+string guard_state_offline
+string guard_state_online
+style Theme.PadGuard
+style Theme.PadGuard.Lock
+xml device_admin
