@@ -12,6 +12,7 @@ import com.padguard.domain.model.TimeRestriction
 import com.padguard.domain.model.WebPolicy
 import com.padguard.domain.repository.DeviceRepository
 import com.padguard.domain.repository.PolicyRepository
+import com.padguard.presentation.util.TimeFormat
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -38,8 +39,25 @@ data class ControlPolicyUiState(
     val error: String? = null
 )
 
-/** 家庭预设模板（上学日 / 周末 / 假期 / 夜间锁机） */
-enum class FamilyPreset { SCHOOL_DAY, WEEKEND, HOLIDAY, NIGHT_LOCK }
+/**
+ * 家庭预设模板（上学日 / 周末 / 假期 / 夜间锁机）
+ *
+ * 预设的「名称 / 管控模式 / 每日限额」在此集中定义，避免 ViewModel 分支里散落硬编码
+ * （新增预设只需加一个枚举项，无需改动 [ControlPolicyViewModel.applyPreset]）。
+ */
+enum class FamilyPreset(
+    /** 预设名称，用于提示文案。 */
+    val displayName: String,
+    /** 应用后切换到的管控模式。 */
+    val controlMode: ControlMode,
+    /** 每日总时长限制（分钟）；null 表示不改动现有限额（如夜间锁机）。 */
+    val dailyLimitMinutes: Int?
+) {
+    SCHOOL_DAY("上学日模式", ControlMode.LEARNING, 120),
+    WEEKEND("周末模式", ControlMode.NORMAL, 180),
+    HOLIDAY("假期模式", ControlMode.NORMAL, 240),
+    NIGHT_LOCK("夜间锁机", ControlMode.FOCUS, null)
+}
 
 @HiltViewModel
 class ControlPolicyViewModel @Inject constructor(
@@ -109,42 +127,19 @@ class ControlPolicyViewModel @Inject constructor(
 
     fun applyPreset(preset: FamilyPreset) {
         viewModelScope.launch {
-            when (preset) {
-                FamilyPreset.SCHOOL_DAY -> {
-                    policyRepository.setControlMode(deviceId, ControlMode.LEARNING)
-                    policyRepository.setGlobalDailyLimit(deviceId, 120)
-                    _uiState.value = _uiState.value.copy(
-                        dailyLimitMinutes = 120,
-                        device = _uiState.value.device?.copy(controlMode = ControlMode.LEARNING),
-                        toast = "已应用：上学日模式（学习模式 · 120 分钟）"
-                    )
-                }
-                FamilyPreset.WEEKEND -> {
-                    policyRepository.setControlMode(deviceId, ControlMode.NORMAL)
-                    policyRepository.setGlobalDailyLimit(deviceId, 180)
-                    _uiState.value = _uiState.value.copy(
-                        dailyLimitMinutes = 180,
-                        device = _uiState.value.device?.copy(controlMode = ControlMode.NORMAL),
-                        toast = "已应用：周末模式（正常模式 · 180 分钟）"
-                    )
-                }
-                FamilyPreset.HOLIDAY -> {
-                    policyRepository.setControlMode(deviceId, ControlMode.NORMAL)
-                    policyRepository.setGlobalDailyLimit(deviceId, 240)
-                    _uiState.value = _uiState.value.copy(
-                        dailyLimitMinutes = 240,
-                        device = _uiState.value.device?.copy(controlMode = ControlMode.NORMAL),
-                        toast = "已应用：假期模式（正常模式 · 240 分钟）"
-                    )
-                }
-                FamilyPreset.NIGHT_LOCK -> {
-                    policyRepository.setControlMode(deviceId, ControlMode.FOCUS)
-                    _uiState.value = _uiState.value.copy(
-                        device = _uiState.value.device?.copy(controlMode = ControlMode.FOCUS),
-                        toast = "已应用：夜间锁机（专注模式）"
-                    )
-                }
+            policyRepository.setControlMode(deviceId, preset.controlMode)
+            val limitMinutes = preset.dailyLimitMinutes
+            if (limitMinutes != null) {
+                policyRepository.setGlobalDailyLimit(deviceId, limitMinutes)
             }
+            val limitLabel = limitMinutes
+                ?.let { " · ${TimeFormat.formatDurationFromMinutes(it)}" }
+                .orEmpty()
+            _uiState.value = _uiState.value.copy(
+                dailyLimitMinutes = limitMinutes ?: _uiState.value.dailyLimitMinutes,
+                device = _uiState.value.device?.copy(controlMode = preset.controlMode),
+                toast = "已应用：${preset.displayName}（${preset.controlMode.label()}$limitLabel）"
+            )
         }
     }
 
@@ -171,7 +166,7 @@ class ControlPolicyViewModel @Inject constructor(
                 installedApps = _uiState.value.installedApps.map {
                     if (it.packageName == app.packageName) updated else it
                 },
-                toast = if (minutes == null) "已取消 ${app.appName} 时长限制" else "已设置 ${app.appName} 限时 $minutes 分钟"
+                toast = if (minutes == null) "已取消 ${app.appName} 时长限制" else "已设置 ${app.appName} 限时 ${TimeFormat.formatDurationFromMinutes(minutes)}"
             )
         }
     }
@@ -219,7 +214,9 @@ class ControlPolicyViewModel @Inject constructor(
                     smartShutdownStartTime = start,
                     smartShutdownEndTime = end
                 ),
-                toast = if (enabled) "已开启定时锁机（${start ?: "--:--"} ~ ${end ?: "--:--"}）" else "已关闭定时锁机"
+                toast = if (enabled) {
+                    "已开启定时锁机（${start?.takeIf { it.isNotBlank() }?.let { TimeFormat.formatClock(it) } ?: "--:--"} ~ ${end?.takeIf { it.isNotBlank() }?.let { TimeFormat.formatClock(it) } ?: "--:--"}）"
+                } else "已关闭定时锁机"
             )
         }
     }

@@ -100,6 +100,9 @@ dependencies {
     // Image loading
     implementation("io.coil-kt:coil-compose:2.7.0")
 
+    // QR code generation (ZXing core, pure Java, no camera dependency)
+    implementation("com.google.zxing:core:3.5.3")
+
     // JSON
     implementation("com.squareup.moshi:moshi-kotlin:1.15.1")
 

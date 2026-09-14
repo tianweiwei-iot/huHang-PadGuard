@@ -7,6 +7,8 @@ import com.padguard.domain.repository.MonitorRepository
 import com.padguard.domain.repository.PolicyRepository
 import com.padguard.domain.repository.StatisticsRepository
 import com.padguard.domain.repository.AlertRepository
+import com.padguard.domain.repository.LocationRepository
+import com.padguard.domain.repository.MessageRepository
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -38,6 +40,18 @@ object RepositoryModule {
     fun provideMonitorRepository(
         localDataSource: LocalDataSource
     ): MonitorRepository = localDataSource
+
+    @Provides
+    @Singleton
+    fun provideMessageRepository(
+        localDataSource: LocalDataSource
+    ): MessageRepository = localDataSource
+
+    @Provides
+    @Singleton
+    fun provideLocationRepository(
+        localDataSource: LocalDataSource
+    ): LocationRepository = localDataSource
 
     @Provides
     @Singleton

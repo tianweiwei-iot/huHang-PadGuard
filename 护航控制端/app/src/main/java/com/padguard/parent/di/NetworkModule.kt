@@ -3,6 +3,8 @@ package com.padguard.parent.di
 import com.padguard.data.api.AlertApi
 import com.padguard.data.api.AuthApi
 import com.padguard.data.api.DeviceApi
+import com.padguard.data.api.LocationApi
+import com.padguard.data.api.MessageApi
 import com.padguard.data.api.MonitorApi
 import com.padguard.data.api.PolicyApi
 import com.padguard.data.api.StatisticsApi
@@ -92,6 +94,16 @@ object NetworkModule {
     @Singleton
     fun provideMonitorApi(retrofit: Retrofit): MonitorApi =
         retrofit.create(MonitorApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideMessageApi(retrofit: Retrofit): MessageApi =
+        retrofit.create(MessageApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideLocationApi(retrofit: Retrofit): LocationApi =
+        retrofit.create(LocationApi::class.java)
 
     @Provides
     @Singleton

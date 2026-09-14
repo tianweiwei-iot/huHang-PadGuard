@@ -26,6 +26,7 @@ import com.padguard.domain.model.DeviceOnlineStatus
 import com.padguard.presentation.ui.components.FeatureGridItem
 import com.padguard.presentation.ui.components.FeatureItem
 import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.DeviceDetailViewModel
 import kotlinx.coroutines.flow.collectLatest
 
@@ -57,6 +58,7 @@ fun DeviceDetailScreen(
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text(uiState.device?.name ?: "设备详情") },
@@ -108,6 +110,9 @@ fun DeviceDetailScreen(
                 LocationCard(address = detailLocation.address, lat = detailLocation.latitude, lng = detailLocation.longitude)
             }
 
+            // 设备管理五面板入口（权限 / 功能 / 应用分发 / 远程升级 / 数据统计）
+            DeviceAdminEntryCard(onOpen = viewModel::openAdminSheet)
+
             Button(
                 onClick = { onNavigateToControl(deviceId) },
                 modifier = Modifier.fillMaxWidth(),
@@ -122,6 +127,16 @@ fun DeviceDetailScreen(
             Spacer(modifier = Modifier.height(8.dp))
         }
     }
+
+    // 设备管理面板（权限管理 / 功能管理 / 应用分发 / 远程升级 / 数据统计）
+    DeviceAdminSheetHost(
+        uiState = uiState,
+        onClose = viewModel::closeAdminSheet,
+        onUpdatePermissions = viewModel::updatePermissions,
+        onUpdateFunctions = viewModel::updateFunctionConfig,
+        onDispatchApp = viewModel::dispatchApp,
+        onStartUpgrade = viewModel::startUpgrade
+    )
 }
 
 @Composable
@@ -229,10 +244,12 @@ private fun TodayUsageDetailCard(usageMinutes: Int) {
             Spacer(modifier = Modifier.width(12.dp))
             Column {
                 Text("今日使用时长", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f))
-                Row(verticalAlignment = Alignment.Bottom) {
-                    Text("${usageMinutes / 60}", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    Text(" 小时 ${usageMinutes % 60} 分", style = MaterialTheme.typography.bodyMedium)
-                }
+                Text(
+                    text = TimeFormat.formatDurationFromMinutes(usageMinutes),
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
         }
     }

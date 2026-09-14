@@ -93,4 +93,16 @@ interface PolicyApi {
         @Path("deviceId") deviceId: String,
         @Body request: ApplyTemplateRequest
     ): Response<ApiResponse<Unit>>
+
+    // === 平板使用时间设置 ===
+    @GET("policies/{deviceId}/tablet-usage-settings")
+    suspend fun getTabletUsageSettings(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<TabletUsageSettingsDto>>
+
+    @PUT("policies/{deviceId}/tablet-usage-settings")
+    suspend fun updateTabletUsageSettings(
+        @Path("deviceId") deviceId: String,
+        @Body request: TabletUsageSettingsDto
+    ): Response<ApiResponse<TabletUsageSettingsDto>>
 }

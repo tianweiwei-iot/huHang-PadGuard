@@ -135,6 +135,78 @@ data class MediaResultDto(
     val durationSeconds: Int? = null   // for audio/video
 )
 
+@JsonClass(generateAdapter = true)
+data class StartRecordRequest(
+    val resolution: String,            // "SD_480P" | "HD_720P" | "FHD_1080P"
+    val withAudio: Boolean
+)
+
+@JsonClass(generateAdapter = true)
+data class ScreenRecordTaskDto(
+    val taskId: String,
+    val deviceId: String,
+    val startedAt: Long,
+    val resolution: String,
+    val withAudio: Boolean
+)
+
+@JsonClass(generateAdapter = true)
+data class ScreenMonitorSettingsDto(
+    val deviceId: String,
+    val autoRefreshSeconds: Int,
+    val highDefinition: Boolean,
+    val recordResolution: String,
+    val recordWithAudio: Boolean,
+    val allowRemoteLock: Boolean
+)
+
+// ==================== 信息发布相关 DTO ====================
+
+@JsonClass(generateAdapter = true)
+data class MessagePublishRequestDto(
+    val deviceId: String,
+    val contentType: String,           // "TEXT" | "IMAGE" | "VIDEO" | "AUDIO"
+    val text: String?,
+    val mediaUrl: String?,
+    val mediaName: String?,
+    val displaySeconds: Int,
+    val fullScreen: Boolean,
+    val playAudio: Boolean
+)
+
+@JsonClass(generateAdapter = true)
+data class PublishedMessageDto(
+    val id: String,
+    val deviceId: String,
+    val contentType: String,
+    val summary: String,
+    val displaySeconds: Int,
+    val fullScreen: Boolean,
+    val publishedAt: Long
+)
+
+// ==================== 定位 / 电子围栏相关 DTO ====================
+
+@JsonClass(generateAdapter = true)
+data class GeofenceDto(
+    val deviceId: String,
+    val enabled: Boolean,
+    val name: String,
+    val centerLatitude: Double,
+    val centerLongitude: Double,
+    val radiusMeters: Int,
+    val alertOnExit: Boolean
+)
+
+@JsonClass(generateAdapter = true)
+data class LocationTrackPointDto(
+    val latitude: Double,
+    val longitude: Double,
+    val address: String?,
+    val accuracy: Float?,
+    val timestamp: Long
+)
+
 // ==================== 策略相关 DTO ====================
 
 @JsonClass(generateAdapter = true)
@@ -206,6 +278,24 @@ data class PolicyTemplateDto(
 @JsonClass(generateAdapter = true)
 data class ApplyTemplateRequest(
     val templateId: String
+)
+
+@JsonClass(generateAdapter = true)
+data class TimeRangeDto(
+    val startTime: String,
+    val endTime: String
+)
+
+@JsonClass(generateAdapter = true)
+data class TabletUsageSettingsDto(
+    val deviceId: String,
+    val enabledTimeRanges: List<TimeRangeDto>?,
+    val weekdayLimitMinutes: Int,
+    val weekendLimitMinutes: Int,
+    val restAfterMinutes: Int,
+    val restDurationMinutes: Int,
+    val timeUpMessage: String,
+    val syncToDevice: Boolean
 )
 
 // ==================== 统计相关 DTO ====================

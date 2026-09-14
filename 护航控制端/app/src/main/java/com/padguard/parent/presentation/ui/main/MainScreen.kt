@@ -6,6 +6,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -15,7 +16,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.padguard.presentation.ui.Screen
-import com.padguard.presentation.ui.device.DeviceListScreen
+import com.padguard.presentation.ui.device.DeviceManageScreen
 import com.padguard.presentation.ui.home.HomeScreen
 import com.padguard.presentation.ui.profile.ProfileAction
 import com.padguard.presentation.ui.profile.ProfileScreen
@@ -26,6 +27,9 @@ import com.padguard.presentation.viewmodel.ProfileViewModel
 /**
  * 主框架：底部导航承载「首页 / 设备 / 统计 / 我的」四个顶级页面。
  * 设备详情 / 管控策略 / 实时监控 以根导航栈（rootNavController）全屏压入，不显示底部栏。
+ *
+ * 视觉（docs/UI设计提示词.md）：全局渐变背景由根导航（PadGuardNavHost）统一铺设，
+ * 此处 Scaffold 透明化让渐变透出；底部导航栏为玻璃质感。
  */
 @Composable
 fun MainScreen(rootNavController: NavHostController) {
@@ -43,8 +47,12 @@ fun MainScreen(rootNavController: NavHostController) {
     val currentRoute = navBackStackEntry?.destination?.route
 
     Scaffold(
+        containerColor = Color.Transparent,
         bottomBar = {
-            NavigationBar {
+            NavigationBar(
+                containerColor = Color.White,
+                tonalElevation = 0.dp
+            ) {
                 items.forEach { item ->
                     NavigationBarItem(
                         selected = currentRoute == item.route,
@@ -75,13 +83,16 @@ fun MainScreen(rootNavController: NavHostController) {
                     onSelectDevice = homeVm::selectDevice,
                     onDeviceClick = { rootNavController.navigate(Screen.DeviceDetail.create(it)) },
                     onNavigateToControl = { rootNavController.navigate(Screen.Control.create(it)) },
-                    onNavigateToMonitor = { rootNavController.navigate(Screen.Monitor.create(it)) },
+                    onNavigateToScreenMonitor = { rootNavController.navigate(Screen.ScreenMonitor.create(it)) },
+                    onNavigateToMessagePublish = { rootNavController.navigate(Screen.MessagePublish.create(it)) },
+                    onNavigateToLocation = { rootNavController.navigate(Screen.Location.create(it)) },
+                    onNavigateToUsageDetail = { rootNavController.navigate(Screen.TabletUsageDetail.create(it)) },
+                    onNavigateToUsageSettings = { rootNavController.navigate(Screen.TabletUsageSettings.create(it)) },
                     onRefresh = homeVm::refreshData
                 )
             }
             composable("devices") {
-                DeviceListScreen(
-                    uiState = homeUiState,
+                DeviceManageScreen(
                     onDeviceClick = { rootNavController.navigate(Screen.DeviceDetail.create(it)) }
                 )
             }

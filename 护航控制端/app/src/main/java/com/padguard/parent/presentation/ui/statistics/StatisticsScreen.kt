@@ -17,6 +17,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import com.padguard.domain.model.AppUsage
 import com.padguard.domain.model.DailyUsage
+import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.StatisticsViewModel
 
 /**
@@ -37,6 +38,7 @@ fun StatisticsScreen(
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = { TopAppBar(title = { Text("使用统计") }) }
     ) { padding ->
         if (deviceId.isEmpty()) {
@@ -63,13 +65,13 @@ fun StatisticsScreen(
                 item {
                     StatCardBig(
                         title = "今日使用时长",
-                        value = "${uiState.todayMinutes / 60} 小时 ${uiState.todayMinutes % 60} 分"
+                        value = TimeFormat.formatDurationFromMinutes(uiState.todayMinutes)
                     )
                 }
                 item {
                     StatCardBig(
                         title = "本周累计",
-                        value = "${uiState.weeklyMinutes / 60} 小时 ${uiState.weeklyMinutes % 60} 分"
+                        value = TimeFormat.formatDurationFromMinutes(uiState.weeklyMinutes)
                     )
                 }
                 item {
@@ -97,7 +99,7 @@ fun StatisticsScreen(
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Text(app.appName, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
                                     Text(
-                                        "${app.usageMinutes} 分",
+                                        TimeFormat.formatDurationFromMinutes(app.usageMinutes),
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                                     )

@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.padguard.domain.model.ControlMode
 import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.ControlPolicyUiState
 import com.padguard.presentation.viewmodel.ControlPolicyViewModel
 import com.padguard.presentation.viewmodel.FamilyPreset
@@ -48,6 +49,7 @@ fun ControlPolicyScreen(
     }
 
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text(uiState.device?.name ?: "管控策略") },
@@ -114,7 +116,7 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
                     Text("每日总使用时长", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     Spacer(modifier = Modifier.height(4.dp))
                     var minutes by remember(uiState.dailyLimitMinutes) { mutableIntStateOf(uiState.dailyLimitMinutes) }
-                    Text("${minutes} 分钟 / 天", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                    Text("${TimeFormat.formatDurationFromMinutes(minutes)} / 天", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
                     Slider(
                         value = minutes.toFloat(),
                         onValueChange = { minutes = it.toInt() },
@@ -135,7 +137,7 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
         items(uiState.timeRestrictions) { tr ->
             TimeRestrictionItem(
                 dayLabel = dayLabel(tr.dayOfWeek),
-                timeRange = "${tr.startTime} - ${tr.endTime}",
+                timeRange = "${TimeFormat.formatClock(tr.startTime)} - ${TimeFormat.formatClock(tr.endTime)}",
                 maxMinutes = tr.maxMinutes,
                 enabled = tr.isEnabled
             ) { viewModel.toggleTimeRestriction(tr) }
@@ -170,7 +172,7 @@ private fun TimeRestrictionItem(
             Column(modifier = Modifier.weight(1f)) {
                 Text(dayLabel, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                 Text(
-                    "$timeRange · 限 ${maxMinutes ?: "不限"} 分钟",
+                    "$timeRange · 限 ${maxMinutes?.let { TimeFormat.formatDurationFromMinutes(it) } ?: "不限"}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
                 )
@@ -241,7 +243,7 @@ private fun AppPolicyItem(
             }
             AssistChip(
                 onClick = onCycleLimit,
-                label = { Text(if (dailyLimit == null) "不限时" else "限时 $dailyLimit 分") }
+                label = { Text(if (dailyLimit == null) "不限时" else "限时 ${TimeFormat.formatDurationFromMinutes(dailyLimit)}") }
             )
             Spacer(modifier = Modifier.width(8.dp))
             Switch(checked = blocked, onCheckedChange = onToggleBlock)

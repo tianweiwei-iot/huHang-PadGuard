@@ -150,4 +150,85 @@ interface MonitorApi {
     suspend fun stopRecording(
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<MediaResultDto>>
+
+    /** 开始录屏 */
+    @POST("monitor/{deviceId}/screen-record/start")
+    suspend fun startScreenRecord(
+        @Path("deviceId") deviceId: String,
+        @Body request: StartRecordRequest
+    ): Response<ApiResponse<ScreenRecordTaskDto>>
+
+    /** 停止录屏，返回录屏文件 */
+    @POST("monitor/screen-record/{taskId}/stop")
+    suspend fun stopScreenRecord(
+        @Path("taskId") taskId: String
+    ): Response<ApiResponse<MediaResultDto>>
+
+    /** 获取屏幕监控设置 */
+    @GET("monitor/{deviceId}/screen-settings")
+    suspend fun getScreenMonitorSettings(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<ScreenMonitorSettingsDto>>
+
+    /** 更新屏幕监控设置 */
+    @PUT("monitor/{deviceId}/screen-settings")
+    suspend fun updateScreenMonitorSettings(
+        @Path("deviceId") deviceId: String,
+        @Body settings: ScreenMonitorSettingsDto
+    ): Response<ApiResponse<ScreenMonitorSettingsDto>>
+}
+
+/**
+ * 信息发布 API 接口定义
+ * 对应设计文档"实时管控 > 信息发布"章节
+ * API 基础路径: /messages
+ */
+interface MessageApi {
+
+    /** 向被管控平板实时发布信息 */
+    @POST("messages/{deviceId}/publish")
+    suspend fun publishMessage(
+        @Path("deviceId") deviceId: String,
+        @Body request: MessagePublishRequestDto
+    ): Response<ApiResponse<PublishedMessageDto>>
+
+    /** 获取已发布信息记录 */
+    @GET("messages/{deviceId}/history")
+    suspend fun getPublishedMessages(
+        @Path("deviceId") deviceId: String,
+        @Query("limit") limit: Int = 20
+    ): Response<ApiResponse<List<PublishedMessageDto>>>
+}
+
+/**
+ * 定位与电子围栏 API 接口定义
+ * 对应设计文档"实时管控 > 定位"章节
+ * API 基础路径: /location
+ */
+interface LocationApi {
+
+    /** 获取设备实时位置 */
+    @GET("location/{deviceId}/current")
+    suspend fun getDeviceLocation(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<LocationDto>>
+
+    /** 获取电子围栏配置 */
+    @GET("location/{deviceId}/geofence")
+    suspend fun getGeofence(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<GeofenceDto>>
+
+    /** 更新电子围栏配置 */
+    @PUT("location/{deviceId}/geofence")
+    suspend fun updateGeofence(
+        @Path("deviceId") deviceId: String,
+        @Body config: GeofenceDto
+    ): Response<ApiResponse<GeofenceDto>>
+
+    /** 获取越界后的移动轨迹 */
+    @GET("location/{deviceId}/track")
+    suspend fun getTrackHistory(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<List<LocationTrackPointDto>>>
 }

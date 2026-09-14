@@ -112,7 +112,7 @@ private fun BatteryIndicator(level: Int) {
 }
 
 /**
- * 功能网格项（用于"设备和应用限制"、"远程监控"等网格）
+ * 功能网格项（用于"设备和应用限制"、"实时管控"等网格）
  */
 @Composable
 fun FeatureGridItem(

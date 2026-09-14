@@ -39,6 +39,7 @@ fun ProfileScreen(
     onAction: (ProfileAction) -> Unit
 ) {
     Scaffold(
+        containerColor = Color.Transparent,
         topBar = { TopAppBar(title = { Text("我的") }) }
     ) { padding ->
         Column(

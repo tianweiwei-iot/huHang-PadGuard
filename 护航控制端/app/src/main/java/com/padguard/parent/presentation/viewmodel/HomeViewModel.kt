@@ -8,6 +8,7 @@ import com.padguard.domain.model.UsageStats
 import com.padguard.domain.repository.DeviceRepository
 import com.padguard.domain.repository.PolicyRepository
 import com.padguard.domain.repository.StatisticsRepository
+import com.padguard.presentation.util.TimeFormat
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -103,11 +104,12 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             statisticsRepository.getTodayUsage(deviceId)
                 .onSuccess { stats ->
+                    val topApp = stats.appUsages.firstOrNull()
                     _uiState.value = _uiState.value.copy(
                         todayUsage = stats,
-                        latestActivity = if (stats.appUsages.isNotEmpty())
-                            "使用了 ${stats.appUsages.first().appName} ${stats.appUsages.first().usageMinutes} 分钟"
-                        else null
+                        latestActivity = topApp?.let {
+                            "使用了 ${it.appName} ${TimeFormat.formatDurationFromMinutes(it.usageMinutes)}"
+                        }
                     )
                 }
                 .onFailure { e ->
