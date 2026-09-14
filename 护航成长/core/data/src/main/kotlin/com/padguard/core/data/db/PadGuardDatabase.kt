@@ -21,9 +21,10 @@ import androidx.room.RoomDatabase
         AppUsageEntity::class,
         DailyUsageEntity::class,
         RiskEventEntity::class,
-        UnlockRequestEntity::class
+        UnlockRequestEntity::class,
+        AgreementEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class PadGuardDatabase : RoomDatabase() {
@@ -35,6 +36,7 @@ abstract class PadGuardDatabase : RoomDatabase() {
     abstract fun dailyUsageDao(): DailyUsageDao
     abstract fun riskEventDao(): RiskEventDao
     abstract fun unlockRequestDao(): UnlockRequestDao
+    abstract fun agreementDao(): AgreementDao
 
     companion object {
         const val NAME = "padguard.db"

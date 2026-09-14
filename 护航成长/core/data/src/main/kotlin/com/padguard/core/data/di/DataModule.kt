@@ -13,6 +13,7 @@ import com.padguard.core.data.db.PadGuardDatabase
 import com.padguard.core.data.db.PolicyDao
 import com.padguard.core.data.db.RiskEventDao
 import com.padguard.core.data.db.UnlockRequestDao
+import com.padguard.core.data.db.AgreementDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -63,6 +64,10 @@ object DatabaseModule {
     @Provides
     @Singleton
     fun provideUnlockRequestDao(db: PadGuardDatabase): UnlockRequestDao = db.unlockRequestDao()
+
+    @Provides
+    @Singleton
+    fun provideAgreementDao(db: PadGuardDatabase): AgreementDao = db.agreementDao()
 }
 
 @Module

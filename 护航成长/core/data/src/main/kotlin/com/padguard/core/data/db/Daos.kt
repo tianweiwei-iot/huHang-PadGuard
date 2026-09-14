@@ -232,3 +232,19 @@ interface UnlockRequestDao {
     @Query("DELETE FROM unlock_request WHERE createdAt < :before")
     suspend fun deleteBefore(before: Long)
 }
+
+@Dao
+interface AgreementDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entity: AgreementEntity): Long
+
+    @Query("SELECT * FROM agreement ORDER BY signedAt DESC LIMIT 1")
+    suspend fun latest(): AgreementEntity?
+
+    @Query("SELECT * FROM agreement ORDER BY signedAt DESC LIMIT :limit")
+    fun observeRecent(limit: Int): Flow<List<AgreementEntity>>
+
+    @Query("DELETE FROM agreement WHERE signedAt < :before")
+    suspend fun deleteBefore(before: Long)
+}

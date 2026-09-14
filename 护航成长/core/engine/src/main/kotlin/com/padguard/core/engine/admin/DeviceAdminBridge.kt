@@ -191,6 +191,70 @@ class DeviceAdminBridge @Inject constructor(
         return um.hasUserRestriction(key)
     }
 
+    /**
+     * 是否持有设备所有者 / 资料所有者特权。
+     *
+     * 运行时权限自动授予（`setPermissionGrantState`）与多数用户限制只有这两种身份才可用，
+     * 普通 DEVICE_ADMIN 拿不到。集中判断避免各方法散落重复条件。
+     */
+    fun hasOwnerPrivileges(): Boolean =
+        isDeviceOwner() || dpm.isProfileOwnerApp(context.packageName)
+
+    // ==================== 权限自动授予（说明书 §7） ====================
+
+    /**
+     * 经 Device Owner / Profile Owner 特权把某个运行时权限直接置为「已授予」。
+     *
+     * 对应说明书 §5.3「同意并授权 → 自动获取全部权限」：孩子点击同意后，
+     * 不必逐个弹系统授权框，由 DPC 一次性把全部所需权限到位。
+     * 普通设备管理员（无 DO/PO）会返回 [OpResult.Unsupported]——这是预期的降级，
+     * 上层据此在 UI 上引导走系统授权流程。
+     */
+    fun grantRuntimePermission(permission: String): OpResult = guarded("grant:$permission") {
+        require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            "setPermissionGrantState requires API 23+"
+        }
+        require(hasOwnerPrivileges()) { "grantRuntimePermission requires Device/Profile Owner" }
+        val admin = requireAdmin()
+        val granted = dpm.setPermissionGrantState(
+            admin,
+            context.packageName,
+            permission,
+            DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+        )
+        require(granted) { "setPermissionGrantState returned false for $permission" }
+    }
+
+    /**
+     * 协议同意后应用的「常开加固基线」（说明书 §11 防绕过）。
+     *
+     * 这些限制一旦开启未成年人模式就不应被解除，仅 Device Owner 可设。
+     * 逐项返回成功/失败，便于上层汇总成「哪些加固未生效」上报服务端，
+     * 避免"看起来加固了实际没生效"的静默失效。
+     */
+    fun applyHardeningBaseline(): List<Pair<String, OpResult>> {
+        val results = mutableListOf<Pair<String, OpResult>>()
+        results += "usbDebug" to setUserRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, true)
+        results += "factoryReset" to setUserRestriction(UserManager.DISALLOW_FACTORY_RESET, true)
+        results += "safeBoot" to setUserRestriction(UserManager.DISALLOW_SAFE_BOOT, true)
+        results += "unknownSources" to setUserRestriction(UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES, true)
+        results += "configDateTime" to setUserRestriction(UserManager.DISALLOW_CONFIG_DATE_TIME, true)
+
+        // USB 文件传输关闭（防通过 USB 拷走数据），API 28+ 才有，且不接受 admin 参数
+        val usb = runCatching {
+            require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) { "requires API 28+" }
+            require(can(Capability.GLOBAL_SETTINGS)) { "requires Device Owner" }
+            dpm.setUsbDataSignalingEnabled(false)
+            OpResult.Ok
+        }.getOrElse { e ->
+            if (e is SecurityException) OpResult.Unsupported("usbDataSignaling", e.message.orEmpty())
+            else OpResult.Failed("usbDataSignaling", e.message.orEmpty())
+        }
+        results += "usbDataSignaling" to usb
+
+        return results
+    }
+
     // ==================== 全局 / 安全设置 ====================
 
     /**

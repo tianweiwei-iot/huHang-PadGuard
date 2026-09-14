@@ -7,6 +7,38 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
+    <!-- 定位（实时定位 / 电子围栏，说明书 §6.5） -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- 设备 / 信号（说明书 §6.1） -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+    <!-- 通信（说明书 §6.9 信息发送 / 代收） -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+
+    <!-- 摄像头 / 麦克风（姿态距离监测、远程截屏录屏，说明书 §6.7 / §6.10） -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- 存储读写（日志 / 截图 / 下发文件，说明书 §6.8） -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- NFC 近场绑定（说明书 §4.3 方式③） -->
+    <uses-permission android:name="android.permission.NFC" />
+
+    <!-- 绑定阶段扫码（说明书 §4.3 方式①） -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+
     <!-- 开机 / 覆盖安装后自启守护服务 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
@@ -17,6 +49,9 @@
 
     <!-- Android 13+ 通知运行时权限 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 守护服务保活（说明书 §7.1） -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!--
       锁屏/拦截覆盖层不需要 SYSTEM_ALERT_WINDOW：
@@ -46,6 +81,13 @@
         <activity
             android:name=".bind.BindActivity"
             android:exported="false"
+            android:theme="@style/Theme.PadGuard" />
+
+        <!-- 扫码绑定页（说明书 §4.3 方式①） -->
+        <activity
+            android:name=".bind.QrScanActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
             android:theme="@style/Theme.PadGuard" />
 
         <!-- 锁屏覆盖层：无解锁入口 -->

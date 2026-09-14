@@ -138,3 +138,18 @@ data class UnlockRequestEntity(
         const val STALE_HOURS = 12
     }
 }
+
+/**
+ * 使用授权协议签署记录（说明书 §5.4 合规留存 / §10.1）。
+ *
+ * 孩子在「同意并授权」后写入；管控端可据此展示「已阅已同意」。
+ * [snMask] 仅存脱敏序列号后 4 位，原始 SN 不出端。
+ */
+@Entity(tableName = "agreement", indices = [Index(value = ["signedAt"])])
+data class AgreementEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val version: String,
+    val signedAt: Long,
+    val snMask: String,
+    val deviceId: String = ""
+)

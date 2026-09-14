@@ -103,5 +103,11 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
 
+    // 扫码绑定（CameraX + MLKit，说明书 §4.3 方式①）
+    implementation(libs.camera2)
+    implementation(libs.camera.lifecycle)
+    implementation(libs.camera.view)
+    implementation(libs.mlkit.barcode)
+
     testImplementation(libs.junit)
 }

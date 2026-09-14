@@ -39,7 +39,14 @@ enum class LogType {
      * 再造一套 pending 队列纯属重复劳动。服务端识别到该 type 后转为待审批工单即可。
      * payload 约定：{ requestId, packageName, appLabel, durationMinutes, reason }
      */
-    UNLOCK_REQUEST
+    UNLOCK_REQUEST,
+
+    /**
+     * 使用授权协议签署（说明书 §5.4 合规留存）。
+     * 孩子点击「同意并授权」后写入，服务端据此向管控端展示「已阅已同意」。
+     * payload 约定：{ version, signedAt, snMask }
+     */
+    AGREEMENT
 }
 
 /**

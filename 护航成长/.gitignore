@@ -1,0 +1,42 @@
+# 本文件为 Android/Gradle 项目标准忽略规则。
+# 重点：local.properties 含本机 SDK 路径与（按 app/build.gradle.kts 的约定）签名密钥信息，
+#       绝不可入库；.gradle/ 含本机 JDK/Gradle 相关配置（如 config.properties 的 java.home）。
+
+# 本机配置
+local.properties
+
+# Gradle / 构建产物
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# 构建产物重定向目录（与项目同盘符的 ASCII 路径，正常在仓库之外，这里兜底）
+/builds/
+
+# 签名文件
+*.jks
+*.keystore
+keystore.properties
+
+# 编译产物
+*.apk
+*.aar
+*.ap_
+*.aab
+*.dex
+*.class
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+captures/
+
+# 日志
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db

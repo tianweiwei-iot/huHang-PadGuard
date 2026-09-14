@@ -37,12 +37,22 @@ class AuthRepository @Inject constructor(
         val DEVICE_SN = stringPreferencesKey("device_sn")
         val STUDENT_NAME = stringPreferencesKey("student_name")
         val TENANT_ID = stringPreferencesKey("tenant_id")
+        val AGREEMENT_VERSION = stringPreferencesKey("agreement_version")
     }
 
+    /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
     val deviceId: Flow<String> = store.data.catch { emit(emptyPreferences()) }
         .map { it[Keys.DEVICE_ID].orEmpty() }
 
     val isBound: Flow<Boolean> = deviceId.map { it.isNotBlank() }
+
+    /** 已同意的协议版本；为空表示尚未同意（受限预览模式）。 */
+    val agreementVersion: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.AGREEMENT_VERSION].orEmpty() }
+
+    /** 是否已同意当前版本协议 —— 入口门禁据此决定是否弹授权弹窗。 */
+    val isAgreementAccepted: Flow<Boolean> =
+        agreementVersion.map { it == CURRENT_AGREEMENT_VERSION }
 
     val studentName: Flow<String> = store.data.catch { emit(emptyPreferences()) }
         .map { it[Keys.STUDENT_NAME].orEmpty() }
@@ -95,6 +105,11 @@ class AuthRepository @Inject constructor(
         store.edit { it[Keys.STUDENT_NAME] = name }
     }
 
+    /** 持久化已同意的协议版本（同意授权后由 [PermissionGranter] 调用）。 */
+    suspend fun saveAgreement(version: String = CURRENT_AGREEMENT_VERSION) {
+        store.edit { it[Keys.AGREEMENT_VERSION] = version }
+    }
+
     /**
      * 解绑清理。
      * 注意：终端**无自主解绑权限**，本方法仅在收到服务端/管理员授权的解绑指令时调用。
@@ -106,5 +121,10 @@ class AuthRepository @Inject constructor(
             // DataStore 写入失败时重试一次，仍失败则记录日志交由上层处理
             store.edit { it.clear() }
         }
+    }
+
+    companion object {
+        /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
+        const val CURRENT_AGREEMENT_VERSION = "1.0.0"
     }
 }
