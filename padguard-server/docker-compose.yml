@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: padguard
+      POSTGRES_USER: padguard
+      POSTGRES_PASSWORD: padguard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U padguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  emqx:
+    image: emqx:5.8
+    ports:
+      - "1883:1883"   # MQTT
+      - "8883:8883"   # MQTT over TLS
+      - "18083:18083" # EMQX dashboard
+    environment:
+      EMQX_LISTENERS__TCP__DEFAULT__PORT: "1883"
+    healthcheck:
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_started
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/padguard
+      SPRING_DATASOURCE_USERNAME: padguard
+      SPRING_DATASOURCE_PASSWORD: padguard
+      PADGUARD_DEV_CHILDSIMULATOR: "false"
+
+volumes:
+  pgdata:

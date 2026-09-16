@@ -1,0 +1,57 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/padguard
+    username: padguard
+    password: padguard
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: false
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 20MB
+
+padguard:
+  jwt:
+    # 生产环境务必替换为 >=32 字节的强密钥，并通过环境变量注入
+    secret: "padguard-dev-secret-key-please-change-in-production-32b"
+    access-ttl-minutes: 120
+    refresh-ttl-days: 30
+  device:
+    token-ttl-days: 30
+  mqtt:
+    broker-url: "tcp://emqx:1883"
+    username: ""
+    password: ""
+    tenant: "default"
+    keep-alive-seconds: 90
+  storage:
+    # 本地文件存储目录（生产可换 MinIO/OSS，仅改 FileStorageService）
+    dir: "./uploads"
+    # 对外 base-url，用于拼接可访问的文件/资源 URL；留空则使用相对路径 /v1/files/{id}
+    # 例如： http://localhost:8080
+    base-url: ""
+  dev:
+    # 无真实被管控端时，开启内置"孩子端模拟器"自动回执指令，便于演示主链路闭环
+    child-simulator: false
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+  padguard:
+    mqtt:
+      broker-url: "tcp://emqx:1883"
