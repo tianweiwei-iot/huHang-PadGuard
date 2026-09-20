@@ -72,6 +72,9 @@ sealed class Screen(val route: String) {
             return "app_usage_history/$deviceId/$safePkg/${period.name}"
         }
     }
+    object AppManage : Screen("app_manage/{deviceId}") {
+        fun create(deviceId: String) = "app_manage/$deviceId"
+    }
     object AlertList : Screen("alert_list")
     object Profile : Screen("profile")
 }
@@ -105,7 +108,8 @@ fun PadGuardNavHost(
                 deviceId = deviceId,
                 onBack = { navController.popBackStack() },
                 onNavigateToControl = { id -> navController.navigate(Screen.Control.create(id)) },
-                onViewScreen = { id -> navController.navigate(Screen.ScreenMonitor.create(id)) }
+                onViewScreen = { id -> navController.navigate(Screen.ScreenMonitor.create(id)) },
+                onNavigateToAppManage = { id -> navController.navigate(Screen.AppManage.create(id)) }
             )
         }
         composable(Screen.Control.route) { backStackEntry ->
@@ -137,6 +141,13 @@ fun PadGuardNavHost(
         composable(Screen.TabletUsageSettings.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
             com.padguard.presentation.ui.usage.TabletUsageSettingsScreen(
+                deviceId = deviceId,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Screen.AppManage.route) { backStackEntry ->
+            val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
+            com.padguard.presentation.ui.apps.AppManageScreen(
                 deviceId = deviceId,
                 onBack = { navController.popBackStack() }
             )

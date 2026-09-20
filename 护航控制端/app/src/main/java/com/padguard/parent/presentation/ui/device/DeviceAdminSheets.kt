@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import com.padguard.domain.model.*
 import com.padguard.presentation.ui.components.FeatureGridItem
 import com.padguard.presentation.ui.components.FeatureItem
+import com.padguard.presentation.ui.components.SoftCard
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.DeviceAdminSheet
@@ -56,12 +57,7 @@ private fun adminSheetFor(name: String): DeviceAdminSheet? = when (name) {
  */
 @Composable
 fun DeviceAdminEntryCard(onOpen: (DeviceAdminSheet) -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text("设备管理", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             Spacer(modifier = Modifier.height(8.dp))

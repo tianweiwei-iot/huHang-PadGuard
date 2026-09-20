@@ -21,6 +21,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.padguard.domain.model.AppUsage
+import com.padguard.presentation.ui.components.AppIcon
+import com.padguard.presentation.ui.components.SoftCard
+import com.padguard.presentation.ui.components.SoftHeroCard
+import com.padguard.presentation.ui.theme.OutlineSoft
 import com.padguard.domain.model.DailyUsage
 import com.padguard.domain.model.ReportPeriod
 import com.padguard.domain.model.UsageStats
@@ -201,13 +205,10 @@ private fun UsageHeaderCard(state: TabletUsageDetailUiState) {
         ReportPeriod.MONTHLY -> "本月限额"
     }
 
-    Card(
+    SoftHeroCard(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            .padding(horizontal = 16.dp)
     ) {
         Row(
             modifier = Modifier.padding(24.dp),
@@ -274,13 +275,10 @@ private fun AppUsageCardList(
     apps: List<AppUsage>,
     onAppClick: (AppUsage) -> Unit
 ) {
-    Card(
+    SoftCard(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            .padding(horizontal = 16.dp)
     ) {
         if (apps.isEmpty()) {
             Text(
@@ -289,7 +287,7 @@ private fun AppUsageCardList(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
             )
-            return@Card
+            return@SoftCard
         }
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
             apps.sortedByDescending { app ->
@@ -299,7 +297,7 @@ private fun AppUsageCardList(
                 if (index < apps.lastIndex) {
                     HorizontalDivider(
                         modifier = Modifier.padding(horizontal = 16.dp),
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                        color = OutlineSoft
                     )
                 }
             }
@@ -316,19 +314,12 @@ private fun AppUsageClickableRow(app: AppUsage, onClick: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(10.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                Icons.Default.Apps,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(22.dp)
-            )
-        }
+        AppIcon(
+            packageName = app.packageName,
+            appName = app.appName,
+            iconUrl = app.iconUrl,
+            size = 40.dp
+        )
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -372,13 +363,10 @@ private fun AppUsageClickableRow(app: AppUsage, onClick: () -> Unit) {
 
 @Composable
 private fun TrendChart(dailyUsages: List<DailyUsage>?) {
-    Card(
+    SoftCard(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            .padding(horizontal = 16.dp)
     ) {
         Box(modifier = Modifier.padding(16.dp)) {
             if (dailyUsages.isNullOrEmpty()) {
@@ -425,13 +413,10 @@ private fun TrendChart(dailyUsages: List<DailyUsage>?) {
 
 @Composable
 private fun DailyUsageItem(day: DailyUsage) {
-    Card(
+    SoftCard(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            .padding(horizontal = 16.dp)
     ) {
         Row(
             modifier = Modifier

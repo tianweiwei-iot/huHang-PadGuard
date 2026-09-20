@@ -28,7 +28,17 @@ interface PolicyApi {
         @Path("restrictionId") restrictionId: String
     ): Response<ApiResponse<Unit>>
 
-    @PUT("policies/{deviceId}/daily-limit")
+    /** 读取设备每日总时长上限（分钟），后端以 DeviceSetting.dailyLimitMinutes 为唯一来源 */
+    @GET("policies/{deviceId}/daily-limit")
+    suspend fun getGlobalDailyLimit(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<Int>>
+
+    /**
+     * 设置设备每日总时长上限（分钟）。
+     * 后端仅暴露 /apps/limit 作为每日总时长写入入口，统一由此落库。
+     */
+    @PUT("policies/{deviceId}/apps/limit")
     suspend fun setGlobalDailyLimit(
         @Path("deviceId") deviceId: String,
         @Body request: DailyLimitRequest
@@ -46,10 +56,15 @@ interface PolicyApi {
         @Body request: UpdateBlacklistRequest
     ): Response<ApiResponse<Unit>>
 
+    /**
+     * 设置单应用时长限制。
+     * 后端当前未单列"单应用"限制，/apps/limit 实际写入设备每日总时长；
+     * 此处复用同一入口，将 AppPolicy.dailyLimitMinutes 作为每日总时长写入，保持行为一致。
+     */
     @PUT("policies/{deviceId}/apps/limit")
     suspend fun setAppTimeLimit(
         @Path("deviceId") deviceId: String,
-        @Body request: AppPolicyDto
+        @Body request: DailyLimitRequest
     ): Response<ApiResponse<Unit>>
 
     // === 上网管控 ===

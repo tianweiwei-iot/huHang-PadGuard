@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.padguard.domain.model.*
 import com.padguard.domain.repository.*
+import com.padguard.domain.KnownAppIcons
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,14 +16,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
-
-// 常见应用的真实图标 URL（Wikimedia 公开资源，HTTPS 稳定）。失败时回退到 UI 兜底字符徽章。
-private const val ICON_WECHAT = "https://upload.wikimedia.org/wikipedia/commons/thumb/8/89/Tencent_WeChat.svg/240px-Tencent_WeChat.svg.png"
-private const val ICON_QQ = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/56/QQ_logo_2016.svg/240px-QQ_logo_2016.svg.png"
-private const val ICON_DOUYIN = "https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/TikTok_logo.svg/240px-TikTok_logo.svg.png"
-private const val ICON_TENCENT_VIDEO = "https://upload.wikimedia.org/wikipedia/commons/thumb/2/22/Tencent_Video.svg/240px-Tencent_Video.svg.png"
-private const val ICON_NETEASE = "https://upload.wikimedia.org/wikipedia/commons/thumb/2/22/NetEase_Logo.svg/240px-NetEase_Logo.svg.png"
-private const val ICON_KUAIYING = "https://upload.wikimedia.org/wikipedia/commons/thumb/0/06/Kuaiying_logo.svg/240px-Kuaiying_logo.svg.png"
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "padguard_prefs")
 
@@ -603,6 +596,21 @@ class LocalDataSource @Inject constructor(
     override suspend fun uninstallApp(deviceId: String, packageName: String): Result<Unit> =
         Result.success(Unit)
 
+    override suspend fun getAppInventory(deviceId: String): Result<List<InstalledApp>> =
+        Result.success(emptyList())
+
+    override suspend fun installRemoteApp(deviceId: String, app: DistributableApp): Result<Unit> =
+        Result.success(Unit)
+
+    override suspend fun setAppSuspended(deviceId: String, packageName: String, suspended: Boolean): Result<Unit> =
+        Result.success(Unit)
+
+    override suspend fun setAppsSuspended(
+        deviceId: String,
+        packages: List<String>,
+        suspended: Boolean
+    ): Result<Unit> = Result.success(Unit)
+
     override suspend fun getWebPolicy(deviceId: String): Result<WebPolicy> =
         Result.success(WebPolicy(deviceId = deviceId))
 
@@ -680,24 +688,24 @@ class LocalDataSource @Inject constructor(
         val totalUsageMinutes = dailyUsages.sumOf { it.usageMinutes }
         val topApps = when (period) {
             ReportPeriod.DAILY -> listOf(
-                AppUsage(packageName = "com.tencent.qqlive", appName = "腾讯视频", usageMinutes = 30, iconUrl = ICON_TENCENT_VIDEO, startTime = "20:15:20", endTime = "23:30:30", usageSeconds = 3 * 3600 + 15 * 60 + 10),
-                AppUsage(packageName = "com.tencent.mm", appName = "微信", usageMinutes = 25, iconUrl = ICON_WECHAT, startTime = "08:30:00", endTime = "08:55:30", usageSeconds = 25 * 60 + 30),
-                AppUsage(packageName = "com.tencent.mobileqq", appName = "QQ", usageMinutes = 20, iconUrl = ICON_QQ, startTime = "09:10:00", endTime = "09:30:00", usageSeconds = 20 * 60),
-                AppUsage(packageName = "com.ss.android.ugc.aweme", appName = "抖音", usageMinutes = 15, iconUrl = ICON_DOUYIN, startTime = "10:00:00", endTime = "10:15:00", usageSeconds = 15 * 60)
+                AppUsage(packageName = "com.tencent.qqlive", appName = "腾讯视频", usageMinutes = 30, iconUrl = KnownAppIcons.iconFor("com.tencent.qqlive"), startTime = "20:15:20", endTime = "23:30:30", usageSeconds = 3 * 3600 + 15 * 60 + 10),
+                AppUsage(packageName = "com.tencent.mm", appName = "微信", usageMinutes = 25, iconUrl = KnownAppIcons.iconFor("com.tencent.mm"), startTime = "08:30:00", endTime = "08:55:30", usageSeconds = 25 * 60 + 30),
+                AppUsage(packageName = "com.tencent.mobileqq", appName = "QQ", usageMinutes = 20, iconUrl = KnownAppIcons.iconFor("com.tencent.mobileqq"), startTime = "09:10:00", endTime = "09:30:00", usageSeconds = 20 * 60),
+                AppUsage(packageName = "com.ss.android.ugc.aweme", appName = "抖音", usageMinutes = 15, iconUrl = KnownAppIcons.iconFor("com.ss.android.ugc.aweme"), startTime = "10:00:00", endTime = "10:15:00", usageSeconds = 15 * 60)
             )
             ReportPeriod.WEEKLY -> listOf(
-                AppUsage(packageName = "com.tencent.mm", appName = "微信", usageMinutes = 180, iconUrl = ICON_WECHAT, startTime = "08:00:00", endTime = "11:00:00", usageSeconds = 180 * 60),
-                AppUsage(packageName = "com.tencent.qqlive", appName = "腾讯视频", usageMinutes = 150, iconUrl = ICON_TENCENT_VIDEO, startTime = "20:00:00", endTime = "22:30:00", usageSeconds = 150 * 60),
-                AppUsage(packageName = "com.ss.android.ugc.aweme", appName = "抖音", usageMinutes = 120, iconUrl = ICON_DOUYIN, startTime = "19:00:00", endTime = "21:00:00", usageSeconds = 120 * 60),
-                AppUsage(packageName = "com.tencent.mobileqq", appName = "QQ", usageMinutes = 90, iconUrl = ICON_QQ, startTime = "12:00:00", endTime = "13:30:00", usageSeconds = 90 * 60),
-                AppUsage(packageName = "com.netease.dwrg", appName = "荒野行动", usageMinutes = 60, iconUrl = ICON_NETEASE, startTime = "15:00:00", endTime = "16:00:00", usageSeconds = 60 * 60)
+                AppUsage(packageName = "com.tencent.mm", appName = "微信", usageMinutes = 180, iconUrl = KnownAppIcons.iconFor("com.tencent.mm"), startTime = "08:00:00", endTime = "11:00:00", usageSeconds = 180 * 60),
+                AppUsage(packageName = "com.tencent.qqlive", appName = "腾讯视频", usageMinutes = 150, iconUrl = KnownAppIcons.iconFor("com.tencent.qqlive"), startTime = "20:00:00", endTime = "22:30:00", usageSeconds = 150 * 60),
+                AppUsage(packageName = "com.ss.android.ugc.aweme", appName = "抖音", usageMinutes = 120, iconUrl = KnownAppIcons.iconFor("com.ss.android.ugc.aweme"), startTime = "19:00:00", endTime = "21:00:00", usageSeconds = 120 * 60),
+                AppUsage(packageName = "com.tencent.mobileqq", appName = "QQ", usageMinutes = 90, iconUrl = KnownAppIcons.iconFor("com.tencent.mobileqq"), startTime = "12:00:00", endTime = "13:30:00", usageSeconds = 90 * 60),
+                AppUsage(packageName = "com.netease.dwrg", appName = "荒野行动", usageMinutes = 60, iconUrl = KnownAppIcons.iconFor("com.netease.dwrg"), startTime = "15:00:00", endTime = "16:00:00", usageSeconds = 60 * 60)
             )
             ReportPeriod.MONTHLY -> listOf(
-                AppUsage(packageName = "com.tencent.mm", appName = "微信", usageMinutes = 720, iconUrl = ICON_WECHAT, startTime = "08:00:00", endTime = "20:00:00", usageSeconds = 720 * 60),
-                AppUsage(packageName = "com.tencent.qqlive", appName = "腾讯视频", usageMinutes = 600, iconUrl = ICON_TENCENT_VIDEO, startTime = "20:00:00", endTime = "23:30:00", usageSeconds = 600 * 60),
-                AppUsage(packageName = "com.ss.android.ugc.aweme", appName = "抖音", usageMinutes = 480, iconUrl = ICON_DOUYIN, startTime = "19:00:00", endTime = "22:00:00", usageSeconds = 480 * 60),
-                AppUsage(packageName = "com.tencent.mobileqq", appName = "QQ", usageMinutes = 360, iconUrl = ICON_QQ, startTime = "12:00:00", endTime = "18:00:00", usageSeconds = 360 * 60),
-                AppUsage(packageName = "com.kuaiya.player", appName = "快影", usageMinutes = 240, iconUrl = ICON_KUAIYING, startTime = "10:00:00", endTime = "14:00:00", usageSeconds = 240 * 60)
+                AppUsage(packageName = "com.tencent.mm", appName = "微信", usageMinutes = 720, iconUrl = KnownAppIcons.iconFor("com.tencent.mm"), startTime = "08:00:00", endTime = "20:00:00", usageSeconds = 720 * 60),
+                AppUsage(packageName = "com.tencent.qqlive", appName = "腾讯视频", usageMinutes = 600, iconUrl = KnownAppIcons.iconFor("com.tencent.qqlive"), startTime = "20:00:00", endTime = "23:30:00", usageSeconds = 600 * 60),
+                AppUsage(packageName = "com.ss.android.ugc.aweme", appName = "抖音", usageMinutes = 480, iconUrl = KnownAppIcons.iconFor("com.ss.android.ugc.aweme"), startTime = "19:00:00", endTime = "22:00:00", usageSeconds = 480 * 60),
+                AppUsage(packageName = "com.tencent.mobileqq", appName = "QQ", usageMinutes = 360, iconUrl = KnownAppIcons.iconFor("com.tencent.mobileqq"), startTime = "12:00:00", endTime = "18:00:00", usageSeconds = 360 * 60),
+                AppUsage(packageName = "com.kuaiya.player", appName = "快影", usageMinutes = 240, iconUrl = KnownAppIcons.iconFor("com.kuaiya.player"), startTime = "10:00:00", endTime = "14:00:00", usageSeconds = 240 * 60)
             )
         }
 
@@ -724,7 +732,7 @@ class LocalDataSource @Inject constructor(
                     packageName = "com.tencent.qqlive",
                     appName = "腾讯视频",
                     usageMinutes = 30,
-                    iconUrl = "https://upload.wikimedia.org/wikipedia/commons/thumb/2/22/Tencent_Video.svg/240px-Tencent_Video.svg.png",
+                    iconUrl = KnownAppIcons.iconFor("com.tencent.qqlive"),
                     startTime = "20:15:20",
                     endTime = "23:30:30",
                     usageSeconds = 3 * 3600 + 15 * 60 + 10
@@ -733,7 +741,7 @@ class LocalDataSource @Inject constructor(
                     packageName = "com.tencent.mm",
                     appName = "微信",
                     usageMinutes = 25,
-                    iconUrl = "https://upload.wikimedia.org/wikipedia/commons/thumb/8/89/Tencent_WeChat.svg/240px-Tencent_WeChat.svg.png",
+                    iconUrl = KnownAppIcons.iconFor("com.tencent.mm"),
                     startTime = "08:30:10",
                     endTime = "08:55:30",
                     usageSeconds = 25 * 60 + 20
@@ -742,7 +750,7 @@ class LocalDataSource @Inject constructor(
                     packageName = "com.tencent.mobileqq",
                     appName = "QQ",
                     usageMinutes = 20,
-                    iconUrl = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/56/QQ_logo_2016.svg/240px-QQ_logo_2016.svg.png",
+                    iconUrl = KnownAppIcons.iconFor("com.tencent.mobileqq"),
                     startTime = "09:10:00",
                     endTime = "09:30:00",
                     usageSeconds = 20 * 60
@@ -751,7 +759,7 @@ class LocalDataSource @Inject constructor(
                     packageName = "com.ss.android.ugc.aweme",
                     appName = "抖音",
                     usageMinutes = 15,
-                    iconUrl = "https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/TikTok_logo.svg/240px-TikTok_logo.svg.png",
+                    iconUrl = KnownAppIcons.iconFor("com.ss.android.ugc.aweme"),
                     startTime = "10:00:00",
                     endTime = "10:15:00",
                     usageSeconds = 15 * 60

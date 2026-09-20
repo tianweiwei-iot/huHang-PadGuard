@@ -30,7 +30,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.padguard.domain.model.*
 import com.padguard.presentation.ui.components.SoftCard
+import com.padguard.presentation.ui.components.SoftHeroCard
 import com.padguard.presentation.ui.components.SoftIconBadge
+import com.padguard.presentation.ui.components.AppIcon
 import com.padguard.presentation.ui.theme.OutlineSoft
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.util.TimeFormat
@@ -60,7 +62,8 @@ fun HomeScreen(
                     onNavigateToLocation: (String) -> Unit,
                     onNavigateToUsageDetail: (String) -> Unit = {},
     onNavigateToUsageSettings: (String) -> Unit = {},
-    onRefresh: () -> Unit = {}
+    onRefresh: () -> Unit = {},
+    onAddDevice: () -> Unit = {}
 ) {
     val devices = uiState.devices
     val selectedDevice = uiState.selectedDevice
@@ -79,8 +82,16 @@ fun HomeScreen(
             // === 1. 顶部标题栏 ===
             item { HomeTopBar(userName = uiState.userName) }
 
-            // === 2. 孩子/设备切换 pill ===
-            if (devices.isNotEmpty()) {
+            // === 2. 空状态：尚未绑定任何孩子设备 ===
+            // HomeViewModel 在设备列表非空时会自动选中首个设备，故 devices 为空即代表「无绑定设备」。
+            // 此时看板与管控卡均无数据可展示，直接展示引导空态并隐藏失效卡片，
+            // 避免「卡片存在却点击无反应、看板消失」的脆弱体验。
+            if (devices.isEmpty()) {
+                item {
+                    EmptyDeviceState(onAddDevice = onAddDevice)
+                }
+            } else {
+                // === 3. 孩子/设备切换 pill ===
                 item {
                     DeviceSwitchPill(
                         devices = devices,
@@ -88,16 +99,14 @@ fun HomeScreen(
                         onSelect = onSelectDevice
                     )
                 }
-            }
 
-            // === 3. 离线告警置顶 ===
-            if (selectedDevice?.onlineStatus == DeviceOnlineStatus.OFFLINE) {
-                item { OfflineAlertBanner(deviceName = selectedDevice.name) }
-            }
+                // === 4. 离线告警置顶 ===
+                if (selectedDevice?.onlineStatus == DeviceOnlineStatus.OFFLINE) {
+                    item { OfflineAlertBanner(deviceName = selectedDevice.name) }
+                }
 
-            // === 4. 今日平板使用情况环卡 + 应用记录 ===
-            item {
-                if (selectedDevice != null) {
+                // === 5. 今日平板使用情况环卡 + 应用记录 ===
+                item {
                     TodayUsageModule(
                         usedMinutes = uiState.todayUsage?.totalUsageMinutes ?: 0,
                         dailyLimitMinutes = uiState.dailyLimitMinutes,
@@ -107,31 +116,31 @@ fun HomeScreen(
                         modifier = Modifier.padding(horizontal = 16.dp)
                     )
                 }
+
+                // === 6. 实时管控三卡（屏幕监控 / 信息发布 / 定位） ===
+                item { SectionTitle(text = "实时管控") }
+                item {
+                    RealtimeControlRow(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        onScreenMonitorClick = { if (deviceId.isNotEmpty()) onNavigateToScreenMonitor(deviceId) },
+                        onMessagePublishClick = { if (deviceId.isNotEmpty()) onNavigateToMessagePublish(deviceId) },
+                        onLocationClick = { if (deviceId.isNotEmpty()) onNavigateToLocation(deviceId) }
+                    )
+                }
+
+                // === 7. 管控策略四大卡 ===
+                item { SectionTitle(text = "管控策略", withTopPadding = true) }
+                item {
+                    ControlCategoryGrid(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        onTimeControlClick = { if (deviceId.isNotEmpty()) onNavigateToUsageSettings(deviceId) },
+                        onOtherCategoryClick = { if (deviceId.isNotEmpty()) onNavigateToControl(deviceId) }
+                    )
+                }
             }
 
-            // === 5. 实时管控三卡（屏幕监控 / 信息发布 / 定位） ===
-            item { SectionTitle(text = "实时管控") }
-            item {
-                RealtimeControlRow(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    onScreenMonitorClick = { if (deviceId.isNotEmpty()) onNavigateToScreenMonitor(deviceId) },
-                    onMessagePublishClick = { if (deviceId.isNotEmpty()) onNavigateToMessagePublish(deviceId) },
-                    onLocationClick = { if (deviceId.isNotEmpty()) onNavigateToLocation(deviceId) }
-                )
-            }
-
-            // === 6. 管控策略四大卡 ===
-            item { SectionTitle(text = "管控策略", withTopPadding = true) }
-            item {
-                ControlCategoryGrid(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    onTimeControlClick = { if (deviceId.isNotEmpty()) onNavigateToUsageSettings(deviceId) },
-                    onOtherCategoryClick = { if (deviceId.isNotEmpty()) onNavigateToControl(deviceId) }
-                )
-            }
-
-            // === 7. 最新动态 ===
-            item { SectionTitle(text = "最新动态", withTopPadding = true) }
+            // === 8. 最新动态 ===
+            item { SectionTitle(text = "最新动态", withTopPadding = devices.isNotEmpty()) }
             item {
                 LatestActivityCard(
                     activityText = uiState.latestActivity ?: "暂无新动态",
@@ -284,18 +293,9 @@ private fun TodayUsageModule(
     val fraction = (usedMinutes.toFloat() / safeLimit.toFloat()).coerceIn(0f, 1f)
     val overLimit = usedMinutes > safeLimit
 
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .shadow(
-                elevation = 10.dp,
-                shape = RoundedCornerShape(16.dp),
-                ambientColor = Color(0xFF2F2470).copy(alpha = 0.28f),
-                spotColor = Color(0xFF2F2470).copy(alpha = 0.28f)
-            )
-            .clip(RoundedCornerShape(16.dp))
-            .background(brush = PadGuardColors.HeroGradient)
-            .clickable(onClick = onModuleClick)
+    SoftHeroCard(
+        modifier = modifier.fillMaxWidth(),
+        onClick = onModuleClick
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -463,72 +463,6 @@ private fun AppUsageLineRow(app: com.padguard.domain.model.AppUsage) {
     }
 }
 
-/**
- * 应用图标：优先用后端返回的 iconUrl（Coil 加载真实 APK 图标）；
- * 加载失败 / 未提供时回退到根据包名/应用名映射的字符徽章。
- */
-@Composable
-private fun AppIcon(packageName: String, appName: String, iconUrl: String?) {
-    val badge = appBadgeStyle(packageName, appName)
-    Box(
-        modifier = Modifier
-            .size(26.dp)
-            .clip(CircleShape)
-            .background(Color.White.copy(alpha = 0.18f)),
-        contentAlignment = Alignment.Center
-    ) {
-        if (!iconUrl.isNullOrBlank()) {
-            coil.compose.AsyncImage(
-                model = iconUrl,
-                contentDescription = appName,
-                modifier = Modifier
-                    .size(24.dp)
-                    .clip(CircleShape)
-                    .background(Color.White),
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .size(24.dp)
-                    .clip(CircleShape)
-                    .background(badge.color),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = badge.mark,
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-    }
-}
-
-/**
- * 兜底图标样式（无 iconUrl 时使用）：根据 packageName / appName 匹配，
- * 返回单字符 + 主色的圆形徽章。
- */
-private data class AppBadgeStyle(val mark: String, val color: Color)
-
-private fun appBadgeStyle(packageName: String, appName: String): AppBadgeStyle {
-    val p = packageName.lowercase()
-    return when {
-        p.contains("mobileqq") || p.contains("qq") -> AppBadgeStyle("🐧", Color(0xFF12B7F5))
-        p.contains("tencent.mm") || p.contains("wechat") || appName.contains("微信") -> AppBadgeStyle("微", Color(0xFF07C160))
-        p.contains("aweme") || p.contains("douyin") || appName.contains("抖音") -> AppBadgeStyle("抖", Color(0xFFFE2C55))
-        p.contains("qqlive") || p.contains("tencent.video") || appName.contains("腾讯视频") -> AppBadgeStyle("▶", Color(0xFFFF7028))
-        p.contains("netease") || appName.contains("荒野") -> AppBadgeStyle("野", Color(0xFFE3344A))
-        p.contains("kuaiya") || appName.contains("快影") -> AppBadgeStyle("K", Color(0xFF1E90FF))
-        p.contains("tencent") -> AppBadgeStyle("T", Color(0xFF1976FF))
-        else -> {
-            val ch = appName.firstOrNull()?.toString() ?: "·"
-            AppBadgeStyle(ch, Color(0xFF607D8B))
-        }
-    }
-}
-
 // ==================== 管控四大卡 ====================
 
 /**
@@ -693,6 +627,38 @@ private fun LatestActivityCard(activityText: String, modifier: Modifier = Modifi
                 color = PadGuardColors.TextSecondary,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/**
+ * 空状态：当前账号尚未绑定任何孩子设备。
+ *
+ * 设计取舍：无设备时看板与管控卡均无数据，与其渲染「存在却点击无反应」的失效卡片，
+ * 不如直接给出明确的引导入口（跳转设备页生成绑定码），消除隐性空操作陷阱。
+ */
+@Composable
+private fun EmptyDeviceState(onAddDevice: () -> Unit) {
+    SoftCard(onClick = onAddDevice, modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            SoftIconBadge(icon = Icons.Default.AddCircle, tintIndex = 0, size = 48.dp, iconSize = 24.dp)
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "还没有绑定的孩子设备",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = PadGuardColors.TextPrimary
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "点此生成绑定码，在孩子平板上完成绑定后，即可查看使用看板与各项管控功能",
+                style = MaterialTheme.typography.bodySmall,
+                color = PadGuardColors.TextSecondary,
+                textAlign = TextAlign.Center
             )
         }
     }

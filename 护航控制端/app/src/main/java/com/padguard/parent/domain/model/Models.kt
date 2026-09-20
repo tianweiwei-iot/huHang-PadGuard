@@ -539,3 +539,26 @@ data class DeviceUpgradeInfo(
     val lastCheckTime: Long = System.currentTimeMillis()
 )
 
+/**
+ * 设备已安装应用（应用监控 / 远程安装维护）
+ *
+ * [suspended] 与 [blocked] 是两种完全不同的状态，UI 上必须区分清楚：
+ * - blocked：应用策略层面的禁用，孩子打开会被拦截页挡住，家长可随时解除；
+ * - suspended：系统级挂起（Device Owner 的 setPackagesSuspended），
+ *   应用图标直接消失、打开即闪退，是更重的手段。
+ * 混为一谈会让家长在"我只是想限制时长"时误用了最重的手段。
+ */
+data class InstalledApp(
+    val packageName: String,
+    val appName: String,
+    val versionName: String? = null,
+    val versionCode: Long? = null,
+    val isSystem: Boolean = false,
+    val installed: Boolean = true,
+    val suspended: Boolean = false,
+    val installTime: Long? = null,
+    val updateTime: Long? = null,
+    val lastSeenAt: Long = 0,
+    val blocked: Boolean = false,
+    val dailyLimitMinutes: Int? = null
+)

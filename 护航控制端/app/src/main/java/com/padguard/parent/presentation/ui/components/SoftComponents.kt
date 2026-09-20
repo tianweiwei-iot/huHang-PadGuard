@@ -13,6 +13,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -68,6 +69,37 @@ fun SoftCard(
             content = content
         )
     }
+}
+
+/**
+ * Hero 深紫渐变卡（每屏至多一张）：
+ * - 深紫三段渐变实底（`PadGuardColors.HeroGradient`）
+ * - 深紫 28% 投影（`PadGuardColors.HeroShadow`）
+ * - 其上内容一律白字（由调用方保证）
+ *
+ * 全 App 的 Hero 卡（今日使用卡、周期汇总卡）统一走本组件，
+ * 禁止在页面自行拼装渐变/投影参数。
+ */
+@Composable
+fun SoftHeroCard(
+    modifier: Modifier = Modifier,
+    shape: Shape = SoftCardShape,
+    onClick: (() -> Unit)? = null,
+    content: @Composable BoxScope.() -> Unit
+) {
+    Box(
+        modifier = modifier
+            .shadow(
+                elevation = 10.dp,
+                shape = shape,
+                ambientColor = PadGuardColors.HeroShadow,
+                spotColor = PadGuardColors.HeroShadow
+            )
+            .clip(shape)
+            .background(brush = PadGuardColors.HeroGradient)
+            .let { m -> if (onClick != null) m.clickable(onClick = onClick) else m },
+        content = content
+    )
 }
 
 /**

@@ -28,8 +28,8 @@ import com.padguard.presentation.viewmodel.ProfileViewModel
  * 主框架：底部导航承载「首页 / 设备 / 统计 / 我的」四个顶级页面。
  * 设备详情 / 管控策略 / 实时监控 以根导航栈（rootNavController）全屏压入，不显示底部栏。
  *
- * 视觉（docs/UI设计提示词.md）：全局渐变背景由根导航（PadGuardNavHost）统一铺设，
- * 此处 Scaffold 透明化让渐变透出；底部导航栏为玻璃质感。
+ * 视觉（docs/UI设计提示词.md v2.1）：全局浅灰底由根导航（PadGuardNavHost）统一铺设，
+ * 此处 Scaffold 透明化让底色透出；底部导航栏为纯白实底。
  */
 @Composable
 fun MainScreen(rootNavController: NavHostController) {
@@ -88,7 +88,8 @@ fun MainScreen(rootNavController: NavHostController) {
                     onNavigateToLocation = { rootNavController.navigate(Screen.Location.create(it)) },
                     onNavigateToUsageDetail = { rootNavController.navigate(Screen.TabletUsageDetail.create(it)) },
                     onNavigateToUsageSettings = { rootNavController.navigate(Screen.TabletUsageSettings.create(it)) },
-                    onRefresh = homeVm::refreshData
+                    onRefresh = homeVm::refreshData,
+                    onAddDevice = { navController.navigate("devices") }
                 )
             }
             composable("devices") {

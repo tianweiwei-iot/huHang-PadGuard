@@ -60,7 +60,8 @@ data class UserDto(
 @JsonClass(generateAdapter = true)
 data class DeviceDto(
     val id: String,
-    val name: String,
+    // 后端 Device.toDto() 中 name/controlMode/sceneType 可能为 null，放宽可空以兼容解析
+    val name: String?,
     val deviceId: String,
     val model: String?,
     val osVersion: String?,
@@ -68,12 +69,19 @@ data class DeviceDto(
     val onlineStatus: String,   // "ONLINE" | "OFFLINE" | "UNKNOWN"
     val lastOnlineTime: Long?,
     val batteryLevel: Int?,
-    val controlMode: String,    // "NORMAL" | "LEARNING" | "FOCUS"
+    val controlMode: String?,   // 后端可能为 null（孩子端尚未上报）
     val groupId: String?,
-    val groupName: String?,
-    val sceneType: String,
+    val groupName: String?,     // 后端当前恒为 null
+    val sceneType: String?,
     val latitude: Double?,
     val longitude: Double?
+)
+
+/** 家长端生成 6 位一次性绑定码响应 */
+@JsonClass(generateAdapter = true)
+data class BindCodeResponse(
+    val bindCode: String,
+    val expiresAt: Long
 )
 
 @JsonClass(generateAdapter = true)
@@ -111,11 +119,13 @@ data class AssignGroupRequest(
 @JsonClass(generateAdapter = true)
 data class ScreenshotDto(
     val deviceId: String,
+    // 后端返回 imageUrl（而非 imageBase64），且尺寸/时间为可选
     val imageUrl: String?,
     val thumbnailUrl: String?,
-    val capturedAt: Long,
-    val width: Int,
-    val height: Int
+    val capturedAt: Long?,
+    val width: Int?,
+    val height: Int?,
+    val status: String? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -191,7 +201,7 @@ data class PublishedMessageDto(
 data class GeofenceDto(
     val deviceId: String,
     val enabled: Boolean,
-    val name: String,
+    val name: String?,
     val centerLatitude: Double,
     val centerLongitude: Double,
     val radiusMeters: Int,
@@ -211,8 +221,8 @@ data class LocationTrackPointDto(
 
 @JsonClass(generateAdapter = true)
 data class TimeRestrictionDto(
-    val id: String,
-    val deviceId: String,
+    val id: String?,
+    val deviceId: String?,
     val dayOfWeek: Int,
     val startTime: String,
     val endTime: String,
@@ -270,9 +280,9 @@ data class ModeChangeRequest(
 data class PolicyTemplateDto(
     val id: String,
     val name: String,
-    val description: String,
+    val description: String?,
     val sceneType: String,
-    val category: String
+    val category: String?
 )
 
 @JsonClass(generateAdapter = true)
@@ -379,9 +389,9 @@ data class AlertDto(
     val deviceName: String,
     val level: String,       // "INFO" | "WARNING" | "CRITICAL"
     val title: String,
-    val message: String,
+    val message: String?,
     val status: String,      // "ACTIVE" | "ACKNOWLEDGED" | "RESOLVED" | "CLOSED"
-    val category: String,
+    val category: String?,
     val triggeredAt: Long,
     val acknowledgedAt: Long?,
     val resolvedAt: Long?
@@ -390,4 +400,48 @@ data class AlertDto(
 @JsonClass(generateAdapter = true)
 data class CloseAlertRequest(
     val reason: String?
+)
+
+// ==================== 应用监控 / 远程安装维护 ====================
+
+/**
+ * 设备已安装应用（服务端台账 + 本地应用策略合并结果）
+ *
+ * [blocked] / [dailyLimitMinutes] 由服务端与 app_policies 表合并后下发，
+ * 控制端无需再请求一次策略接口即可直接渲染开关状态。
+ */
+@JsonClass(generateAdapter = true)
+data class InstalledAppDto(
+    val packageName: String,
+    val appName: String? = null,
+    val versionName: String? = null,
+    val versionCode: Long? = null,
+    val isSystem: Boolean = false,
+    val installed: Boolean = true,
+    val suspended: Boolean = false,
+    val installTime: Long? = null,
+    val updateTime: Long? = null,
+    val lastSeenAt: Long = 0,
+    val blocked: Boolean = false,
+    val dailyLimitMinutes: Int? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AppInstallRequest(
+    val apkUrl: String,
+    val packageName: String,
+    val versionCode: Long? = null,
+    val appName: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class SuspendRequest(
+    val packageName: String,
+    val suspended: Boolean = true
+)
+
+@JsonClass(generateAdapter = true)
+data class BatchSuspendRequest(
+    val packages: List<String> = emptyList(),
+    val suspended: Boolean = true
 )

@@ -25,6 +25,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.padguard.domain.model.DeviceOnlineStatus
 import com.padguard.presentation.ui.components.FeatureGridItem
 import com.padguard.presentation.ui.components.FeatureItem
+import com.padguard.presentation.ui.components.SoftCard
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.DeviceDetailViewModel
@@ -48,6 +49,7 @@ fun DeviceDetailScreen(
     onBack: () -> Unit,
     onNavigateToControl: (String) -> Unit,
     onViewScreen: (String) -> Unit,
+    onNavigateToAppManage: (String) -> Unit = {},
     viewModel: DeviceDetailViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -124,6 +126,17 @@ fun DeviceDetailScreen(
                 Text("管控策略（时长 / 应用 / 上网 / 系统）")
             }
 
+            // 应用监控 + 远程安装维护（已安装台账 / 挂起 / 卸载）
+            OutlinedButton(
+                onClick = { onNavigateToAppManage(deviceId) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.Apps, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("应用管理（已安装 / 挂起 / 卸载）")
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
         }
     }
@@ -141,12 +154,7 @@ fun DeviceDetailScreen(
 
 @Composable
 private fun DeviceHeaderCard(device: com.padguard.domain.model.Device) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
@@ -209,12 +217,7 @@ private fun QuickCommandGrid(onCommand: (String) -> Unit) {
         FeatureItem("看屏", Icons.AutoMirrored.Filled.ScreenShare),
         FeatureItem("授权", Icons.Default.VerifiedUser)
     )
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text("即时远程指令", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             Spacer(modifier = Modifier.height(8.dp))
@@ -233,12 +236,7 @@ private fun QuickCommandGrid(onCommand: (String) -> Unit) {
 
 @Composable
 private fun TodayUsageDetailCard(usageMinutes: Int) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.HourglassBottom, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
             Spacer(modifier = Modifier.width(12.dp))
@@ -257,12 +255,7 @@ private fun TodayUsageDetailCard(usageMinutes: Int) {
 
 @Composable
 private fun LocationCard(address: String?, lat: Double, lng: Double) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier.size(48.dp).background(PadGuardColors.SectionBg, RoundedCornerShape(12.dp)),

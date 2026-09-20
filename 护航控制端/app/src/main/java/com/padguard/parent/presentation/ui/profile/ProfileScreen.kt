@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.presentation.ui.components.SoftCard
 
 /**
  * 我的页（底部导航「我的」Tab）
@@ -105,11 +106,9 @@ private data class ProfileItem(
 
 @Composable
 private fun ProfileListItem(item: ProfileItem, onClick: () -> Unit) {
-    Card(
+    SoftCard(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        onClick = onClick
     ) {
         Row(
             modifier = Modifier

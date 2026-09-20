@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import com.padguard.domain.model.Device
 import com.padguard.domain.model.DeviceOnlineStatus
 import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.presentation.ui.components.SoftCard
 
 /**
  * 设备状态卡片（首页顶部）
@@ -31,14 +32,11 @@ fun DeviceStatusCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit = {}
 ) {
-    Card(
+    SoftCard(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            .padding(horizontal = 16.dp),
+        onClick = onClick
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

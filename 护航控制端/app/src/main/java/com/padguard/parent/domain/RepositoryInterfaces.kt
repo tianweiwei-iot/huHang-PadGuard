@@ -235,11 +235,23 @@ interface PolicyRepository {
     /** 设置单应用时长限制 */
     suspend fun setAppTimeLimit(policy: AppPolicy): Result<Unit>
 
-    /** 远程安装应用 */
+    /** 远程安装应用：下发指令，APK 由被管控端从 url 自行下载 */
     suspend fun installApp(deviceId: String, appUrl: String): Result<Unit>
 
     /** 卸载应用 */
     suspend fun uninstallApp(deviceId: String, packageName: String): Result<Unit>
+
+    /** 读取设备已安装应用台账（服务端合并了黑名单/限额策略） */
+    suspend fun getAppInventory(deviceId: String): Result<List<InstalledApp>>
+
+    /** 远程安装（带包名，服务端据此预置台账记录） */
+    suspend fun installRemoteApp(deviceId: String, app: DistributableApp): Result<Unit>
+
+    /** 单应用挂起 / 恢复 */
+    suspend fun setAppSuspended(deviceId: String, packageName: String, suspended: Boolean): Result<Unit>
+
+    /** 批量挂起 / 恢复 */
+    suspend fun setAppsSuspended(deviceId: String, packages: List<String>, suspended: Boolean): Result<Unit>
 
     // === 上网管控 ===
     /** 获取上网策略 */

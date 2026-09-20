@@ -1,9 +1,9 @@
 # 平板管控系统（PadGuard 家长端）UI 界面设计提示词
 
-> 版本：v2.1（2026-09-13，参考 WPS「我的」页版式重定基调）
+> 版本：v2.1（2026-09-13，参考 WPS「我的」页版式重定基调；2026-09-20 经深色玻璃版试验后用户确认回归浅色系，本版恢复为唯一基准）
 > 用途：本提示词是 App UI 重设计的唯一视觉基准。所有页面开发、评审、后续迭代均以此为准；
 > 亦可将「逐页提示词」直接投喂给 AI 设计/生图工具生成视觉稿。
-> v2.0 的毛玻璃/光斑体系已废弃，当前基调为「浅灰底 + 纯白大圆角卡片 + 深紫渐变 Hero」。
+> v2.0 的毛玻璃/光斑体系与 v3.0 的深色玻璃体系均已废弃，当前基调为「浅灰底 + 纯白大圆角卡片 + 深紫渐变 Hero」。
 
 ---
 
@@ -97,7 +97,7 @@
 
 ## 三、实现约束（开发侧）
 
-1. **组件统一入口**：白卡 `SoftCard`、图标 `SoftIconBadge`、背景 `AppSoftBackground` 全部定义在 `presentation/ui/components/SoftComponents.kt`；颜色/渐变 token 在 `ui/theme/Theme.kt`（`PadGuardColors`）。页面禁止硬编码装饰色、禁止自拼投影圆角参数。
+1. **组件统一入口**：白卡 `SoftCard`、Hero 卡 `SoftHeroCard`、图标 `SoftIconBadge`、背景 `AppSoftBackground` 全部定义在 `presentation/ui/components/SoftComponents.kt`；颜色/渐变 token 在 `ui/theme/Theme.kt`（`PadGuardColors`，含 `HeroShadow`）。页面禁止硬编码装饰色、禁止自拼投影圆角参数。
 2. **色彩纪律**：装饰仅限蓝/紫/粉三系；语义状态色（绿/红/灰）仅用于状态。
 3. **Hero 唯一性**：每屏至多一张深紫渐变卡。
 4. **可读性底线**：白卡上文字用 `TextPrimary`/`TextSecondary`；Hero 卡上文字一律白色，对比度不足时提高渐变深度而不是加描边。

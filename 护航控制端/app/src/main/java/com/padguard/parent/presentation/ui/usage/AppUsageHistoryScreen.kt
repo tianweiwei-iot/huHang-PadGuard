@@ -22,6 +22,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.padguard.domain.model.AppUsageHistoryEntry
+import com.padguard.presentation.ui.components.AppIcon
+import com.padguard.presentation.ui.components.SoftCard
+import com.padguard.presentation.ui.components.SoftHeroCard
 import com.padguard.domain.model.ReportPeriod
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.AppUsageHistoryViewModel
@@ -76,7 +79,7 @@ fun AppUsageHistoryScreen(
             contentPadding = PaddingValues(vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            item { SummaryCard(appName = uiState.appName, period = uiState.period, totalSeconds = uiState.totalSeconds, count = uiState.entries.size) }
+            item { SummaryCard(packageName = packageName, appName = uiState.appName, period = uiState.period, totalSeconds = uiState.totalSeconds, count = uiState.entries.size) }
 
             if (uiState.entries.isEmpty()) {
                 item {
@@ -103,44 +106,32 @@ fun AppUsageHistoryScreen(
 }
 
 @Composable
-private fun SummaryCard(appName: String, period: ReportPeriod, totalSeconds: Int, count: Int) {
+private fun SummaryCard(packageName: String, appName: String, period: ReportPeriod, totalSeconds: Int, count: Int) {
     val periodLabel = when (period) {
         ReportPeriod.DAILY -> "今日"
         ReportPeriod.WEEKLY -> "本周"
         ReportPeriod.MONTHLY -> "本月"
     }
-    Card(
+    SoftHeroCard(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            .padding(horizontal = 16.dp)
     ) {
         Row(
             modifier = Modifier.padding(20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .background(
-                        MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.15f),
-                        RoundedCornerShape(12.dp)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    Icons.Default.Apps,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimary
-                )
-            }
+            AppIcon(
+                packageName = packageName,
+                appName = appName,
+                iconUrl = null,
+                size = 48.dp
+            )
             Spacer(modifier = Modifier.width(16.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = if (appName.isNotEmpty()) "$appName · $periodLabel" else periodLabel,
-                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.85f),
+                    color = Color.White.copy(alpha = 0.85f),
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -148,7 +139,7 @@ private fun SummaryCard(appName: String, period: ReportPeriod, totalSeconds: Int
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = TimeFormat.formatDuration(totalSeconds),
-                    color = MaterialTheme.colorScheme.onPrimary,
+                    color = Color.White,
                     style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1
@@ -156,7 +147,7 @@ private fun SummaryCard(appName: String, period: ReportPeriod, totalSeconds: Int
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = "共 $count 次打开使用",
-                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f),
+                    color = Color.White.copy(alpha = 0.7f),
                     style = MaterialTheme.typography.labelSmall
                 )
             }
@@ -166,13 +157,10 @@ private fun SummaryCard(appName: String, period: ReportPeriod, totalSeconds: Int
 
 @Composable
 private fun HistoryRow(entry: AppUsageHistoryEntry) {
-    Card(
+    SoftCard(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            .padding(horizontal = 16.dp)
     ) {
         Row(
             modifier = Modifier

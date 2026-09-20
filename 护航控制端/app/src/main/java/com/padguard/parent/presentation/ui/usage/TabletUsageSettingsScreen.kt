@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.padguard.domain.model.TabletUsageSettings
 import com.padguard.domain.model.TimeRange
+import com.padguard.presentation.ui.components.SoftCard
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.TabletUsageSettingsUiState
 import com.padguard.presentation.viewmodel.TabletUsageSettingsViewModel
@@ -136,12 +137,7 @@ fun TabletUsageSettingsScreen(
 
 @Composable
 private fun EnableSwitch(enabled: Boolean, onToggle: (Boolean) -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -173,12 +169,7 @@ private fun TimeRangeSection(
     viewModel: TabletUsageSettingsViewModel,
     enabled: Boolean
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -282,9 +273,22 @@ private fun TimeInput(
  * 统一时长控件：步进按钮 + 渐变加深的滑动条。
  * 步长 30 分钟，范围 0 ~ 24 小时（1440 分钟）。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DurationControl(
+    title: String,
+    minutes: Int,
+    enabled: Boolean,
+    onUpdate: (Int) -> Unit
+) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
+        DurationControlContent(title = title, minutes = minutes, enabled = enabled, onUpdate = onUpdate)
+    }
+}
+
+/** 时长控件内容体：供独立卡片与「休息提醒」卡内复用，避免卡片嵌套卡片。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DurationControlContent(
     title: String,
     minutes: Int,
     enabled: Boolean,
@@ -293,13 +297,7 @@ private fun DurationControl(
     val maxMinutes = 1440
     val step = 30
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+    Column(modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -399,7 +397,6 @@ private fun DurationControl(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
             )
         }
-    }
 }
 
 @Composable
@@ -408,12 +405,7 @@ private fun RestSection(
     viewModel: TabletUsageSettingsViewModel,
     enabled: Boolean
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
                 text = "休息提醒",
@@ -421,14 +413,14 @@ private fun RestSection(
                 fontWeight = FontWeight.SemiBold
             )
             Spacer(modifier = Modifier.height(12.dp))
-            DurationControl(
+            DurationControlContent(
                 title = "使用多久后提醒休息",
                 minutes = settings.restAfterMinutes,
                 enabled = enabled,
                 onUpdate = viewModel::updateRestAfter
             )
             Spacer(modifier = Modifier.height(12.dp))
-            DurationControl(
+            DurationControlContent(
                 title = "每次休息时长",
                 minutes = settings.restDurationMinutes,
                 enabled = enabled,
@@ -440,12 +432,7 @@ private fun RestSection(
 
 @Composable
 private fun MessageSection(message: String, onUpdate: (String) -> Unit, enabled: Boolean) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
                 text = "超时提示文案",

@@ -27,6 +27,7 @@ import com.padguard.domain.model.Device
 import com.padguard.domain.model.DeviceImportRow
 import com.padguard.domain.model.DeviceOnlineStatus
 import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.presentation.ui.components.SoftCard
 import com.padguard.presentation.util.QrCodeGenerator
 import com.padguard.presentation.viewmodel.DeviceManageViewModel
 import kotlinx.coroutines.flow.collectLatest
@@ -203,12 +204,7 @@ private fun SummaryCard(
     modifier: Modifier = Modifier,
     valueColor: Color = MaterialTheme.colorScheme.primary
 ) {
-    Card(
-        modifier = modifier,
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
+    SoftCard(modifier = modifier) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -249,13 +245,9 @@ private fun ManagedDeviceCard(
     var menuOpen by remember { mutableStateOf(false) }
     val online = device.onlineStatus == DeviceOnlineStatus.ONLINE
 
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    SoftCard(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),

@@ -62,11 +62,12 @@ interface DeviceApi {
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<DeviceDto>>
 
-    /** 绑定设备（扫码/手动） */
-    @POST("devices/bind")
-    suspend fun bindDevice(
-        @Body request: BindDeviceRequest
-    ): Response<ApiResponse<DeviceDto>>
+    /**
+     * 生成 6 位一次性绑定码（10 分钟有效）。
+     * 真实绑定由孩子端拿此码调用 /api/v1/device/bind 完成，家长端仅负责下发。
+     */
+    @POST("devices/bind-code")
+    suspend fun generateBindCode(): Response<ApiResponse<BindCodeResponse>>
 
     /** 解绑设备 */
     @POST("devices/{deviceId}/unbind")
@@ -231,4 +232,47 @@ interface LocationApi {
     suspend fun getTrackHistory(
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<List<LocationTrackPointDto>>>
+}
+
+/**
+ * 应用监控 / 远程安装维护 API 接口定义
+ * 对应设计文档"应用管理"与"远程维护"章节
+ * API 基础路径: /devices/{deviceId}/apps
+ */
+interface AppManageApi {
+
+    /** 获取设备已安装应用台账（含黑名单/限额合并结果） */
+    @GET("devices/{deviceId}/apps")
+    suspend fun getInstalledApps(
+        @Path("deviceId") deviceId: String,
+        @Query("onlyInstalled") onlyInstalled: Boolean = true
+    ): Response<ApiResponse<List<InstalledAppDto>>>
+
+    /** 远程安装：下发 INSTALL_APP 指令，APK 由被管控端自行下载 */
+    @POST("devices/{deviceId}/apps/install")
+    suspend fun installApp(
+        @Path("deviceId") deviceId: String,
+        @Body request: AppInstallRequest
+    ): Response<ApiResponse<Unit>>
+
+    /** 远程卸载 */
+    @POST("devices/{deviceId}/apps/uninstall")
+    suspend fun uninstallApp(
+        @Path("deviceId") deviceId: String,
+        @Body request: SuspendRequest
+    ): Response<ApiResponse<Unit>>
+
+    /** 单应用挂起 / 恢复 */
+    @PUT("devices/{deviceId}/apps/suspend")
+    suspend fun suspendApp(
+        @Path("deviceId") deviceId: String,
+        @Body request: SuspendRequest
+    ): Response<ApiResponse<Unit>>
+
+    /** 批量挂起 / 恢复（"一键禁用所有游戏"这类场景） */
+    @PUT("devices/{deviceId}/apps/suspend/batch")
+    suspend fun suspendAppsBatch(
+        @Path("deviceId") deviceId: String,
+        @Body request: BatchSuspendRequest
+    ): Response<ApiResponse<Map<String, Int>>>
 }

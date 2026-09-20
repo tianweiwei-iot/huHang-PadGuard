@@ -16,6 +16,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import com.padguard.domain.model.AppUsage
+import com.padguard.presentation.ui.components.AppIcon
+import com.padguard.presentation.ui.components.SoftCard
 import com.padguard.domain.model.DailyUsage
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.StatisticsViewModel
@@ -95,7 +97,7 @@ fun StatisticsScreen(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(Icons.Default.Apps, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    AppIcon(packageName = app.packageName, appName = app.appName, iconUrl = app.iconUrl, size = 40.dp)
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Text(app.appName, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
                                     Text(
@@ -115,12 +117,7 @@ fun StatisticsScreen(
 
 @Composable
 private fun StatCardBig(title: String, value: String) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
             Spacer(modifier = Modifier.height(4.dp))
@@ -131,12 +128,7 @@ private fun StatCardBig(title: String, value: String) {
 
 @Composable
 private fun WeeklyTrendBar(dailyUsages: List<DailyUsage>) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()

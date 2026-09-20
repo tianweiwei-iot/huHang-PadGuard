@@ -89,6 +89,7 @@ object PadGuardColors {
     val OfflineGray = com.padguard.presentation.ui.theme.OfflineGray
     val WarningRed = com.padguard.presentation.ui.theme.WarningRed
     val SuccessGreen = com.padguard.presentation.ui.theme.SuccessGreen
+    val Amber = Color(0xFFFFA000)
 
     // 品牌三色
     val PrimaryBlue = com.padguard.presentation.ui.theme.PrimaryBlue
@@ -128,4 +129,7 @@ object PadGuardColors {
 
     /** 卡片投影色（极轻，深蓝黑 8%） */
     val CardShadow = Color(0xFF1E293B).copy(alpha = 0.08f)
+
+    /** Hero 卡投影色（深紫 28%，只压底不描边） */
+    val HeroShadow = Color(0xFF2F2470).copy(alpha = 0.28f)
 }
