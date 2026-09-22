@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import android.util.DisplayMetrics
+import android.widget.Toast
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.padguard.core.common.Logger
@@ -333,6 +334,14 @@ class ScreenCaptureService : Service() {
                 Logger.i(TAG) { "screen record started: taskId=$taskId ${w}x$h audio=$withAudio" }
             } catch (t: Throwable) {
                 Logger.e(TAG, t) { "screen record start failed" }
+                // P2 修复：之前失败只记日志、被控端无任何提示，家长端也收不到失败信号。
+                // 这里给出本机可感知的提示，孩子立刻知道录屏没起来（多半是未授权屏幕采集）。
+                // 注意：此处在协程内，this 是 CoroutineScope 而非 Context，必须用 applicationContext。
+                Toast.makeText(
+                    applicationContext,
+                    "录屏启动失败：${t.message ?: "未知错误"}（请先授权屏幕采集）",
+                    Toast.LENGTH_LONG
+                ).show()
                 releaseRecorder()
                 stopIfIdle()
             }
@@ -632,6 +641,12 @@ class ScreenCaptureService : Service() {
         start(context, intent)
     }
 
+    /** 仅构建截屏采集 Intent（供 GuardService 在需要授权时包装成可点击通知） */
+    fun screenshotIntent(context: Context, shotId: String): Intent =
+        Intent(context, ScreenCaptureService::class.java)
+            .putExtra(EXTRA_ACTION, ACTION_SCREENSHOT)
+            .putExtra(EXTRA_SHOT_ID, shotId)
+
     fun startScreenRecord(context: Context, taskId: String, resolution: String, withAudio: Boolean) {
         val intent = Intent(context, ScreenCaptureService::class.java)
             .putExtra(EXTRA_ACTION, ACTION_SCREEN_RECORD)
@@ -640,6 +655,14 @@ class ScreenCaptureService : Service() {
             .putExtra(EXTRA_WITH_AUDIO, withAudio)
         start(context, intent)
     }
+
+    /** 仅构建录屏采集 Intent（供 GuardService 在需要授权时包装成可点击通知） */
+    fun screenRecordIntent(context: Context, taskId: String, resolution: String, withAudio: Boolean): Intent =
+        Intent(context, ScreenCaptureService::class.java)
+            .putExtra(EXTRA_ACTION, ACTION_SCREEN_RECORD)
+            .putExtra(EXTRA_TASK_ID, taskId)
+            .putExtra(EXTRA_RESOLUTION, resolution)
+            .putExtra(EXTRA_WITH_AUDIO, withAudio)
 
         fun stopScreenRecord(context: Context) {
             val intent = Intent(context, ScreenCaptureService::class.java)

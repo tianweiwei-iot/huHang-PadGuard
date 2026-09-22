@@ -30,6 +30,18 @@ class ChildDeviceController(
         policyExtensionService.ensureRebuilt(deviceId)
         return DeviceApiResponse.ok(policyService.getForChild(deviceId, currentVersion))
     }
+
+    /**
+     * 孩子端自定义设备名。凭设备令牌鉴权（[deviceId] 由拦截器注入），
+     * 写库即生效；家长端设备台账下次刷新即可看到，满足「自定义 + 实时同步至各端」。
+     */
+    @PostMapping("/name")
+    fun updateName(
+        @RequestAttribute("deviceId") deviceId: String,
+        @RequestBody req: DeviceNameRequest
+    ) = DeviceApiResponse.ok(
+        deviceService.updateNameByDevice(deviceId, req.name).let { mapOf("deviceId" to deviceId, "name" to req.name) }
+    )
 }
 
 @RestController

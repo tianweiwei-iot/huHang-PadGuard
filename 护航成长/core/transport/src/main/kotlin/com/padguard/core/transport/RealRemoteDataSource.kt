@@ -19,6 +19,7 @@ import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
 import com.padguard.core.transport.http.BindRequest
 import com.padguard.core.transport.http.CredentialStore
+import com.padguard.core.transport.http.DeviceNameRequest
 import com.padguard.core.transport.http.EventUploadRequest
 import com.padguard.core.transport.http.HeartbeatAck
 import com.padguard.core.transport.http.LocationUploadRequest
@@ -264,6 +265,14 @@ class RealRemoteDataSource @Inject constructor(
         if (points.isEmpty()) return ApiResult.Success(Unit, timeProvider.now())
         return caller.callIgnoringData("locations") {
             api.uploadLocations(LocationUploadRequest(deviceId, points))
+        }
+    }
+
+    override suspend fun updateDeviceName(deviceId: String, name: String): ApiResult<Unit> {
+        // 与 DeviceService.updateNameByDevice 对齐：孩子端本地修改设备名后上报服务端，
+        // 服务端写入台账并下发 downConfig(deviceName) 同步给家长端看板。
+        return caller.callIgnoringData("device-name") {
+            api.updateName(DeviceNameRequest(name))
         }
     }
 

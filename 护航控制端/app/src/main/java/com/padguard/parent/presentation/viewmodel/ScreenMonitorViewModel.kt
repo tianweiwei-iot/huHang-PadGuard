@@ -131,7 +131,7 @@ class ScreenMonitorViewModel @Inject constructor(
             if (shot == null) {
                 _uiState.value = _uiState.value.copy(
                     fetchingFrame = false,
-                    toast = "截屏失败：平板未上传画面（请在被控端完成屏幕采集授权）"
+                    toast = "截屏失败：平板未上传画面（若已拒绝授权，请在平板「我的→设备管理员」重新授权屏幕采集）"
                 )
                 return@launch
             }
@@ -299,8 +299,9 @@ class ScreenMonitorViewModel @Inject constructor(
         /** 截屏历史在端上保留的最大条数。 */
         const val MAX_SCREENSHOT_HISTORY = 20
 
-        /** 单帧截图的最长等待：8 次 × 1.5s ≈ 12s，覆盖被控端采集上传的正常耗时 */
-        const val SCREENSHOT_POLL_TIMES = 8
-        const val SCREENSHOT_POLL_INTERVAL_MS = 1_500L
+        /** 单帧截图最长等待：20 次 × 2s = 40s。
+         *  首次采集需孩子在平板通知里点击授权屏幕采集，留足授权交互时间，避免过早判定失败（P1） */
+        const val SCREENSHOT_POLL_TIMES = 20
+        const val SCREENSHOT_POLL_INTERVAL_MS = 2_000L
     }
 }

@@ -303,6 +303,21 @@ class MessageActivity : ComponentActivity() {
 /** 屏幕上部的来源标识文案：让孩子一眼看出这是家长发来的，不是系统弹窗或广告。 */
 private const val SOURCE_LABEL = "来自家长的信息"
 
+/**
+ * 判断标题是否只是"来源标识"而非真正的消息标题。
+ *
+ * 家长端下发的 SHOW_MESSAGE 默认带 `title="来自家长的消息"`，与顶部 [SOURCE_LABEL] 语义重复。
+ * 需求要求"消息框内不要出现来源提示，只在屏幕顶端显示"——所以这类标题不应在消息框里再渲染一次，
+ * 避免孩子看到两处"来自家长"的提示。
+ */
+private fun isSourceLabel(title: String): Boolean {
+    val t = title.trim()
+    return t == SOURCE_LABEL ||
+        t == "来自家长的消息" ||
+        t.equals("来自家长的信息", ignoreCase = true) ||
+        t.equals("来自家长的消息", ignoreCase = true)
+}
+
 @Composable
 private fun MessageContent(
     title: String,
@@ -342,10 +357,12 @@ private fun MessageContent(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    if (title.isNotBlank()) {
+                    if (title.isNotBlank() && !isSourceLabel(title)) {
                         Text(
                             text = title,
-                            style = MaterialTheme.typography.titleLarge,
+                            // 标题放大，便于孩子看清
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -371,7 +388,8 @@ private fun MessageContent(
                             if (body.isNotBlank()) {
                                 Text(
                                     text = body,
-                                    style = MaterialTheme.typography.bodyLarge,
+                                    // 正文字号放大（原 bodyLarge=16sp），方便阅读
+                                    fontSize = 18.sp,
                                     textAlign = TextAlign.Center,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
@@ -384,7 +402,7 @@ private fun MessageContent(
                         Spacer(Modifier.height(20.dp))
                         Text(
                             text = body,
-                            style = MaterialTheme.typography.bodyMedium,
+                            fontSize = 16.sp,
                             textAlign = TextAlign.Center,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
                         )

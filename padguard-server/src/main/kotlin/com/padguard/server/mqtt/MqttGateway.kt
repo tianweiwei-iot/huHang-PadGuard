@@ -26,6 +26,11 @@ class MqttGateway(
         publish(downPolicyTopic(deviceId), mapOf("version" to version))
     }
 
+    /** 下发运行参数 / 设备元信息（如自定义设备名）到被控端 */
+    fun publishConfig(deviceId: String, values: Map<String, String>) {
+        publish(downConfigTopic(deviceId), values)
+    }
+
     private fun publish(topic: String, payload: Any) {
         val client = mqttClient ?: run {
             // 本地免 Docker 运行（MQTT 关闭）时静默跳过下发；指令仍以 PENDING 落库

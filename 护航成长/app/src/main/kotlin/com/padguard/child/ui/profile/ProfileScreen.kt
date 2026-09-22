@@ -19,7 +19,10 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -56,6 +59,8 @@ fun ProfileScreen(
     val serverUrl by viewModel.serverUrl.collectAsState()
     var showServerDialog by remember { mutableStateOf(false) }
     var serverInput by remember { mutableStateOf("") }
+    var showNameDialog by remember { mutableStateOf(false) }
+    var nameInput by remember { mutableStateOf("") }
 
     ProfileContent(
         state = state,
@@ -63,6 +68,10 @@ fun ProfileScreen(
         onSetServer = {
             serverInput = serverUrl
             showServerDialog = true
+        },
+        onEditDeviceName = {
+            nameInput = state.deviceName.ifBlank { state.deviceSn }
+            showNameDialog = true
         }
     )
 
@@ -76,13 +85,25 @@ fun ProfileScreen(
             }
         )
     }
+
+    if (showNameDialog) {
+        DeviceNameDialog(
+            initial = nameInput,
+            onDismiss = { showNameDialog = false },
+            onSave = { name ->
+                viewModel.saveDeviceName(name)
+                showNameDialog = false
+            }
+        )
+    }
 }
 
 @Composable
 private fun ProfileContent(
     state: ProfileUiState,
     onPermissionGuide: (String) -> Unit,
-    onSetServer: () -> Unit
+    onSetServer: () -> Unit,
+    onEditDeviceName: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -102,7 +123,7 @@ private fun ProfileContent(
                 )
             }
             item {
-                DeviceCard(state = state)
+                DeviceCard(state = state, onEditDeviceName = onEditDeviceName)
             }
             item {
                 Text(
@@ -134,7 +155,7 @@ private fun ProfileContent(
 }
 
 @Composable
-private fun DeviceCard(state: ProfileUiState) {
+private fun DeviceCard(state: ProfileUiState, onEditDeviceName: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier
@@ -182,6 +203,10 @@ private fun DeviceCard(state: ProfileUiState) {
                 }
             }
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+            DeviceNameRow(
+                name = state.deviceName.ifBlank { state.deviceSn },
+                onClick = onEditDeviceName
+            )
             InfoRow(label = "设备 SN", value = state.deviceSn)
             InfoRow(label = "型号", value = state.deviceModel)
             InfoRow(label = "系统", value = state.androidVersion)
@@ -189,6 +214,74 @@ private fun DeviceCard(state: ProfileUiState) {
             InfoRow(label = "电量", value = state.battery)
         }
     }
+}
+
+@Composable
+private fun DeviceNameRow(name: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "设备名称",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = "改名",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun DeviceNameDialog(
+    initial: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(
+                enabled = text.isNotBlank(),
+                onClick = { onSave(text.trim()) }
+            ) { Text("保存") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+        title = { Text("修改设备名称") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                placeholder = { Text("例如：小明的平板") },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    )
 }
 
 @Composable
@@ -242,6 +335,7 @@ private fun PermissionRow(
     title: String,
     subtitle: String,
     active: Boolean,
+    pillText: String? = null,
     onClick: () -> Unit
 ) {
     Row(
@@ -260,7 +354,7 @@ private fun PermissionRow(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
             )
         }
-        StatusPill(active = active)
+        StatusPill(active = active, text = pillText ?: if (active) "已开启" else "未开启")
         Icon(
             imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
             contentDescription = null,
@@ -270,11 +364,11 @@ private fun PermissionRow(
 }
 
 @Composable
-private fun StatusPill(active: Boolean) {
+private fun StatusPill(active: Boolean, text: String) {
     val bg = if (active) MaterialTheme.colorScheme.primary else Color(0xFFB0BEC5)
     Surface(color = bg, shape = MaterialTheme.shapes.small) {
         Text(
-            text = if (active) "已开启" else "未开启",
+            text = text,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
             style = MaterialTheme.typography.labelMedium,
             color = Color.White

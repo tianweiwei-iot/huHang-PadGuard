@@ -1,9 +1,11 @@
 package com.padguard.child.capture
 
 import android.app.Activity
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -116,6 +118,25 @@ class CapturePermissionActivity : ComponentActivity() {
             }
             runCatching { context.startActivity(intent) }
                 .onFailure { Logger.e(TAG, it) { "failed to open capture permission" } }
+        }
+
+        /**
+         * 构建「点击即跳转到屏幕采集授权页」的 PendingIntent。
+         *
+         * 为什么需要它：家长端下发截屏/录屏指令时，被控端通常在后台（守护服务）收到，
+         * 而 Android 10+ 禁止后台直接弹 Activity（[CapturePermissionActivity.startWith] 可能被系统拦掉），
+         * 导致孩子永远看不到授权弹窗、家长端一直"等待授权"。
+         * 由守护服务发一条高优先级通知，点击通知的 PendingIntent 启动授权页是**用户主动触发**，
+         * 系统必然放行 —— 这是 P1「首次需授权后一直无画面」的可靠解法。
+         */
+        fun capturePermissionPendingIntent(context: Context, captureIntent: Intent): PendingIntent {
+            val intent = Intent(context, CapturePermissionActivity::class.java).apply {
+                putExtra(EXTRA_CAPTURE_INTENT, captureIntent)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            return PendingIntent.getActivity(context, 0, intent, flags)
         }
     }
 }

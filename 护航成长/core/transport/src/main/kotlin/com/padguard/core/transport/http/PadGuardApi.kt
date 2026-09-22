@@ -21,6 +21,9 @@ import retrofit2.http.Query
  * 需要同时拿到 HTTP 状态码与业务 code，才能区分「令牌过期(401/40101)」
  * 与「网络异常」两类完全不同的处置路径。
  */
+/** §5.11 孩子端自定义设备名请求体 */
+data class DeviceNameRequest(val name: String)
+
 interface PadGuardApi {
 
     /** §5.1 设备绑定。绑定接口本身不带 Authorization，由拦截器按路径跳过。 */
@@ -92,6 +95,10 @@ interface PadGuardApi {
     /** §5.8 心跳降级上报（仅 MQTT 不可用时使用） */
     @POST("device/heartbeat")
     suspend fun heartbeat(@Body body: Heartbeat): Response<ApiEnvelope<HeartbeatAck>>
+
+    /** §5.11 孩子端自定义设备名 */
+    @POST("device/name")
+    suspend fun updateName(@Body body: DeviceNameRequest): Response<ApiEnvelope<JsonElement>>
 
     /**
      * §5.9 指令回执降级通道（契约 V1.1 新增）。

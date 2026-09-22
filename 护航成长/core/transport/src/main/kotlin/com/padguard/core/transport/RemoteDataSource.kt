@@ -114,4 +114,7 @@ interface RemoteDataSource {
 
     /** 轮询降级通道主动拉取指令；MQTT 模式下不应调用 */
     suspend fun pullCommands(since: Long): ApiResult<List<Command>>
+
+    /** 孩子端自定义设备名并上报服务端（实时同步到家长端台账） */
+    suspend fun updateDeviceName(deviceId: String, name: String): ApiResult<Unit>
 }

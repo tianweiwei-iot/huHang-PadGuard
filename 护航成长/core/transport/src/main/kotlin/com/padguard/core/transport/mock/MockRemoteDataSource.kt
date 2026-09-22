@@ -20,6 +20,7 @@ import com.padguard.core.transport.TransportMode
 import com.padguard.core.transport.TransportSettings
 import com.padguard.core.transport.http.AppInventoryItem
 import com.padguard.core.transport.http.AppSyncAck
+import com.padguard.core.transport.http.DeviceNameRequest
 import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
 import com.padguard.core.transport.http.BindRequest
@@ -322,6 +323,12 @@ class MockRemoteDataSource @Inject constructor(
             AppSyncAck(inserted = 0, updated = apps.size, removed = 0),
             timeProvider.now()
         )
+    }
+
+    override suspend fun updateDeviceName(deviceId: String, name: String): ApiResult<Unit> {
+        simulateNetwork<Unit>()?.let { return it }
+        Logger.i(TAG) { "device name updated (mock): deviceId=$deviceId name=$name" }
+        return ApiResult.Success(Unit, timeProvider.now())
     }
 
     override suspend fun pullCommands(since: Long): ApiResult<List<Command>> {

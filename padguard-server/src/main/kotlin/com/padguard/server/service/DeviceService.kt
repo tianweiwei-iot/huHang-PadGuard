@@ -9,8 +9,10 @@ import com.padguard.server.dto.BindRequest
 import com.padguard.server.dto.BindResult
 import com.padguard.server.dto.DeviceDto
 import com.padguard.server.dto.HeartbeatDto
+import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.ws.WebSocketPushService
+import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
 import java.util.UUID
@@ -21,8 +23,11 @@ class DeviceService(
     private val bindCodeService: BindCodeService,
     private val policyService: PolicyService,
     private val webSocketPush: WebSocketPushService,
+    private val mqttGateway: MqttGateway,
     @Value("\${padguard.device.token-ttl-days:30}") private val tokenTtlDays: Long
 ) {
+
+    private val log = LoggerFactory.getLogger(DeviceService::class.java)
     /**
      * 孩子端绑定：消费绑定码 -> **按硬件指纹复用或新建设备** -> 下发令牌/MQTT 凭据/HMAC 密钥 -> 建默认策略
      *
@@ -38,6 +43,7 @@ class DeviceService(
      */
     fun bindChild(req: BindRequest): BindResult {
         val userId = bindCodeService.consume(req.bindCode)
+        val deviceId = UUID.randomUUID().toString()
         val deviceToken = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "")
         val hmacSecret = "hs_" + UUID.randomUUID().toString().replace("-", "")
         val mqttPassword = "mk_" + UUID.randomUUID().toString().replace("-", "")
@@ -179,6 +185,25 @@ class DeviceService(
         val dev = requireOwned(userId, deviceId)
         dev.name = name
         deviceRepository.save(dev)
+        // 实时同步到被控端：通过下行 config 通道把自定义设备名推下去，
+        // 孩子端「我的」页立即显示新名称，无需重连或重启。
+        pushDeviceName(deviceId, name)
+    }
+
+    /** 孩子端自定义设备名（凭设备令牌鉴权，不依赖家长 userId） */
+    fun updateNameByDevice(deviceId: String, name: String) {
+        deviceRepository.findById(deviceId).ifPresent { dev ->
+            dev.name = name
+            deviceRepository.save(dev)
+        }
+        // 同步回被控端：确保各端（家长看板 / 孩子端本地）最终一致
+        pushDeviceName(deviceId, name)
+    }
+
+    /** 把设备名通过 MQTT 下发行推给被控端 */
+    private fun pushDeviceName(deviceId: String, name: String) {
+        runCatching { mqttGateway.publishConfig(deviceId, mapOf("deviceName" to name)) }
+            .onFailure { log.warn("push deviceName config failed: $it") }
     }
 
     /** 家长分配设备到分组 */

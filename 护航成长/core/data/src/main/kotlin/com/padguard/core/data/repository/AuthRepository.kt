@@ -36,6 +36,7 @@ class AuthRepository @Inject constructor(
         val TOKEN_EXPIRES_AT = longPreferencesKey("token_expires_at")
         val BOUND_AT = longPreferencesKey("bound_at")
         val DEVICE_SN = stringPreferencesKey("device_sn")
+        val DEVICE_NAME = stringPreferencesKey("device_name")
         val STUDENT_NAME = stringPreferencesKey("student_name")
         val TENANT_ID = stringPreferencesKey("tenant_id")
         val AGREEMENT_VERSION = stringPreferencesKey("agreement_version")
@@ -86,6 +87,10 @@ class AuthRepository @Inject constructor(
     val deviceSn: Flow<String> = store.data.catch { emit(emptyPreferences()) }
         .map { it[Keys.DEVICE_SN].orEmpty() }
 
+    /** 自定义设备名（家长重命名下发 / 孩子端本地修改都会写入此处，驱动「我的」页展示） */
+    val deviceName: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.DEVICE_NAME].orEmpty() }
+
     suspend fun getDeviceId(): String = deviceId.first()
 
     suspend fun getDeviceToken(): String =
@@ -108,6 +113,11 @@ class AuthRepository @Inject constructor(
 
     suspend fun getStudentName(): String =
         store.data.catch { emit(emptyPreferences()) }.first()[Keys.STUDENT_NAME].orEmpty()
+
+    /** 持久化自定义设备名（家长下发或孩子本地修改共用） */
+    suspend fun saveDeviceName(name: String) {
+        store.edit { it[Keys.DEVICE_NAME] = name }
+    }
 
     /** 保存绑定结果。绑定成功后终端即进入受控态。 */
     suspend fun saveBindResult(result: BindResult, deviceSn: String) {

@@ -54,6 +54,9 @@ data class BindRequest(
     val appVersion: String? = null
 )
 
+/** 孩子端自定义设备名（凭设备令牌鉴权） */
+data class DeviceNameRequest(val name: String)
+
 data class BindResult(
     val deviceId: String, val deviceToken: String, val mqttUsername: String,
     val mqttPassword: String, val hmacSecret: String, val expiresAt: Long

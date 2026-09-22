@@ -99,15 +99,29 @@ class StatisticsService(
     }
 
     // ---------- 工具 ----------
-    private fun sumMinutes(logs: List<UsageLog>): Int =
-        logs.filter { it.type == "APP_USAGE" }.sumOf { log ->
-            (parsePayload(log)["durationSec"] as? Number)?.toInt()?.div(60) ?: 0
+    /**
+     * 解析单条 APP_USAGE 的时长（秒）。
+     *
+     * 兼容两种上报形态：早期孩子在端把 `durationSec` 序列化成字符串（"120"），
+     * 服务端若只用 `as? Number` 强转会得到 null、时长永远被算成 0，
+     * 家长看板"真实使用时长"始终为空。这里同时认数字与字符串，避免契约演进踩坑。
+     */
+    private fun durationSecOf(log: UsageLog): Int {
+        val raw = parsePayload(log)["durationSec"] ?: return 0
+        return when (raw) {
+            is Number -> raw.toInt()
+            is String -> raw.toIntOrNull() ?: 0
+            else -> 0
         }
+    }
+
+    private fun sumMinutes(logs: List<UsageLog>): Int =
+        logs.filter { it.type == "APP_USAGE" }.sumOf { durationSecOf(it) / 60 }
 
     private fun topApps(logs: List<UsageLog>, limit: Int): List<AppUsageDto> {
         val byPkg = logs.filter { it.type == "APP_USAGE" }.groupBy { parsePayload(it)["packageName"] as? String ?: "unknown" }
         return byPkg.map { (pkg, ls) ->
-            val min = ls.sumOf { (parsePayload(it)["durationSec"] as? Number)?.toInt()?.div(60) ?: 0 }
+            val min = ls.sumOf { durationSecOf(it) / 60 }
             AppUsageDto(pkg, parsePayload(ls.first())["appName"] as? String ?: pkg, min, null)
         }.sortedByDescending { it.usageMinutes }.take(limit)
     }

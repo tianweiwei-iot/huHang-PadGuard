@@ -16,8 +16,10 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.padguard.child.MainActivity
 import com.padguard.child.R
+import com.padguard.child.capture.CapturePermissionActivity
 import com.padguard.child.capture.PhotoCapture
 import com.padguard.child.capture.ScreenCaptureService
+import com.padguard.child.capture.ScreenCaptureSession
 import com.padguard.child.maintain.AppInstaller
 import com.padguard.child.monitor.AppInventoryCollector
 import com.padguard.child.monitor.DeviceSnapshotCollector
@@ -519,6 +521,9 @@ class GuardService : Service() {
                 payload = mapOf(
                     "packageName" to stat.packageName,
                     "appName" to appLabel(stat.packageName),
+                    // LogRepository.append 的契约是 Map<String, String>（整包 JSON 序列化后上报），
+                    // 所以这里只能以字符串形式传；服务端 StatisticsService.durationSecOf
+                    // 同时兼容 Number 与 String（toIntOrNull），不会再把时长算成 0。
                     "durationSec" to (delta / 1000).toString(),
                     "dayKey" to key
                 )
@@ -594,6 +599,11 @@ class GuardService : Service() {
                             // transport 内部已把节奏参数写进 TransportSettings，
                             // 主循环下一轮读 monitoring() 时自然生效，这里无需额外动作
                             Logger.i(TAG) { "runtime config updated: ${event.values.keys}" }
+                            // 设备名下发：家长端重命名后通过 downConfig(deviceName) 下发，
+                            // 这里持久化到本地，驱动「我的」页实时刷新（P6）
+                            event.values["deviceName"]?.takeIf { it.isNotBlank() }?.let { name ->
+                                runSafely("saveDeviceName") { authRepository.saveDeviceName(name) }
+                            }
                         }
 
                         is Downlink.ConnectivityChanged -> {
@@ -651,8 +661,15 @@ class GuardService : Service() {
             // 真实产物（图片/音频/视频）走独立上传通道。
             // 因此这里必须把最终成败写进日志流，否则管控端只会看到"受理成功"却永远等不到产物。
             is EngineEffect.CaptureScreenshot -> {
-                ScreenCaptureService.captureScreenshot(this, effect.shotId)
-                reportEffectResult(effect.msgId, "screenshot", true, "已触发采集（首次需用户在系统弹窗中授权一次）")
+                val captureIntent = ScreenCaptureService.screenshotIntent(this, effect.shotId)
+                if (ScreenCaptureSession.hasToken()) {
+                    ScreenCaptureService.startAuthorized(this, captureIntent)
+                } else {
+                    // 后台收到采集指令时，Android 10+ 会拦掉直接弹出的授权页，
+                    // 改为发高优先级通知：孩子点击通知即用户主动触发，系统必然放行（修复 P1 永远等待授权）
+                    promptCaptureConsent(captureIntent)
+                }
+                reportEffectResult(effect.msgId, "screenshot", true, "已触发采集（首次需孩子在平板通知中点击授权屏幕采集）")
             }
 
             is EngineEffect.CapturePhoto -> {
@@ -818,6 +835,34 @@ class GuardService : Service() {
         runCatching {
             getSystemService(NotificationManager::class.java)
                 ?.notify(NOTIFICATION_ID, buildNotification())
+        }
+    }
+
+    /**
+     * 屏幕采集授权引导通知（修复 P1 关键路径）。
+     *
+     * 家长端下发截屏/录屏时，被控端多在后台收到。Android 10+ 禁止后台直接弹出授权 Activity，
+     * 孩子看不到系统"是否允许录制屏幕"弹窗，自然不会授权，家长端便一直停在"首次需要授权"。
+     *
+     * 这里复用守护服务自身常驻通知的渠道，发一条**高优先级**通知，点击即跳转授权页
+     * （用户主动触发，系统必然放行）。孩子点一下授权，采集链路才真正跑起来。
+     * 用与常驻通知相同的 [NOTIFICATION_ID]，授权后下次 [updateNotification] 会把它覆盖回低优先级常驻态。
+     */
+    private fun promptCaptureConsent(captureIntent: Intent) {
+        val pi = CapturePermissionActivity.capturePermissionPendingIntent(this, captureIntent)
+        val consentNotif = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.guard_notification_title))
+            .setContentText("家长请求查看屏幕：点击此处授权屏幕采集")
+            .setSmallIcon(R.drawable.ic_guard_notification)
+            .setContentIntent(pi)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setShowWhen(false)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .build()
+        runCatching {
+            getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, consentNotif)
         }
     }
 
