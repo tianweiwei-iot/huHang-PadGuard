@@ -16,8 +16,11 @@ import android.widget.VideoView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,7 +41,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -112,8 +117,11 @@ class MessageActivity : ComponentActivity() {
         mediaName = intent?.getStringExtra(EXTRA_MEDIA_NAME).orEmpty()
 
         // 霸屏不提供任何关闭入口；非阻塞且有时长则到点自动关闭
-        if (durationSec > 0) {
-            handler.postDelayed({ finishSafely() }, durationSec * 1000L)
+        // 倒计时以「首次展示」为基准：被系统弹窗打断后 re-arm 重拉本页时不重置，
+        // 否则只要来一个系统弹窗，霸屏就永远数不完（实测踩过）。
+        val remainMs = beginSession(sessionKey(), durationSec)
+        if (remainMs > 0) {
+            handler.postDelayed({ finishSafely() }, remainMs)
         }
 
         // 霸屏期间拦截返回键
@@ -198,6 +206,7 @@ class MessageActivity : ComponentActivity() {
     }
 
     private fun finishSafely() {
+        endSession()
         if (blocking) LockTaskSupport.stop(this)
         if (!isFinishing) finish()
     }
@@ -211,6 +220,32 @@ class MessageActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "MessageActivity"
+
+        // ==================== 霸屏会话（跨实例重建保持倒计时） ====================
+        // re-arm 走 show() -> startActivity(CLEAR_TOP)。若目标页被系统回收重建，
+        // onCreate 会重新执行：必须能识别「这是同一条消息的重新拉起」，
+        // 否则每次重建都从头计时，霸屏就永远不会到点。
+        @Volatile private var sessionKey: String = ""
+        @Volatile private var deadlineAt: Long = 0L
+
+        /** 返回距截止还剩多少毫秒；durationSec<=0 返回 0（不自动关闭）。 */
+        private fun beginSession(key: String, durationSec: Int): Long {
+            if (durationSec <= 0) return 0L
+            val now = System.currentTimeMillis()
+            if (key == sessionKey && deadlineAt > now) return deadlineAt - now
+            sessionKey = key
+            deadlineAt = now + durationSec * 1000L
+            return durationSec * 1000L
+        }
+
+        private fun endSession() {
+            sessionKey = ""
+            deadlineAt = 0L
+        }
+
+        private fun MessageActivity.sessionKey(): String =
+            listOf(titleText, bodyText, durationSec, blocking, contentType, mediaUrl, mediaName)
+                .joinToString("\u0001")
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_BODY = "body"
         private const val EXTRA_DURATION = "durationSec"
@@ -226,6 +261,7 @@ class MessageActivity : ComponentActivity() {
 
         /** 供外部（如解锁指令）主动关闭霸屏页 */
         fun dismiss(context: Context) {
+            endSession()
             instance?.let { activity ->
                 LockTaskSupport.stop(activity)
                 if (!activity.isFinishing) activity.finish()
@@ -264,6 +300,9 @@ class MessageActivity : ComponentActivity() {
 
 // ==================== UI ====================
 
+/** 屏幕上部的来源标识文案：让孩子一眼看出这是家长发来的，不是系统弹窗或广告。 */
+private const val SOURCE_LABEL = "来自家长的信息"
+
 @Composable
 private fun MessageContent(
     title: String,
@@ -281,65 +320,75 @@ private fun MessageContent(
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
 
-            // ---------- 顶端偏中：「通知」标识 ----------
-            // 需求要求把原来的圆形「告」字标改成顶端偏中的「通知」条，
-            // 把屏幕正中间完整留给图片/视频/文字内容。
+            // ---------- 屏幕上部：来源标识「来自家长的信息」 ----------
+            // 明确来源，避免孩子误以为是系统提示或某个 App 的广告弹窗。
             NoticeBadge(
+                text = SOURCE_LABEL,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 72.dp)
+                    .padding(top = 64.dp)
             )
 
-            // ---------- 正中间：内容区 ----------
-            Column(
+            // ---------- 屏幕正中央：消息框 ----------
+            // 正文（及素材）统一装进一块圆角卡片里，视觉上就是"一块消息板"，
+            // 而不是散落在屏幕中间的文字。
+            MessageCard(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                    .fillMaxWidth(0.88f)
             ) {
-                if (title.isNotBlank()) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.headlineSmall,
-                        textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                    Spacer(Modifier.height(16.dp))
-                }
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    if (title.isNotBlank()) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleLarge,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(Modifier.height(16.dp))
+                    }
 
-                when {
-                    mediaUrl.isNotBlank() && contentType == "IMAGE" ->
-                        RemoteImage(mediaUrl, Modifier.fillMaxWidth())
+                    when {
+                        mediaUrl.isNotBlank() && contentType == "IMAGE" ->
+                            RemoteImage(mediaUrl, Modifier.fillMaxWidth())
 
-                    mediaUrl.isNotBlank() && contentType == "VIDEO" ->
-                        RemoteVideo(mediaUrl, Modifier.fillMaxWidth().height(240.dp))
-
-                    mediaUrl.isNotBlank() && contentType == "AUDIO" ->
-                        RemoteAudio(mediaUrl, mediaName, autoPlay = blocking)
-
-                    else -> {
-                        if (body.isNotBlank()) {
-                            Text(
-                                text = body,
-                                style = MaterialTheme.typography.bodyLarge,
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onBackground
+                        mediaUrl.isNotBlank() && contentType == "VIDEO" ->
+                            RemoteVideo(
+                                url = mediaUrl,
+                                modifier = Modifier.fillMaxWidth().height(240.dp),
+                                // 霸屏期间不给播放控制条：那等于给了孩子一个可点的出口
+                                showControls = !blocking
                             )
+
+                        mediaUrl.isNotBlank() && contentType == "AUDIO" ->
+                            RemoteAudio(mediaUrl, mediaName, autoPlay = blocking)
+
+                        else -> {
+                            if (body.isNotBlank()) {
+                                Text(
+                                    text = body,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    textAlign = TextAlign.Center,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
                     }
-                }
 
-                // 有素材时，正文作为补充说明放在素材下方
-                if (mediaUrl.isNotBlank() && body.isNotBlank()) {
-                    Spacer(Modifier.height(20.dp))
-                    Text(
-                        text = body,
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f)
-                    )
+                    // 有素材时，正文作为补充说明放在素材下方
+                    if (mediaUrl.isNotBlank() && body.isNotBlank()) {
+                        Spacer(Modifier.height(20.dp))
+                        Text(
+                            text = body,
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                        )
+                    }
                 }
             }
 
@@ -356,23 +405,83 @@ private fun MessageContent(
                     }
                 }
             } else {
-                // 霸屏：不给任何按钮，只提示剩余时长由系统到点关闭
-                Text(
-                    text = "信息发布中，请稍候…",
+                // 霸屏：不给任何按钮，只倒计时，到点自动关闭
+                BlockingFooter(
+                    durationSec = durationSec,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 40.dp),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+                        .padding(bottom = 40.dp)
+                )
+            }
+
+            // ---------- 霸屏期间吞掉一切触摸 ----------
+            // LockTask 挡得住导航手势与返回键，挡不住屏幕内的点击。
+            // 覆盖一层透明可点击层把触摸全部消费掉，孩子点哪儿都不会有反应。
+            if (blocking) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { /* 吞掉点击 */ }
                 )
             }
         }
     }
 }
 
-/** 顶端偏中的「通知」标识条 */
+/** 屏幕正中央的消息框：圆角卡片 + 描边 + 内部留白。 */
 @Composable
-private fun NoticeBadge(modifier: Modifier = Modifier) {
+private fun MessageCard(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 6.dp,
+        shadowElevation = 6.dp,
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.dp,
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+        )
+    ) {
+        Box(modifier = Modifier.padding(24.dp)) { content() }
+    }
+}
+
+/** 霸屏倒计时脚注：让"还要等多久"可见，避免孩子反复尝试操作。 */
+@Composable
+private fun BlockingFooter(durationSec: Int, modifier: Modifier = Modifier) {
+    if (durationSec <= 0) {
+        Text(
+            text = "信息发布中，请稍候…",
+            modifier = modifier,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+        )
+        return
+    }
+    var remain by remember(durationSec) { mutableIntStateOf(durationSec) }
+    LaunchedEffect(durationSec) {
+        while (remain > 0) {
+            kotlinx.coroutines.delay(1000)
+            remain--
+        }
+    }
+    Text(
+        text = if (remain > 0) "信息发布中，${remain} 秒后可继续操作" else "信息发布中，请稍候…",
+        modifier = modifier,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+    )
+}
+
+/** 屏幕上部的来源标识条 */
+@Composable
+private fun NoticeBadge(text: String, modifier: Modifier = Modifier) {
     Row(
         modifier = modifier
             .background(
@@ -383,7 +492,7 @@ private fun NoticeBadge(modifier: Modifier = Modifier) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = "通知",
+            text = text,
             color = MaterialTheme.colorScheme.primary,
             fontSize = 16.sp,
             fontWeight = FontWeight.Bold
@@ -423,7 +532,7 @@ private fun RemoteImage(url: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun RemoteVideo(url: String, modifier: Modifier = Modifier) {
+private fun RemoteVideo(url: String, modifier: Modifier = Modifier, showControls: Boolean = true) {
     val context = LocalContext.current
     var localPath by remember(url) { mutableStateOf<String?>(null) }
 
@@ -446,7 +555,8 @@ private fun RemoteVideo(url: String, modifier: Modifier = Modifier) {
         factory = { ctx ->
             VideoView(ctx).apply {
                 setVideoURI(Uri.parse(localPath))
-                setMediaController(MediaController(ctx))
+                // 霸屏时不挂 MediaController：控制条本身就是可点击的交互入口
+                if (showControls) setMediaController(MediaController(ctx))
                 setOnPreparedListener { it.isLooping = true; start() }
                 setOnErrorListener { _, _, _ -> true }
             }

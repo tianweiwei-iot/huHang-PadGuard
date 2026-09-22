@@ -279,7 +279,9 @@ class PolicyEngine @Inject constructor(
      */
     suspend fun scanTamper(): List<TamperFinding> {
         val policy = policyRepository.getPolicy()
-        val findings = tamperDetector.detect(policy.security)
+        // systemLock 必须一起传：debug 构建/救援通道会主动解除调试类限制，
+        // 缺了它 TamperDetector 只能按默认策略判定，把"按设计解除"误报成 POLICY_APPLY_FAILED。
+        val findings = tamperDetector.detect(policy.security, policy.systemLock)
         if (findings.isEmpty()) return emptyList()
 
         val deviceId = authRepository.getDeviceId()

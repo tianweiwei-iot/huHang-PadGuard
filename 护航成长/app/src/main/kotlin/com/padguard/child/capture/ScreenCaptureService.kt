@@ -111,11 +111,14 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        enterForeground()
-        val action = intent?.getStringExtra(EXTRA_ACTION) ?: run {
+        val action = intent?.getStringExtra(EXTRA_ACTION)
+        if (action == null) {
             stopSelf()
             return START_STICKY
         }
+        // 前台类型必须与本次任务匹配（见 [enterForeground]）：
+        // 先解析动作再进前台，截屏这类纯投影任务绝不携带 microphone 类型。
+        enterForeground(action, intent.getBooleanExtra(EXTRA_WITH_AUDIO, false))
         when (action) {
             ACTION_SCREENSHOT -> captureScreenshot(intent.getStringExtra(EXTRA_SHOT_ID).orEmpty(), intent)
             ACTION_SCREEN_RECORD -> startScreenRecord(
@@ -501,7 +504,7 @@ class ScreenCaptureService : Service() {
 
     // ==================== 前台通知 ====================
 
-    private fun enterForeground() {
+    private fun enterForeground(action: String, withAudio: Boolean) {
         // 幂等守卫：同一个服务实例只允许成功进入前台一次。
         //
         // 注意与历史版本的关键差别：**失败时不能把标志位置 true**。
@@ -511,6 +514,15 @@ class ScreenCaptureService : Service() {
         // 系统抛 SecurityException，但标志位却被置成 true，
         // 于是授权完成后重放请求时再也不会重试，createVirtualDisplay 必然失败，
         // 表现为"截屏/录屏永远转圈"。现在失败如实记录并保持可重试。
+        //
+        // 前台类型按需裁剪（实测 TB330FU / Android 14+ 的硬教训）：
+        // `microphone` 类型额外要求 RECORD_AUDIO 处于"可用状态"（运行时授权 +
+        // while-in-use 资格）。把 microphone 类型无条件拼进 startForeground，
+        // 会因为资格不满足让**整个** startForeground 抛 SecurityException ——
+        // 服务进不了前台，紧接着的 getMediaProjection 也被拒，
+        // 授权令牌在 obtainProjection 的兜底清理里被丢弃，
+        // 于是家长端每 16 秒一次截屏轮询，孩子端就每 16 秒弹一次授权框。
+        // 纯截屏/无声录屏根本不需要麦克风，绝不为它搭上主链路。
         if (foregroundEntered) return
         val manager = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && manager != null) {
@@ -519,13 +531,26 @@ class ScreenCaptureService : Service() {
             ).apply { setShowBadge(false) }
             manager.createNotificationChannel(channel)
         }
+        val needsMic = withAudio || action == ACTION_AUDIO_RECORD
         try {
-            ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), fgsType())
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), fgsType(needsMic))
             foregroundEntered = true
         } catch (t: Throwable) {
-            Logger.e(TAG, t) {
-                "startForeground failed (mediaProjection 类型要求已取得采集授权，" +
-                    "必须先由授权页拿到令牌再起服务)"
+            if (!needsMic) {
+                Logger.e(TAG, t) {
+                    "startForeground failed (mediaProjection 类型要求已取得采集授权，" +
+                        "必须先由授权页拿到令牌再起服务)"
+                }
+                return
+            }
+            // 麦克风资格不满足（运行时授权被策略回收 / 无 while-in-use 资格等）：
+            // 退化为纯投影，保住截屏与无声录屏主链路；录音由 MediaRecorder 层自行失败并如实上报。
+            try {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), fgsType(false))
+                foregroundEntered = true
+                Logger.w(TAG) { "microphone fgs type rejected, degraded to projection-only (audio disabled)" }
+            } catch (e: Throwable) {
+                Logger.e(TAG, e) { "startForeground failed even with projection-only type" }
             }
         }
     }
@@ -547,12 +572,20 @@ class ScreenCaptureService : Service() {
             .build()
     }
 
-    private fun fgsType(): Int {
+    /**
+     * 前台服务类型。
+     *
+     * `mediaProjection` 是本服务的主类型（截屏/录屏全靠它）；
+     * `microphone` 只在确实要采集声音时才带上 —— 它对调用方的
+     * RECORD_AUDIO 运行时授权与 while-in-use 资格有额外硬性要求，
+     * 不满足时整个 startForeground 一起失败（见 [enterForeground] 内注释）。
+     */
+    private fun fgsType(withMic: Boolean): Int {
         var type = 0
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        if (withMic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         }
         return type

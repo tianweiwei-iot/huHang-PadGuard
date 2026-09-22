@@ -5,9 +5,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.ArrowDropUp
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,6 +29,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.unit.dp
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.ui.components.SoftCard
+import com.padguard.parent.di.AccountPrefs
 import com.padguard.presentation.viewmodel.LoginViewModel
 import com.padguard.presentation.viewmodel.buildServerConfig
 import com.padguard.presentation.viewmodel.parseServerConfig
@@ -114,8 +120,13 @@ fun LoginScreen(
                         PasswordLoginForm(
                             phone = uiState.phone,
                             password = uiState.password,
+                            history = uiState.history,
+                            rememberPassword = uiState.rememberPassword,
                             onPhoneChange = viewModel::updatePhone,
                             onPasswordChange = viewModel::updatePassword,
+                            onSelectHistory = viewModel::selectHistoryAccount,
+                            onRemoveHistory = viewModel::removeHistoryAccount,
+                            onRememberChange = viewModel::toggleRememberPassword,
                             onLogin = { viewModel.loginWithPassword() },
                             isLoading = uiState.isLoading
                         )
@@ -211,28 +222,110 @@ private fun LoginModeToggle(
     }
 }
 
+/**
+ * 历史账号下拉：点击展开，选中即回填账号与已保存的密码，右侧 × 可删除该条。
+ *
+ * 用 [DropdownMenu] 而不是 ExposedDropdownMenu：[OutlinedTextField] 保持普通可编辑状态，
+ * 用户既能直接手输新号码，也能从历史里挑，两者互不干扰。
+ */
+@Composable
+private fun HistoryAccountField(
+    phone: String,
+    history: List<AccountPrefs.SavedAccount>,
+    onPhoneChange: (String) -> Unit,
+    onSelectHistory: (String) -> Unit,
+    onRemoveHistory: (String) -> Unit,
+    onNext: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = phone,
+            onValueChange = { onPhoneChange(it); expanded = false },
+            label = { Text("手机号") },
+            placeholder = { Text("请输入手机号") },
+            trailingIcon = {
+                IconButton(onClick = { expanded = true }, enabled = history.isNotEmpty()) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Default.ArrowDropUp else Icons.Default.ArrowDropDown,
+                        contentDescription = "选择历史账号",
+                        tint = if (history.isEmpty()) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+            keyboardActions = KeyboardActions(onNext = { onNext() }),
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp)
+        )
+        DropdownMenu(
+            expanded = expanded && history.isNotEmpty(),
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.fillMaxWidth(0.9f)
+        ) {
+            history.forEach { acc ->
+                DropdownMenuItem(
+                    text = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(acc.phone, style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    text = if (acc.password != null) "已记住密码" else "仅记住账号",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
+                    },
+                    onClick = { onSelectHistory(acc.phone); expanded = false },
+                    trailingIcon = {
+                        IconButton(onClick = {
+                            onRemoveHistory(acc.phone)
+                            if (history.size <= 1) expanded = false
+                        }) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "删除该历史账号",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                            )
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun PasswordLoginForm(
     phone: String,
     password: String,
+    history: List<AccountPrefs.SavedAccount>,
+    rememberPassword: Boolean,
     onPhoneChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
+    onSelectHistory: (String) -> Unit,
+    onRemoveHistory: (String) -> Unit,
+    onRememberChange: (Boolean) -> Unit,
     onLogin: () -> Unit,
     isLoading: Boolean
 ) {
     var passwordVisible by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
 
-    OutlinedTextField(
-        value = phone,
-        onValueChange = onPhoneChange,
-        label = { Text("手机号") },
-        placeholder = { Text("请输入手机号") },
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-        keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
-        modifier = Modifier.fillMaxWidth(),
-        singleLine = true,
-        shape = RoundedCornerShape(12.dp)
+    HistoryAccountField(
+        phone = phone,
+        history = history,
+        onPhoneChange = onPhoneChange,
+        onSelectHistory = onSelectHistory,
+        onRemoveHistory = onRemoveHistory,
+        onNext = { focusManager.moveFocus(FocusDirection.Down) }
     )
 
     Spacer(modifier = Modifier.height(16.dp))
@@ -258,7 +351,31 @@ private fun PasswordLoginForm(
         shape = RoundedCornerShape(12.dp)
     )
 
-    Spacer(modifier = Modifier.height(24.dp))
+    Spacer(modifier = Modifier.height(4.dp))
+
+    // 记住密码：勾选后密码随账号一起存到本地，下次进入自动回填；取消则立即清除
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = rememberPassword,
+            onCheckedChange = onRememberChange,
+            modifier = Modifier.size(24.dp)
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = "记住账号和密码",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+            modifier = Modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onRememberChange(!rememberPassword) }
+        )
+    }
+
+    Spacer(modifier = Modifier.height(16.dp))
 
     Button(
         onClick = onLogin,

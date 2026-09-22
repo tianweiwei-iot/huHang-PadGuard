@@ -42,6 +42,21 @@ class LogRepository @Inject constructor(
         const val ALERT_BATCH_SIZE = 50
         /** 未上传日志的软上限，超出后丢弃最旧的普通日志 */
         private const val MAX_PENDING_LOGS = 50_000
+
+        /**
+         * 算得上「一次拦截」的风险类型。
+         *
+         * 其余（策略自检失败、root、开发者选项、心跳超时…）属于**环境风险**，
+         * 走告警上报给家长即可，不该出现在孩子端首页的「最近拦截」里 ——
+         * 孩子看不懂，也无从处理，只会以为管控出了故障。
+         */
+        private val BLOCK_RISK_TYPES = setOf(
+            RiskType.BLACKLIST_APP_LAUNCH,
+            RiskType.BLOCKED_URL_ACCESS,
+            RiskType.TIME_LIMIT_EXCEEDED,
+            RiskType.UNINSTALL_ATTEMPT,
+            RiskType.CLEAR_DATA_ATTEMPT
+        )
     }
 
     suspend fun append(type: LogType, payload: Map<String, String>, timestamp: Long = System.currentTimeMillis()) {
@@ -133,9 +148,14 @@ class LogRepository @Inject constructor(
     /**
      * 供首页展示的"最近拦截"列表，合并两类来源：
      * - URL 拦截（[LogType.URL_BLOCKED]）→ 来自 behavior_log
-     * - 时长 / 名单 / 风险类告警 → 来自 risk_event（按白名单过滤）
+     * - 时长 / 名单 / 卸载类拦截 → 来自 risk_event（按 [BLOCK_RISK_TYPES] 过滤）
      *
      * 按时间倒序合并后取前 [limit] 条，方便首页一行一个卡片展示。
+     *
+     * ## 为什么要过滤 risk_event
+     * risk_event 里既有"真正被拦下来"的事件，也有策略自检、环境风险（已 root、
+     * 开发者选项被打开、策略项需重新下发…）。后者不是一次拦截，混进「最近拦截」
+     * 会让孩子端首页出现「管控事件：POLICY_APPLY_FAILED」这种看不懂也无从处理的条目。
      *
      * @param limit 最多返回多少条
      */
@@ -143,7 +163,7 @@ class LogRepository @Inject constructor(
         val urlFlow = logDao.observeRecentOfType(LogType.URL_BLOCKED.name, limit)
             .map { list -> list.map { it.toRecentBlock() } }
         val alertFlow = riskDao.observeRecent(limit)
-            .map { list -> list.map { it.toRecentBlock() } }
+            .map { list -> list.mapNotNull { it.toRecentBlock() } }
         return combine(urlFlow, alertFlow) { urls, alerts ->
             (urls + alerts)
                 .sortedByDescending { it.timestamp }
@@ -170,8 +190,17 @@ class LogRepository @Inject constructor(
         )
     }
 
-    private fun RiskEventEntity.toRecentBlock(): RecentBlock {
-        val type = runCatching { RiskType.valueOf(type) }.getOrDefault(RiskType.POLICY_APPLY_FAILED)
+    /**
+     * 风险事件 → 拦截条目。
+     *
+     * 只保留**真正拦下了某个动作**的类型；其余返回 null（首页不展示）。
+     * 兜底文案也从裸枚举名改成人话 —— 曾经直接拼 `type.name`，
+     * 首页就出现「管控事件：POLICY_APPLY_FAILED」这种内部代号。
+     */
+    private fun RiskEventEntity.toRecentBlock(): RecentBlock? {
+        val type = runCatching { RiskType.valueOf(type) }.getOrNull() ?: return null
+        if (type !in BLOCK_RISK_TYPES) return null
+
         val detail = decodePayload(detailJson)
         val pkg = detail["packageName"]?.takeIf { it.isNotBlank() }
         val summary = when {
@@ -179,13 +208,33 @@ class LogRepository @Inject constructor(
             pkg != null -> "$pkg 被限制使用"
             type == RiskType.TIME_LIMIT_EXCEEDED -> "应用当日时长已用完"
             type == RiskType.UNINSTALL_ATTEMPT -> "尝试卸载管控"
-            else -> "管控事件：${type.name}"
+            type == RiskType.FORCE_STOP_ATTEMPT -> "尝试强行停止管控"
+            type == RiskType.CLEAR_DATA_ATTEMPT -> "尝试清除管控数据"
+            else -> "管控事件：${riskTypeLabel(type)}"
         }
         return RecentBlock(
             summary = summary,
             timestamp = timestamp,
             source = RecentBlock.Source.RISK
         )
+    }
+
+    /** 展示用中文名，避免把内部枚举名直接甩给用户 */
+    private fun riskTypeLabel(type: RiskType): String = when (type) {
+        RiskType.BLACKLIST_APP_LAUNCH -> "黑名单应用被阻止"
+        RiskType.BLOCKED_URL_ACCESS -> "违规网址被拦截"
+        RiskType.TIME_LIMIT_EXCEEDED -> "当日时长已用完"
+        RiskType.UNINSTALL_ATTEMPT -> "尝试卸载管控"
+        RiskType.FORCE_STOP_ATTEMPT -> "尝试强行停止管控"
+        RiskType.CLEAR_DATA_ATTEMPT -> "尝试清除管控数据"
+        RiskType.CLOCK_TAMPERING -> "检测到修改系统时间"
+        RiskType.ROOT_DETECTED -> "检测到设备已 root"
+        RiskType.DEVELOPER_OPTIONS_ENABLED -> "检测到开发者选项被打开"
+        RiskType.USB_DEBUG_ENABLED -> "检测到 USB 调试被打开"
+        RiskType.PERMISSION_REVOKED -> "管控权限被削弱"
+        RiskType.POLICY_APPLY_FAILED -> "部分管控项需重新下发"
+        RiskType.INVALID_SIGNATURE -> "指令签名校验失败"
+        RiskType.HEARTBEAT_TIMEOUT -> "与服务端通信超时"
     }
 
     // ==================== 清理 ====================

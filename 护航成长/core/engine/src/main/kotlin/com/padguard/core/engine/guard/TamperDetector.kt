@@ -10,7 +10,9 @@ import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
 import com.padguard.core.data.model.policy.ControlMode
 import com.padguard.core.data.model.policy.SecurityPolicy
+import com.padguard.core.data.model.policy.SystemLockPolicy
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.core.engine.enforcer.isBlocking
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
@@ -54,14 +56,14 @@ class TamperDetector @Inject constructor(
      * @return 本轮新发现的问题；空列表表示一切正常。
      *   调用方（[com.padguard.core.engine.PolicyEngine]）负责落库并上报。
      */
-    fun detect(policy: SecurityPolicy): List<TamperFinding> {
+    fun detect(policy: SecurityPolicy, systemLock: SystemLockPolicy = SystemLockPolicy()): List<TamperFinding> {
         val findings = mutableListOf<TamperFinding>()
 
         detectClockTampering(policy, findings)
         detectPermissionDowngrade(findings)
         detectDebugChannels(findings)
         if (policy.blockRoot) detectRoot(findings)
-        detectRestrictionLoss(policy, findings)
+        detectRestrictionLoss(policy, systemLock, findings)
 
         if (findings.isNotEmpty()) {
             Logger.w(TAG) { "tamper findings: ${findings.map { it.type }}" }
@@ -206,14 +208,31 @@ class TamperDetector @Inject constructor(
      * 由于清除是静默的，若不主动核对，终端会以为策略还在生效。
      * 这里抽查最关键的几条，发现丢失即上报 POLICY_APPLY_FAILED 触发重新下发。
      */
-    private fun detectRestrictionLoss(policy: SecurityPolicy, findings: MutableList<TamperFinding>) {
+    private fun detectRestrictionLoss(
+        policy: SecurityPolicy,
+        systemLock: SystemLockPolicy,
+        findings: MutableList<TamperFinding>
+    ) {
         if (admin.controlMode.value != ControlMode.DEVICE_OWNER) return
 
+        // 「预期存在的限制」必须和真正下发它们的 Enforcer 口径一致。
+        // 曾经这里按 SecurityPolicy 的开关直接列固定清单，结果把"按设计主动解除"的项
+        // 当成了"限制被绕过"：debug 构建会主动解除 USB 调试限制（见 SystemLockEnforcer 的
+        // debug 豁免与 DeviceAdminBridge.applyHardeningBaseline），于是每次自检都误报
+        // POLICY_APPLY_FAILED，首页「最近拦截」里刷满「管控事件：POLICY_APPLY_FAILED」。
+        // 排查时极易被这条假告警带偏，真正的告警反而被淹没。
         val expected = buildList {
             if (policy.antiClockTamper) add(UserManager.DISALLOW_CONFIG_DATE_TIME)
             if (policy.blockRoot) add(UserManager.DISALLOW_FACTORY_RESET)
-            if (policy.blockRoot) add(UserManager.DISALLOW_DEBUGGING_FEATURES)
-            if (policy.antiUninstall) add(UserManager.DISALLOW_UNINSTALL_APPS)
+            // 完全复刻 SystemLockEnforcer 的判定：debug 构建豁免 + 救援通道（ALLOW）时不封。
+            // 任一侧口径不一致，就会把"按设计解除"误报成"限制被绕过"。
+            val blockDebug = !admin.isDebuggableBuild &&
+                (systemLock.developerOptions.isBlocking() || systemLock.usbDebug.isBlocking())
+            if (blockDebug) add(UserManager.DISALLOW_DEBUGGING_FEATURES)
+            // DISALLOW_UNINSTALL_APPS 由 AppPolicy.installPolicy.allowUserUninstall 决定，
+            // 本类只拿得到 SecurityPolicy，无法判断它此刻该开还是该关，故不列入预期；
+            // 防卸载的真实基线是 AppPolicyEnforcer.protectSelf 的 setUninstallBlocked(自己)，
+            // 那一项无条件生效，不受任何策略开关影响。
         }
         val missing = expected.filterNot { admin.hasUserRestriction(it) }
         if (missing.isEmpty()) return
