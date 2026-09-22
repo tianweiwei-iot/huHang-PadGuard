@@ -26,9 +26,6 @@
 @rem Set local scope for the variables with windows NT shell
 if "%OS%"=="Windows_NT" setlocal
 
-@rem Set JAVA_HOME to use system Java 17
-set JAVA_HOME=E:\Tools\Java 17
-
 set DIRNAME=%~dp0
 if "%DIRNAME%"=="" set DIRNAME=.
 @rem This is normally unused

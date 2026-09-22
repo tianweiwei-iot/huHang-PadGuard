@@ -7,6 +7,7 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import com.padguard.core.common.Logger
@@ -48,6 +49,13 @@ class CapturePermissionActivity : ComponentActivity() {
         } else {
             Logger.w(TAG) { "media projection denied, dropping pending capture" }
             ScreenCaptureService.pendingIntent = null
+            // P1/P2：之前拒绝后只记日志，孩子和家长都不知道发生了什么，
+            // 家长端只会一直"等待授权"。这里给出明确提示，说明如何恢复。
+            Toast.makeText(
+                this,
+                "已拒绝屏幕采集授权，家长将无法查看实时画面；可在「我的 → 设备管理员」重新授权",
+                Toast.LENGTH_LONG
+            ).show()
         }
         finish()
     }
