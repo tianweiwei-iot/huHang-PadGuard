@@ -37,8 +37,9 @@ class MonitorService(
             )
         )
         commandService.issueCommand(
-            deviceId, "SCREENSHOT",
-            mapOf("triggerType" to "REMOTE", "shotId" to shotId), priority = "HIGH"
+            deviceId, CommandType.SCREENSHOT,
+            mapOf(CommandKey.TRIGGER_TYPE to "REMOTE", CommandKey.SHOT_ID to shotId),
+            priority = "HIGH"
         )
         return ScreenshotRequestResult(deviceId, shotId, "PENDING", now)
     }
@@ -57,38 +58,84 @@ class MonitorService(
 
     fun requestPhoto(userId: String, deviceId: String): TaskAcceptedDto {
         requireOwned(userId, deviceId)
-        return startMediaTask(deviceId, "PHOTO", "image/jpeg")
+        val t = createMediaTask(deviceId, "PHOTO", "image/jpeg")
+        commandService.issueCommand(
+            deviceId, CommandType.PHOTO, mapOf(CommandKey.TASK_ID to t.taskId), priority = "NORMAL"
+        )
+        return t
     }
 
     fun startRecording(userId: String, deviceId: String): TaskAcceptedDto {
         requireOwned(userId, deviceId)
-        return startMediaTask(deviceId, "RECORD", "audio/mp4")
+        val t = createMediaTask(deviceId, "RECORD", "audio/mp4")
+        commandService.issueCommand(
+            deviceId, CommandType.RECORD, mapOf(CommandKey.TASK_ID to t.taskId), priority = "NORMAL"
+        )
+        return t
     }
 
+    /**
+     * 发起录屏。任务创建与指令下发必须一一对应：
+     * 之前 [createMediaTask] 内部会先下发一条只有 taskId 的 SCREEN_RECORD 指令，
+     * 这里又下发一条带分辨率/音频参数的，导致同一次请求产生两条指令、孩子端重复开录
+     * （且第一条缺参数只能用默认值）。现在统一由调用方下发**唯一一条**全量参数指令。
+     */
     fun startScreenRecord(userId: String, deviceId: String, req: StartRecordRequest): TaskAcceptedDto {
         requireOwned(userId, deviceId)
-        val t = startMediaTask(deviceId, "SCREEN_RECORD", "video/mp4")
+        val t = createMediaTask(deviceId, "SCREEN_RECORD", "video/mp4")
         commandService.issueCommand(
-            deviceId, "SCREEN_RECORD",
-            mapOf("taskId" to t.taskId, "resolution" to req.resolution, "withAudio" to req.withAudio),
+            deviceId, CommandType.SCREEN_RECORD,
+            mapOf(
+                CommandKey.TASK_ID to t.taskId,
+                CommandKey.RESOLUTION to req.resolution,
+                CommandKey.WITH_AUDIO to req.withAudio
+            ),
             priority = "NORMAL"
         )
         return t
     }
 
+    /**
+     * 停止录屏：必须真正下发 STOP_SCREEN_RECORD 指令。
+     *
+     * 之前只查库返回任务、**根本没下发指令**，家长端却收到 200 success ——
+     * 外部表现为"停止成功"，孩子端却继续录制，正是指令契约里点名的
+     * "操作成功、设备毫无反应"一类问题，这里用与 [startScreenRecord] 对称的指令下发修复。
+     */
     fun stopScreenRecord(userId: String, taskId: String): TaskAcceptedDto {
         val task = mediaTaskRepository.findById(taskId).orElse(null)
             ?: throw BizException(ParentErr.PARAM_ERROR, "任务不存在", Audience.PARENT)
         requireOwned(userId, task.deviceId)
+        issueStopCommand(task.deviceId, task.kind, task.id)
         return TaskAcceptedDto(task.id, task.kind, task.status, task.startedAt)
     }
 
-    /** 停止录音/录屏：返回该设备最新一条对应类型任务（媒体文件由孩子端上传后入库） */
+    /** 停止录音/录屏：下发对应类型的停止指令（媒体文件由孩子端上传后入库） */
     fun stopByKind(userId: String, deviceId: String, kind: String): TaskAcceptedDto {
         requireOwned(userId, deviceId)
         val task = mediaTaskRepository.findByDeviceIdAndKindOrderByStartedAtDesc(deviceId, kind, PageRequest.of(0, 1))
             .firstOrNull() ?: throw BizException(ParentErr.PARAM_ERROR, "无进行中的$kind 任务", Audience.PARENT)
+        issueStopCommand(deviceId, kind, task.id)
         return TaskAcceptedDto(task.id, task.kind, task.status, task.startedAt)
+    }
+
+    /**
+     * 下发停止采集指令。
+     *
+     * 幂等性由孩子端保证：没有进行中的录制时它只记一条日志、不上传、不报错，
+     * 因此重复点击"停止"或对已结束的任务点停止都是安全的。
+     */
+    private fun issueStopCommand(deviceId: String, kind: String, taskId: String) {
+        val type = when (kind) {
+            "RECORD" -> CommandType.STOP_RECORD
+            "SCREEN_RECORD" -> CommandType.STOP_SCREEN_RECORD
+            else -> return   // 一次性任务（如拍照）没有"停止"语义
+        }
+        commandService.issueCommand(
+            deviceId, type,
+            mapOf(CommandKey.TASK_ID to taskId),
+            priority = "HIGH"
+        )
     }
 
     fun getScreenSettings(userId: String, deviceId: String): ScreenMonitorSettingsDto {
@@ -143,6 +190,18 @@ class MonitorService(
         }
     }
 
+    /** 取媒体任务结果（停止录音/录屏后回传文件地址用） */
+    fun getMediaResult(taskId: String): MediaResultDto {
+        val task = mediaTaskRepository.findById(taskId).orElse(null)
+            ?: throw BizException(ParentErr.PARAM_ERROR, "任务不存在", Audience.PARENT)
+        return MediaResultDto(
+            url = task.url ?: "",
+            mimeType = task.mimeType ?: "",
+            size = task.size ?: 0L,
+            durationSeconds = task.durationSeconds
+        )
+    }
+
     private fun pushScreenshotReady(deviceId: String, shot: Screenshot) {
         deviceRepository.findById(deviceId).ifPresent { dev ->
             dev.userId?.let { uid ->
@@ -154,15 +213,17 @@ class MonitorService(
         }
     }
 
-    private fun startMediaTask(deviceId: String, kind: String, mime: String): TaskAcceptedDto {
+    /**
+     * 落一条 PENDING 媒体任务记录。
+     * **不下发指令** —— 各媒体类型的指令参数不同（录屏要带分辨率/音频），统一由调用方
+     * 下发唯一一条指令，避免"建任务时隐式发一条、调用方再发一条"的重复指令。
+     */
+    private fun createMediaTask(deviceId: String, kind: String, mime: String): TaskAcceptedDto {
         val taskId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         mediaTaskRepository.save(
             MediaTask(id = taskId, deviceId = deviceId, kind = kind, status = "PENDING",
                 mimeType = mime, startedAt = now)
-        )
-        commandService.issueCommand(
-            deviceId, kind, mapOf("taskId" to taskId), priority = "NORMAL"
         )
         return TaskAcceptedDto(taskId, kind, "PENDING", now)
     }

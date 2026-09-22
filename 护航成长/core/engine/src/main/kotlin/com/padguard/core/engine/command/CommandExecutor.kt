@@ -73,6 +73,11 @@ class CommandExecutor @Inject constructor(
                 CommandType.SHOW_MESSAGE -> showMessage(command, deviceId)
                 CommandType.SCREENSHOT -> screenshot(command, deviceId)
                 CommandType.LOCATE -> locate(command, deviceId)
+                CommandType.PHOTO -> photo(command, deviceId)
+                CommandType.RECORD -> audioRecord(command, deviceId)
+                CommandType.STOP_RECORD -> stopAudioRecord(command, deviceId)
+                CommandType.SCREEN_RECORD -> screenRecord(command, deviceId)
+                CommandType.STOP_SCREEN_RECORD -> stopScreenRecord(command, deviceId)
                 CommandType.RESET_POLICY -> resetPolicy(command, deviceId)
                 CommandType.REFRESH_POLICY -> refreshPolicy(command, deviceId)
                 CommandType.INSTALL_APP -> installApp(command, deviceId)
@@ -212,7 +217,12 @@ class CommandExecutor @Inject constructor(
                 title = command.payloadString(KEY_TITLE, "来自家长的消息"),
                 body = body,
                 durationSec = command.payloadInt(KEY_DURATION_SEC, 0),
-                blocking = command.payloadBoolean(KEY_BLOCKING, false)
+                blocking = command.payloadBoolean(KEY_BLOCKING, false),
+                // 图片/视频/音频素材：霸屏时要在正中间展示，必须随指令一起下发。
+                // 之前只传文字，家长发了一张图下去，孩子端只显示一行空白，等于发了条空消息。
+                contentType = command.payloadString(KEY_CONTENT_TYPE, "TEXT"),
+                mediaUrl = command.payloadString(KEY_MEDIA_URL),
+                mediaName = command.payloadString(KEY_MEDIA_NAME)
             )
         )
         return ack(command, deviceId, AckStatus.SUCCESS)
@@ -229,13 +239,58 @@ class CommandExecutor @Inject constructor(
      * 回执 SUCCESS 的含义是"任务已受理"，不是"图片已产出"。
      */
     private fun screenshot(command: Command, deviceId: String): CommandAck {
-        _effects.tryEmit(EngineEffect.CaptureScreenshot(command.msgId))
+        // shotId 由服务端在落 PENDING 记录时生成，必须原样带回，
+        // 否则上传的截图无法与家长端的那次请求关联，家长只会看到"一直在等待中"。
+        _effects.tryEmit(
+            EngineEffect.CaptureScreenshot(
+                msgId = command.msgId,
+                shotId = command.payloadString("shotId").ifBlank { command.msgId }
+            )
+        )
         return ack(command, deviceId, AckStatus.SUCCESS, "ACCEPTED", "截屏任务已受理，结果将随日志单独上报")
     }
 
     private fun locate(command: Command, deviceId: String): CommandAck {
         _effects.tryEmit(EngineEffect.RequestLocation(command.msgId))
         return ack(command, deviceId, AckStatus.SUCCESS, "ACCEPTED", "定位任务已受理，结果将随日志单独上报")
+    }
+
+    private fun photo(command: Command, deviceId: String): CommandAck {
+        _effects.tryEmit(
+            EngineEffect.CapturePhoto(
+                msgId = command.msgId,
+                taskId = command.payloadString("taskId").ifBlank { command.msgId }
+            )
+        )
+        return ack(command, deviceId, AckStatus.SUCCESS, "ACCEPTED", "拍照任务已受理，结果将随日志单独上报")
+    }
+
+    private fun audioRecord(command: Command, deviceId: String): CommandAck {
+        val taskId = command.payloadString("taskId").ifBlank { command.msgId }
+        _effects.tryEmit(EngineEffect.StartAudioRecord(command.msgId, taskId))
+        return ack(command, deviceId, AckStatus.SUCCESS, "ACCEPTED", "录音任务已受理，结果将随日志单独上报")
+    }
+
+    private fun stopAudioRecord(command: Command, deviceId: String): CommandAck {
+        _effects.tryEmit(EngineEffect.StopAudioRecord)
+        return ack(command, deviceId, AckStatus.SUCCESS)
+    }
+
+    private fun screenRecord(command: Command, deviceId: String): CommandAck {
+        _effects.tryEmit(
+            EngineEffect.StartScreenRecord(
+                msgId = command.msgId,
+                taskId = command.payloadString("taskId").ifBlank { command.msgId },
+                resolution = command.payloadString("resolution", "HD_720P"),
+                withAudio = command.payloadBoolean("withAudio", false)
+            )
+        )
+        return ack(command, deviceId, AckStatus.SUCCESS, "ACCEPTED", "录屏任务已受理，结果将随日志单独上报")
+    }
+
+    private fun stopScreenRecord(command: Command, deviceId: String): CommandAck {
+        _effects.tryEmit(EngineEffect.StopScreenRecord)
+        return ack(command, deviceId, AckStatus.SUCCESS)
     }
 
     private fun flushLogs(command: Command, deviceId: String): CommandAck {
@@ -420,6 +475,12 @@ class CommandExecutor @Inject constructor(
         const val KEY_DURATION_SEC = "durationSec"
         const val KEY_TITLE = "title"
         const val KEY_CONTENT = "content"
+        /** 信息发布素材类型：TEXT / IMAGE / VIDEO / AUDIO */
+        const val KEY_CONTENT_TYPE = "contentType"
+        /** 信息发布素材下载地址（服务端 /v1/files/{id}） */
+        const val KEY_MEDIA_URL = "mediaUrl"
+        /** 素材展示名（音频没有画面时用它占位） */
+        const val KEY_MEDIA_NAME = "mediaName"
         /** 家长拒绝某次临时解锁申请时随 SHOW_MESSAGE 附带的申请 id（契约扩展项） */
         const val KEY_REQUEST_ID = "requestId"
         const val KEY_BLOCKING = "blocking"
@@ -442,15 +503,37 @@ class CommandExecutor @Inject constructor(
 sealed interface EngineEffect {
     data class ShowLockScreen(val reason: String) : EngineEffect
     data object DismissLockScreen : EngineEffect
+    /**
+     * @param blocking true = 霸屏：占满屏幕且期间禁止任何操作/退出，直到 [durationSec] 到点
+     * @param contentType TEXT / IMAGE / VIDEO / AUDIO
+     * @param mediaUrl 素材地址（服务端文件下载链接），霸屏时在正中间展示
+     */
     data class ShowMessage(
         val title: String,
         val body: String,
         val durationSec: Int,
-        val blocking: Boolean
+        val blocking: Boolean,
+        val contentType: String = "TEXT",
+        val mediaUrl: String = "",
+        val mediaName: String = ""
     ) : EngineEffect
 
-    data class CaptureScreenshot(val msgId: String) : EngineEffect
+    /**
+     * @param shotId 服务端为这次请求生成的截图 id，上传时必须原样带回以完成关联
+     */
+    data class CaptureScreenshot(val msgId: String, val shotId: String) : EngineEffect
+
+    /**
+     * @param taskId 服务端生成的媒体任务 id（PHOTO 走媒体任务通道，与截图不同表）
+     */
+    data class CapturePhoto(val msgId: String, val taskId: String) : EngineEffect
     data class RequestLocation(val msgId: String) : EngineEffect
+    data class StartScreenRecord(
+        val msgId: String, val taskId: String, val resolution: String, val withAudio: Boolean
+    ) : EngineEffect
+    data object StopScreenRecord : EngineEffect
+    data class StartAudioRecord(val msgId: String, val taskId: String) : EngineEffect
+    data object StopAudioRecord : EngineEffect
     data object FlushLogs : EngineEffect
 
     /** 重启/清除前先把待上报数据落盘并尽力上传 */

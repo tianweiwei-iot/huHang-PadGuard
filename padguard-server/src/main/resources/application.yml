@@ -1,5 +1,24 @@
 server:
   port: 8080
+  tomcat:
+    # 必须显式固定 basedir：默认是系统临时目录下的 tomcat.<port>.<随机>，
+    # 于是 accesslog 里写的相对路径 ./logs 会被解析到那个临时目录里去，
+    # 结果日志"确实在写、但没人找得到"，排障时反而更困惑；临时目录还会被系统清理。
+    basedir: ./tomcat-work
+    # 访问日志：排查"管控端连不上"时，第一件事就是判断"请求到底有没有到达服务端"。
+    # 没有它，只能靠猜测区分「网络不通 / 地址填错 / 服务端处理失败」，排障成本极高。
+    accesslog:
+      enabled: true
+      # 相对 basedir 解析，最终落在 <应用目录>/tomcat-work/logs
+      directory: ./logs
+      prefix: padguard-access
+      suffix: .log
+      # %h 客户端IP | %r 请求行 | %s 状态码 | %b 响应字节 | %D 耗时(ms)
+      pattern: '%h %t "%r" %s %b bytes %D ms'
+      rotate: true
+      # buffered 默认为 true，日志会先攒在内存里不落盘 —— 排查线上问题时
+      # 恰恰是"最新的几条请求"最关键，攒着看不到等于没有，必须关掉。
+      buffered: false
 
 spring:
   datasource:
@@ -20,8 +39,8 @@ spring:
     locations: classpath:db/migration
   servlet:
     multipart:
-      max-file-size: 20MB
-      max-request-size: 20MB
+      max-file-size: 200MB
+      max-request-size: 200MB
 
 padguard:
   jwt:
@@ -32,6 +51,8 @@ padguard:
   device:
     token-ttl-days: 30
   mqtt:
+    # 本地免 Docker 运行时设为 false（见 local profile），避免强连 EMQX 导致启动失败
+    enabled: true
     broker-url: "tcp://emqx:1883"
     username: ""
     password: ""
@@ -55,3 +76,79 @@ spring:
   padguard:
     mqtt:
       broker-url: "tcp://emqx:1883"
+
+---
+# 本地免 Docker 运行：H2 内存库 + 关闭 MQTT，仅依赖本机 JVM 即可启动联调
+spring:
+  config:
+    activate:
+      on-profile: local
+  datasource:
+    url: "jdbc:h2:mem:padguard;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
+    username: "sa"
+    password: ""
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+  flyway:
+    enabled: false
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
+
+padguard:
+  mqtt:
+    enabled: false
+  dev:
+    child-simulator: false
+
+---
+# 家庭/本地部署包（发布用）：H2 文件库（数据持久化，重启不丢）+ 关闭 MQTT + 固定 8090 端口
+# 配合发布包内的 start.bat 使用，双击即可在家长电脑上运行服务端
+server:
+  port: 8090
+
+spring:
+  config:
+    activate:
+      on-profile: home
+  datasource:
+    url: "jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE"
+    username: "sa"
+    password: ""
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+  flyway:
+    enabled: false
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
+
+padguard:
+  jwt:
+    # 家庭局域网部署密钥；联网正式使用时请更换
+    secret: "padguard-home-deploy-secret-key-2026-please-change-32b"
+  mqtt:
+    # 家庭部署包内置 Mosquitto Broker（随服务端启动脚本拉起，监听 0.0.0.0:1883）。
+    # 服务端本机回环连接；孩子端平板通过局域网 IP:1883 连接。
+    enabled: true
+    broker-url: "tcp://127.0.0.1:1883"
+    username: ""
+    password: ""
+    tenant: "default"
+    keep-alive-seconds: 90
+  storage:
+    dir: "./uploads"
+  dev:
+    child-simulator: false

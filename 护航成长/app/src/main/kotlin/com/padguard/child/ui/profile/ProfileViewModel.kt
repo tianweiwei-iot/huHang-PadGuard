@@ -10,6 +10,7 @@ import android.os.StatFs
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.core.data.repository.AuthRepository
+import com.padguard.core.transport.TransportSettings
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -30,11 +31,19 @@ import javax.inject.Inject
 @HiltViewModel
 class ProfileViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val authRepository: AuthRepository
+    private val authRepository: AuthRepository,
+    private val transportSettings: TransportSettings
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ProfileUiState())
     val state: StateFlow<ProfileUiState> = _state.asStateFlow()
+
+    /** 当前生效的服务器地址（「更多 → 服务器地址」可修改并持久化）。 */
+    val serverUrl: StateFlow<String> = transportSettings.baseUrl
+
+    fun setServerUrl(url: String) {
+        transportSettings.setBaseUrl(url)
+    }
 
     init {
         viewModelScope.launch {

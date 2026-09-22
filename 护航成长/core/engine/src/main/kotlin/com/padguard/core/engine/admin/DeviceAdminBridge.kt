@@ -56,6 +56,16 @@ class DeviceAdminBridge @Inject constructor(
     private val dpm: DevicePolicyManager =
         context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
 
+    /**
+     * 当前 App 是否为可调试构建（debug 签名）。
+     *
+     * 调试构建永不封 ADB / USB 数据 / 开发者选项——否则开发设备一旦激活 Device Owner
+     * 就会被加固基线把 adb 连接搯死（USB 数据信号关闭后 adb 物理断连），
+     * 只能擦除 userdata 才能恢复。生产 release 构建不受影响，防绕过能力完整保留。
+     */
+    val isDebuggableBuild: Boolean =
+        (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
     private val _controlMode = MutableStateFlow(ControlMode.LEGACY)
     val controlMode: StateFlow<ControlMode> = _controlMode.asStateFlow()
 
@@ -234,23 +244,21 @@ class DeviceAdminBridge @Inject constructor(
      */
     fun applyHardeningBaseline(): List<Pair<String, OpResult>> {
         val results = mutableListOf<Pair<String, OpResult>>()
-        results += "usbDebug" to setUserRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, true)
+        // 调试构建豁免：USB/调试通道是开发与远程运维的生命线，封了就无法再通过 adb 救援
+        if (!isDebuggableBuild) {
+            results += "usbDebug" to setUserRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, true)
+        }
         results += "factoryReset" to setUserRestriction(UserManager.DISALLOW_FACTORY_RESET, true)
         results += "safeBoot" to setUserRestriction(UserManager.DISALLOW_SAFE_BOOT, true)
         results += "unknownSources" to setUserRestriction(UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES, true)
         results += "configDateTime" to setUserRestriction(UserManager.DISALLOW_CONFIG_DATE_TIME, true)
 
-        // USB 文件传输关闭（防通过 USB 拷走数据），API 28+ 才有，且不接受 admin 参数
-        val usb = runCatching {
-            require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) { "requires API 28+" }
-            require(can(Capability.GLOBAL_SETTINGS)) { "requires Device Owner" }
-            dpm.setUsbDataSignalingEnabled(false)
-            OpResult.Ok
-        }.getOrElse { e ->
-            if (e is SecurityException) OpResult.Unsupported("usbDataSignaling", e.message.orEmpty())
-            else OpResult.Failed("usbDataSignaling", e.message.orEmpty())
+        // USB 文件传输关闭（防通过 USB 拷走数据）
+        if (isDebuggableBuild) {
+            results += "usbDataSignaling" to OpResult.Unsupported("usbDataSignaling", "debug 构建跳过，避免锁死开发 adb")
+        } else {
+            results += "usbDataSignaling" to setUsbDataSignaling(enabled = false)
         }
-        results += "usbDataSignaling" to usb
 
         return results
     }
@@ -289,6 +297,20 @@ class DeviceAdminBridge @Inject constructor(
         val admin = requireAdmin()
         require(can(Capability.GLOBAL_SETTINGS)) { "requires Device Owner" }
         dpm.setGlobalSetting(admin, key, value)
+    }
+
+    /**
+     * USB 数据信号总开关（关闭后 USB 口只剩供电，adb 物理断连）。
+     *
+     * 注意方向性：这是「封」与「解封」共用的开关。debug 构建或策略放开调试通道时
+     * 必须显式调 [enabled]=true 恢复，否则关掉之后 adb 再也连不上，只能擦机救援。
+     */
+    fun setUsbDataSignaling(enabled: Boolean): OpResult = guarded("usbDataSignaling:$enabled") {
+        val admin = requireAdmin()
+        // setUsbDataSignalingEnabled 是 API 31 才有的方法；旧系统上调用会直接 NoSuchMethodError
+        require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) { "requires API 31+" }
+        require(can(Capability.GLOBAL_SETTINGS)) { "requires Device Owner" }
+        dpm.setUsbDataSignalingEnabled(enabled)
     }
 
     fun setSecureSetting(key: String, value: String): OpResult = guarded("secureSetting:$key=$value") {

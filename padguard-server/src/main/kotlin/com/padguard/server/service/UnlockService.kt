@@ -53,10 +53,10 @@ class UnlockService(
         t.resolvedAt = System.currentTimeMillis()
         unlockTicketRepository.save(t)
         commandService.issueCommand(
-            deviceId, "TEMP_UNLOCK",
+            deviceId, CommandType.TEMP_UNLOCK,
             mapOf(
-                "packageName" to (req.packageName ?: t.packageName ?: ""),
-                "durationMinutes" to (t.durationMinutes ?: 30)
+                CommandKey.PACKAGE_NAME to (req.packageName ?: t.packageName ?: ""),
+                CommandKey.DURATION_MINUTES to (t.durationMinutes ?: 30)
             ),
             priority = "HIGH"
         )
@@ -69,8 +69,11 @@ class UnlockService(
         t.resolvedAt = System.currentTimeMillis()
         unlockTicketRepository.save(t)
         commandService.issueCommand(
-            deviceId, "SHOW_MESSAGE",
-            mapOf("requestId" to t.id, "body" to (req.reason ?: "申请未通过")),
+            deviceId, CommandType.SHOW_MESSAGE,
+            mapOf(
+                CommandKey.REQUEST_ID to t.id,
+                CommandKey.CONTENT to (req.reason ?: "申请未通过")
+            ),
             priority = "NORMAL"
         )
     }

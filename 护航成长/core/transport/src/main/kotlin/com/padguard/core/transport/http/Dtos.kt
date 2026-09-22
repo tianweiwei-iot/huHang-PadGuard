@@ -112,3 +112,41 @@ data class ScreenshotAck(
     @SerialName("shotId") val shotId: String = "",
     @SerialName("accepted") val accepted: Boolean = false
 )
+
+@Serializable
+data class MediaAck(
+    @SerialName("taskId") val taskId: String = "",
+    @SerialName("accepted") val accepted: Boolean = false
+)
+
+// ==================== 应用台账 ====================
+
+/**
+ * 单条已安装应用信息。
+ *
+ * [isSystem] 用于让管控端把"系统组件"与"用户安装的应用"分开呈现 ——
+ * 家长关心的是孩子自己装了什么，把几百个系统服务混在列表里只会让页面不可用。
+ */
+@Serializable
+data class AppInventoryItem(
+    @SerialName("packageName") val packageName: String,
+    @SerialName("appName") val appName: String? = null,
+    @SerialName("versionName") val versionName: String? = null,
+    @SerialName("versionCode") val versionCode: Long? = null,
+    @SerialName("isSystem") val isSystem: Boolean? = null,
+    @SerialName("installTime") val installTime: Long? = null,
+    @SerialName("updateTime") val updateTime: Long? = null
+)
+
+@Serializable
+data class AppInventoryRequest(
+    @SerialName("apps") val apps: List<AppInventoryItem>
+)
+
+/** 服务端返回的同步统计，仅用于日志与问题定位，不参与业务判断 */
+@Serializable
+data class AppSyncAck(
+    @SerialName("inserted") val inserted: Int = 0,
+    @SerialName("updated") val updated: Int = 0,
+    @SerialName("removed") val removed: Int = 0
+)

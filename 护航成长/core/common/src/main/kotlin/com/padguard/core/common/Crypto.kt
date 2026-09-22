@@ -2,7 +2,6 @@ package com.padguard.core.common
 
 import android.util.Base64
 import java.security.MessageDigest
-import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -31,11 +30,15 @@ object Crypto {
 
     /**
      * AES-GCM 加密。输出结构：[12 字节 IV][密文+16 字节 GCM Tag]
+     *
+     * IV 由 Cipher 对象随机生成，而不是调用方自造：
+     * Android Keystore 密钥（setRandomizedEncryptionRequired=true，默认开启）
+     * 禁止调用方传入 IV，自造 IV 会直接抛 InvalidAlgorithmParameterException。
      */
     fun encrypt(plain: ByteArray, key: SecretKey): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        val iv = ByteArray(IV_LENGTH_BYTES).also { SecureRandom().nextBytes(it) }
-        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
+        cipher.init(Cipher.ENCRYPT_MODE, key)
+        val iv = cipher.iv ?: error("cipher did not generate an IV")
         val cipherText = cipher.doFinal(plain)
         return iv + cipherText
     }

@@ -21,6 +21,12 @@ class MessageService(
     /** 家长向设备实时发布信息：下发 SHOW_MESSAGE 指令并记录历史 */
     fun publish(userId: String, deviceId: String, req: MessagePublishRequest): PublishedMessageDto {
         requireOwned(userId, deviceId)
+        // 提前失败优于下发后被孩子端拒绝：否则家长端看到"发布成功"，
+        // 孩子端却以 BAD_PAYLOAD 丢弃，故障无法被及时发现。
+        val content = req.text?.trim().orEmpty()
+        if (content.isEmpty() && req.mediaUrl.isNullOrBlank()) {
+            throw BizException(ParentErr.PARAM_ERROR, "消息内容不能为空", Audience.PARENT)
+        }
         val now = System.currentTimeMillis()
         val msg = publishedMessageRepository.save(
             PublishedMessage(
@@ -31,14 +37,15 @@ class MessageService(
             )
         )
         commandService.issueCommand(
-            deviceId, "SHOW_MESSAGE",
+            deviceId, CommandType.SHOW_MESSAGE,
             mapOf(
-                "contentType" to req.contentType,
-                "text" to req.text,
-                "mediaUrl" to req.mediaUrl,
-                "displaySeconds" to req.displaySeconds,
-                "fullScreen" to req.fullScreen,
-                "playAudio" to req.playAudio
+                CommandKey.CONTENT to content,
+                CommandKey.DURATION_SEC to req.displaySeconds,
+                CommandKey.BLOCKING to req.fullScreen,
+                // 霸屏时孩子端要在屏幕正中展示素材，缺了 mediaUrl 就只剩一行文字
+                CommandKey.CONTENT_TYPE to req.contentType,
+                CommandKey.MEDIA_URL to (req.mediaUrl ?: ""),
+                CommandKey.MEDIA_NAME to (req.mediaName ?: "")
             ),
             priority = "NORMAL"
         )

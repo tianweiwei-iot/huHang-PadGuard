@@ -411,8 +411,9 @@ class LocalDataSource @Inject constructor(
     override suspend fun requestScreenshot(deviceId: String): Result<ScreenshotData> =
         Result.success(ScreenshotData(
             deviceId = deviceId,
-            imageBase64 = null,
+            imageUrl = null,
             thumbnailUrl = null,
+            status = "PENDING",
             capturedAt = System.currentTimeMillis(),
             width = 1920,
             height = 1080
@@ -423,6 +424,9 @@ class LocalDataSource @Inject constructor(
 
     override suspend fun getScreenshotHistory(deviceId: String, limit: Int): Result<List<ScreenshotData>> =
         Result.success(emptyList())
+
+    override suspend fun downloadImage(imageUrl: String): Result<ByteArray> =
+        Result.failure(Exception("本地模式下无截图可下载"))
 
     override suspend fun takePhoto(deviceId: String): Result<String> =
         Result.success("https://mock.padguard.com/photos/${deviceId}_${System.currentTimeMillis()}.jpg")
@@ -624,6 +628,22 @@ class LocalDataSource @Inject constructor(
         Result.success(Unit)
 
     override suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit> =
+        Result.success(Unit)
+
+    override suspend fun unlock(deviceId: String): Result<Unit> =
+        Result.success(Unit)
+
+    override suspend fun tempUnlock(deviceId: String, durationMinutes: Int): Result<Unit> =
+        Result.success(Unit)
+
+    override suspend fun getUnlockTickets(deviceId: String): Result<List<UnlockTicket>> =
+        Result.success(emptyList())
+
+    override suspend fun approveUnlockTicket(
+        deviceId: String, ticketId: String, durationMinutes: Int?
+    ): Result<Unit> = Result.success(Unit)
+
+    override suspend fun ignoreUnlockTicket(deviceId: String, ticketId: String): Result<Unit> =
         Result.success(Unit)
 
     override suspend fun setControlMode(deviceId: String, mode: ControlMode): Result<Unit> =

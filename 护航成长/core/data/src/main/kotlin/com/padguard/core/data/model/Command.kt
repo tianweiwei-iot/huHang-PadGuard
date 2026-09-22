@@ -63,6 +63,21 @@ enum class CommandType {
     /** 立即上报一次定位 */
     LOCATE,
 
+    /** 远程拍照（需摄像头采集） */
+    PHOTO,
+
+    /** 开始录音（需麦克风采集） */
+    RECORD,
+
+    /** 停止录音 */
+    STOP_RECORD,
+
+    /** 开始录屏（需 MediaProjection 授权） */
+    SCREEN_RECORD,
+
+    /** 停止录屏 */
+    STOP_SCREEN_RECORD,
+
     /** 策略一键重置：终端丢弃本地缓存并重新拉取全量 */
     RESET_POLICY,
 

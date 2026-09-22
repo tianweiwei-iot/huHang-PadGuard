@@ -57,6 +57,26 @@ interface PadGuardApi {
         @Part file: MultipartBody.Part
     ): Response<ApiEnvelope<ScreenshotAck>>
 
+    /** §5.5.1 上报媒体文件（录音/录屏） */
+    @Multipart
+    @POST("device/media")
+    suspend fun uploadMedia(
+        @Part("taskId") taskId: RequestBody,
+        @Part("durationSeconds") durationSeconds: RequestBody,
+        @Part("mimeType") mimeType: RequestBody,
+        @Part file: MultipartBody.Part
+    ): Response<ApiEnvelope<MediaAck>>
+
+    /**
+     * §5.10 全量上报已安装应用台账。
+     *
+     * 走 HTTP 而不是 MQTT：清单通常几百条、几十 KB，
+     * MQTT 上行走大包容易触发 broker 报文大小限制，失败后重传代价也高；
+     * HTTP 天然支持 gzip 与更大的 body，更适合这种"周期性全量快照"。
+     */
+    @POST("device/apps")
+    suspend fun uploadApps(@Body body: AppInventoryRequest): Response<ApiEnvelope<AppSyncAck>>
+
     /**
      * §5.6 上报定位轨迹。
      * data 用 JsonElement 而非 Unit：kotlinx.serialization 对 Unit 的处理依赖版本，

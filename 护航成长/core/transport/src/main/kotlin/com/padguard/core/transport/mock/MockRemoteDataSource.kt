@@ -18,6 +18,8 @@ import com.padguard.core.transport.Downlink
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportMode
 import com.padguard.core.transport.TransportSettings
+import com.padguard.core.transport.http.AppInventoryItem
+import com.padguard.core.transport.http.AppSyncAck
 import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
 import com.padguard.core.transport.http.BindRequest
@@ -25,6 +27,7 @@ import com.padguard.core.transport.http.HeartbeatAck
 import com.padguard.core.transport.http.LogUploadResponse
 import com.padguard.core.transport.http.PolicyFetchResult
 import com.padguard.core.transport.http.ScreenshotAck
+import com.padguard.core.transport.http.MediaAck
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -296,6 +299,29 @@ class MockRemoteDataSource @Inject constructor(
         )
         Logger.i(TAG) { "screenshot accepted: $shotId ${jpeg.size / 1024}KB trigger=$triggerType" }
         return ApiResult.Success(ScreenshotAck(shotId = shotId, accepted = true), timeProvider.now())
+    }
+
+    override suspend fun uploadMedia(
+        taskId: String,
+        durationSeconds: Int,
+        mimeType: String,
+        file: java.io.File
+    ): ApiResult<MediaAck> {
+        simulateNetwork<MediaAck>()?.let { return it }
+        Logger.i(TAG) { "media accepted: $taskId ${file.length() / 1024}KB mime=$mimeType" }
+        return ApiResult.Success(MediaAck(taskId = taskId, accepted = true), timeProvider.now())
+    }
+
+    override suspend fun uploadApps(
+        deviceId: String,
+        apps: List<AppInventoryItem>
+    ): ApiResult<AppSyncAck> {
+        simulateNetwork<AppSyncAck>()?.let { return it }
+        Logger.i(TAG) { "app inventory accepted: ${apps.size} app(s)" }
+        return ApiResult.Success(
+            AppSyncAck(inserted = 0, updated = apps.size, removed = 0),
+            timeProvider.now()
+        )
     }
 
     override suspend fun pullCommands(since: Long): ApiResult<List<Command>> {

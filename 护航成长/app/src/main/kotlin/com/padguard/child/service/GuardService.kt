@@ -16,11 +16,17 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.padguard.child.MainActivity
 import com.padguard.child.R
+import com.padguard.child.capture.PhotoCapture
+import com.padguard.child.capture.ScreenCaptureService
+import com.padguard.child.maintain.AppInstaller
+import com.padguard.child.monitor.AppInventoryCollector
 import com.padguard.child.monitor.DeviceSnapshotCollector
 import com.padguard.child.monitor.ForegroundAppMonitor
+import com.padguard.child.monitor.LocationCollector
 import com.padguard.child.ui.block.AppBlockActivity
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.ui.message.MessageActivity
+import com.padguard.child.ui.overlay.WatermarkOverlay
 import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.model.Heartbeat
@@ -29,6 +35,7 @@ import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.data.repository.PolicyRepository
 import com.padguard.core.data.repository.UnlockRequestRepository
+import com.padguard.core.data.repository.UsageRepository
 import com.padguard.core.engine.PolicyEngine
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.command.EngineEffect
@@ -49,6 +56,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 
@@ -97,6 +105,12 @@ class GuardService : Service() {
     @Inject lateinit var admin: DeviceAdminBridge
     @Inject lateinit var timeProvider: TimeProvider
     @Inject lateinit var unlockRequestRepository: UnlockRequestRepository
+    @Inject lateinit var locationCollector: LocationCollector
+    @Inject lateinit var appInventory: AppInventoryCollector
+    @Inject lateinit var usageRepository: UsageRepository
+    @Inject lateinit var photoCapture: PhotoCapture
+    @Inject lateinit var appInstaller: AppInstaller
+    @Inject lateinit var watermark: WatermarkOverlay
 
     /**
      * 服务自己的作用域，不用 `@ApplicationScope`。
@@ -113,6 +127,12 @@ class GuardService : Service() {
 
     private val transportStarted = AtomicBoolean(false)
     private val bootstrapped = AtomicBoolean(false)
+    /** 安装/卸载完成后请求立即同步一次应用台账 */
+    private val appSyncRequested = AtomicBoolean(false)
+
+    /** 已上报过的应用用量（包名 -> 累计毫秒），用于计算增量，避免服务端重复累加 */
+    private val reportedAppUsage = ConcurrentHashMap<String, Long>()
+    @Volatile private var reportedAppUsageDay = ""
 
     /** 锁屏页当前是否已被拉起，避免每轮 tick 重复 startActivity 造成闪屏 */
     private var lockScreenShown = false
@@ -143,6 +163,10 @@ class GuardService : Service() {
         } else if (reason == REASON_BOOT) {
             // 极少见：进程未死但收到开机广播，仍需走一次开机复位
             scope.launch { runSafely("onDeviceBoot") { policyEngine.onDeviceBoot() } }
+        } else if (reason == REASON_FLUSH) {
+            // 锁屏页刚提交了解锁申请：这类交互有时效，等下一个 60s 上报窗口太慢，
+            // 家长可能要一分多钟后才看到，孩子会以为申请没发出去而反复提交。
+            scope.launch { runSafely("flushNow") { uploadPending() } }
         } else {
             // 已在运行，外部只是想催一次策略对齐（如管理器刚激活、Kiosk 被意外退出）
             scope.launch { runSafely("applyOnKick") { policyEngine.applyCurrent(force = true) } }
@@ -233,6 +257,9 @@ class GuardService : Service() {
             var nextSelfCheck = SystemClock.elapsedRealtime() + SELF_CHECK_INTERVAL_MS
             var nextTamperScan = SystemClock.elapsedRealtime() + TAMPER_SCAN_INTERVAL_MS
             var nextLogUpload = SystemClock.elapsedRealtime() + LOG_UPLOAD_MIN_INTERVAL_MS
+            // 首次台账同步刻意提前：设备刚绑定/服务刚启动时家长往往正盯着应用列表，
+            // 等 30 分钟会让「应用」Tab 一直空白；首报完成后回到正常周期。
+            var nextAppSync = SystemClock.elapsedRealtime() + APP_SYNC_FIRST_DELAY_MS
 
             while (isActive) {
                 val now = SystemClock.elapsedRealtime()
@@ -268,9 +295,51 @@ class GuardService : Service() {
                         .coerceAtLeast(LOG_UPLOAD_MIN_INTERVAL_MS)
                 }
 
+                // ---------- 应用台账全量同步 ----------
+                // 安装/卸载指令执行完后会置 [appSyncRequested]，
+                // 让家长在几秒内看到清单变化，而不是等满 30 分钟。
+                if (now >= nextAppSync || appSyncRequested.getAndSet(false)) {
+                    runSafely("appSync") { syncAppInventory() }
+                    nextAppSync = now + APP_SYNC_INTERVAL_MS
+                }
+
                 updateNotification()
                 delay(MIN_TICK_MS)
             }
+        }
+    }
+
+    /**
+     * 预约一次台账补同步。
+     *
+     * 延迟 10 秒再置位：PackageInstaller 会话提交后系统还要走拷贝→校验→提交，
+     * 立刻同步的话新包很可能还没落地，家长端刷新一次看不到又会再刷一次。
+     */
+    private fun scheduleAppSync() {
+        scope.launch {
+            delay(APP_SYNC_AFTER_INSTALL_DELAY_MS)
+            appSyncRequested.set(true)
+        }
+    }
+
+    /**
+     * 上报已安装应用台账。
+     *
+     * 频率刻意压到 30 分钟：清单上百条、单次请求几十 KB，
+     * 频繁上报既费流量又会让孩子端看起来"在偷传数据"。
+     * 应用装卸本身就是低频事件，30 分钟的滞后对家长的判断没有实质影响。
+     */
+    private suspend fun syncAppInventory() {
+        val deviceId = authRepository.getDeviceId()
+        if (deviceId.isBlank()) return
+        val apps = appInventory.collect()
+        if (apps.isEmpty()) return
+        when (val r = remote.uploadApps(deviceId, apps)) {
+            is ApiResult.Success -> {
+                val ack = r.value
+                Logger.d(TAG) { "app inventory synced: ${apps.size} (+${ack.inserted} ~${ack.updated} -${ack.removed})" }
+            }
+            else -> Logger.w(TAG) { "app inventory sync failed: $r" }
         }
     }
 
@@ -388,6 +457,11 @@ class GuardService : Service() {
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return
 
+        // 上报前先把本地累计的应用用量落成日志：
+        // 服务端统计接口只读 usage_log 表，本地 UsageRepository 的累计值若不上行，
+        // 家长端的"使用时长统计"永远是 0 —— 这是最容易被忽略的一条断链。
+        runSafely("appUsageReport") { reportAppUsage() }
+
         val alerts = logRepository.takePendingAlerts()
         if (alerts.isNotEmpty()) {
             val r = remote.uploadEvents(deviceId, alerts.map { it.copy(deviceId = deviceId) })
@@ -412,6 +486,52 @@ class GuardService : Service() {
         runCatching { unlockRequestRepository.purge(UNLOCK_REQUEST_RETENTION_DAYS) }
             .onFailure { Logger.w(TAG) { "purge unlock requests failed: $it" } }
     }
+
+    /**
+     * 把本地累计的应用用量落成 APP_USAGE 日志。
+     *
+     * ## 为什么报"增量"而不是"累计值"
+     * 累计值会让服务端把同一段时长重复累加：每次上报都是"截至当前的全部用量"，
+     * 服务端按 durationSec 求和后，一天结束时的总时长会是真实值的 N 倍（N = 上报次数）。
+     * 这里用 [reportedAppUsage] 记住"已经报过多少"，只上报两次之间的增量，服务端直接求和即可。
+     *
+     * ## 为什么在日切时清空
+     * UsageRepository 的累计值本来就是按 dayKey 分表的，跨日会自然归零；
+     * 若这里不清空记录表，新一天的首次上报会算出"负数增量"并被阈值过滤掉，当天数据就丢了。
+     */
+    private suspend fun reportAppUsage() {
+        val key = usageRepository.dayKey()
+        if (key != reportedAppUsageDay) {
+            reportedAppUsage.clear()
+            reportedAppUsageDay = key
+        }
+        val snapshot = usageRepository.snapshotAppUsage(key)
+        if (snapshot.isEmpty()) return
+
+        var emitted = 0
+        for (stat in snapshot) {
+            val reported = reportedAppUsage[stat.packageName] ?: 0L
+            val delta = stat.usedMs - reported
+            if (delta < USAGE_REPORT_MIN_DELTA_MS) continue
+            reportedAppUsage[stat.packageName] = stat.usedMs
+            logRepository.append(
+                type = LogType.APP_USAGE,
+                payload = mapOf(
+                    "packageName" to stat.packageName,
+                    "appName" to appLabel(stat.packageName),
+                    "durationSec" to (delta / 1000).toString(),
+                    "dayKey" to key
+                )
+            )
+            emitted++
+        }
+        if (emitted > 0) Logger.d(TAG) { "app usage reported: $emitted app(s) for day=$key" }
+    }
+
+    /** 取应用显示名；取不到（已卸载）时退回包名，保证统计里不会出现空名称 */
+    private fun appLabel(packageName: String): String = runCatching {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString()
+    }.getOrDefault(packageName)
 
     private suspend fun refreshPolicy() {
         val current = policyRepository.currentVersion()
@@ -516,67 +636,109 @@ class GuardService : Service() {
                 title = effect.title,
                 body = effect.body,
                 durationSec = effect.durationSec,
-                blocking = effect.blocking
+                blocking = effect.blocking,
+                contentType = effect.contentType,
+                mediaUrl = effect.mediaUrl,
+                mediaName = effect.mediaName
             )
 
             EngineEffect.FlushLogs, EngineEffect.FlushBeforeShutdown -> uploadPending()
 
             is EngineEffect.RefreshPolicy -> refreshPolicy()
 
-            // ---------- 以下为"受理了但端上目前做不到"的动作 ----------
-            // CommandExecutor 回执的 SUCCESS 语义是"任务已受理"，不是"已完成"，
-            // 所以真实结果必须由这里如实补一条日志。
-            // 若这里什么都不做，管控端会看到 SUCCESS 却永远收不到产物，
-            // 那就是最糟的一种失败：看起来成功的失败。
-            is EngineEffect.CaptureScreenshot -> reportUnsupported(
-                msgId = effect.msgId,
-                action = "screenshot",
-                reason = "Android 未向 Device Owner 开放静默截屏 API；" +
-                    "需接入无障碍服务 takeScreenshot(API 30+) 或 MediaProjection 用户授权，当前版本未启用"
-            )
+            // ---------- 采集类：真实执行，结果单独回传 ----------
+            // 这些动作的共同点是"指令回执已先行返回 SUCCESS（任务已受理）"，
+            // 真实产物（图片/音频/视频）走独立上传通道。
+            // 因此这里必须把最终成败写进日志流，否则管控端只会看到"受理成功"却永远等不到产物。
+            is EngineEffect.CaptureScreenshot -> {
+                ScreenCaptureService.captureScreenshot(this, effect.shotId)
+                reportEffectResult(effect.msgId, "screenshot", true, "已触发采集（首次需用户在系统弹窗中授权一次）")
+            }
 
-            is EngineEffect.RequestLocation -> reportUnsupported(
-                msgId = effect.msgId,
-                action = "locate",
-                reason = "定位采集模块未在本版本启用（P0 范围外）"
-            )
+            is EngineEffect.CapturePhoto -> {
+                val error = photoCapture.captureAndUpload(effect.taskId)
+                reportEffectResult(effect.msgId, "photo", error == null, error ?: "已上传")
+            }
 
-            is EngineEffect.InstallApp -> reportUnsupported(
-                msgId = effect.msgId,
-                action = "installApp",
-                reason = "静默安装需 DO + PackageInstaller 会话，本版本未启用；包名=${effect.packageName}"
-            )
+            is EngineEffect.RequestLocation -> {
+                val ok = locationCollector.collectAndUpload()
+                reportEffectResult(
+                    effect.msgId, "locate", ok,
+                    if (ok) "已上报" else "定位失败（未授权定位权限或设备当前无任何位置缓存）"
+                )
+            }
 
-            is EngineEffect.UninstallApp -> reportUnsupported(
-                msgId = effect.msgId,
-                action = "uninstallApp",
-                reason = "静默卸载需 DO + PackageInstaller 会话，本版本未启用；包名=${effect.packageName}"
-            )
+            is EngineEffect.StartScreenRecord -> {
+                ScreenCaptureService.startScreenRecord(
+                    this, effect.taskId, effect.resolution, effect.withAudio
+                )
+                reportEffectResult(effect.msgId, "screenRecord", true, "已开始录制")
+            }
 
-            is EngineEffect.SetWatermark -> reportUnsupported(
-                msgId = "",
-                action = "setWatermark",
-                reason = "全局水印需系统级悬浮窗覆盖，本版本未启用；enabled=${effect.enabled}"
-            )
+            EngineEffect.StopScreenRecord -> ScreenCaptureService.stopScreenRecord(this)
+
+            is EngineEffect.StartAudioRecord -> {
+                ScreenCaptureService.startAudioRecord(this, effect.taskId)
+                reportEffectResult(effect.msgId, "audioRecord", true, "已开始录音")
+            }
+
+            EngineEffect.StopAudioRecord -> ScreenCaptureService.stopAudioRecord(this)
+
+            // ---------- 远程运维：静默安装 / 卸载 ----------
+            is EngineEffect.InstallApp -> {
+                val error = appInstaller.install(effect.apkUrl, effect.packageName)
+                // 安装是异步完成的（PackageInstaller 回调），这里给一个延迟后的补同步，
+                // 让家长端能在十几秒内看到新应用出现在台账里，而不是等下一个 30 分钟周期。
+                if (error == null) scheduleAppSync()
+                reportEffectResult(effect.msgId, "installApp", error == null, error ?: "安装会话已提交")
+            }
+
+            is EngineEffect.UninstallApp -> {
+                val error = appInstaller.uninstall(effect.packageName)
+                if (error == null) scheduleAppSync()
+                reportEffectResult(effect.msgId, "uninstallApp", error == null, error ?: "卸载已提交")
+            }
+
+            is EngineEffect.SetWatermark -> {
+                val ok = if (effect.enabled) {
+                    watermark.show(effect.content)
+                } else {
+                    watermark.hide()
+                    true
+                }
+                reportEffectResult(
+                    "", "setWatermark", ok,
+                    if (ok) "enabled=${effect.enabled}" else "悬浮窗权限未授予，水印未生效"
+                )
+            }
 
             is EngineEffect.UpdateRuntimeConfig ->
                 Logger.i(TAG) { "runtime config from command: ${effect.params.keys}" }
         }
     }
 
-    /** 把"做不到"写进日志流，让管控端能看见降级，而不是以为成功了 */
-    private suspend fun reportUnsupported(msgId: String, action: String, reason: String) {
-        Logger.w(TAG) { "$action unsupported: $reason" }
+    /**
+     * 采集/运维类副作用的真实结果留痕。
+     *
+     * 指令回执在 [com.padguard.core.engine.command.CommandExecutor] 里就已经发出去了，
+     * 语义是"已受理"；这里补的是**最终结果**。两者缺一不可：
+     * 只有前者会出现"看起来成功的失败"，只有后者则管控端不知道指令有没有被收到。
+     */
+    private suspend fun reportEffectResult(msgId: String, action: String, ok: Boolean, detail: String) {
         logRepository.append(
             type = LogType.COMMAND_EXEC,
             payload = mapOf(
                 "msgId" to msgId,
                 "action" to action,
-                "result" to "UNSUPPORTED",
-                "reason" to reason
+                "result" to if (ok) "DONE" else "FAILED",
+                "reason" to detail
             )
         )
+        // 结果随下一次上报窗口走即可；这里额外触发一次是为了让实时类动作（截屏/定位）
+        // 在秒级内到达家长端 —— 家长点了"看看孩子在干嘛"却要等一个上报周期，体验上是断的。
+        if (ok) uploadPending()
     }
+
 
     // ==================== 前台通知 ====================
 
@@ -689,6 +851,8 @@ class GuardService : Service() {
 
         const val EXTRA_REASON = "reason"
         const val REASON_BOOT = "boot"
+        /** 立即上报一次本地待发数据（解锁申请等时效性交互使用） */
+        const val REASON_FLUSH = "flush"
 
         /** 采样基准间隔。15s 是权衡结果：更短会明显增加耗电，更长会让"时段锁"生效延迟到肉眼可见 */
         private const val MIN_TICK_MS = 15_000L
@@ -701,6 +865,23 @@ class GuardService : Service() {
 
         /** 日志上报最小间隔，防止服务端把 logUploadIntervalSec 配成 0 导致刷接口 */
         private const val LOG_UPLOAD_MIN_INTERVAL_MS = 60_000L
+
+        /** 应用台账全量同步间隔：装卸是低频事件，没必要跟着 15s 的采样节奏跑 */
+        private const val APP_SYNC_INTERVAL_MS = 30 * 60_000L
+
+        /** 服务启动后的首次台账同步延迟：让刚绑定的设备尽快把应用清单送到家长端 */
+        private const val APP_SYNC_FIRST_DELAY_MS = 15_000L
+
+        /** 安装/卸载指令后补同步的等待时间，等 PackageInstaller 会话真正落地 */
+        private const val APP_SYNC_AFTER_INSTALL_DELAY_MS = 10_000L
+
+        /**
+         * 应用用量上报的最小增量。
+         * 低于 30 秒的增量不值得单独发一条日志：家长看到的统计精度是分钟级，
+         * 而每 15 秒采样一次若不加阈值，一天会产生上万条 APP_USAGE 日志，
+         * 白白占用上行带宽与服务端存储。
+         */
+        private const val USAGE_REPORT_MIN_DELTA_MS = 30_000L
 
         /**
          * 启动守护服务。

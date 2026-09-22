@@ -119,6 +119,10 @@ class ParentPolicyExtendedController(private val policyExtensionService: PolicyE
     fun appLimit(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: DailyLimitRequest) =
         ApiResponse.ok<Any?>(run { policyExtensionService.setAppLimit(userId, deviceId, req); null })
 
+    @GetMapping("/{deviceId}/daily-limit")
+    fun dailyLimit(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+        ApiResponse.ok(policyExtensionService.getDailyLimit(userId, deviceId))
+
     @GetMapping("/{deviceId}/web")
     fun web(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
         ApiResponse.ok(policyExtensionService.getWebPolicy(userId, deviceId))
@@ -138,6 +142,78 @@ class ParentPolicyExtendedController(private val policyExtensionService: PolicyE
     @PostMapping("/{deviceId}/apply-template")
     fun applyTemplate(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: ApplyTemplateRequest) =
         ApiResponse.ok<Any?>(run { policyExtensionService.applyTemplate(userId, deviceId, req); null })
+
+    @GetMapping("/{deviceId}/tablet-usage-settings")
+    fun tabletUsageSettings(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+        ApiResponse.ok(policyExtensionService.getTabletUsageSettings(userId, deviceId))
+
+    @PutMapping("/{deviceId}/tablet-usage-settings")
+    fun updateTabletUsageSettings(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String,
+        @RequestBody req: TabletUsageSettingsDto
+    ) = ApiResponse.ok(policyExtensionService.updateTabletUsageSettings(userId, deviceId, req))
+
+    // ---------- 救援通道 ----------
+    // 平板被策略封死调试与侧载后，唯一能给它"松绑"的只有它自己（Device Owner）。
+    // 这里把松绑动作做成服务端指令：孩子端下次拉策略即解封，之后才能侧载新版 APK
+    // 或打开 USB 调试被 adb 接管 —— 否则「要升级必须先升级」是死锁。
+    @GetMapping("/{deviceId}/system-lock-relaxed")
+    fun systemLockRelaxed(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String
+    ) = ApiResponse.ok(mapOf("relaxed" to policyExtensionService.getSystemLockRelaxed(userId, deviceId)))
+
+    @PutMapping("/{deviceId}/system-lock-relaxed")
+    fun setSystemLockRelaxed(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String,
+        @RequestBody req: SystemLockRelaxedRequest
+    ) = ApiResponse.ok(mapOf("relaxed" to policyExtensionService.setSystemLockRelaxed(userId, deviceId, req.relaxed)))
+}
+
+// ==================== 应用监控 / 远程安装维护 ====================
+@RestController
+@RequestMapping("/v1/devices/{deviceId}/apps")
+class ParentAppManageController(private val appManageService: AppManageService) {
+
+    @GetMapping
+    fun list(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestParam(required = false, defaultValue = "true") onlyInstalled: Boolean
+    ) = ApiResponse.ok(appManageService.listApps(userId, deviceId, onlyInstalled))
+
+    @PostMapping("/install")
+    fun install(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: AppInstallRequest
+    ) = ApiResponse.ok(appManageService.installApp(userId, deviceId, req))
+
+    @PostMapping("/uninstall")
+    fun uninstall(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: SuspendRequest
+    ): ApiResponse<*> {
+        appManageService.uninstallApp(userId, deviceId, req.packageName)
+        return ApiResponse.ok<Any?>(null)
+    }
+
+    @PutMapping("/suspend")
+    fun suspend(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: SuspendRequest
+    ): ApiResponse<*> {
+        appManageService.setSuspended(userId, deviceId, req.packageName, req.suspended)
+        return ApiResponse.ok<Any?>(null)
+    }
+
+    @PutMapping("/suspend/batch")
+    fun suspendBatch(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: BatchSuspendRequest
+    ) = ApiResponse.ok(mapOf("sent" to appManageService.setSuspendedBatch(userId, deviceId, req.packages, req.suspended)))
 }
 
 // ==================== 数据统计 ====================

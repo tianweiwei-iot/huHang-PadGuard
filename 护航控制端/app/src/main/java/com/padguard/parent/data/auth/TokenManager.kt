@@ -86,6 +86,10 @@ class TokenManager @Inject constructor(
 
     suspend fun isLoggedIn(): Boolean = getAccessToken() != null
 
+    /** 登录态响应式流：存在 accessToken 即视为已登录；会话被 clear 时立即发出 false */
+    fun isLoggedInFlow(): Flow<Boolean> =
+        context.authDataStore.data.map { it[Keys.ACCESS_TOKEN] != null }
+
     fun currentUserFlow(): Flow<User?> = context.authDataStore.data.map { prefs ->
         val token = prefs[Keys.ACCESS_TOKEN] ?: return@map null
         User(

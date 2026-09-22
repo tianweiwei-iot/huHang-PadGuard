@@ -60,6 +60,18 @@ class UsageRepository @Inject constructor(
         }
 
     /**
+     * 当日应用用量快照（按使用时长降序）。
+     *
+     * 与 [observeAppUsage] 的区别：这是一次性查询，适合"周期性上报"这种取一次就走的场景。
+     * 用 Flow 版本需要长期持有订阅，而上报协程是短命的，订阅会在协程结束时被取消，
+     * 反而可能一次数据都拿不到（Room 的 Flow 在首次收集前不发射）。
+     */
+    suspend fun snapshotAppUsage(key: String = dayKey()): List<AppUsageStat> =
+        appUsageDao.snapshotByDay(key).map {
+            AppUsageStat(it.packageName, it.dayKey, it.usedMs, it.launchCount, it.lastUpdateAt)
+        }
+
+    /**
      * 首页"今日使用"专用：返回当前本地日的全局累计使用分钟数。
      *
      * 注意：返回的是**真实采集**的时长（不是策略下发的限额），由 GuardService 周期累加。

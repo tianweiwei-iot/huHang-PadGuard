@@ -136,6 +136,10 @@ class TamperDetector @Inject constructor(
 
     /** 开发者选项 / USB 调试被打开：这是绕过管控的常见前置动作 */
     private fun detectDebugChannels(findings: MutableList<TamperFinding>) {
+        // debug 构建自我豁免：调试通道是开发/远程运维的生命线（见 SystemLockEnforcer），
+        // 客户端自己恢复了这些开关还反复告警，只会制造"狼来了"，把真告警淹没掉。
+        if (admin.isDebuggableBuild) return
+
         val devEnabled = runCatching {
             Settings.Global.getInt(
                 context.contentResolver,

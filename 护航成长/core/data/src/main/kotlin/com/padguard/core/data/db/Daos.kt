@@ -87,6 +87,10 @@ interface AppUsageDao {
     @Query("SELECT * FROM app_usage WHERE dayKey = :dayKey")
     fun observeByDay(dayKey: String): Flow<List<AppUsageEntity>>
 
+    /** 一次性快照：供周期上报使用，避免为取一次数据而长期持有 Flow 订阅 */
+    @Query("SELECT * FROM app_usage WHERE dayKey = :dayKey ORDER BY usedMs DESC")
+    suspend fun snapshotByDay(dayKey: String): List<AppUsageEntity>
+
     @Query("SELECT * FROM app_usage WHERE dayKey = :dayKey AND packageName = :pkg")
     suspend fun get(dayKey: String, pkg: String): AppUsageEntity?
 

@@ -65,21 +65,44 @@ class SystemLockEnforcer @Inject constructor(
         }
 
         // ---------- 2. 调试通道 ----------
-        val blockDebug = policy.developerOptions.isBlocking() || policy.usbDebug.isBlocking()
+        // 调试构建永不封 ADB/开发者选项：debug 设备一旦被封，adb 断连后无法救援。
+        // 策略开关本身记录在案，只是不落到系统设置。
+        val blockDebug = !admin.isDebuggableBuild &&
+            (policy.developerOptions.isBlocking() || policy.usbDebug.isBlocking())
         report.record(
-            "systemLock.developerOptions/usbDebug=$blockDebug",
+            "systemLock.developerOptions/usbDebug=$blockDebug" +
+                if (admin.isDebuggableBuild) " (debug 构建跳过)" else "",
             admin.setUserRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, blockDebug)
         )
-        if (blockDebug && admin.can(Capability.GLOBAL_SETTINGS)) {
-            // 已经打开的开发者选项不会因为加限制而自动关闭，需要主动清零
-            report.record(
-                "systemLock.adbDisabled",
-                admin.setGlobalSetting(Settings.Global.ADB_ENABLED, "0")
-            )
-            report.record(
-                "systemLock.devSettingsDisabled",
-                admin.setGlobalSetting(Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, "0")
-            )
+        if (admin.can(Capability.GLOBAL_SETTINGS)) {
+            if (blockDebug) {
+                // 已经打开的开发者选项不会因为加限制而自动关闭，需要主动清零
+                report.record(
+                    "systemLock.adbDisabled",
+                    admin.setGlobalSetting(Settings.Global.ADB_ENABLED, "0")
+                )
+                report.record(
+                    "systemLock.devSettingsDisabled",
+                    admin.setGlobalSetting(Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, "0")
+                )
+            } else {
+                // 解封方向必须对称恢复（含 debug 构建豁免的情况）：
+                // 早期版本把这两项清零后从不恢复，导致平板上开发者选项入口永久消失、
+                // USB 调试打不开，连 adb 都救不回来 —— 这是本次「救援缺口」的根因。
+                report.record(
+                    "systemLock.devSettingsRestored",
+                    admin.setGlobalSetting(Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, "1")
+                )
+                report.record(
+                    "systemLock.adbRestored",
+                    admin.setGlobalSetting(Settings.Global.ADB_ENABLED, "1")
+                )
+                // 若历史上被关过 USB 数据信号（adb 物理断连），同样要恢复
+                report.record(
+                    "systemLock.usbSignalingRestored",
+                    admin.setUsbDataSignaling(enabled = true)
+                )
+            }
         }
 
         // ---------- 3. 安装来源 ----------

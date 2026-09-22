@@ -102,7 +102,11 @@ import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import retrofit2.Response
+import retrofit2.Retrofit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -130,7 +134,9 @@ class ApiDataSource @Inject constructor(
     private val statisticsApi: StatisticsApi,
     private val alertApi: AlertApi,
     private val appManageApi: AppManageApi,
-    private val tokenManager: TokenManager
+    private val tokenManager: TokenManager,
+    private val authenticatedClient: OkHttpClient,
+    private val retrofit: Retrofit
 ) : AuthRepository, DeviceRepository, MonitorRepository, PolicyRepository,
     StatisticsRepository, AlertRepository, MessageRepository, LocationRepository {
 
@@ -354,6 +360,19 @@ class ApiDataSource @Inject constructor(
     override suspend fun getScreenshotHistory(deviceId: String, limit: Int): Result<List<ScreenshotData>> =
         exec { monitorApi.getScreenshotHistory(deviceId, limit) }.map { it.data.orEmpty().map { s -> s.toDomain() } }
 
+    override suspend fun downloadImage(imageUrl: String): Result<ByteArray> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                // resolve 同时兼容相对路径（/v1/files/{id}）与绝对 URL；
+                // 占位 baseUrl 的 host 由 HostSelectionInterceptor 统一改写为真实服务器
+                val url = retrofit.baseUrl().resolve(imageUrl) ?: error("非法图片地址: $imageUrl")
+                authenticatedClient.newCall(Request.Builder().url(url).get().build()).execute().use { resp ->
+                    check(resp.isSuccessful) { "图片下载失败: HTTP ${resp.code}" }
+                    resp.body?.bytes() ?: error("图片下载失败: 空响应")
+                }
+            }
+        }
+
     override suspend fun takePhoto(deviceId: String): Result<String> =
         exec { monitorApi.takePhoto(deviceId) }.map { it.data?.url ?: throw Exception("拍照请求失败") }
 
@@ -475,6 +494,45 @@ class ApiDataSource @Inject constructor(
 
     override suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit> =
         Result.failure(Exception("服务端未提供护眼参数接口，暂不支持。"))
+
+    override suspend fun unlock(deviceId: String): Result<Unit> =
+        exec { policyApi.unlock(deviceId) }.map { Unit }
+
+    override suspend fun tempUnlock(deviceId: String, durationMinutes: Int): Result<Unit> =
+        exec {
+            policyApi.tempUnlock(
+                deviceId,
+                com.padguard.data.model.TempUnlockRequest(durationMinutes = durationMinutes)
+            )
+        }.map { Unit }
+
+    override suspend fun getUnlockTickets(deviceId: String): Result<List<com.padguard.domain.repository.UnlockTicket>> =
+        exec { policyApi.getUnlockTickets(deviceId) }.map { list ->
+            list.data.orEmpty().map { dto ->
+                com.padguard.domain.repository.UnlockTicket(
+                    id = dto.id, deviceId = dto.deviceId, packageName = dto.packageName,
+                    appLabel = dto.appLabel, durationMinutes = dto.durationMinutes,
+                    reason = dto.reason, status = dto.status, createdAt = dto.createdAt
+                )
+            }
+        }
+
+    override suspend fun approveUnlockTicket(
+        deviceId: String, ticketId: String, durationMinutes: Int?
+    ): Result<Unit> =
+        exec {
+            policyApi.approveUnlockTicket(
+                deviceId, ticketId,
+                com.padguard.data.model.UnlockApproveRequest(durationMinutes = durationMinutes)
+            )
+        }.map { Unit }
+
+    override suspend fun ignoreUnlockTicket(deviceId: String, ticketId: String): Result<Unit> =
+        exec {
+            policyApi.rejectUnlockTicket(
+                deviceId, ticketId, com.padguard.data.model.UnlockRejectRequest(reason = "家长已忽略")
+            )
+        }.map { Unit }
 
     override suspend fun setControlMode(deviceId: String, mode: ControlMode): Result<Unit> =
         exec { policyApi.setControlMode(deviceId, com.padguard.data.model.ModeChangeRequest(mode.name)) }.map { Unit }
@@ -601,7 +659,7 @@ private fun DeviceGroupDto.toDomain(): DeviceGroup = DeviceGroup(
 )
 
 private fun ScreenshotDto.toDomain(): ScreenshotData = ScreenshotData(
-    deviceId = deviceId, imageBase64 = null, thumbnailUrl = thumbnailUrl ?: imageUrl,
+    deviceId = deviceId, imageUrl = imageUrl, thumbnailUrl = thumbnailUrl, status = status,
     capturedAt = capturedAt ?: 0, width = width ?: 0, height = height ?: 0
 )
 

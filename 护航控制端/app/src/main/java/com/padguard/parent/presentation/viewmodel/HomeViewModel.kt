@@ -3,11 +3,13 @@ package com.padguard.presentation.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.domain.model.Device
+import com.padguard.domain.model.DeviceOnlineStatus
 import com.padguard.domain.model.SceneType
 import com.padguard.domain.model.UsageStats
 import com.padguard.domain.repository.DeviceRepository
 import com.padguard.domain.repository.PolicyRepository
 import com.padguard.domain.repository.StatisticsRepository
+import com.padguard.domain.repository.UnlockTicket
 import com.padguard.presentation.util.TimeFormat
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,6 +37,9 @@ data class HomeUiState(
     val dailyLimitMinutes: Int = 120,
     val todayUsage: UsageStats? = null,
     val latestActivity: String? = null,
+    /** 孩子端提交、等待家长处理的解锁申请（取最早一条展示，避免首页被刷屏） */
+    val pendingUnlockTicket: UnlockTicket? = null,
+    val unlockActionMessage: String? = null,
     val isRefreshing: Boolean = false,
     val error: String? = null
 )
@@ -62,9 +67,50 @@ class HomeViewModel @Inject constructor(
     fun selectDevice(deviceId: String) {
         if (_uiState.value.selectedDeviceId == deviceId) return
         val device = _uiState.value.devices.firstOrNull { it.id == deviceId }
-        _uiState.value = _uiState.value.copy(selectedDeviceId = deviceId, selectedDevice = device)
+        _uiState.value = _uiState.value.copy(
+            selectedDeviceId = deviceId,
+            selectedDevice = device,
+            pendingUnlockTicket = null
+        )
         loadTodayUsage(deviceId)
         loadDailyLimit(deviceId)
+        loadUnlockTickets(deviceId)
+    }
+
+    /** 忽略某条解锁申请：关闭工单，不下发任何消息给孩子 */
+    fun ignoreUnlockTicket(ticketId: String) {
+        val deviceId = _uiState.value.selectedDeviceId ?: return
+        viewModelScope.launch {
+            policyRepository.ignoreUnlockTicket(deviceId, ticketId)
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        pendingUnlockTicket = null,
+                        unlockActionMessage = "已忽略该申请"
+                    )
+                    loadUnlockTickets(deviceId)
+                }
+                .onFailure { e -> _uiState.value = _uiState.value.copy(error = e.message) }
+        }
+    }
+
+    fun clearUnlockMessage() {
+        _uiState.value = _uiState.value.copy(unlockActionMessage = null)
+    }
+
+    /**
+     * 拉取待处理的解锁申请。
+     * 首页只展示最早的一条：孩子可能连着提交好几次，全列出来既刷屏又容易让家长误点。
+     */
+    private fun loadUnlockTickets(deviceId: String) {
+        viewModelScope.launch {
+            policyRepository.getUnlockTickets(deviceId)
+                .onSuccess { tickets ->
+                    _uiState.value = _uiState.value.copy(
+                        pendingUnlockTicket = tickets.filter { it.isPending }.minByOrNull { it.createdAt }
+                    )
+                }
+                .onFailure { /* 申请列表是增值信息，失败不阻断首页渲染 */ }
+        }
     }
 
     /**
@@ -80,7 +126,13 @@ class HomeViewModel @Inject constructor(
                     val sel = if (currentSel != null && devices.any { it.id == currentSel }) {
                         currentSel
                     } else {
-                        devices.firstOrNull()?.id
+                        // 同一台平板反复绑定会在服务端留下多条设备记录，
+                        // 其中往往只有一条真正在线。若默认选第一条（很可能是废弃记录），
+                        // 家长下发的所有指令都会发给一个离线设备 ——
+                        // 现场表现是"什么管控功能都没反应，就消息发送看似成功"。
+                        // 因此首次选中优先选在线设备，没有在线设备才回落到第一条。
+                        devices.firstOrNull { it.onlineStatus == DeviceOnlineStatus.ONLINE }?.id
+                            ?: devices.firstOrNull()?.id
                     }
                     val selectedDevice = devices.firstOrNull { it.id == sel }
                     _uiState.value = _uiState.value.copy(
@@ -92,6 +144,7 @@ class HomeViewModel @Inject constructor(
                     sel?.let {
                         loadTodayUsage(it)
                         loadDailyLimit(it)
+                        loadUnlockTickets(it)
                     }
                 }
                 .onFailure { e ->

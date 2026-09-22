@@ -276,6 +276,33 @@ data class ModeChangeRequest(
     val mode: String   // "NORMAL" | "LEARNING" | "FOCUS"
 )
 
+data class TempUnlockRequest(
+    val durationMinutes: Int = 30,
+    val packageName: String? = null,
+    val reason: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class UnlockTicketDto(
+    val id: String,
+    val deviceId: String,
+    val packageName: String? = null,
+    val appLabel: String? = null,
+    val durationMinutes: Int? = null,
+    val reason: String? = null,
+    val status: String = "PENDING",
+    val createdAt: Long = 0L
+)
+
+data class UnlockApproveRequest(
+    val durationMinutes: Int? = null,
+    val packageName: String? = null
+)
+
+data class UnlockRejectRequest(
+    val reason: String? = null
+)
+
 @JsonClass(generateAdapter = true)
 data class PolicyTemplateDto(
     val id: String,

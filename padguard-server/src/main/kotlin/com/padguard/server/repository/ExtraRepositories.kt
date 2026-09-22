@@ -71,3 +71,10 @@ interface PolicyTemplateRepository : JpaRepository<PolicyTemplate, String> {
 interface MediaTaskRepository : JpaRepository<MediaTask, String> {
     fun findByDeviceIdAndKindOrderByStartedAtDesc(deviceId: String, kind: String, pageable: Pageable): List<MediaTask>
 }
+
+@Repository
+interface InstalledAppRepository : JpaRepository<InstalledApp, String> {
+    fun findByDeviceId(deviceId: String): List<InstalledApp>
+    fun findByDeviceIdAndPackageName(deviceId: String, packageName: String): InstalledApp?
+    fun findByDeviceIdAndInstalledTrue(deviceId: String): List<InstalledApp>
+}

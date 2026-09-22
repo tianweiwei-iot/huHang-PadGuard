@@ -88,6 +88,7 @@ fun MainScreen(rootNavController: NavHostController) {
                     onNavigateToLocation = { rootNavController.navigate(Screen.Location.create(it)) },
                     onNavigateToUsageDetail = { rootNavController.navigate(Screen.TabletUsageDetail.create(it)) },
                     onNavigateToUsageSettings = { rootNavController.navigate(Screen.TabletUsageSettings.create(it)) },
+                    onIgnoreUnlockTicket = homeVm::ignoreUnlockTicket,
                     onRefresh = homeVm::refreshData,
                     onAddDevice = { navController.navigate("devices") }
                 )

@@ -1,5 +1,6 @@
 package com.padguard.presentation.ui.realtime
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +27,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -45,6 +47,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -95,8 +100,12 @@ fun ScreenMonitorScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             LiveScreenCard(
+                liveImage = uiState.liveImage?.asImageBitmap(),
+                fetchingFrame = uiState.fetchingFrame,
                 updatedAtMillis = uiState.screenshot?.capturedAt,
-                resolutionText = uiState.screenshot?.let { "${it.width}×${it.height}" },
+                resolutionText = uiState.screenshot?.let { s ->
+                    if (s.width > 0 && s.height > 0) "${s.width}×${s.height}" else null
+                },
                 isRecording = uiState.isRecording,
                 recordingSeconds = uiState.recordingSeconds,
                 onRefresh = viewModel::refreshScreenshot
@@ -131,9 +140,11 @@ fun ScreenMonitorScreen(
     }
 }
 
-/** 实时画面占位卡：Mock 阶段以占位渲染呈现，接入推流后可替换为真实画面。 */
+/** 实时画面卡：有画面时渲染被控端最新截图，否则显示占位引导。 */
 @Composable
 private fun LiveScreenCard(
+    liveImage: ImageBitmap?,
+    fetchingFrame: Boolean,
     updatedAtMillis: Long?,
     resolutionText: String?,
     isRecording: Boolean,
@@ -148,45 +159,82 @@ private fun LiveScreenCard(
         colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A2E))
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(64.dp)
-                        .background(
-                            brush = Brush.linearGradient(listOf(Color(0xFF4A90D9), Color(0xFF07C160))),
-                            shape = RoundedCornerShape(16.dp)
-                        ),
-                    contentAlignment = Alignment.Center
+            if (liveImage != null) {
+                Image(
+                    bitmap = liveImage,
+                    contentDescription = "平板实时画面",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+                // 采集中的半透明遮罩，给家长"正在取新画面"的反馈
+                if (fetchingFrame) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.35f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .background(
+                                brush = Brush.linearGradient(listOf(Color(0xFF4A90D9), Color(0xFF07C160))),
+                                shape = RoundedCornerShape(16.dp)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ScreenShare,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "平板实时画面",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (fetchingFrame) "正在获取画面…" else "等待被控端上传画面（首次需在被控端完成授权）",
+                        color = Color.White.copy(alpha = 0.75f),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (updatedAtMillis != null && updatedAtMillis > 0) {
+                        Text(
+                            text = "更新于 ${TimeFormat.formatClockFromMillis(updatedAtMillis)}",
+                            color = Color.White.copy(alpha = 0.6f),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+
+            if (liveImage == null) {
+                // 右上角手动刷新：占位态下家长可主动触发
+                IconButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.align(Alignment.TopEnd)
                 ) {
                     Icon(
-                        Icons.AutoMirrored.Filled.ScreenShare,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(36.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "平板实时画面",
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = updatedAtMillis?.let { "更新于 ${TimeFormat.formatClockFromMillis(it)}" } ?: "正在获取画面…",
-                    color = Color.White.copy(alpha = 0.75f),
-                    style = MaterialTheme.typography.bodySmall
-                )
-                if (resolutionText != null) {
-                    Text(
-                        text = resolutionText,
-                        color = Color.White.copy(alpha = 0.55f),
-                        style = MaterialTheme.typography.labelSmall
+                        Icons.Default.Refresh,
+                        contentDescription = "刷新画面",
+                        tint = Color.White.copy(alpha = 0.85f)
                     )
                 }
             }

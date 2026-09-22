@@ -94,6 +94,40 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // 从首页「去处理」进来时首先看到的就是这块：解锁 / 限时解锁 / 改每日时长
+        item {
+            SectionTitle("解锁与放行")
+            SoftCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "孩子申请解锁后，可在此一键放行；也可只改每日时长，让他按新额度继续使用。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { viewModel.unlockNow() },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        ) { Text("一键解锁") }
+                        OutlinedButton(
+                            onClick = { viewModel.lockScreen() },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("立即锁屏") }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text("限时放行", style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(15, 30, 60).forEach { m ->
+                            OutlinedButton(onClick = { viewModel.tempUnlock(m) }) { Text("${m}分钟") }
+                        }
+                    }
+                }
+            }
+        }
+
         item {
             SectionTitle("家庭模板（一键应用）")
             Row(

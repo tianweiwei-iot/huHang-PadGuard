@@ -6,7 +6,9 @@ import com.padguard.core.transport.RealRemoteDataSource
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
 import com.padguard.core.transport.http.AuthInterceptor
+import com.padguard.core.transport.http.FamilyAuthApi
 import com.padguard.core.transport.http.HostSelectionInterceptor
+import com.padguard.core.transport.http.LoginHostInterceptor
 import com.padguard.core.transport.http.PadGuardApi
 import com.padguard.core.transport.http.RetryInterceptor
 import com.padguard.core.transport.mock.MockRemoteDataSource
@@ -15,6 +17,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import kotlinx.serialization.json.Json
+import javax.inject.Named
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -99,6 +102,48 @@ object TransportModule {
     @Provides
     @Singleton
     fun providePadGuardApi(retrofit: Retrofit): PadGuardApi = retrofit.create(PadGuardApi::class.java)
+
+    /**
+     * 家庭账号登录专用 Retrofit。
+     *
+     * 与子端 [provideRetrofit] 的区别：
+     * 1. baseUrl 用占位根 `http://localhost/`，由 [LoginHostInterceptor] 在每次请求时改写为
+     *    配置地址的 host（保留 `/v1/auth/login/password` 相对路径），避免被 `/api/v1` 前缀污染；
+     * 2. 客户端**不含** [AuthInterceptor]——登录发生在绑定之前，此时没有设备令牌可携带；
+     * 3. 用 [Named] 区分，避免与子端 Retrofit 形成多绑定歧义。
+     */
+    @Provides
+    @Singleton
+    @Named("familyAuth")
+    fun provideFamilyAuthRetrofit(
+        loginHostInterceptor: LoginHostInterceptor,
+        retryInterceptor: RetryInterceptor,
+        json: Json
+    ): Retrofit {
+        val builder = OkHttpClient.Builder()
+            .addInterceptor(loginHostInterceptor)
+            .addInterceptor(retryInterceptor)
+            .connectTimeout(CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
+            .readTimeout(READ_TIMEOUT_SEC, TimeUnit.SECONDS)
+            .writeTimeout(WRITE_TIMEOUT_SEC, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(false)
+        if (BuildConfig.DEBUG) {
+            builder.addInterceptor(
+                HttpLoggingInterceptor { message -> Logger.v("OkHttp") { message } }
+                    .apply { level = HttpLoggingInterceptor.Level.BODY }
+            )
+        }
+        return Retrofit.Builder()
+            .baseUrl("http://localhost/")
+            .client(builder.build())
+            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+            .build()
+    }
+
+    @Provides
+    @Singleton
+    fun provideFamilyAuthApi(@Named("familyAuth") retrofit: Retrofit): FamilyAuthApi =
+        retrofit.create(FamilyAuthApi::class.java)
 
     /**
      * 真实实现与 Mock 实现的选择点。

@@ -118,7 +118,14 @@ class KioskEnforcer @Inject constructor(
             return report
         }
         report.record("kiosk.clearPersistentLauncher", admin.clearPersistentPreferredLauncher(context.packageName))
-        report.record("kiosk.clearLockTaskPackages", admin.setLockTaskPackages(emptyList()))
+        // 白名单必须保留自身：锁屏页 / 霸屏页靠 startLockTask() 实现"滑不走"，
+        // 而它们与 Kiosk 无关 —— Kiosk 关闭时设备仍可能处于时段锁或家长远程锁定状态。
+        // 历史实现这里清空了整个白名单，等于把锁屏页的固定能力一起清掉，
+        // 结果是"关了 Kiosk 之后锁屏就能上滑退出"。
+        report.record(
+            "kiosk.clearLockTaskPackages(keepSelf)",
+            admin.setLockTaskPackages(listOf(context.packageName))
+        )
         report.note("kiosk=OFF")
         return report
     }

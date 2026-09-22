@@ -1,12 +1,23 @@
 package com.padguard.presentation.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.padguard.domain.model.ReportPeriod
+import com.padguard.parent.presentation.viewmodel.SessionViewModel
 import com.padguard.presentation.ui.auth.LoginScreen
 import com.padguard.presentation.ui.components.AppSoftBackground
 import com.padguard.presentation.ui.control.ControlPolicyScreen
@@ -81,15 +92,45 @@ sealed class Screen(val route: String) {
 
 @Composable
 fun PadGuardNavHost(
-    navController: NavHostController = rememberNavController()
+    navController: NavHostController = rememberNavController(),
+    sessionViewModel: SessionViewModel = hiltViewModel()
 ) {
+    // ---- 会话门控 ----
+    // 启动时读取持久化会话决定起点；bootResolved=false 期间显示启动占位，
+    // 避免先闪一帧登录页再跳主页的视觉抖动。
+    val bootResolved by sessionViewModel.bootResolved.collectAsState()
+    val user by sessionViewModel.user.collectAsState()
+
+    // 会话在运行中被清空（如令牌刷新失败、退出登录）时，全局退回登录页。
+    // 用「目标页不是登录页」做防重入，退出登录自身的导航不会被二次叠加。
+    LaunchedEffect(user, bootResolved) {
+        val onLogin = navController.currentDestination?.route == Screen.Login.route
+        if (bootResolved && user == null && !onLogin) {
+            navController.navigate(Screen.Login.route) {
+                popUpTo(0) { inclusive = true }
+            }
+        }
+    }
+
     // 全局浅灰背景铺在导航根部：登录页、主框架与全部二级页共享同一底色，
     // 各页 Scaffold 透明化让底色透出（白卡层次依赖该背景）。
     AppSoftBackground(modifier = Modifier) {
-    NavHost(
-        navController = navController,
-        startDestination = Screen.Login.route
-    ) {
+        if (!bootResolved) {
+            // 会话读取（纯本地 DataStore）通常毫秒级完成；占位仅防御首帧闪屏
+            Box(
+                modifier = Modifier.fillMaxSize().background(Color.Transparent),
+                contentAlignment = Alignment.Center
+            ) { CircularProgressIndicator() }
+            return@AppSoftBackground
+        }
+
+        val startDestination =
+            if (user != null) SessionViewModel.MEMBER_START else SessionViewModel.GUEST_START
+
+        NavHost(
+            navController = navController,
+            startDestination = startDestination
+        ) {
         composable(Screen.Login.route) {
             LoginScreen(
                 onLoginSuccess = {
@@ -166,6 +207,6 @@ fun PadGuardNavHost(
                 onBack = { navController.popBackStack() }
             )
         }
-    }
+        }
     }
 }

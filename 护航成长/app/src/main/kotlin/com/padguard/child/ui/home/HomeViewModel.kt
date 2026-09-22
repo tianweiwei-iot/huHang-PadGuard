@@ -62,6 +62,9 @@ class HomeViewModel @Inject constructor(
                 val dailyQuota = policy.appLimit.dailyTotalMinutes
                 val remaining = (dailyQuota - usedMinutes).coerceAtLeast(0)
                 val nowMillis = timeProvider.now()
+                // 时间轴是「策略时区」的一天：游标、读数、时段判定必须同一时区，
+                // 否则会出现“图例说进行中、游标却停在别处”的自相矛盾
+                val zone = policyZone(policy.schedule)
                 HomeUiState(
                     studentName = studentName,
                     statusLabel = "在线",
@@ -69,8 +72,9 @@ class HomeViewModel @Inject constructor(
                     usedMinutes = usedMinutes,
                     quotaMinutes = dailyQuota,
                     remainingMinutes = remaining,
-                    nowLabel = formatNow(nowMillis, ZoneId.systemDefault()),
-                    scheduleItems = buildScheduleSlots(policy.schedule, nowMillis),
+                    nowLabel = formatNow(nowMillis, zone),
+                    nowMinutes = minutesOfDay(nowMillis, zone),
+                    scheduleItems = buildScheduleSlots(policy.schedule, nowMillis, zone),
                     recentBlocks = blocks.map {
                         RecentBlockUi(
                             appName = it.summary,
@@ -84,15 +88,21 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    private fun buildScheduleSlots(schedule: SchedulePolicy, nowMillis: Long): List<ScheduleSlotUi> {
+    /** 计划时段以服务端下发的时区为准（通常 Asia/Shanghai）；
+     *  即使设备时区被改错，时间轴仍按家长配置的时区走，与锁机判定保持一致 */
+    private fun policyZone(schedule: SchedulePolicy): ZoneId =
+        runCatching { ZoneId.of(schedule.timezone) }.getOrElse {
+            Logger.w("HomeViewModel") { "invalid timezone ${schedule.timezone}, fallback" }
+            ZoneId.systemDefault()
+        }
+
+    private fun buildScheduleSlots(
+        schedule: SchedulePolicy,
+        nowMillis: Long,
+        zone: ZoneId
+    ): List<ScheduleSlotUi> {
         if (schedule.rules.isEmpty()) return emptyList()
-        val zone = runCatching { ZoneId.of(schedule.timezone) }
-            .getOrElse {
-                Logger.w("HomeViewModel") { "invalid timezone ${schedule.timezone}, fallback" }
-                ZoneId.systemDefault()
-            }
-        val nowMinutes = LocalTime.ofInstant(Instant.ofEpochMilli(nowMillis), zone)
-            .toSecondOfDay() / 60
+        val nowMinutes = minutesOfDay(nowMillis, zone)
         return schedule.rules
             .sortedBy { it.startMinutes() }
             .map { rule ->
@@ -101,7 +111,11 @@ class HomeViewModel @Inject constructor(
                     timeRange = "${rule.start} – ${rule.end}",
                     label = if (isLocked) "休息" else "可用",
                     isLocked = isLocked,
-                    isCurrent = isCurrentSlot(rule, nowMinutes)
+                    isCurrent = isCurrentSlot(rule, nowMinutes),
+                    // 供游标卡尺时间轴做几何定位：0..1440 分钟（跨零点由 crossesMidnight 标记）
+                    startMinutes = rule.startMinutes(),
+                    endMinutes = rule.endMinutes(),
+                    crossesMidnight = rule.crossesMidnight()
                 )
             }
     }
@@ -120,6 +134,10 @@ class HomeViewModel @Inject constructor(
         val time = LocalTime.ofInstant(Instant.ofEpochMilli(millis), zone)
         return "%02d:%02d".format(time.hour, time.minute)
     }
+
+    /** 当天已过的分钟数（0..1439），与 [formatNow] 用同一时区，保证读数与游标刻度一致 */
+    private fun minutesOfDay(millis: Long, zone: ZoneId): Int =
+        LocalTime.ofInstant(Instant.ofEpochMilli(millis), zone).toSecondOfDay() / 60
 
     private fun formatRelative(millis: Long): String {
         val diffMin = ((timeProvider.now() - millis) / 60_000L).coerceAtLeast(0)
@@ -145,6 +163,8 @@ data class HomeUiState(
     val quotaMinutes: Int = 0,
     val remainingMinutes: Int = 0,
     val nowLabel: String = "--:--",
+    /** 当前时刻的当天分钟数（0..1439），供时间轴游标定位；-1 表示未知 */
+    val nowMinutes: Int = -1,
     val scheduleItems: List<ScheduleSlotUi> = emptyList(),
     val recentBlocks: List<RecentBlockUi> = emptyList()
 )
@@ -153,7 +173,13 @@ data class ScheduleSlotUi(
     val timeRange: String,
     val label: String,
     val isLocked: Boolean,
-    val isCurrent: Boolean
+    val isCurrent: Boolean,
+    /** 起始分钟（0..1440），供时间轴定位 */
+    val startMinutes: Int = 0,
+    /** 结束分钟（0..1440）；跨零点时小于 [startMinutes] */
+    val endMinutes: Int = 0,
+    /** 是否跨零点（用于时间轴把它拆成两段画） */
+    val crossesMidnight: Boolean = false
 )
 
 data class RecentBlockUi(

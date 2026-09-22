@@ -12,7 +12,10 @@ import com.padguard.core.transport.http.BindRequest
 import com.padguard.core.transport.http.HeartbeatAck
 import com.padguard.core.transport.http.LogUploadResponse
 import com.padguard.core.transport.http.PolicyFetchResult
+import com.padguard.core.transport.http.AppInventoryItem
+import com.padguard.core.transport.http.AppSyncAck
 import com.padguard.core.transport.http.ScreenshotAck
+import com.padguard.core.transport.http.MediaAck
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -88,6 +91,26 @@ interface RemoteDataSource {
         triggerType: String,
         jpeg: ByteArray
     ): ApiResult<ScreenshotAck>
+
+    /**
+     * 上报媒体文件（录音/录屏），服务端关联到媒体任务。
+     * 用 [java.io.File] 而非 ByteArray：录屏文件动辄几十 MB，
+     * 整体读进内存会直接 OOM，走流式 RequestBody 才稳。
+     */
+    suspend fun uploadMedia(
+        taskId: String,
+        durationSeconds: Int,
+        mimeType: String,
+        file: java.io.File
+    ): ApiResult<MediaAck>
+
+    /**
+     * 全量上报已安装应用台账（应用监控 / 远程运维的数据源）。
+     *
+     * 必须是"全量"而非增量：服务端以"本次上报里没出现 = 已卸载"来判定卸载，
+     * 增量上报无法区分"没出现"和"没变化"，会让台账永久残留已卸载的应用。
+     */
+    suspend fun uploadApps(deviceId: String, apps: List<AppInventoryItem>): ApiResult<AppSyncAck>
 
     /** 轮询降级通道主动拉取指令；MQTT 模式下不应调用 */
     suspend fun pullCommands(since: Long): ApiResult<List<Command>>

@@ -138,10 +138,16 @@ class SecurityEnforcer @Inject constructor(
             "security.disallowFactoryReset",
             admin.setUserRestriction(UserManager.DISALLOW_FACTORY_RESET, true)
         )
-        report.record(
-            "security.disallowDebugging",
-            admin.setUserRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, true)
-        )
+        if (admin.isDebuggableBuild) {
+            // debug 构建豁免：DO 设置 DISALLOW_DEBUGGING_FEATURES 时，UserRestrictions 特殊处理
+            // 会联动把 Settings.Global.ADB_ENABLED 写成 0，直接掐断 adb，开发设备无法救援。
+            report.note("security.disallowDebugging=debug 构建跳过（避免锁死 adb）")
+        } else {
+            report.record(
+                "security.disallowDebugging",
+                admin.setUserRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, true)
+            )
+        }
         report.record(
             "security.disallowSafeBoot",
             admin.setUserRestriction(UserManager.DISALLOW_SAFE_BOOT, true)

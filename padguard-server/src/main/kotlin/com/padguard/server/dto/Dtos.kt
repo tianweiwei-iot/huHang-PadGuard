@@ -28,6 +28,13 @@ data class DeviceDto(
 data class LockRequest(val reason: String? = null)
 data class ModeRequest(val mode: String)
 
+/** 限时解锁：durationMinutes 到点后自动恢复管控；packageName 留空表示整机放行 */
+data class TempUnlockRequest(
+    val durationMinutes: Int = 30,
+    val packageName: String? = null,
+    val reason: String? = null
+)
+
 data class CommandDto(
     val msgId: String, val type: String, val status: String,
     val payload: Map<String, Any?>?, val createdAt: Long, val executedAt: Long?

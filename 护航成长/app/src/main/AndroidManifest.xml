@@ -39,6 +39,23 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
+    <!--
+      应用台账采集：Android 11+ 的包可见性限制会让 getInstalledPackages() 默认只返回
+      极少数系统包，应用监控将直接失效。家长管控属于 QUERY_ALL_PACKAGES 的合规用途
+      （设备管理与家长监护），上架时需在 Play 控制台声明该用途。
+      同时用 <queries> 声明"带桌面启动入口的应用"，即使权限被裁剪也能拿到主要清单。
+    -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <!-- 开机 / 覆盖安装后自启守护服务 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
@@ -46,6 +63,25 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+
+    <!-- 应用内静默安装/卸载：PackageInstaller 会话提交与结果回调都走这里 -->
+    <uses-permission android:name="android.permission.INSTALL_PACKAGES"
+        tools:ignore="ReservedSystemPermission" />
+    <uses-permission android:name="android.permission.DELETE_PACKAGES"
+        tools:ignore="ReservedSystemPermission" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!--
+      全局水印是悬浮窗覆盖层，必须有 SYSTEM_ALERT_WINDOW。
+      注意：该权限不会随安装自动授予，需用户在系统设置中手动打开
+      （WatermarkOverlay.isSupported() 会检测，未授权时水印静默降级并如实上报）。
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!-- Android 13+ 通知运行时权限 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -64,6 +100,7 @@
         android:allowBackup="false"
         android:label="@string/app_name"
         android:theme="@style/Theme.PadGuard"
+        android:usesCleartextTraffic="true"
         android:supportsRtl="true">
 
         <!-- 入口：设备绑定 / 状态查看 -->
@@ -124,6 +161,30 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="device management / parental-control guard service" />
         </service>
+
+        <!--
+          屏幕采集（截屏 / 录屏 / 录音）：
+          API 29+ 起 MediaProjection 必须在带 mediaProjection 类型的前台服务里使用，
+          否则 createVirtualDisplay 直接抛 SecurityException。
+          录音额外需要 microphone 类型，故一并声明。
+        -->
+        <service
+            android:name=".capture.ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection|microphone" />
+
+        <!-- 采集授权过渡页：无界面（透明），仅用于承接 MediaProjection 授权结果 -->
+        <activity
+            android:name=".capture.CapturePermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- 静默安装 / 卸载结果回调 -->
+        <receiver
+            android:name=".maintain.InstallResultReceiver"
+            android:exported="false" />
 
         <!-- 设备管理器 / Device Owner 锚点 -->
         <receiver

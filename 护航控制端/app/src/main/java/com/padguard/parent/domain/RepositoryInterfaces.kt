@@ -141,6 +141,14 @@ interface MonitorRepository {
     /** 获取实时行为截图历史 */
     suspend fun getScreenshotHistory(deviceId: String, limit: Int = 20): Result<List<ScreenshotData>>
 
+    /**
+     * 下载截图原图。
+     *
+     * [imageUrl] 为服务端返回的路径（如 /v1/files/{id}，可为绝对 URL），
+     * 返回原始 JPEG 字节，由调用方决定渲染或落相册。
+     */
+    suspend fun downloadImage(imageUrl: String): Result<ByteArray>
+
     /** 远程拍照 */
     suspend fun takePhoto(deviceId: String): Result<String>  // 返回图片URL
 
@@ -270,6 +278,22 @@ interface PolicyRepository {
     /** 设置护眼参数 */
     suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit>
 
+    // === 解锁 / 解锁申请闭环 ===
+    /** 一键解锁：解除远程锁屏、时段锁与限额锁 */
+    suspend fun unlock(deviceId: String): Result<Unit>
+
+    /** 限时解锁：durationMinutes 到点后自动恢复管控 */
+    suspend fun tempUnlock(deviceId: String, durationMinutes: Int): Result<Unit>
+
+    /** 孩子端提交上来的待处理解锁申请 */
+    suspend fun getUnlockTickets(deviceId: String): Result<List<UnlockTicket>>
+
+    /** 同意申请（按申请时长放行） */
+    suspend fun approveUnlockTicket(deviceId: String, ticketId: String, durationMinutes: Int?): Result<Unit>
+
+    /** 忽略申请：关闭工单，不下发任何消息给孩子 */
+    suspend fun ignoreUnlockTicket(deviceId: String, ticketId: String): Result<Unit>
+
     // === 模式切换 ===
     /** 切换管控模式 */
     suspend fun setControlMode(deviceId: String, mode: ControlMode): Result<Unit>
@@ -351,6 +375,28 @@ data class DailyViolation(
     val date: String,
     val count: Int
 )
+
+/**
+ * 孩子端提交的临时解锁申请（服务端工单）。
+ *
+ * 闭环：孩子端锁屏页填理由 → 上行日志 → 服务端建工单 → 管控端展示 →
+ * 家长「去处理」进入管控策略页解锁/改时长，或「忽略」关闭工单。
+ */
+data class UnlockTicket(
+    val id: String,
+    val deviceId: String,
+    val packageName: String? = null,
+    val appLabel: String? = null,
+    val durationMinutes: Int? = null,
+    val reason: String? = null,
+    val status: String = "PENDING",
+    val createdAt: Long = 0L
+) {
+    val isPending: Boolean get() = status == "PENDING"
+
+    /** 展示标题：单应用申请显示应用名，整机申请显示「整台设备」 */
+    val targetLabel: String get() = appLabel?.takeIf { it.isNotBlank() } ?: "整台设备"
+}
 
 /**
  * 风险预警仓库接口

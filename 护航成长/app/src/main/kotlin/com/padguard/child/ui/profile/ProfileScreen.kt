@@ -25,6 +25,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.child.ui.components.GlyphKind
+import com.padguard.child.ui.settings.ServerConfigDialog
 
 /**
  * "我的"页。
@@ -49,13 +53,36 @@ fun ProfileScreen(
     viewModel: ProfileViewModel = hiltViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    ProfileContent(state = state, onPermissionGuide = onPermissionGuide)
+    val serverUrl by viewModel.serverUrl.collectAsState()
+    var showServerDialog by remember { mutableStateOf(false) }
+    var serverInput by remember { mutableStateOf("") }
+
+    ProfileContent(
+        state = state,
+        onPermissionGuide = onPermissionGuide,
+        onSetServer = {
+            serverInput = serverUrl
+            showServerDialog = true
+        }
+    )
+
+    if (showServerDialog) {
+        ServerConfigDialog(
+            initial = serverInput,
+            onDismiss = { showServerDialog = false },
+            onSave = { url ->
+                viewModel.setServerUrl(url)
+                showServerDialog = false
+            }
+        )
+    }
 }
 
 @Composable
 private fun ProfileContent(
     state: ProfileUiState,
-    onPermissionGuide: (String) -> Unit
+    onPermissionGuide: (String) -> Unit,
+    onSetServer: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -100,7 +127,7 @@ private fun ProfileContent(
                 )
             }
             item {
-                MoreCard()
+                MoreCard(onSetServer = onSetServer)
             }
         }
     }
@@ -256,9 +283,11 @@ private fun StatusPill(active: Boolean) {
 }
 
 @Composable
-private fun MoreCard() {
+private fun MoreCard(onSetServer: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column {
+            SimpleRow(title = "⚙ 高级设置", subtitle = "服务器地址 / 端口等（连不上管控端时修改）", onClick = onSetServer)
+            HorizontalDivider()
             SimpleRow(title = "应用管理", subtitle = "查看本机已安装应用与受限情况")
             HorizontalDivider()
             SimpleRow(title = "帮助与反馈", subtitle = "常见问题 + 提交反馈")
@@ -268,12 +297,16 @@ private fun MoreCard() {
     }
 }
 
+/**
+ * 服务器地址设置弹窗已统一迁移到 [com.padguard.child.ui.settings.ServerConfigDialog]，
+ * 「我的 → 更多 → 高级设置」与绑定欢迎页共用，避免重复实现。
+ */
 @Composable
-private fun SimpleRow(title: String, subtitle: String) {
+private fun SimpleRow(title: String, subtitle: String, onClick: () -> Unit = {}) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { /* TODO: P1 跳转 */ }
+            .clickable(onClick = onClick)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)

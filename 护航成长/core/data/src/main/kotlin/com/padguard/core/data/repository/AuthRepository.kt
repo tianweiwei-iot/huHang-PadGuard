@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.padguard.core.data.di.AuthDataStore
@@ -38,6 +39,15 @@ class AuthRepository @Inject constructor(
         val STUDENT_NAME = stringPreferencesKey("student_name")
         val TENANT_ID = stringPreferencesKey("tenant_id")
         val AGREEMENT_VERSION = stringPreferencesKey("agreement_version")
+
+        // === 被管控端登录态（复用家长家庭账号） ===
+        val CHILD_PHONE = stringPreferencesKey("child_phone")
+        val CHILD_TOKEN = stringPreferencesKey("child_token")
+        val CHILD_USER_ID = stringPreferencesKey("child_user_id")
+        val CHILD_LOGGED_IN = booleanPreferencesKey("child_logged_in")
+
+        // === 权限引导完成态（初次打开一次性授予，后续登录不再重复） ===
+        val PERMISSIONS_DONE = booleanPreferencesKey("permissions_done")
     }
 
     /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
@@ -53,6 +63,22 @@ class AuthRepository @Inject constructor(
     /** 是否已同意当前版本协议 —— 入口门禁据此决定是否弹授权弹窗。 */
     val isAgreementAccepted: Flow<Boolean> =
         agreementVersion.map { it == CURRENT_AGREEMENT_VERSION }
+
+    /** 被管控端是否已用家庭账号登录（驱动入口分流：未登录→登录页）。 */
+    val isChildLoggedIn: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.CHILD_LOGGED_IN] == true }
+
+    /** 权限引导是否已完成（初次打开一次性授予，后续登录不再重复）。 */
+    val isPermissionsDone: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.PERMISSIONS_DONE] == true }
+
+    /** 已登录的家庭账号手机号（仅用于展示）。 */
+    val childPhone: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.CHILD_PHONE].orEmpty() }
+
+    /** 已登录的家庭账号用户ID。 */
+    val childUserId: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.CHILD_USER_ID].orEmpty() }
 
     val studentName: Flow<String> = store.data.catch { emit(emptyPreferences()) }
         .map { it[Keys.STUDENT_NAME].orEmpty() }
@@ -108,6 +134,35 @@ class AuthRepository @Inject constructor(
     /** 持久化已同意的协议版本（同意授权后由 [PermissionGranter] 调用）。 */
     suspend fun saveAgreement(version: String = CURRENT_AGREEMENT_VERSION) {
         store.edit { it[Keys.AGREEMENT_VERSION] = version }
+    }
+
+    /** 保存家庭账号登录态（账号/令牌/用户ID），置 [Keys.CHILD_LOGGED_IN]=true。 */
+    suspend fun saveChildLogin(phone: String, token: String, userId: String) {
+        store.edit {
+            it[Keys.CHILD_PHONE] = phone
+            it[Keys.CHILD_TOKEN] = token
+            it[Keys.CHILD_USER_ID] = userId
+            it[Keys.CHILD_LOGGED_IN] = true
+        }
+    }
+
+    /** 标记权限引导已完成，后续登录不再重复申请。 */
+    suspend fun savePermissionsDone() {
+        store.edit { it[Keys.PERMISSIONS_DONE] = true }
+    }
+
+    /**
+     * 退出家庭账号登录。
+     * 仅清登录态，保留已绑定设备与权限完成态——下次进入直接登录即可，
+     * 不再重复走权限引导（[isPermissionsDone] 独立持久化）。
+     */
+    suspend fun childLogout() {
+        store.edit {
+            it.remove(Keys.CHILD_PHONE)
+            it.remove(Keys.CHILD_TOKEN)
+            it.remove(Keys.CHILD_USER_ID)
+            it[Keys.CHILD_LOGGED_IN] = false
+        }
     }
 
     /**

@@ -27,6 +27,12 @@ interface PolicyRepository : JpaRepository<Policy, String> {
 interface CommandRepository : JpaRepository<Command, String> {
     fun findByMsgId(msgId: String): Command?
     fun findByDeviceIdOrderByCreatedAtDesc(deviceId: String): List<Command>
+
+    /**
+     * 轮询下发专用：按创建时间**升序**（FIFO）。
+     * 降级轮询通道必须保证先到先执行，避免用 Desc 查询时旧指令被新指令挤出批次上限。
+     */
+    fun findByDeviceIdOrderByCreatedAtAsc(deviceId: String): List<Command>
 }
 
 @Repository

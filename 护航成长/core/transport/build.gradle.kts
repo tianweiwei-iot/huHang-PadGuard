@@ -23,9 +23,10 @@ android {
 
     buildTypes {
         debug {
-            buildConfigField("boolean", "USE_MOCK_SERVER", "true")
-            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://10.0.2.2:8080/api/v1/\"")
-            buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://10.0.2.2:1883\"")
+            // 本地真机联调：关闭 Mock，直连局域网真实服务端
+            buildConfigField("boolean", "USE_MOCK_SERVER", "false")
+            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://192.168.1.10:8090/api/v1/\"")
+            buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://192.168.1.10:1883\"")
         }
     }
 

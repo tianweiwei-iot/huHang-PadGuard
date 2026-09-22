@@ -14,7 +14,10 @@ import jakarta.annotation.PostConstruct
 import org.eclipse.paho.mqttv5.client.IMqttToken
 import org.eclipse.paho.mqttv5.client.MqttCallback
 import org.eclipse.paho.mqttv5.client.MqttClient
-import org.eclipse.paho.mqttv5.client.MqttMessage
+import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse
+import org.eclipse.paho.mqttv5.common.MqttException
+import org.eclipse.paho.mqttv5.common.MqttMessage
+import org.eclipse.paho.mqttv5.common.packet.MqttProperties
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import java.nio.charset.StandardCharsets
@@ -23,7 +26,7 @@ import java.util.UUID
 /** 接收被管控端上行：ack / heartbeat / event / status，并回写状态、推 WS */
 @Component
 class ChildUplinkHandler(
-    private val mqttClient: MqttClient,
+    private val mqttClient: MqttClient?,
     private val objectMapper: ObjectMapper,
     private val commandRepository: CommandRepository,
     private val deviceEventRepository: DeviceEventRepository,
@@ -36,11 +39,15 @@ class ChildUplinkHandler(
 
     @PostConstruct
     fun subscribe() {
-        mqttClient.setCallback(this)
-        mqttClient.subscribe("pg/v1/+/up/+/ack", 1)
-        mqttClient.subscribe("pg/v1/+/up/+/heartbeat", 1)
-        mqttClient.subscribe("pg/v1/+/up/+/event", 1)
-        mqttClient.subscribe("pg/v1/+/up/+/status", 1)
+        val client = mqttClient ?: run {
+            log.info("MQTT disabled (padguard.mqtt.enabled=false): uplink subscriber skipped")
+            return
+        }
+        client.setCallback(this)
+        client.subscribe("pg/v1/+/up/+/ack", 1)
+        client.subscribe("pg/v1/+/up/+/heartbeat", 1)
+        client.subscribe("pg/v1/+/up/+/event", 1)
+        client.subscribe("pg/v1/+/up/+/status", 1)
         log.info("ChildUplinkHandler subscribed to uplink topics")
     }
 
@@ -60,7 +67,8 @@ class ChildUplinkHandler(
         }
     }
 
-    private fun handleAck(deviceId: String, json: String) {
+    /** 处理指令回执：可由 MQTT 上行或 HTTP 降级端点复用 */
+    fun handleAck(deviceId: String, json: String) {
         val ack = objectMapper.readValue(json, AckPacket::class.java)
         val cmd = commandRepository.findByMsgId(ack.msgId) ?: return
         cmd.status = ack.status
@@ -109,9 +117,15 @@ class ChildUplinkHandler(
         }
     }
 
-    override fun connectionLost(cause: Throwable?) {
-        log.warn("MQTT connection lost: ${cause?.message}")
+    override fun disconnected(disconnectResponse: MqttDisconnectResponse?) {
+        log.warn("MQTT disconnected: ${disconnectResponse?.reasonString}")
     }
+
+    override fun mqttErrorOccurred(exception: MqttException?) {
+        log.warn("MQTT error occurred: ${exception?.message}")
+    }
+
+    override fun authPacketArrived(reasonCode: Int, properties: MqttProperties?) {}
 
     override fun deliveryComplete(token: IMqttToken?) {}
 

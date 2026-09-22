@@ -147,7 +147,32 @@ class DeviceSetting(
     @Column(name = "smart_shutdown_start") var smartShutdownStart: String? = null,
     @Column(name = "smart_shutdown_end") var smartShutdownEnd: String? = null,
     @Column(name = "daily_limit_minutes") var dailyLimitMinutes: Int = 120,
-    @Column(name = "web_blocked_urls", columnDefinition = "text") var webBlockedUrls: String? = null
+    @Column(name = "web_blocked_urls", columnDefinition = "text") var webBlockedUrls: String? = null,
+    // ---- 平板使用时间设置（家长端「时间管控」页，GET/PUT policies/{deviceId}/tablet-usage-settings）----
+    // 可空 + null 视为默认值：存量行（迁移前创建）这些列为 NULL，读取时由服务层兜底
+    @Column(name = "weekday_limit_minutes") var weekdayLimitMinutes: Int? = 120,
+    @Column(name = "weekend_limit_minutes") var weekendLimitMinutes: Int? = 180,
+    @Column(name = "rest_after_minutes") var restAfterMinutes: Int? = 60,
+    @Column(name = "rest_duration_minutes") var restDurationMinutes: Int? = 15,
+    @Column(name = "time_up_message", columnDefinition = "text") var timeUpMessage: String? = null,
+    /** 可用时间段 JSON：[{"startTime":"08:00","endTime":"18:00"}]，null 表示未设置 */
+    @Column(name = "enabled_time_ranges", columnDefinition = "text") var enabledTimeRangesJson: String? = null,
+    /**
+     * 救援通道：临时解除「系统设置锁定」中的调试与侧载限制。
+     *
+     * ## 为什么必须有这个开关
+     * 被管控平板一旦按默认策略封死 DISALLOW_DEBUGGING_FEATURES + ADB_ENABLED=0 +
+     * DISALLOW_INSTALL_UNKNOWN_SOURCES，就再也无法侧载新版 APK，也无法用 adb 救援 ——
+     * 而"解除限制"这件事本身又只能由已安装的孩子端（Device Owner）执行，
+     * 于是形成死锁：要升级必须先升级。此开关把解除动作做成服务端可下发指令，
+     * 由孩子端下一次拉取策略时自行解封，从而打破死锁。
+     *
+     * 默认 false（保持最严管控）；仅在需要远程升级/救援时由家长端打开，事后应关闭。
+     */
+    // 可空 Boolean?：存量行在加列前不存在该列，Hibernate 把缺失列读成 NULL，
+    // 声明成原始类型 boolean 会在读取时直接抛
+    // "Null value was assigned to a property of primitive type" —— 整个策略接口 500。
+    @Column(name = "system_lock_relaxed") var systemLockRelaxed: Boolean? = false
 )
 
 @Entity
@@ -159,6 +184,40 @@ class PolicyTemplate(
     @Column(name = "scene_type") var sceneType: String = "",
     var category: String? = null,
     @Column(name = "package_json", columnDefinition = "text") var packageJson: String? = null
+)
+
+/**
+ * 设备已安装应用台账（远程运维 / 应用监控的数据底座）。
+ *
+ * 为什么需要一张独立的表，而不是每次让管控端实时去设备拉：
+ * 1. 实时拉要下发指令并等设备回包，列表页打开要转好几秒，且设备离线时什么都看不到；
+ * 2. 历史"装过什么、什么时候装的"本身就是有价值的审计信息，
+ *    孩子自己卸掉的违规应用，家长应当仍能在台账里看见痕迹。
+ *
+ * 台账由孩子端周期性全量上报（幂等 upsert），[lastSeenAt] 用于判断"本次是否还在"，
+ * 已卸载的应用保留记录但置 [installed=false]，不物理删除。
+ */
+@Entity
+@Table(
+    name = "installed_apps",
+    uniqueConstraints = [UniqueConstraint(columnNames = ["device_id", "package_name"])]
+)
+class InstalledApp(
+    @Id var id: String = "",
+    @Column(name = "device_id") var deviceId: String = "",
+    @Column(name = "package_name") var packageName: String = "",
+    @Column(name = "app_name") var appName: String? = null,
+    @Column(name = "version_name") var versionName: String? = null,
+    @Column(name = "version_code") var versionCode: Long? = null,
+    @Column(name = "is_system") var isSystem: Boolean = false,
+    /** 当前是否仍处于安装状态（上报中缺失即置 false，不物理删除，保留审计痕迹） */
+    var installed: Boolean = true,
+    /** 是否被管控端挂起（DO 的 setPackagesSuspended，不是卸载） */
+    var suspended: Boolean = false,
+    @Column(name = "install_time") var installTime: Long? = null,
+    @Column(name = "update_time") var updateTime: Long? = null,
+    @Column(name = "first_seen_at") var firstSeenAt: Long = 0,
+    @Column(name = "last_seen_at") var lastSeenAt: Long = 0
 )
 
 @Entity

@@ -8,6 +8,7 @@ data class DeviceGroupDto(
 )
 data class CreateGroupRequest(val name: String, val sceneType: String)
 data class AssignGroupRequest(val groupId: String)
+data class RenameDeviceRequest(val name: String)
 
 // ============ 监控 / 媒体 ============
 data class ScreenshotDto(
@@ -23,6 +24,16 @@ data class TaskAcceptedDto(
 data class MediaResultDto(
     val url: String, val mimeType: String, val size: Long, val durationSeconds: Int? = null
 )
+
+/**
+ * 截图 / 媒体文件上传回执。
+ *
+ * 与孩子端 `ScreenshotAck` / `MediaAck` 严格对齐：`accepted` 是「服务端是否已接收」的布尔标志。
+ * 注意：它和日志 / 定位上报里的 `accepted`（表示"接收条数"的整数）语义不同，
+ * 切勿复用 —— 早期用 `Map` 返回 `accepted=1` 曾导致孩子端 JSON 解析失败（Boolean 位置收到整数）。
+ * 这里用强类型 DTO 固化契约，让字段类型在编译期就对不上会直接报错。
+ */
+data class UploadAckDto(val accepted: Boolean, val url: String)
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class StartRecordRequest(val resolution: String = "HD_720P", val withAudio: Boolean = true)
 data class ScreenRecordTaskDto(
@@ -103,6 +114,29 @@ data class PolicyTemplateDto(
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class ApplyTemplateRequest(val templateId: String)
 
+/** 可用时间段（HH:mm 24 小时制），与家长端 TimeRangeDto 对齐 */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class TimeRangeDto(val startTime: String, val endTime: String)
+
+/**
+ * 平板使用时间设置（家长端「时间管控」页）。
+ * 字段与家长端 TabletUsageSettingsDto 一一对应；syncToDevice 为 true 时立即重建并下发策略包。
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class TabletUsageSettingsDto(
+    val deviceId: String = "",
+    val enabledTimeRanges: List<TimeRangeDto>? = null,
+    val weekdayLimitMinutes: Int = 120,
+    val weekendLimitMinutes: Int = 180,
+    val restAfterMinutes: Int = 60,
+    val restDurationMinutes: Int = 15,
+    val timeUpMessage: String = "",
+    val syncToDevice: Boolean = false
+)
+
+/** 救援通道开关请求：解除被管控平板的调试 / 侧载限制，用于远程升级或 adb 救援。 */
+data class SystemLockRelaxedRequest(val relaxed: Boolean = false)
+
 // ============ 统计 ============
 data class AppUsageDto(
     val packageName: String, val appName: String, val usageMinutes: Int, val iconUrl: String? = null
@@ -147,3 +181,50 @@ data class UnlockTicketDto(
 data class UnlockApproveRequest(val durationMinutes: Int? = null, val packageName: String? = null)
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class UnlockRejectRequest(val reason: String? = null)
+
+// ============ 应用监控 / 远程安装维护 ============
+/** 孩子端上报的单条应用信息 */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class AppInventoryItem(
+    val packageName: String,
+    val appName: String? = null,
+    val versionName: String? = null,
+    val versionCode: Long? = null,
+    val isSystem: Boolean? = null,
+    val installTime: Long? = null,
+    val updateTime: Long? = null
+)
+
+/** 孩子端全量应用台账上报 */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class AppInventoryRequest(val apps: List<AppInventoryItem> = emptyList())
+
+/** 家长端看到的已安装应用（已合并本地应用策略） */
+data class InstalledAppDto(
+    val packageName: String,
+    val appName: String? = null,
+    val versionName: String? = null,
+    val versionCode: Long? = null,
+    val isSystem: Boolean = false,
+    val installed: Boolean = true,
+    val suspended: Boolean = false,
+    val installTime: Long? = null,
+    val updateTime: Long? = null,
+    val lastSeenAt: Long = 0,
+    val blocked: Boolean = false,
+    val dailyLimitMinutes: Int? = null
+)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class AppInstallRequest(
+    val apkUrl: String,
+    val packageName: String,
+    val versionCode: Long? = null,
+    val appName: String? = null
+)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class SuspendRequest(val packageName: String, val suspended: Boolean = true)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class BatchSuspendRequest(val packages: List<String> = emptyList(), val suspended: Boolean = true)

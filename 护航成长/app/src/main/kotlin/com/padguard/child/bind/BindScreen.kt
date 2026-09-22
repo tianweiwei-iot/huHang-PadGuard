@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -26,6 +27,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -34,6 +38,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.padguard.child.ui.settings.ServerConfigDialog
 
 /**
  * 绑定流程 UI（说明书 §4.2 / §4.3）。
@@ -52,6 +57,8 @@ fun BindScreen(
     viewModel: BindViewModel = hiltViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val serverUrl by viewModel.serverUrl.collectAsState()
+    var showAdvanced by remember { mutableStateOf(false) }
     LaunchedEffect(state.step) {
         if (state.step == BindStep.Success) onBound()
     }
@@ -67,12 +74,24 @@ fun BindScreen(
         onCodeChanged = viewModel::onCodeChanged,
         onSubmit = viewModel::submit,
         onRetry = viewModel::retry,
-        onStartBinding = viewModel::startBindingWithDefaultCode,
+        onInputCode = viewModel::goToInputCode,
         onBackToInput = viewModel::backToInput,
         onBackToWelcome = viewModel::backToWelcome,
         onScanQr = onScanQr,
-        onStartNfc = onStartNfc
+        onStartNfc = onStartNfc,
+        onAdvancedSettings = { showAdvanced = true }
     )
+
+    if (showAdvanced) {
+        ServerConfigDialog(
+            initial = serverUrl,
+            onDismiss = { showAdvanced = false },
+            onSave = { url ->
+                viewModel.setServerUrl(url)
+                showAdvanced = false
+            }
+        )
+    }
 }
 
 @Composable
@@ -81,11 +100,12 @@ private fun BindContent(
     onCodeChanged: (String) -> Unit,
     onSubmit: () -> Unit,
     onRetry: () -> Unit,
-    onStartBinding: () -> Unit,
+    onInputCode: () -> Unit,
     onBackToInput: () -> Unit,
     onBackToWelcome: () -> Unit,
     onScanQr: () -> Unit,
-    onStartNfc: () -> Unit
+    onStartNfc: () -> Unit,
+    onAdvancedSettings: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -114,8 +134,9 @@ private fun BindContent(
             when (state.step) {
                 BindStep.Welcome -> MethodChoiceStep(
                     onScanQr = onScanQr,
-                    onInputCode = onStartBinding,
-                    onNfc = onStartNfc
+                    onInputCode = onInputCode,
+                    onNfc = onStartNfc,
+                    onAdvancedSettings = onAdvancedSettings
                 )
                 BindStep.InputCode -> InputCodeStep(
                     code = state.code,
@@ -157,7 +178,8 @@ private fun BindContent(
 private fun MethodChoiceStep(
     onScanQr: () -> Unit,
     onInputCode: () -> Unit,
-    onNfc: () -> Unit
+    onNfc: () -> Unit,
+    onAdvancedSettings: () -> Unit
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -193,9 +215,18 @@ private fun MethodChoiceStep(
             onClick = onNfc
         )
 
-        // 演示期提示：让用户看到当前一键绑定用的固定码，避免「到底绑成没」来回切页确认
+        // 高级设置：绑定前即可设置服务器地址 / 端口（连不上管控端时改为 USB 直连电脑的地址）
+        OutlinedButton(
+            onClick = onAdvancedSettings,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text("⚙ 高级设置（服务器地址 / 端口）", style = MaterialTheme.typography.titleSmall)
+        }
+
+        // 演示期提示：绑定码在家长端「添加设备」页生成，10 分钟内有效
         Text(
-            text = "（演示绑定码：${BindViewModel.DEFAULT_TEST_BIND_CODE}）",
+            text = "绑定码在家长端「添加设备」页生成，10 分钟内有效",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
             textAlign = TextAlign.Center

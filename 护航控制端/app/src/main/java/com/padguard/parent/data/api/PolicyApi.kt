@@ -97,6 +97,37 @@ interface PolicyApi {
         @Body request: ModeChangeRequest
     ): Response<ApiResponse<Unit>>
 
+    // === 解锁 / 解锁申请 ===
+    @POST("policies/{deviceId}/unlock")
+    suspend fun unlock(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<Unit>>
+
+    @POST("policies/{deviceId}/temp-unlock")
+    suspend fun tempUnlock(
+        @Path("deviceId") deviceId: String,
+        @Body request: TempUnlockRequest
+    ): Response<ApiResponse<Unit>>
+
+    @GET("devices/{deviceId}/unlock-tickets")
+    suspend fun getUnlockTickets(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<List<UnlockTicketDto>>>
+
+    @POST("devices/{deviceId}/unlock-tickets/{ticketId}/approve")
+    suspend fun approveUnlockTicket(
+        @Path("deviceId") deviceId: String,
+        @Path("ticketId") ticketId: String,
+        @Body request: UnlockApproveRequest
+    ): Response<ApiResponse<Unit>>
+
+    @POST("devices/{deviceId}/unlock-tickets/{ticketId}/reject")
+    suspend fun rejectUnlockTicket(
+        @Path("deviceId") deviceId: String,
+        @Path("ticketId") ticketId: String,
+        @Body request: UnlockRejectRequest
+    ): Response<ApiResponse<Unit>>
+
     // === 策略模板 ===
     @GET("policies/templates")
     suspend fun getTemplates(

@@ -10,7 +10,10 @@ import org.eclipse.paho.mqttv5.client.IMqttToken
 import org.eclipse.paho.mqttv5.client.MqttCallback
 import org.eclipse.paho.mqttv5.client.MqttClient
 import org.eclipse.paho.mqttv5.client.MqttConnectionOptions
-import org.eclipse.paho.mqttv5.client.MqttMessage
+import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse
+import org.eclipse.paho.mqttv5.common.MqttException
+import org.eclipse.paho.mqttv5.common.MqttMessage
+import org.eclipse.paho.mqttv5.common.packet.MqttProperties
 import org.eclipse.paho.mqttv5.client.persist.MqttDefaultFilePersistence
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -46,9 +49,9 @@ class DevChildSimulator(
             MqttDefaultFilePersistence(System.getProperty("java.io.tmpdir") + "/padguard-sim-mqtt")
         )
         val opts = MqttConnectionOptions().apply {
-            cleanStart = true
+            setCleanStart(true)
             keepAliveInterval = 90
-            automaticReconnect = true
+            setAutomaticReconnect(true)
         }
         try {
             client!!.connect(opts)
@@ -86,9 +89,15 @@ class DevChildSimulator(
         }
     }
 
-    override fun connectionLost(cause: Throwable?) {
-        log.warn("Sim MQTT connection lost: ${cause?.message}")
+    override fun disconnected(disconnectResponse: MqttDisconnectResponse?) {
+        log.warn("Sim MQTT disconnected")
     }
+
+    override fun mqttErrorOccurred(exception: MqttException?) {
+        log.warn("Sim MQTT error occurred: ${exception?.message}")
+    }
+
+    override fun authPacketArrived(reasonCode: Int, properties: MqttProperties?) {}
 
     override fun deliveryComplete(token: IMqttToken?) {}
 

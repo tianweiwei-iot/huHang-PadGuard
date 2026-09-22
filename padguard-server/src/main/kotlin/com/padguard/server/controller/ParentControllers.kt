@@ -3,7 +3,9 @@ package com.padguard.server.controller
 import com.padguard.server.common.ApiResponse
 import com.padguard.server.dto.*
 import com.padguard.server.service.AuthService
+import com.padguard.server.service.CommandKey
 import com.padguard.server.service.CommandService
+import com.padguard.server.service.CommandType
 import com.padguard.server.service.DeviceService
 import com.padguard.server.service.GroupService
 import com.padguard.server.service.PolicyService
@@ -98,7 +100,51 @@ class PolicyController(
     ): ApiResponse<*> {
         deviceService.getDevice(userId, deviceId) // 校验设备归属
         return ApiResponse.ok(
-            commandService.issueCommand(deviceId, "LOCK_SCREEN", mapOf("reason" to req?.reason))
+            commandService.issueCommand(
+                deviceId, CommandType.LOCK_SCREEN, mapOf(CommandKey.REASON to req?.reason)
+            )
+        )
+    }
+
+    /**
+     * 一键解锁：解除远程锁屏 / 时段锁 / 限额锁。
+     *
+     * 之前服务端根本没有这个接口（只有"锁"没有"开"），家长端点解锁必然 404，
+     * 而锁屏指令一旦下发，设备在策略下次刷新前不会自行恢复 —— 等于单向闸门。
+     * 这里补上对称的解锁通道。
+     */
+    @PostMapping("/policies/{deviceId}/unlock")
+    fun unlock(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody(required = false) req: LockRequest?
+    ): ApiResponse<*> {
+        deviceService.getDevice(userId, deviceId)
+        return ApiResponse.ok(
+            commandService.issueCommand(
+                deviceId, CommandType.UNLOCK, mapOf(CommandKey.REASON to req?.reason)
+            )
+        )
+    }
+
+    /** 限时解锁：payload 中的 durationMinutes 到点后自动恢复管控 */
+    @PostMapping("/policies/{deviceId}/temp-unlock")
+    fun tempUnlock(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: TempUnlockRequest
+    ): ApiResponse<*> {
+        deviceService.getDevice(userId, deviceId)
+        val minutes = req.durationMinutes.takeIf { it > 0 } ?: 30
+        return ApiResponse.ok(
+            commandService.issueCommand(
+                deviceId, CommandType.TEMP_UNLOCK,
+                mapOf(
+                    CommandKey.DURATION_MINUTES to minutes,
+                    CommandKey.PACKAGE_NAME to (req.packageName ?: ""),
+                    CommandKey.REASON to req.reason
+                )
+            )
         )
     }
 

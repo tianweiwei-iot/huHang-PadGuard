@@ -10,6 +10,9 @@ import com.padguard.core.data.model.Heartbeat
 import com.padguard.core.data.model.LocationInfo
 import com.padguard.core.data.model.RiskEvent
 import com.padguard.core.data.model.policy.PolicyPackage
+import com.padguard.core.transport.http.AppInventoryItem
+import com.padguard.core.transport.http.AppInventoryRequest
+import com.padguard.core.transport.http.AppSyncAck
 import com.padguard.core.transport.http.AckUploadRequest
 import com.padguard.core.transport.http.ApiCaller
 import com.padguard.core.transport.http.ApiCode
@@ -21,6 +24,7 @@ import com.padguard.core.transport.http.HeartbeatAck
 import com.padguard.core.transport.http.LocationUploadRequest
 import com.padguard.core.transport.http.LogUploadRequest
 import com.padguard.core.transport.http.LogUploadResponse
+import com.padguard.core.transport.http.MediaAck
 import com.padguard.core.transport.http.PadGuardApi
 import com.padguard.core.transport.http.PolicyFetchResult
 import com.padguard.core.transport.http.ScreenshotAck
@@ -47,7 +51,9 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.ConcurrentLinkedQueue
 import javax.inject.Inject
@@ -281,6 +287,35 @@ class RealRemoteDataSource @Inject constructor(
                 file = filePart
             )
         }
+    }
+
+    override suspend fun uploadMedia(
+        taskId: String,
+        durationSeconds: Int,
+        mimeType: String,
+        file: java.io.File
+    ): ApiResult<MediaAck> {
+        val textType = "text/plain".toMediaType()
+        val body = file.asRequestBody(mimeType.toMediaTypeOrNull())
+        val filePart = MultipartBody.Part.createFormData("file", file.name, body)
+        return caller.call("media") {
+            api.uploadMedia(
+                taskId = taskId.toRequestBody(textType),
+                durationSeconds = durationSeconds.toString().toRequestBody(textType),
+                mimeType = mimeType.toRequestBody(textType),
+                file = filePart
+            )
+        }
+    }
+
+    override suspend fun uploadApps(
+        deviceId: String,
+        apps: List<AppInventoryItem>
+    ): ApiResult<AppSyncAck> {
+        // 空清单不上报：服务端会把"空清单"理解成"所有应用都被卸载了"，
+        // 那会让整个台账被误置为已卸载，是一次请求就能毁掉全部历史数据的操作。
+        if (apps.isEmpty()) return ApiResult.Success(AppSyncAck(), timeProvider.now())
+        return caller.call("apps") { api.uploadApps(AppInventoryRequest(apps)) }
     }
 
     override suspend fun pullCommands(since: Long): ApiResult<List<Command>> =

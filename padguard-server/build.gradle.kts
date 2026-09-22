@@ -17,6 +17,8 @@ dependencies {
     implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql")
     implementation("org.postgresql:postgresql")
+    // 本地免 Docker 运行（local profile）使用 H2 内存库
+    runtimeOnly("com.h2database:h2")
     implementation("org.springframework.security:spring-security-crypto:6.3.1")
 
     // JWT (parent auth) — jjwt 0.12.x

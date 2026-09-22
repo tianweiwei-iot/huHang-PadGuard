@@ -62,6 +62,7 @@ fun HomeScreen(
                     onNavigateToLocation: (String) -> Unit,
                     onNavigateToUsageDetail: (String) -> Unit = {},
     onNavigateToUsageSettings: (String) -> Unit = {},
+    onIgnoreUnlockTicket: (String) -> Unit = {},
     onRefresh: () -> Unit = {},
     onAddDevice: () -> Unit = {}
 ) {
@@ -103,6 +104,19 @@ fun HomeScreen(
                 // === 4. 离线告警置顶 ===
                 if (selectedDevice?.onlineStatus == DeviceOnlineStatus.OFFLINE) {
                     item { OfflineAlertBanner(deviceName = selectedDevice.name) }
+                }
+
+                // === 4.1 孩子端解锁申请：置顶，家长可忽略或去处理 ===
+                uiState.pendingUnlockTicket?.let { ticket ->
+                    item {
+                        UnlockRequestCard(
+                            ticket = ticket,
+                            deviceName = selectedDevice?.name.orEmpty(),
+                            onIgnore = onIgnoreUnlockTicket,
+                            onHandle = { if (deviceId.isNotEmpty()) onNavigateToControl(deviceId) },
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+                    }
                 }
 
                 // === 5. 今日平板使用情况环卡 + 应用记录 ===
@@ -270,6 +284,78 @@ private fun OfflineAlertBanner(deviceName: String) {
                 color = PadGuardColors.WarningRed,
                 style = MaterialTheme.typography.bodyMedium
             )
+        }
+    }
+}
+
+/**
+ * 孩子端解锁申请卡（首页置顶）。
+ *
+ * 孩子在锁屏页点了「申请解锁」并填了理由，这条申请会以工单形式上到这里。
+ * 家长两个选择：
+ * - **忽略**：关闭工单，设备保持锁定，不给孩子任何反馈（避免"闹就有用"的负向强化）；
+ * - **去处理**：跳转管控策略页，在那里一键解锁 / 限时解锁 / 调整每日可用时长。
+ *
+ * 之所以跳转到策略页而不是在这里直接放行：家长看到申请后的常见决策其实是
+ * "今天是不是该多给半小时"，这属于策略调整而不是一次性的放行操作，
+ * 放在策略页能一次性改完并立即生效。
+ */
+@Composable
+private fun UnlockRequestCard(
+    ticket: com.padguard.domain.repository.UnlockTicket,
+    deviceName: String,
+    onIgnore: (String) -> Unit,
+    onHandle: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = PadGuardColors.Amber.copy(alpha = 0.12f))
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.LockOpen,
+                    contentDescription = null,
+                    tint = PadGuardColors.Amber,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "$deviceName 申请解锁",
+                    color = PadGuardColors.Amber,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "申请对象：${ticket.targetLabel}" +
+                    (ticket.durationMinutes?.let { " · 期望 $it 分钟" } ?: ""),
+                style = MaterialTheme.typography.bodyMedium,
+                color = PadGuardColors.TextPrimary
+            )
+            if (!ticket.reason.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "理由：${ticket.reason}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = PadGuardColors.TextSecondary
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = { onIgnore(ticket.id) }) {
+                    Text("忽略", color = PadGuardColors.TextSecondary)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = onHandle,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = PadGuardColors.Amber)
+                ) { Text("去处理") }
+            }
         }
     }
 }

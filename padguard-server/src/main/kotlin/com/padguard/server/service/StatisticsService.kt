@@ -10,6 +10,7 @@ import com.padguard.server.repository.DeviceEventRepository
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UsageLogRepository
 import com.fasterxml.jackson.databind.ObjectMapper
+import org.springframework.data.domain.Pageable
 import org.springframework.stereotype.Service
 import java.time.Instant
 import java.time.LocalDate
@@ -48,7 +49,7 @@ class StatisticsService(
             val dayLogs = logs.filter { (it.timestamp ?: 0) in ds..de }
             DailyUsageDto(dayStr(d), sumMinutes(dayLogs), dayLogs.count { it.type == "APP_USAGE" })
         }
-        val alertCount = alertRepository.findByUserIdAndStatus(userId, "ACTIVE").count { it.deviceId == deviceId }
+        val alertCount = alertRepository.findByUserIdAndStatus(userId, "ACTIVE", Pageable.unpaged()).count { it.deviceId == deviceId }
         return StatisticsReportDto(
             deviceId = deviceId, period = period, startDate = dayStr(days - 1), endDate = todayStr(),
             totalUsageMinutes = sumMinutes(logs), dailyUsages = daily,

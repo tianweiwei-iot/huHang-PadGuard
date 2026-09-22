@@ -231,12 +231,16 @@ enum class CommandStatus {
  */
 data class ScreenshotData(
     val deviceId: String,
-    val imageBase64: String?,        // Base64 编码的截图
-    val thumbnailUrl: String?,       // 缩略图 URL
-    val capturedAt: Long,
+    val imageUrl: String?,           // 服务端图片路径（/v1/files/{id}），PENDING 时为 null
+    val thumbnailUrl: String?,       // 缩略图 URL（当前服务端未生成，可为 null）
+    val status: String?,             // PENDING / READY
+    val capturedAt: Long,            // 采集时间戳（毫秒），PENDING 时为 0
     val width: Int,
     val height: Int
-)
+) {
+    /** 是否已可展示（服务端已收到设备上传的截图） */
+    val isReady: Boolean get() = status == "READY" && imageUrl != null
+}
 
 /**
  * 告警信息

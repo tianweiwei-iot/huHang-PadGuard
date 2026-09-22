@@ -231,6 +231,29 @@ class ControlPolicyViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 一键解锁。
+     *
+     * 服务端此前只有"锁"没有"开"，锁屏一旦下发就只能等策略自然失效 —— 单向闸门。
+     * 这里补上对称的解锁通道，家长点了「去处理」才能真正放行。
+     */
+    fun unlockNow() {
+        viewModelScope.launch {
+            policyRepository.unlock(deviceId)
+                .onSuccess { _uiState.value = _uiState.value.copy(toast = "已解锁设备") }
+                .onFailure { _uiState.value = _uiState.value.copy(toast = "解锁失败：${it.message}") }
+        }
+    }
+
+    /** 限时放行：到点自动恢复管控，适合"再玩 30 分钟就收"这类场景 */
+    fun tempUnlock(minutes: Int) {
+        viewModelScope.launch {
+            policyRepository.tempUnlock(deviceId, minutes)
+                .onSuccess { _uiState.value = _uiState.value.copy(toast = "已限时放行 $minutes 分钟") }
+                .onFailure { _uiState.value = _uiState.value.copy(toast = "限时放行失败：${it.message}") }
+        }
+    }
+
     fun setEyeProtection(enabled: Boolean, level: Int) {
         viewModelScope.launch {
             policyRepository.setEyeProtection(deviceId, enabled, level)

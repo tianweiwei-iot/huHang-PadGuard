@@ -1,5 +1,7 @@
 package com.padguard.core.transport
 
+import android.app.Application
+import android.content.SharedPreferences
 import com.padguard.core.common.Logger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,9 +31,14 @@ enum class TransportMode {
  * 上线后同一能力用于灰度切换接入点，避免为改域名重新发包。
  */
 @Singleton
-class TransportSettings @Inject constructor() {
+class TransportSettings @Inject constructor(
+    private val application: Application
+) {
+    private val prefs: SharedPreferences =
+        application.getSharedPreferences("padguard_child_transport", android.content.Context.MODE_PRIVATE)
 
-    private val _baseUrl = MutableStateFlow(normalizeBaseUrl(BuildConfig.DEFAULT_BASE_URL))
+    private val _baseUrl =
+        MutableStateFlow(normalizeBaseUrl(prefs.getString(KEY_BASE_URL, null) ?: BuildConfig.DEFAULT_BASE_URL))
     val baseUrl: StateFlow<String> = _baseUrl.asStateFlow()
 
     private val _mqttBroker = MutableStateFlow(BuildConfig.DEFAULT_MQTT_BROKER)
@@ -60,8 +67,10 @@ class TransportSettings @Inject constructor() {
 
     fun setBaseUrl(url: String) {
         if (url.isBlank()) return
-        _baseUrl.value = normalizeBaseUrl(url)
-        Logger.i(TAG) { "baseUrl -> ${_baseUrl.value}" }
+        val normalized = normalizeBaseUrl(url)
+        _baseUrl.value = normalized
+        prefs.edit().putString(KEY_BASE_URL, normalized).apply()
+        Logger.i(TAG) { "baseUrl -> $normalized" }
     }
 
     fun setMqttBroker(uri: String) {
@@ -105,6 +114,8 @@ class TransportSettings @Inject constructor() {
 
     companion object {
         private const val TAG = "TransportSettings"
+
+        private const val KEY_BASE_URL = "base_url"
 
         const val DEFAULT_HEARTBEAT_SEC = 30
         const val DEFAULT_POLLING_SEC = 60
