@@ -24,11 +24,26 @@ import retrofit2.http.Query
 /** §5.11 孩子端自定义设备名请求体 */
 data class DeviceNameRequest(val name: String)
 
+/** §5.1b 账号密码绑定请求体：家长账号 + 设备信息（复用 [BindRequest] 避免字段漂移） */
+data class BindByAccountRequest(
+    val phone: String,
+    val password: String,
+    val req: BindRequest
+)
+
 interface PadGuardApi {
 
     /** §5.1 设备绑定。绑定接口本身不带 Authorization，由拦截器按路径跳过。 */
     @POST("device/bind")
     suspend fun bind(@Body body: BindRequest): Response<ApiEnvelope<BindResult>>
+
+    /**
+     * §5.1b 账号密码绑定（方式④）：直接输入家长端手机号 + 密码完成绑定，
+     * 用于不方便扫码、或配对码已过期 / 生成后未能及时使用的场景。
+     * 同样不带 Authorization。
+     */
+    @POST("device/bind-by-account")
+    suspend fun bindByAccount(@Body body: BindByAccountRequest): Response<ApiEnvelope<BindResult>>
 
     /** §5.2 时间同步 */
     @GET("device/time")

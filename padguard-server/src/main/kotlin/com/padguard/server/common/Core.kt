@@ -99,11 +99,17 @@ class GlobalExceptionHandler {
     @ExceptionHandler(BizException::class)
     fun handleBiz(e: BizException, response: HttpServletResponse): ResponseEntity<*>? {
         if (!resetIfPossible(response)) return null
-        // 鉴权失败必须落到 HTTP 401，不能只写在响应体里：
-        // 客户端的自动续期是靠 OkHttp Authenticator 拦截 401 触发的，
-        // 若这里回 200 + code=1002，续期逻辑永远不会执行，
-        // 结果就是 accessToken 过期后全端接口一直报「token 不合法」，只能重新登录。
-        val status = if (e.code == ParentErr.UNAUTHORIZED) HttpStatus.UNAUTHORIZED else HttpStatus.OK
+        // 鉴权失败必须落到对应的 HTTP 状态码，不能只写在响应体里：
+        // - 家长端：OkHttp Authenticator 只在 401 上触发自动续期；
+        // - 被管控端：HTTP 401/403 会被映射为 TOKEN_INVALID / DEVICE_UNBOUND 终态，
+        //   终端据此清空本地凭据回到绑定页。若这里回 200，终端会永远停在
+        //   "已绑定"的假象里（例如服务端换库后设备记录已不存在）。
+        val status = when {
+            e.audience == Audience.PARENT && e.code == ParentErr.UNAUTHORIZED -> HttpStatus.UNAUTHORIZED
+            e.audience == Audience.CHILD && e.code == ChildErr.TOKEN_INVALID -> HttpStatus.UNAUTHORIZED
+            e.audience == Audience.CHILD && e.code == ChildErr.DEVICE_UNBOUND -> HttpStatus.FORBIDDEN
+            else -> HttpStatus.OK
+        }
         return if (e.audience == Audience.CHILD) {
             ResponseEntity.status(status)
                 .contentType(MediaType.APPLICATION_JSON)

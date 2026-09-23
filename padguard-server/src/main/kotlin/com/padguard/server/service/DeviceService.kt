@@ -2,6 +2,7 @@ package com.padguard.server.service
 
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
+import com.padguard.server.common.ChildErr
 import com.padguard.server.common.HashUtil
 import com.padguard.server.common.ParentErr
 import com.padguard.server.domain.Device
@@ -11,6 +12,8 @@ import com.padguard.server.dto.DeviceDto
 import com.padguard.server.dto.HeartbeatDto
 import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.DeviceRepository
+import com.padguard.server.repository.UserRepository
+import com.padguard.server.security.Passwords
 import com.padguard.server.ws.WebSocketPushService
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -24,6 +27,7 @@ class DeviceService(
     private val policyService: PolicyService,
     private val webSocketPush: WebSocketPushService,
     private val mqttGateway: MqttGateway,
+    private val userRepository: UserRepository,
     @Value("\${padguard.device.token-ttl-days:30}") private val tokenTtlDays: Long
 ) {
 
@@ -43,6 +47,11 @@ class DeviceService(
      */
     fun bindChild(req: BindRequest): BindResult {
         val userId = bindCodeService.consume(req.bindCode)
+        return bindChildWithUser(req, userId)
+    }
+
+    /** 绑定主流程：确认归属家长后创建/复用设备并下发凭据（配对码与账号密码两种方式共用）。 */
+    fun bindChildWithUser(req: BindRequest, userId: String): BindResult {
         val deviceId = UUID.randomUUID().toString()
         val deviceToken = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "")
         val hmacSecret = "hs_" + UUID.randomUUID().toString().replace("-", "")
@@ -91,6 +100,22 @@ class DeviceService(
             mqttUsername = deviceId, mqttPassword = mqttPassword,
             hmacSecret = hmacSecret, expiresAt = now + tokenTtlDays * 86_400_000
         )
+    }
+
+    /**
+     * 「账号密码绑定」：孩子端直接拿家长的手机号 + 密码绑定，无需配对码 / 扫码。
+     *
+     * 与 [bindChild] 的唯一区别是归属家长的确认方式（账号密码 vs 一次性绑定码），
+     * 设备台账、令牌下发、默认策略等后续逻辑完全复用，避免两套实现漂移。
+     */
+    fun bindChildByAccount(req: com.padguard.server.dto.BindByAccountRequest): BindResult {
+        val user = userRepository.findByPhone(req.phone.trim())
+            ?: throw BizException(ChildErr.TOKEN_INVALID, "家长账号不存在", Audience.CHILD)
+        if (!Passwords.matches(req.password, user.passwordHash)) {
+            throw BizException(ChildErr.TOKEN_INVALID, "家长账号或密码错误", Audience.CHILD)
+        }
+        // 复用既有绑定实现：把「已确认的 userId」当作绑定码消费的结果
+        return bindChildWithUser(req.req, user.id)
     }
 
     /**
@@ -178,6 +203,16 @@ class DeviceService(
         dev.groupId = null
         dev.deviceTokenHash = "revoked_" + UUID.randomUUID().toString()
         deviceRepository.save(dev)
+        // 关键：必须通知被控端。否则平板本地仍持有旧令牌、继续上报心跳并处于受控态，
+        // 家长端看着"解绑了"，但孩子端其实还挂在管控里 —— 这就是"解绑无效"的体感来源。
+        // 复用下行 config 通道下发 unbind=1，孩子端收到后清除本地凭据并回到绑定页。
+        pushUnbind(deviceId)
+    }
+
+    /** 下发解绑通知给孩子端（尽力而为：平板离线时会在其下次上线后由重连逻辑兜底）。 */
+    private fun pushUnbind(deviceId: String) {
+        runCatching { mqttGateway.publishConfig(deviceId, mapOf("unbind" to "1")) }
+            .onFailure { log.warn("push unbind config failed: $it") }
     }
 
     /** 家长修改设备别名 */

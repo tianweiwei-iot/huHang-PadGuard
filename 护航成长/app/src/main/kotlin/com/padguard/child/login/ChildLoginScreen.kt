@@ -14,6 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -46,6 +47,7 @@ import com.padguard.child.ui.settings.ServerConfigDialog
 fun ChildLoginScreen(viewModel: ChildLoginViewModel = hiltViewModel()) {
     val phone by viewModel.phone.collectAsStateWithLifecycle()
     val password by viewModel.password.collectAsStateWithLifecycle()
+    val remember by viewModel.remember.collectAsStateWithLifecycle()
     val state by viewModel.state.collectAsStateWithLifecycle()
     val serverUrl by viewModel.serverUrl.collectAsStateWithLifecycle()
     var showAdvanced by remember { mutableStateOf(false) }
@@ -109,7 +111,26 @@ fun ChildLoginScreen(viewModel: ChildLoginViewModel = hiltViewModel()) {
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp)
             )
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(8.dp))
+
+            // 「记住账号密码」：勾选后写入本机 DataStore，下次进入自动填充；
+            // 取消勾选会立即清除已保存的密码（见 ChildLoginViewModel.onRememberChanged）。
+            Row(
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Checkbox(
+                    checked = remember,
+                    onCheckedChange = viewModel::onRememberChanged,
+                    enabled = state !is LoginUiState.Loading
+                )
+                Text(
+                    text = "记住账号密码（仅保存在本机，可在「我的」中清除）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                )
+            }
+            Spacer(Modifier.height(12.dp))
 
             Button(
                 onClick = viewModel::login,

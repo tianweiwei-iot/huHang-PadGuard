@@ -253,7 +253,11 @@ class ApiDataSource @Inject constructor(
         )
 
     override suspend fun unbindDevice(deviceId: String): Result<Unit> =
-        exec { deviceApi.unbindDevice(deviceId) }.map { Unit }
+        exec { deviceApi.unbindDevice(deviceId) }.map { Unit }.onSuccess {
+            // 解绑后必须立刻刷新列表：否则要等 POLL_INTERVAL_MS 轮询才更新，
+            // 家长端看着设备还在列表里，会误以为"解绑没生效"。
+            refreshDeviceList()
+        }
 
     override suspend fun renameDevice(deviceId: String, newName: String): Result<Unit> =
         exec { deviceApi.renameDevice(deviceId, RenameDeviceRequest(newName)) }.map { Unit }

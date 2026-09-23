@@ -46,6 +46,11 @@ class AuthRepository @Inject constructor(
         val CHILD_TOKEN = stringPreferencesKey("child_token")
         val CHILD_USER_ID = stringPreferencesKey("child_user_id")
         val CHILD_LOGGED_IN = booleanPreferencesKey("child_logged_in")
+        // === 账号密码记录（家长家庭账号，用于免重复输入 / 掉线后自动重登）===
+        // 安全说明：与 deviceToken / hmacSecret 同库存放（DataStore，应用私有目录、
+        // 非 root 设备不可读）。仅当用户在登录页勾选「记住账号密码」时才会写入。
+        val CHILD_PASSWORD = stringPreferencesKey("child_password")
+        val CHILD_REMEMBER = booleanPreferencesKey("child_remember")
 
         // === 权限引导完成态（初次打开一次性授予，后续登录不再重复） ===
         val PERMISSIONS_DONE = booleanPreferencesKey("permissions_done")
@@ -153,6 +158,38 @@ class AuthRepository @Inject constructor(
             it[Keys.CHILD_TOKEN] = token
             it[Keys.CHILD_USER_ID] = userId
             it[Keys.CHILD_LOGGED_IN] = true
+        }
+    }
+
+    /**
+     * 记录账号密码（登录页「记住账号密码」勾选时调用）。
+     *
+     * 安全说明：密码与 deviceToken / hmacSecret 同库存放于应用私有 DataStore
+     * （非 root 设备其他应用不可读），且**仅在用户显式勾选后**才写入，
+     * 用户随时可在「我的 → 账号与密码」一键清除。
+     */
+    suspend fun saveChildCredentials(phone: String, password: String) {
+        store.edit {
+            it[Keys.CHILD_PHONE] = phone
+            it[Keys.CHILD_PASSWORD] = password
+            it[Keys.CHILD_REMEMBER] = true
+        }
+    }
+
+    /** 已记录的账号 + 密码（未记录时均为空串）。 */
+    val rememberedCredentials: Flow<Pair<String, String>> =
+        store.data.catch { emit(emptyPreferences()) }
+            .map { it[Keys.CHILD_PHONE].orEmpty() to it[Keys.CHILD_PASSWORD].orEmpty() }
+
+    /** 是否开启了「记住账号密码」。 */
+    val isRemembered: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.CHILD_REMEMBER] == true }
+
+    /** 清除已记录的账号密码（只清记录，不退出登录、不影响已绑定设备）。 */
+    suspend fun clearRememberedCredentials() {
+        store.edit {
+            it.remove(Keys.CHILD_PASSWORD)
+            it[Keys.CHILD_REMEMBER] = false
         }
     }
 

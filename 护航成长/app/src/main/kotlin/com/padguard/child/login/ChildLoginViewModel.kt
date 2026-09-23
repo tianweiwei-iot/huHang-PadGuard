@@ -12,6 +12,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -39,6 +40,30 @@ class ChildLoginViewModel @Inject constructor(
 
     private val _password = MutableStateFlow("")
     val password: StateFlow<String> = _password
+
+    /** 是否勾选「记住账号密码」；勾选后凭据落地，下次进入自动填充。 */
+    private val _remember = MutableStateFlow(false)
+    val remember: StateFlow<Boolean> = _remember
+
+    init {
+        // 已记录过凭据：回填账号密码并默认勾上，省去每次重输
+        viewModelScope.launch {
+            val (savedPhone, savedPwd) = authRepository.rememberedCredentials.first()
+            if (savedPhone.isNotBlank() && savedPwd.isNotBlank()) {
+                _phone.value = savedPhone
+                _password.value = savedPwd
+                _remember.value = true
+            }
+        }
+    }
+
+    fun onRememberChanged(value: Boolean) {
+        _remember.value = value
+        // 取消勾选立即清除已记录的密码，避免"关了开关但密码还在库里"
+        if (!value) {
+            viewModelScope.launch { authRepository.clearRememberedCredentials() }
+        }
+    }
 
     private val _state = MutableStateFlow<LoginUiState>(LoginUiState.Idle)
     val state: StateFlow<LoginUiState> = _state
@@ -68,6 +93,10 @@ class ChildLoginViewModel @Inject constructor(
             when (result) {
                 is ApiResult.Success -> {
                     authRepository.saveChildLogin(p, result.value.token, result.value.user?.id ?: "")
+                    // 勾选了才记录密码；未勾选则不写入（且已在开关关闭时清除过）
+                    if (_remember.value) {
+                        authRepository.saveChildCredentials(p, pw)
+                    }
                     _state.value = LoginUiState.Success
                 }
                 is ApiResult.BizError -> _state.value = LoginUiState.Error(result.message)

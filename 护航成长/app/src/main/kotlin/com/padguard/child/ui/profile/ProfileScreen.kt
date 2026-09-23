@@ -72,7 +72,8 @@ fun ProfileScreen(
         onEditDeviceName = {
             nameInput = state.deviceName.ifBlank { state.deviceSn }
             showNameDialog = true
-        }
+        },
+        onClearCredentials = viewModel::clearRememberedCredentials
     )
 
     if (showServerDialog) {
@@ -103,7 +104,8 @@ private fun ProfileContent(
     state: ProfileUiState,
     onPermissionGuide: (String) -> Unit,
     onSetServer: () -> Unit,
-    onEditDeviceName: () -> Unit
+    onEditDeviceName: () -> Unit,
+    onClearCredentials: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -124,6 +126,9 @@ private fun ProfileContent(
             }
             item {
                 DeviceCard(state = state, onEditDeviceName = onEditDeviceName)
+            }
+            item {
+                CredentialsCard(state = state, onClear = onClearCredentials)
             }
             item {
                 Text(
@@ -149,6 +154,61 @@ private fun ProfileContent(
             }
             item {
                 MoreCard(onSetServer = onSetServer)
+            }
+        }
+    }
+}
+
+@Composable
+/**
+ * 已记录的家长端账号密码。
+ *
+ * 密码默认掩码显示，点「显示」才明文；一键「清除记录」会立刻从本机删除。
+ * 说明文案明确告知"仅保存在本机"，避免误解为上传到服务器。
+ */
+private fun CredentialsCard(state: ProfileUiState, onClear: () -> Unit) {
+    var revealed by remember { mutableStateOf(false) }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(text = "账号与密码", style = MaterialTheme.typography.titleMedium)
+            if (state.account.isBlank()) {
+                Text(
+                    text = "未记录。登录或绑定时勾选「记住账号密码」后显示在此。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            } else {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text(
+                        text = "账号：${state.account}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text(
+                        text = "密码：" + if (revealed) state.accountPassword else "••••••",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { revealed = !revealed }) {
+                        Text(if (revealed) "隐藏" else "显示")
+                    }
+                }
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text(
+                        text = "仅保存在本机，用于免重复输入",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = onClear) { Text("清除记录") }
+                }
             }
         }
     }

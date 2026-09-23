@@ -34,6 +34,7 @@ class WebConfig(
             .addPathPatterns("/api/v1/**")
             .excludePathPatterns(
                 "/api/v1/device/bind",
+                "/api/v1/device/bind-by-account",
                 "/api/v1/device/time"
             )
     }

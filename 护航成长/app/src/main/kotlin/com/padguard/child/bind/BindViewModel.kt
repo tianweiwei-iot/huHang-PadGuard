@@ -11,6 +11,7 @@ import com.padguard.core.transport.TransportSettings
 import com.padguard.core.transport.http.ApiCaller
 import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
+import com.padguard.core.transport.http.BindByAccountRequest
 import com.padguard.core.transport.http.BindRequest
 import com.padguard.core.transport.http.PadGuardApi
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -64,6 +65,12 @@ class BindViewModel @Inject constructor(
         _state.value = BindUiState(step = BindStep.InputCode)
     }
 
+    /** 欢迎页「④ 账号密码绑定」：进入家长账号密码输入页 */
+    fun goToInputAccount() {
+        if (_state.value.step == BindStep.Submitting) return
+        _state.value = BindUiState(step = BindStep.InputAccount)
+    }
+
     fun submit() {
         val code = _state.value.code
         if (code.length != 6) {
@@ -78,6 +85,66 @@ class BindViewModel @Inject constructor(
 
     fun retry() {
         _state.value = BindUiState(step = BindStep.InputCode, code = _state.value.code)
+    }
+
+    // ==================== 方式④：账号密码绑定 ====================
+
+    fun onAccountChanged(value: String) {
+        _state.value = _state.value.copy(account = value.trim(), errorMessage = null)
+    }
+
+    fun onAccountPasswordChanged(value: String) {
+        _state.value = _state.value.copy(accountPassword = value, errorMessage = null)
+    }
+
+    /**
+     * 用家长端账号密码直接绑定。
+     *
+     * 存在意义：配对码链路依赖"家长端生成码 → 孩子端 10 分钟内输入"两步配合，
+     * 任一端网络不通或超时都会绑不上；扫码又依赖相机授权。账号密码是最稳的兜底方式，
+     * 只要能连上服务器且账号密码正确即可绑定。
+     */
+    fun submitByAccount() {
+        val account = _state.value.account
+        val pwd = _state.value.accountPassword
+        if (account.isBlank() || pwd.isBlank()) {
+            _state.value = _state.value.copy(errorMessage = "请输入家长端账号和密码")
+            return
+        }
+        _state.value = _state.value.copy(step = BindStep.Submitting, errorMessage = null)
+        viewModelScope.launch { performBindByAccount(account, pwd) }
+    }
+
+    private suspend fun performBindByAccount(account: String, pwd: String) {
+        // 账号密码方式不经绑定码，bindCode 留空（服务端按账号校验归属）
+        val req = buildBindRequest("")
+        val body = BindByAccountRequest(phone = account, password = pwd, req = req)
+        when (val result = apiCaller.call("child-bind-account") { padGuardApi.bindByAccount(body) }) {
+            is ApiResult.Success -> {
+                runCatching {
+                    authRepository.saveBindResult(result.value, deviceSn = req.deviceSn)
+                    // 绑定成功后记录账号密码：便于掉线/重置后直接恢复，也供「我的」页查看
+                    authRepository.saveChildCredentials(account, pwd)
+                }.getOrElse { e ->
+                    _state.value = _state.value.copy(
+                        step = BindStep.Failed,
+                        errorMessage = "绑定成功但本地凭据保存失败：${e.message}"
+                    )
+                    return
+                }
+                _state.value = _state.value.copy(step = BindStep.Success)
+            }
+            is ApiResult.BizError -> _state.value = _state.value.copy(
+                step = BindStep.Failed,
+                errorMessage = if (result.code == ApiCode.TOKEN_INVALID) {
+                    "家长账号或密码错误，请重新输入"
+                } else mapBindError(result.code, result.message)
+            )
+            is ApiResult.Failure -> _state.value = _state.value.copy(
+                step = BindStep.Failed,
+                errorMessage = result.message
+            )
+        }
     }
 
     private suspend fun performBind(code: String) {
@@ -165,10 +232,12 @@ class BindViewModel @Inject constructor(
 }
 
 /** 绑定流程状态机。 */
-enum class BindStep { Welcome, InputCode, Submitting, Waiting, Success, Failed }
+enum class BindStep { Welcome, InputCode, InputAccount, Submitting, Waiting, Success, Failed }
 
 data class BindUiState(
     val step: BindStep = BindStep.Welcome,
     val code: String = "",
+    val account: String = "",
+    val accountPassword: String = "",
     val errorMessage: String? = null
 )

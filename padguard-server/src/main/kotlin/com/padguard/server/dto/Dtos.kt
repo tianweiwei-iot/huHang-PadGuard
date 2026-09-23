@@ -54,6 +54,18 @@ data class BindRequest(
     val appVersion: String? = null
 )
 
+/**
+ * 「账号密码绑定」请求：孩子端直接输入家长的手机号 + 密码完成绑定，
+ * 供不方便扫码 / 配对码已过期的场景使用（说明书 §4.3 方式④）。
+ *
+ * 设备信息复用 [BindRequest]（`req` 字段），避免两处字段定义漂移。
+ */
+data class BindByAccountRequest(
+    val phone: String,
+    val password: String,
+    val req: BindRequest
+)
+
 /** 孩子端自定义设备名（凭设备令牌鉴权） */
 data class DeviceNameRequest(val name: String)
 

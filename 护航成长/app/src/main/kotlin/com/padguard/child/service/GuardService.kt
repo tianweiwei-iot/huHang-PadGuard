@@ -604,6 +604,13 @@ class GuardService : Service() {
                             event.values["deviceName"]?.takeIf { it.isNotBlank() }?.let { name ->
                                 runSafely("saveDeviceName") { authRepository.saveDeviceName(name) }
                             }
+                            // 解绑下发：家长端点击解绑后，服务端经 downConfig(unbind=1) 通知本端。
+                            // 必须就地清除本地凭据并回到绑定流程，否则平板仍持旧令牌继续上报，
+                            // 表现为"家长端解绑了，孩子端却还在受控 / 再也绑不上别的账号"。
+                            if (event.values["unbind"] == "1") {
+                                Logger.w(TAG) { "unbind command received, clearing local credentials" }
+                                runSafely("handleRemoteUnbind") { handleRemoteUnbind() }
+                            }
                         }
 
                         is Downlink.ConnectivityChanged -> {
@@ -864,6 +871,28 @@ class GuardService : Service() {
         runCatching {
             getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, consentNotif)
         }
+    }
+
+    /**
+     * 收到服务端解绑指令后的本地清理。
+     *
+     * 清理顺序很重要：先清凭据（阻止后续上报再拿旧令牌），再停采集，最后把用户
+     * 送回绑定页。若只清不跳转，孩子会停在一个"看起来还在管控中"的空壳界面上。
+     */
+    private suspend fun handleRemoteUnbind() {
+        authRepository.clear()
+        runCatching { ScreenCaptureService.stopScreenRecord(this) }
+        runCatching { ScreenCaptureService.stopAudioRecord(this) }
+        withContext(Dispatchers.Main) {
+            runCatching {
+                startActivity(
+                    Intent(this@GuardService, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    }
+                )
+            }
+        }
+        stopSelf()
     }
 
     // ==================== 工具 ====================

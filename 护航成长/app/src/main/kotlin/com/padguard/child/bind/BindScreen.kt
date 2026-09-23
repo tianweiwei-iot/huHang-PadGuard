@@ -73,6 +73,10 @@ fun BindScreen(
         state = state,
         onCodeChanged = viewModel::onCodeChanged,
         onSubmit = viewModel::submit,
+        onInputAccount = viewModel::goToInputAccount,
+        onAccountChanged = viewModel::onAccountChanged,
+        onAccountPasswordChanged = viewModel::onAccountPasswordChanged,
+        onSubmitAccount = viewModel::submitByAccount,
         onRetry = viewModel::retry,
         onInputCode = viewModel::goToInputCode,
         onBackToInput = viewModel::backToInput,
@@ -99,6 +103,10 @@ private fun BindContent(
     state: BindUiState,
     onCodeChanged: (String) -> Unit,
     onSubmit: () -> Unit,
+    onInputAccount: () -> Unit,
+    onAccountChanged: (String) -> Unit,
+    onAccountPasswordChanged: (String) -> Unit,
+    onSubmitAccount: () -> Unit,
     onRetry: () -> Unit,
     onInputCode: () -> Unit,
     onBackToInput: () -> Unit,
@@ -136,7 +144,16 @@ private fun BindContent(
                     onScanQr = onScanQr,
                     onInputCode = onInputCode,
                     onNfc = onStartNfc,
+                    onInputAccount = onInputAccount,
                     onAdvancedSettings = onAdvancedSettings
+                )
+                BindStep.InputAccount -> AccountBindStep(
+                    account = state.account,
+                    password = state.accountPassword,
+                    errorMessage = state.errorMessage,
+                    onAccountChanged = onAccountChanged,
+                    onPasswordChanged = onAccountPasswordChanged,
+                    onSubmit = onSubmitAccount
                 )
                 BindStep.InputCode -> InputCodeStep(
                     code = state.code,
@@ -179,6 +196,7 @@ private fun MethodChoiceStep(
     onScanQr: () -> Unit,
     onInputCode: () -> Unit,
     onNfc: () -> Unit,
+    onInputAccount: () -> Unit,
     onAdvancedSettings: () -> Unit
 ) {
     Column(
@@ -213,6 +231,11 @@ private fun MethodChoiceStep(
             title = "③ NFC 碰一碰",
             desc = "将本设备背面贴近已开启 NFC 的家长端，自动读取",
             onClick = onNfc
+        )
+        BindMethodCard(
+            title = "④ 账号密码绑定",
+            desc = "直接输入家长端账号和密码绑定，不受配对码 10 分钟时效与相机权限限制",
+            onClick = onInputAccount
         )
 
         // 高级设置：绑定前即可设置服务器地址 / 端口（连不上管控端时改为 USB 直连电脑的地址）
@@ -292,6 +315,69 @@ private fun InputCodeStep(
         ) {
             Text(text = "提交绑定")
         }
+    }
+}
+
+/**
+ * 方式④：账号密码绑定。
+ *
+ * 这是配对码 / 扫码之外的兜底链路——只要能连上服务器、账号密码正确就能绑定，
+ * 不依赖家长端实时生成码，也不依赖相机授权。
+ */
+@Composable
+private fun AccountBindStep(
+    account: String,
+    password: String,
+    errorMessage: String?,
+    onAccountChanged: (String) -> Unit,
+    onPasswordChanged: (String) -> Unit,
+    onSubmit: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = "用家长账号绑定",
+            style = MaterialTheme.typography.titleMedium
+        )
+        OutlinedTextField(
+            value = account,
+            onValueChange = onAccountChanged,
+            label = { Text("家长端账号（手机号）") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = password,
+            onValueChange = onPasswordChanged,
+            label = { Text("密码") },
+            singleLine = true,
+            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            modifier = Modifier.fillMaxWidth()
+        )
+        if (errorMessage != null) {
+            Text(
+                text = errorMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+        Button(
+            onClick = onSubmit,
+            enabled = account.isNotBlank() && password.isNotBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(text = "绑定")
+        }
+        Text(
+            text = "绑定成功后账号密码会记录在本机，可在「我的」中查看或清除",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            textAlign = TextAlign.Center
+        )
     }
 }
 

@@ -58,14 +58,17 @@ class ProfileViewModel @Inject constructor(
                 authRepository.studentName,
                 authRepository.deviceSn,
                 authRepository.isBound,
-                authRepository.deviceName
-            ) { name, sn, bound, deviceName ->
+                authRepository.deviceName,
+                authRepository.rememberedCredentials
+            ) { name, sn, bound, deviceName, creds ->
                 val adminState = detectAdminState()
                 ProfileUiState(
                     studentName = name,
                     deviceSn = sn.ifBlank { Build.SERIAL ?: "未识别" },
                     deviceName = deviceName,
                     isBound = bound,
+                    account = creds.first,
+                    accountPassword = creds.second,
                     deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
                     androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
                     storage = readStorage(),
@@ -86,6 +89,11 @@ class ProfileViewModel @Inject constructor(
      * 本地持久化 + 上报服务端两步：服务端写入台账后，
      * 家长端下次拉取设备列表即可看到新名字（实时性由家长端轮询/推送决定）。
      */
+    /** 清除本机已记录的账号密码（不影响登录态与已绑定设备）。 */
+    fun clearRememberedCredentials() {
+        viewModelScope.launch { authRepository.clearRememberedCredentials() }
+    }
+
     fun saveDeviceName(name: String) {
         val trimmed = name.trim()
         if (trimmed.isBlank()) return
@@ -158,6 +166,10 @@ data class ProfileUiState(
     val deviceSn: String = "未识别",
     val deviceName: String = "",
     val isBound: Boolean = false,
+    /** 已记录的家长端账号（空串表示未记录） */
+    val account: String = "",
+    /** 已记录的家长端密码（空串表示未记录；UI 默认掩码展示） */
+    val accountPassword: String = "",
     val deviceModel: String = "未知设备",
     val androidVersion: String = "Android --",
     val storage: String = "未知",

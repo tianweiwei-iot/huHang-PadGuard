@@ -18,6 +18,11 @@ class ChildDeviceController(
     @PostMapping("/bind")
     fun bind(@RequestBody req: BindRequest) = DeviceApiResponse.ok(deviceService.bindChild(req))
 
+    /** 账号密码绑定：孩子端输入家长手机号 + 密码，免配对码完成绑定（方式④） */
+    @PostMapping("/bind-by-account")
+    fun bindByAccount(@RequestBody req: BindByAccountRequest) =
+        DeviceApiResponse.ok(deviceService.bindChildByAccount(req))
+
     @GetMapping("/time")
     fun time() = DeviceApiResponse.ok(mapOf("serverTime" to System.currentTimeMillis()))
 

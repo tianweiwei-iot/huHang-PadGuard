@@ -40,6 +40,11 @@ class AuthService(
         } catch (e: Exception) {
             throw BizException(ParentErr.UNAUTHORIZED, "refresh 失效", Audience.PARENT)
         }
+        // 必须确认用户仍存在：服务器换库/清库后旧令牌签名依然有效，
+        // 若不校验，客户端会拿着"幽灵账号"的令牌永远续期，绑定的设备全挂在不存在的用户下。
+        if (!userRepository.existsById(userId)) {
+            throw BizException(ParentErr.UNAUTHORIZED, "账号不存在或已被重置，请重新登录", Audience.PARENT)
+        }
         return TokenResponse(jwt.createAccessToken(userId), jwt.createRefreshToken(userId))
     }
 
