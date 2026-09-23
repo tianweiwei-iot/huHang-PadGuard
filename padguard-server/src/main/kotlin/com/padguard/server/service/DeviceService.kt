@@ -129,6 +129,14 @@ class DeviceService(
         val sn = req.deviceSn?.takeIf { it.isNotBlank() }
         if (sn != null) {
             mine.firstOrNull { it.deviceSn == sn }?.let { return it }
+            // 孤儿回收：同一台平板（同 deviceSn）的历史台账，若处于"已解绑"状态、
+            // 或原归属家长账号已不存在（清库/删号），则直接复用这条记录。
+            // 不做这层回收的话，每次重绑都会新建一条设备，家长端会出现重复设备，
+            // 而旧记录又永远卡在别人名下 —— 表现为"解绑后这台平板再也绑不回来"。
+            deviceRepository.findByDeviceSn(sn).firstOrNull { dev ->
+                val owner = dev.userId
+                owner.isNullOrBlank() || !userRepository.existsById(owner)
+            }?.let { return it }
         }
         val fp = req.fingerprint?.takeIf { it.isNotBlank() }
         if (fp != null) {
@@ -196,7 +204,13 @@ class DeviceService(
         val dev = deviceRepository.findById(deviceId).orElse(null)
             ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
         if (dev.userId != userId) {
-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+            // 孤儿设备兜底：原归属家长账号已不存在（清库/删号）时，允许当前家长接管并解绑。
+            // 否则这类设备会永远卡在"别人的设备"状态，家长端点解绑只得到
+            // 「设备不属于当前用户」，且再也无法重新绑定 —— 这是"以前绑的设备解绑报错"的成因之一。
+            val ownerExists = dev.userId?.let { userRepository.existsById(it) } ?: false
+            if (ownerExists) {
+                throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+            }
         }
         dev.userId = null
         dev.onlineStatus = "OFFLINE"

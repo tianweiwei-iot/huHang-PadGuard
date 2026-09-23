@@ -252,12 +252,14 @@ class ApiDataSource @Inject constructor(
             Exception("设备绑定需由孩子端输入配对码完成；请在「接入」页生成配对码 / 二维码后，由被控平板扫码或输入。")
         )
 
-    override suspend fun unbindDevice(deviceId: String): Result<Unit> =
-        exec { deviceApi.unbindDevice(deviceId) }.map { Unit }.onSuccess {
-            // 解绑后必须立刻刷新列表：否则要等 POLL_INTERVAL_MS 轮询才更新，
-            // 家长端看着设备还在列表里，会误以为"解绑没生效"。
-            refreshDeviceList()
-        }
+    override suspend fun unbindDevice(deviceId: String): Result<Unit> {
+        val result = exec { deviceApi.unbindDevice(deviceId) }.map { Unit }
+        // 解绑后必须立刻刷新列表：否则要等 POLL_INTERVAL_MS 轮询才更新，
+        // 家长端看着设备还在列表里，会误以为"解绑没生效"。
+        // 注意必须写成显式 suspend 调用 —— Result.onSuccess 的 lambda 不是挂起上下文。
+        if (result.isSuccess) refreshDeviceList()
+        return result
+    }
 
     override suspend fun renameDevice(deviceId: String, newName: String): Result<Unit> =
         exec { deviceApi.renameDevice(deviceId, RenameDeviceRequest(newName)) }.map { Unit }

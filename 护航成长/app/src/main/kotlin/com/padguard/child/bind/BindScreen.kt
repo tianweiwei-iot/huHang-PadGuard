@@ -74,6 +74,9 @@ fun BindScreen(
         onCodeChanged = viewModel::onCodeChanged,
         onSubmit = viewModel::submit,
         onInputAccount = viewModel::goToInputAccount,
+        onTestConnection = viewModel::testConnection,
+        serverUrl = serverUrl,
+        connectionResult = state.connectionResult,
         onAccountChanged = viewModel::onAccountChanged,
         onAccountPasswordChanged = viewModel::onAccountPasswordChanged,
         onSubmitAccount = viewModel::submitByAccount,
@@ -104,6 +107,9 @@ private fun BindContent(
     onCodeChanged: (String) -> Unit,
     onSubmit: () -> Unit,
     onInputAccount: () -> Unit,
+    onTestConnection: () -> Unit,
+    serverUrl: String,
+    connectionResult: String?,
     onAccountChanged: (String) -> Unit,
     onAccountPasswordChanged: (String) -> Unit,
     onSubmitAccount: () -> Unit,
@@ -145,7 +151,10 @@ private fun BindContent(
                     onInputCode = onInputCode,
                     onNfc = onStartNfc,
                     onInputAccount = onInputAccount,
-                    onAdvancedSettings = onAdvancedSettings
+                    onAdvancedSettings = onAdvancedSettings,
+                    serverUrl = serverUrl,
+                    connectionResult = state.connectionResult,
+                    onTestConnection = onTestConnection
                 )
                 BindStep.InputAccount -> AccountBindStep(
                     account = state.account,
@@ -197,7 +206,10 @@ private fun MethodChoiceStep(
     onInputCode: () -> Unit,
     onNfc: () -> Unit,
     onInputAccount: () -> Unit,
-    onAdvancedSettings: () -> Unit
+    onAdvancedSettings: () -> Unit,
+    serverUrl: String,
+    connectionResult: String?,
+    onTestConnection: () -> Unit
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -237,6 +249,34 @@ private fun MethodChoiceStep(
             desc = "直接输入家长端账号和密码绑定，不受配对码 10 分钟时效与相机权限限制",
             onClick = onInputAccount
         )
+
+        // 连接自检：绑定失败绝大多数是"服务器地址不通"，把地址与连通性直接摊开，
+        // 避免用户只能看到一句笼统的"绑定失败"而无从下手。
+        Text(
+            text = "当前服务器：$serverUrl",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedButton(
+            onClick = onTestConnection,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text("🔌 测试连接", style = MaterialTheme.typography.titleSmall)
+        }
+        if (!connectionResult.isNullOrBlank()) {
+            Text(
+                text = connectionResult,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (connectionResult.startsWith("连接正常"))
+                    MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
 
         // 高级设置：绑定前即可设置服务器地址 / 端口（连不上管控端时改为 USB 直连电脑的地址）
         OutlinedButton(

@@ -13,6 +13,9 @@ interface UserRepository : JpaRepository<User, String> {
 @Repository
 interface DeviceRepository : JpaRepository<Device, String> {
     fun findByUserId(userId: String): List<Device>
+
+    /** 按硬件序列号查设备（跨用户）：用于"孤儿设备回收"与重绑复用同一条台账 */
+    fun findByDeviceSn(deviceSn: String): List<Device>
 }
 
 @Repository

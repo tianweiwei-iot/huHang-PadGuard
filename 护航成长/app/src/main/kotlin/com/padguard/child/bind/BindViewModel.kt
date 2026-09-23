@@ -54,6 +54,28 @@ class BindViewModel @Inject constructor(
         transportSettings.setBaseUrl(url)
     }
 
+    /**
+     * 连接自检：打一次 `/api/v1/device/time`（免鉴权、无副作用）。
+     *
+     * 存在的意义：绑定失败最常见的原因根本不是绑定码，而是**服务器地址不通**
+     * （出厂默认值 / 家长电脑换了 IP / 端口未放行）。没有自检时用户只能看到
+     * 一句笼统的"绑定失败"，完全无从下手。这里把"地址 + 能否连通"直接摊开。
+     */
+    fun testConnection() {
+        viewModelScope.launch {
+            val url = transportSettings.baseUrl.value
+            _state.value = _state.value.copy(connectionResult = "正在测试…")
+            val result = apiCaller.call("device-time") { padGuardApi.serverTime() }
+            _state.value = _state.value.copy(
+                connectionResult = when (result) {
+                    is ApiResult.Success -> "连接正常：$url"
+                    is ApiResult.BizError -> "服务端异常：${result.message}（$url）"
+                    is ApiResult.Failure -> "无法连接：$url\n原因：${result.message}"
+                }
+            )
+        }
+    }
+
     fun onCodeChanged(input: String) {
         val sanitized = input.filter { it.isDigit() }.take(6)
         _state.value = _state.value.copy(code = sanitized, errorMessage = null)
@@ -142,7 +164,7 @@ class BindViewModel @Inject constructor(
             )
             is ApiResult.Failure -> _state.value = _state.value.copy(
                 step = BindStep.Failed,
-                errorMessage = result.message
+                errorMessage = networkFailureText(result.message)
             )
         }
     }
@@ -168,10 +190,16 @@ class BindViewModel @Inject constructor(
             )
             is ApiResult.Failure -> _state.value = _state.value.copy(
                 step = BindStep.Failed,
-                errorMessage = result.message
+                errorMessage = networkFailureText(result.message)
             )
         }
     }
+
+    /** 网络类失败必须带上"当前服务器地址"，否则用户根本不知道该改哪里。 */
+    private fun networkFailureText(detail: String): String =
+        "无法连接服务器：${transportSettings.baseUrl.value}\n" +
+            "原因：$detail\n" +
+            "请到「高级设置」确认地址为家长电脑的 IP 与端口（默认 8090）。"
 
     /**
      * 组装绑定请求体（契约 §5.1）。
@@ -239,5 +267,7 @@ data class BindUiState(
     val code: String = "",
     val account: String = "",
     val accountPassword: String = "",
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    /** 连接自检结果（"正在测试…" / "连接正常：…" / "无法连接：… 原因：…"） */
+    val connectionResult: String? = null
 )

@@ -45,6 +45,7 @@ import com.padguard.core.engine.enforcer.LimitVerdict
 import com.padguard.core.transport.Downlink
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
+import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
 import com.padguard.core.transport.http.PolicyFetchResult
 import dagger.hilt.android.AndroidEntryPoint
@@ -444,6 +445,20 @@ class GuardService : Service() {
                     // 而 transport 层的健康检查本就会在通道异常时降级到轮询。
                     // 这里只留一条可观测线索，便于事后判断"是否发生过推送丢失"。
                     Logger.w(TAG) { "server reports ${ack.pendingCommandCount} pending commands" }
+                }
+            }
+            is ApiResult.BizError -> {
+                lastHeartbeatOk = false
+                online = remote.isOnline()
+                Logger.w(TAG) { "heartbeat rejected: ${result.code} ${result.message}" }
+                // 自愈兜底（关键）：服务端判定"设备已解绑"(40301) 或"令牌无效"(40101) 时，
+                // 本端必须就地清空凭据并回到绑定流程。
+                // 不能只依赖解绑那一刻的 MQTT 推送 —— 平板当时可能离线、推送收不到，
+                // 结果就是本地仍显示"已绑定"、再也进不去绑定页（僵尸绑定态），
+                // 表现为"扫码、配对码都试过了怎么都绑不上"。
+                if (result.code == ApiCode.DEVICE_UNBOUND || result.code == ApiCode.TOKEN_INVALID) {
+                    Logger.w(TAG) { "device no longer bound on server -> self-heal to bind flow" }
+                    runSafely("selfHealUnbind") { handleRemoteUnbind() }
                 }
             }
             else -> {
