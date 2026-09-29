@@ -78,19 +78,23 @@ spring:
       broker-url: "tcp://emqx:1883"
 
 ---
-# 本地免 Docker 运行：H2 内存库 + 关闭 MQTT，仅依赖本机 JVM 即可启动联调
+# 本地免 Docker 运行：H2 文件库 + 关闭 MQTT，仅依赖本机 JVM 即可启动联调。
+# 注意：这里刻意用【文件库 + ddl-auto=update】而非内存库——绑定关系属于用户资产，
+# 必须"除非家长手动解绑、或服务端显式删除，否则一直存在"（重启服务端 / 重装家长端都不应丢失）。
+# 早期用 h2:mem + ddl-auto=create，每次重启都会把 device 表连同绑定关系清空，
+# 导致家长端重装登录后"看不到设备"、而被管控端却仍处于锁屏状态的不一致问题。
 spring:
   config:
     activate:
       on-profile: local
   datasource:
-    url: "jdbc:h2:mem:padguard;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
+    url: "jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE"
     username: "sa"
     password: ""
     driver-class-name: org.h2.Driver
   jpa:
     hibernate:
-      ddl-auto: create
+      ddl-auto: update
     properties:
       hibernate:
         dialect: org.hibernate.dialect.H2Dialect

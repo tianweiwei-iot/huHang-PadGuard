@@ -122,11 +122,12 @@ class PolicyExtensionService(
         rebuildPolicy(deviceId)
     }
 
-    /** 读取设备每日总时长上限（分钟）。单一数据源为 DeviceSetting.dailyLimitMinutes，缺省为 0。 */
+    /** 读取设备每日总时长上限（分钟）。单一数据源为 DeviceSetting.dailyLimitMinutes，缺省为 120。 */
     fun getDailyLimit(userId: String, deviceId: String): Int {
         requireOwned(userId, deviceId)
         val s = deviceSettingOf(deviceId)
-        return s.dailyLimitMinutes ?: 0
+        // 未配置或显式置 0 时回落到产品默认 120 分钟，避免家长端看到「0/1 分钟」这种失真值。
+        return if (s.dailyLimitMinutes > 0) s.dailyLimitMinutes else 120
     }
 
     // ---------- 上网管控 ----------
@@ -164,6 +165,7 @@ class PolicyExtensionService(
         val s = deviceSettingOf(deviceId)
         return TabletUsageSettingsDto(
             deviceId = deviceId,
+            enabled = s.timeControlEnabled,
             enabledTimeRanges = s.enabledTimeRangesJson?.let(::parseTimeRanges),
             weekdayLimitMinutes = s.weekdayLimitMinutes ?: 120,
             weekendLimitMinutes = s.weekendLimitMinutes ?: 180,
@@ -184,7 +186,8 @@ class PolicyExtensionService(
         s.timeUpMessage = req.timeUpMessage.ifBlank { null }
         s.enabledTimeRangesJson = req.enabledTimeRanges
             ?.takeIf { it.isNotEmpty() }
-            ?.let { objectMapper.writeValueAsString(it.map { r -> TimeRangeDto(r.startTime, r.endTime) }) }
+            ?.let { objectMapper.writeValueAsString(it) }
+        s.timeControlEnabled = req.enabled
         deviceSettingRepository.save(s)
 
         // 家长勾选「同步到设备」时立即重建策略包并推送通知；否则等待下次自然重建
@@ -350,6 +353,7 @@ class PolicyExtensionService(
             // 家长端现在的操作语义本来就是"禁用某个应用"（黑名单），这里保持一致。
             "app" to mapOf("mode" to "BLACKLIST", "whitelist" to whitelist, "blacklist" to blacklist),
             "appLimit" to mapOf(
+                "enabled" to (settings.timeControlEnabled ?: true),
                 "dailyTotalMinutes" to (settings.dailyLimitMinutes ?: 0),
                 "weekdayTotalMinutes" to (settings.weekdayLimitMinutes ?: 120),
                 "weekendTotalMinutes" to (settings.weekendLimitMinutes ?: 180),
@@ -358,7 +362,10 @@ class PolicyExtensionService(
                 "timeUpMessage" to settings.timeUpMessage,
                 "rules" to limitRules
             ),
-            "schedule" to mapOf("timezone" to "Asia/Shanghai", "rules" to scheduleRules + usageRangeRules),
+            "schedule" to mapOf(
+                "enabled" to (settings.timeControlEnabled ?: true),
+                "timezone" to "Asia/Shanghai", "rules" to scheduleRules + usageRangeRules
+            ),
             "web" to mapOf("mode" to "BLACKLIST", "blacklist" to webUrls, "browserDisabled" to settings.browserDisabled),
             "monitoring" to mapOf("heartbeatIntervalSec" to settings.autoRefreshSeconds, "logUploadIntervalSec" to 300)
         )

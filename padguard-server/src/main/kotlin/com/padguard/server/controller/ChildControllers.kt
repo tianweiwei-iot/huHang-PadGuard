@@ -6,6 +6,7 @@ import com.padguard.server.service.*
 import com.padguard.server.mqtt.ChildUplinkHandler
 import org.springframework.http.MediaType
 import org.springframework.web.bind.annotation.*
+import org.springframework.web.context.request.async.DeferredResult
 import org.springframework.web.multipart.MultipartFile
 
 @RestController
@@ -72,21 +73,69 @@ class ChildReportController(
         @RequestBody body: LocationsRequest
     ) = DeviceApiResponse.ok(mapOf("accepted" to ingestService.saveLocations(body.copy(deviceId = deviceId))))
 
+    /**
+     * 心跳。
+     *
+     * 回执**必须携带** `pendingCommandCount` / `policyVersion`：
+     * 孩子端靠这两个字段在心跳这一刻就"按需"立刻拉指令、重新拉策略，
+     * 而不必苦等下一次定时轮询。原先这里返回 `ok(null)`，终端反序列化后拿到全默认值，
+     * 那些"有指令就立即拉取"的触发条件永远不成立 —— 远程锁屏 / 解锁 / 实时看屏首帧
+     * 因此只能等到兜底轮询才落地，这是端到端延迟高的直接原因之一。
+     */
     @PostMapping("/heartbeat")
     fun heartbeat(
         @RequestAttribute("deviceId") deviceId: String,
         @RequestBody hb: HeartbeatDto
     ): DeviceApiResponse<*> {
         deviceService.applyHeartbeat(deviceId, hb)
-        return DeviceApiResponse.ok(null)
+        val pending = commandService.pendingForPolling(deviceId, 0).size
+        return DeviceApiResponse.ok(
+            mapOf(
+                "pendingCommandCount" to pending,
+                "policyVersion" to deviceService.policyVersionOf(deviceId),
+                "flushLogs" to false
+            )
+        )
     }
 
-    /** MQTT 降级轮询通道：返回设备待执行指令包 */
+    /**
+     * MQTT 降级轮询通道：返回设备待执行指令包。
+     *
+     * 支持长轮询：终端带上 `waitMs` 后，若此刻没有待办指令，请求会挂在服务端，
+     * 直到有指令入库（[CommandService.notifyWaiters] 唤醒）或超时才返回。
+     *
+     * 这是无 broker 环境下实时性的关键：定时轮询的周期就是指令延迟的下限，
+     * 60s 一轮意味着家长点「锁屏」最坏要等一分钟。长轮询把延迟从「一个轮询周期」
+     * 降到「一次 RTT」，实时看屏首帧与远程锁屏 / 解锁才能做到秒级响应。
+     *
+     * 不带 `waitMs` 时行为与原先完全一致（立即返回），保证旧终端兼容。
+     */
     @GetMapping("/commands")
     fun commands(
         @RequestAttribute("deviceId") deviceId: String,
-        @RequestParam since: Long = 0
-    ): DeviceApiResponse<*> = DeviceApiResponse.ok(commandService.pendingForPolling(deviceId, since))
+        @RequestParam since: Long = 0,
+        @RequestParam(defaultValue = "0") waitMs: Long = 0
+    ): Any {
+        if (waitMs <= 0L) {
+            return DeviceApiResponse.ok(commandService.pendingForPolling(deviceId, since))
+        }
+        val capped = waitMs.coerceIn(1L, CommandService.MAX_WAIT_MS)
+        val deferred = DeferredResult<Any>(capped)
+        val onReady: (List<CommandPacket>) -> Unit = { list ->
+            runCatching { deferred.setResult(DeviceApiResponse.ok(list)) }
+        }
+        // 超时回空列表而不是报错：对终端而言与「这一轮没有指令」等价，不会触发错误退避
+        deferred.onTimeout {
+            commandService.removeWaiter(deviceId, onReady)
+            runCatching { deferred.setResult(DeviceApiResponse.ok(emptyList<CommandPacket>())) }
+        }
+        // 正常完成 / 超时 / 客户端断开都必须摘除回调，否则队列随断连无限增长
+        deferred.onCompletion { commandService.removeWaiter(deviceId, onReady) }
+        // 返回 false 表示此刻已有待办指令、onReady 已同步 setResult；
+        // 结果会暂存在 DeferredResult 里，Spring 拿到它后立刻完成响应。
+        commandService.registerWaiter(deviceId, since, onReady)
+        return deferred
+    }
 
     /**
      * 孩子端自定义个人资料（姓名 / 昵称 / 头像 URL），凭设备令牌鉴权。

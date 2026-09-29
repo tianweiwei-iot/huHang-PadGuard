@@ -61,7 +61,34 @@ class CommandExecutor @Inject constructor(
     /** app 层前台服务订阅此流完成需要平台能力的动作 */
     val effects: SharedFlow<EngineEffect> = _effects.asSharedFlow()
 
+    /**
+     * 已执行指令去重（按 msgId，有界 LRU）。
+     *
+     * 为什么要去重：服务端轮询通道以「status==PENDING + createdAt>=游标」过滤指令，
+     * 一旦终端时钟快于服务端（游标被判非法归零）或回执延迟，同一条指令就会在
+     * 每个轮询周期被重复下发。对锁屏/截屏这类幂等动作只是浪费，
+     * 对「录屏」是灾难：每次重复 start 都会把上一段录制当"残留"丢弃重启，
+     * 永远产不出完整视频。这里以执行器为唯一漏斗，保证同一条指令只执行一次。
+     */
+    private val executedMsgIds = LinkedHashSet<String>()
+
+    private fun markExecutedIfFirst(msgId: String): Boolean = synchronized(executedMsgIds) {
+        if (!executedMsgIds.add(msgId)) return false
+        // 有界：指令吞吐有限（每条指令服务端才生成一条），几百条的窗口足够宽，
+        // 既防住轮询周期内的重复，也不会无限增长
+        while (executedMsgIds.size > RECENT_MSG_ID_LIMIT) {
+            val it = executedMsgIds.iterator()
+            it.next()
+            it.remove()
+        }
+        return true
+    }
+
     suspend fun execute(command: Command, deviceId: String): CommandAck {
+        if (!markExecutedIfFirst(command.msgId)) {
+            Logger.w(TAG) { "duplicate command ${command.type} (msgId=${command.msgId}) ignored" }
+            return ack(command, deviceId, AckStatus.SUCCESS, "DUPLICATE", "指令已执行过，忽略重复下发")
+        }
         Logger.i(TAG) { "executing ${command.type} (msgId=${command.msgId})" }
         return try {
             when (command.type) {
@@ -218,8 +245,13 @@ class CommandExecutor @Inject constructor(
      */
     private suspend fun showMessage(command: Command, deviceId: String): CommandAck {
         val body = command.payloadString(KEY_CONTENT)
-        if (body.isBlank()) {
-            return ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "content 不能为空")
+        val mediaUrl = command.payloadString(KEY_MEDIA_URL)
+        // 媒体消息（图片/视频/音频）的正文是**选填**的附加说明，家长发一张纯图时
+        // content 为空串是正常业务形态 —— 之前一刀切要求 content 非空，
+        // 导致所有纯媒体指令在渲染前就被判 BAD_PAYLOAD 丢弃，孩子端永远看不到素材。
+        // 只要二者有其一即可下发；都没有才是真正的坏载荷。
+        if (body.isBlank() && mediaUrl.isBlank()) {
+            return ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "content 与 mediaUrl 均为空")
         }
         val requestId = command.payloadString(KEY_REQUEST_ID)
         if (requestId.isNotBlank()) {
@@ -235,7 +267,7 @@ class CommandExecutor @Inject constructor(
                 // 图片/视频/音频素材：霸屏时要在正中间展示，必须随指令一起下发。
                 // 之前只传文字，家长发了一张图下去，孩子端只显示一行空白，等于发了条空消息。
                 contentType = command.payloadString(KEY_CONTENT_TYPE, "TEXT"),
-                mediaUrl = command.payloadString(KEY_MEDIA_URL),
+                mediaUrl = mediaUrl,
                 mediaName = command.payloadString(KEY_MEDIA_NAME)
             )
         )
@@ -535,6 +567,9 @@ class CommandExecutor @Inject constructor(
 
     companion object {
         private const val TAG = "CommandExecutor"
+
+        /** 去重窗口大小：覆盖轮询周期内可能的重复下发即可 */
+        private const val RECENT_MSG_ID_LIMIT = 512
         private const val SELF_GUARD_PLACEHOLDER = "com.padguard.child"
 
         // payload 键名，与接口契约 §4.1 保持一致

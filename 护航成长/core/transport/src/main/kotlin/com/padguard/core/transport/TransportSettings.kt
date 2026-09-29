@@ -118,13 +118,26 @@ class TransportSettings @Inject constructor(
         private const val KEY_BASE_URL = "base_url"
 
         const val DEFAULT_HEARTBEAT_SEC = 30
-        const val DEFAULT_POLLING_SEC = 60
+        /**
+         * 降级轮询周期。
+         *
+         * 取 2s 而非 60s：这个值是**指令延迟的下限**——定时轮询下家长点「锁屏」/
+         * 「实时看屏」最坏要等整整一个周期才被孩子端取走，60s 一轮在实测中就是
+         * 「点了半天没反应」。
+         *
+         * 正常路径下它并不决定实时性：轮询请求会带长轮询参数挂在服务端，
+         * 指令一到立即返回、返回后立刻发起下一轮；这里只在长轮询不可用
+         * （旧服务端 / 请求失败退避）时才真正生效。
+         */
+        const val DEFAULT_POLLING_SEC = 2
         const val DEFAULT_LOG_UPLOAD_SEC = 300
 
         // 契约 §4.3：心跳 5s–300s 可远程配置
         private const val MIN_HEARTBEAT_SEC = 5
         private const val MAX_HEARTBEAT_SEC = 300
-        private const val MIN_POLLING_SEC = 15
+        // 下限放宽到 1s：原先的 15s 会把服务端下发的短周期强行抬高，
+        // 导致即便服务端想让指令更快落地也做不到（远程配置被静默钳制）。
+        private const val MIN_POLLING_SEC = 1
         private const val MAX_POLLING_SEC = 600
         private const val MIN_LOG_UPLOAD_SEC = 30
         private const val MAX_LOG_UPLOAD_SEC = 3600

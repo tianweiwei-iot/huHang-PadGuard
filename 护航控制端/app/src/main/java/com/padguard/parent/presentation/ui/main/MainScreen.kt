@@ -63,12 +63,24 @@ fun MainScreen(
                     NavigationBarItem(
                         selected = currentRoute == item.route,
                         onClick = {
-                            navController.navigate(item.route) {
-                                popUpTo(navController.graph.findStartDestination().id) {
-                                    saveState = true
+                            // 起始页（首页）不能走 saveState/restoreState：
+                            // 实测经过「接入新设备」流程后，restoreState 会在起始目的地上
+                            // 恢复出被污染的回退栈 —— 点「首页」永远落在「设备管理」。
+                            // 起始页永远存在于回退栈底，直接 popBackStack 即可确定性回到首页；
+                            // 万一真不在栈里（理论不会），再退化为普通 navigate。
+                            val isStart = item.route == navController.graph.startDestinationRoute
+                            if (isStart) {
+                                if (!navController.popBackStack(item.route, inclusive = false)) {
+                                    navController.navigate(item.route) { launchSingleTop = true }
                                 }
-                                launchSingleTop = true
-                                restoreState = true
+                            } else {
+                                navController.navigate(item.route) {
+                                    popUpTo(navController.graph.findStartDestination().id) {
+                                        saveState = true
+                                    }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
                             }
                         },
                         icon = { Icon(item.icon, contentDescription = item.label) },

@@ -23,10 +23,14 @@ class MessageService(
         requireOwned(userId, deviceId)
         // 提前失败优于下发后被孩子端拒绝：否则家长端看到"发布成功"，
         // 孩子端却以 BAD_PAYLOAD 丢弃，故障无法被及时发现。
-        val content = req.text?.trim().orEmpty()
+        var content = req.text?.trim().orEmpty()
         if (content.isEmpty() && req.mediaUrl.isNullOrBlank()) {
             throw BizException(ParentErr.PARAM_ERROR, "消息内容不能为空", Audience.PARENT)
         }
+        // 纯媒体消息（未填附加说明）content 兜底为素材名：
+        // 下发的载荷里 CONTENT 为空串时，旧版孩子端 / 历史日志里会看到一条"空消息"，
+        // 用素材名兜底让任何一端的展示都至少有可读信息。
+        if (content.isEmpty()) content = req.mediaName?.trim().orEmpty()
         val now = System.currentTimeMillis()
         val msg = publishedMessageRepository.save(
             PublishedMessage(

@@ -38,6 +38,10 @@ import com.padguard.presentation.ui.theme.OutlineSoft
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.HomeUiState
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 
 /**
  * 首页仪表盘（清爽卡片风，参考 WPS「我的」页版式；视觉基准：docs/UI设计提示词.md）
@@ -73,6 +77,17 @@ fun HomeScreen(
     val devices = uiState.devices
     val selectedDevice = uiState.selectedDevice
     val deviceId = selectedDevice?.id.orEmpty()
+
+    // 回到首页（ON_RESUME）即刷新设备列表：孩子端改名 / 用量上报后，
+    // 家长端回首页能即时拉到三端一致的最新数据（服务端→家长端同步）。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) onRefresh()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     PullToRefreshBox(
         isRefreshing = uiState.isRefreshing,
@@ -119,6 +134,7 @@ fun HomeScreen(
                         usedMinutes = uiState.todayUsage?.totalUsageMinutes ?: 0,
                         dailyLimitMinutes = uiState.dailyLimitMinutes,
                         appUsages = uiState.todayUsage?.appUsages ?: emptyList(),
+                        childName = uiState.childName,
                         onModuleClick = { if (deviceId.isNotEmpty()) onNavigateToUsageDetail(deviceId) },
                         onLimitClick = { if (deviceId.isNotEmpty()) onNavigateToUsageSettings(deviceId) },
                         modifier = Modifier.padding(horizontal = 16.dp)
@@ -275,7 +291,7 @@ private fun DeviceSwitchPill(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = device.name,
+                        text = device.childName?.takeIf { it.isNotBlank() } ?: device.name,
                         color = if (selected) Color.White else PadGuardColors.TextPrimary,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
@@ -396,12 +412,14 @@ private fun TodayUsageModule(
     appUsages: List<com.padguard.domain.model.AppUsage>,
     onModuleClick: () -> Unit,
     onLimitClick: () -> Unit,
+    childName: String = "",
     modifier: Modifier = Modifier
 ) {
-    val safeLimit = dailyLimitMinutes.coerceAtLeast(1)
-    val remaining = (safeLimit - usedMinutes).coerceAtLeast(0)
-    val fraction = (usedMinutes.toFloat() / safeLimit.toFloat()).coerceIn(0f, 1f)
-    val overLimit = usedMinutes > safeLimit
+    // 真实每日限额：服务端返回 0 表示「未设置」，不应伪装成 1 分钟。
+    val hasLimit = dailyLimitMinutes > 0
+    val remaining = (dailyLimitMinutes - usedMinutes).coerceAtLeast(0)
+    val fraction = if (hasLimit) (usedMinutes.toFloat() / dailyLimitMinutes.toFloat()).coerceIn(0f, 1f) else 0f
+    val overLimit = hasLimit && usedMinutes > dailyLimitMinutes
 
     SoftHeroCard(
         modifier = modifier.fillMaxWidth(),
@@ -429,7 +447,11 @@ private fun TodayUsageModule(
                 }
                 Spacer(modifier = Modifier.width(14.dp))
                 Column {
-                    Text("今日平板使用情况", color = Color.White.copy(alpha = 0.85f), style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        if (childName.isBlank()) "今日平板使用情况" else "$childName · 今日平板使用情况",
+                        color = Color.White.copy(alpha = 0.85f),
+                        style = MaterialTheme.typography.labelMedium
+                    )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         "已用 ${TimeFormat.formatDurationFromMinutes(usedMinutes)}",
@@ -439,13 +461,15 @@ private fun TodayUsageModule(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        if (overLimit) "已超出限额 ${TimeFormat.formatDurationFromMinutes(usedMinutes - safeLimit)}" else "剩余 ${TimeFormat.formatDurationFromMinutes(remaining)}",
+                        text = if (!hasLimit) "未设置每日限额"
+                        else if (overLimit) "已超出限额 ${TimeFormat.formatDurationFromMinutes(usedMinutes - dailyLimitMinutes)}"
+                        else "剩余 ${TimeFormat.formatDurationFromMinutes(remaining)}",
                         color = Color.White.copy(alpha = 0.95f),
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "每日限额 ${TimeFormat.formatDurationFromMinutes(safeLimit)}",
+                        text = if (hasLimit) "每日限额 ${TimeFormat.formatDurationFromMinutes(dailyLimitMinutes)}" else "每日限额：未设置",
                         color = Color.White.copy(alpha = 0.8f),
                         style = MaterialTheme.typography.labelSmall
                     )

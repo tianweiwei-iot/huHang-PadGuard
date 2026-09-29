@@ -346,7 +346,9 @@ class RealRemoteDataSource @Inject constructor(
     }
 
     override suspend fun pullCommands(since: Long): ApiResult<List<Command>> =
-        caller.call("commands") { api.commands(since) }
+        // 带长轮询参数：有指令时服务端立即返回，没有则挂起到超时，
+        // 指令延迟因此不再受轮询周期限制。
+        caller.call("commands") { api.commands(since, LONG_POLL_WAIT_MS) }
 
     // ==================== 下行处理 ====================
 
@@ -423,20 +425,30 @@ class RealRemoteDataSource @Inject constructor(
             while (isActive) {
                 val intervalMs = settings.pollingIntervalSec.value * 1000L
                 if (settings.mode.value == TransportMode.POLLING && credentials.isBound) {
-                    runPollingRound()
+                    val parked = runPollingRound()
                     // 每轮结束尝试恢复 MQTT：校园网切换后端口可能重新放通
                     if (mqtt.connect()) {
                         Logger.i(TAG) { "mqtt recovered, leaving polling mode" }
                     }
+                    // 长轮询生效时，服务端已经替我们"等过"了一轮：返回后立刻发起下一次，
+                    // 指令从入库到被取走只剩一次 RTT。未挂起（旧服务端 / 请求失败）才退避，
+                    // 否则会退化成紧密循环空转刷屏。
+                    if (!parked) delay(intervalMs)
+                } else {
+                    delay(intervalMs)
                 }
-                delay(intervalMs)
             }
         }
     }
 
-    private suspend fun runPollingRound() {
+    /** @return true 表示本轮请求被服务端挂起过（长轮询生效），调用方无需再退避 */
+    private suspend fun runPollingRound(): Boolean {
+        val startedAt = timeProvider.now()
+        var parked = false
         when (val r = pullCommands(lastPollAt)) {
             is ApiResult.Success -> {
+                // 耗时足够长才说明服务端真的挂住了请求；立即返回说明它没支持长轮询
+                parked = timeProvider.now() - startedAt >= LONG_POLL_PARKED_THRESHOLD_MS
                 pollingHealthy = true
                 lastPollAt = timeProvider.now()
                 _downlink.tryEmit(Downlink.ConnectivityChanged(true, TransportMode.POLLING))
@@ -452,6 +464,7 @@ class RealRemoteDataSource @Inject constructor(
             }
         }
         flushAckRetryQueue()
+        return parked
     }
 
     private suspend fun flushAckRetryQueue() {
@@ -484,5 +497,21 @@ class RealRemoteDataSource @Inject constructor(
     companion object {
         private const val TAG = "RealRemoteDataSource"
         private const val ACK_RETRY_BATCH = 50
+
+        /**
+         * 长轮询挂起时长。
+         *
+         * 必须小于终端 HTTP 读超时（30s）：否则终端会先掐断连接，
+         * 表现为指令依旧迟迟不生效，而服务端只留一条断开日志，极难定位。
+         */
+        private const val LONG_POLL_WAIT_MS = 20_000L
+
+        /**
+         * 判定「服务端确实把请求挂住了」的最小耗时。
+         *
+         * 低于此值说明服务端没支持长轮询（旧版本 / 参数被忽略），此时若仍立即发起
+         * 下一轮就会变成紧密循环空转刷屏，因此退回普通轮询周期做退避。
+         */
+        private const val LONG_POLL_PARKED_THRESHOLD_MS = 1_000L
     }
 }

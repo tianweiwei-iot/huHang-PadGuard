@@ -15,6 +15,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -34,6 +35,10 @@ data class HomeUiState(
     val devices: List<Device> = emptyList(),
     val selectedDeviceId: String? = null,
     val selectedDevice: Device? = null,
+    /** 孩子真实姓名（与服务端 Device.childName 一致，做到孩子端/服务端/家长端三端一致） */
+    val childName: String = "",
+    /** 孩子昵称（可选，用于家长端展示补充） */
+    val childNickname: String = "",
     val dailyLimitMinutes: Int = 120,
     val todayUsage: UsageStats? = null,
     val latestActivity: String? = null,
@@ -55,6 +60,11 @@ class HomeViewModel @Inject constructor(
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     init {
+        // 订阅共享设备流：解绑 / 接入 / 重命名后首页即时反映，无需手动下拉刷新。
+        // 否则解绑成功后首页仍显示旧设备，家长会误以为「解绑无效 / 无法解绑」。
+        viewModelScope.launch {
+            deviceRepository.observeDeviceList().collect { applyDeviceList(it) }
+        }
         loadHomeData()
     }
 
@@ -121,35 +131,51 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             if (showRefreshing) _uiState.value = _uiState.value.copy(isRefreshing = true)
             deviceRepository.getDeviceList()
-                .onSuccess { devices ->
-                    val currentSel = _uiState.value.selectedDeviceId
-                    val sel = if (currentSel != null && devices.any { it.id == currentSel }) {
-                        currentSel
-                    } else {
-                        // 同一台平板反复绑定会在服务端留下多条设备记录，
-                        // 其中往往只有一条真正在线。若默认选第一条（很可能是废弃记录），
-                        // 家长下发的所有指令都会发给一个离线设备 ——
-                        // 现场表现是"什么管控功能都没反应，就消息发送看似成功"。
-                        // 因此首次选中优先选在线设备，没有在线设备才回落到第一条。
-                        devices.firstOrNull { it.onlineStatus == DeviceOnlineStatus.ONLINE }?.id
-                            ?: devices.firstOrNull()?.id
-                    }
-                    val selectedDevice = devices.firstOrNull { it.id == sel }
-                    _uiState.value = _uiState.value.copy(
-                        devices = devices,
-                        selectedDeviceId = sel,
-                        selectedDevice = selectedDevice,
-                        isRefreshing = false
-                    )
-                    sel?.let {
-                        loadTodayUsage(it)
-                        loadDailyLimit(it)
-                        loadUnlockTickets(it)
-                    }
-                }
+                .onSuccess { applyDeviceList(it) }
                 .onFailure { e ->
                     _uiState.value = _uiState.value.copy(error = e.message, isRefreshing = false)
                 }
+        }
+    }
+
+    /**
+     * 统一把设备列表应用到 UI 状态并维护选中态。
+     * 初载 / 下拉刷新与共享设备流 [deviceRepository.observeDeviceList] 的观察者共用此路径，
+     * 因此设备解绑（由 [com.padguard.parent.data.remote.ApiDataSource] 刷新该流）后首页即时反映，
+     * 无需手动下拉刷新 —— 避免「解绑成功了但首页还显示旧设备」的误判。
+     */
+    private fun applyDeviceList(devices: List<Device>) {
+        val current = _uiState.value
+        val currentSel = current.selectedDeviceId
+        val sel = if (currentSel != null && devices.any { it.id == currentSel }) {
+            currentSel
+        } else {
+            // 同一台平板反复绑定会在服务端留下多条设备记录，其中往往只有一条真正在线。
+            // 优先选在线设备，没有在线设备才回落到第一条。
+            devices.firstOrNull { it.onlineStatus == DeviceOnlineStatus.ONLINE }?.id
+                ?: devices.firstOrNull()?.id
+        }
+        val selectionChanged = sel != currentSel
+        val selectedDevice = devices.firstOrNull { it.id == sel }
+        _uiState.value = current.copy(
+            devices = devices,
+            selectedDeviceId = sel,
+            selectedDevice = selectedDevice,
+            childName = selectedDevice?.childName?.takeIf { it.isNotBlank() }.orEmpty(),
+            childNickname = selectedDevice?.childNickname?.takeIf { it.isNotBlank() }.orEmpty(),
+            isRefreshing = false,
+            // 选中设备被解绑/已无可选项时，清空其用量数据：
+            // 否则首页会残留一台已解绑设备的今日统计，看起来像"还在管控里"。
+            todayUsage = if (sel == null) null else current.todayUsage,
+            latestActivity = if (sel == null) null else current.latestActivity,
+            pendingUnlockTicket = if (sel == null) null else current.pendingUnlockTicket
+        )
+        if (selectionChanged) {
+            sel?.let {
+                loadTodayUsage(it)
+                loadDailyLimit(it)
+                loadUnlockTickets(it)
+            }
         }
     }
 

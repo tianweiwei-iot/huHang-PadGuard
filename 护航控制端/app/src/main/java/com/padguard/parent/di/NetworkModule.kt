@@ -50,9 +50,32 @@ object NetworkModule {
     /** 占位 baseUrl：真实 scheme/host/port 由 HostSelectionInterceptor 在请求时改写 */
     private const val PLACEHOLDER_BASE_URL = "http://placeholder.padguard/placeholder/"
 
+    /**
+     * Moshi 默认无法为 kotlin.Unit 建立适配器，而本工程大量接口声明为
+     * `Response<ApiResponse<Unit>>`（logout / 远程安装卸载 / 应用挂起 / 时长限额 …）。
+     *
+     * 缺少适配器时，Retrofit 在**创建 converter 阶段**即抛
+     * `IllegalArgumentException: Unable to create converter for kotlin.Unit`，
+     * 请求根本发不出去 —— 典型表现是"点了按钮立刻报错，但服务端日志一切正常"。
+     *
+     * 这里注册一个空适配器兜底：读取并丢弃响应值即可。
+     * 注册后既不影响 data 为 null 的场景，也让所有 ApiResponse<Unit> 接口恢复可用。
+     */
+    private val unitJsonAdapter = object : com.squareup.moshi.JsonAdapter<Unit>() {
+        override fun fromJson(reader: com.squareup.moshi.JsonReader): Unit {
+            reader.skipValue()
+            return Unit
+        }
+
+        override fun toJson(writer: com.squareup.moshi.JsonWriter, value: Unit?) {
+            writer.nullValue()
+        }
+    }
+
     @Provides
     @Singleton
     fun provideMoshi(): Moshi = Moshi.Builder()
+        .add(Unit::class.java, unitJsonAdapter)
         .addLast(KotlinJsonAdapterFactory())
         .build()
 

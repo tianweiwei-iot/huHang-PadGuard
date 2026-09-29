@@ -189,6 +189,15 @@ class DeviceService(
         }
     }
 
+    /**
+     * 设备当前策略版本，供心跳回执做版本对账。
+     *
+     * 心跳是孩子端唯一"必定周期性到达服务端"的通道，把策略版本搭在回执里，
+     * 终端就能在漏掉策略推送时立刻自我纠偏，不必等下一次自检轮询。
+     */
+    fun policyVersionOf(deviceId: String): Int =
+        deviceRepository.findById(deviceId).map { it.policyVersion }.orElse(0)
+
     fun setOffline(deviceId: String) {
         deviceRepository.findById(deviceId).ifPresent { dev ->
             if (dev.onlineStatus == "ONLINE") {
@@ -294,7 +303,7 @@ class DeviceService(
 
     private fun Device.toDto() = DeviceDto(
         id = id, name = name, deviceId = id, model = model, osVersion = osVersion,
-        appVersion = appVersion, onlineStatus = onlineStatus,
+        appVersion = appVersion, onlineStatus = effectiveOnlineStatus(this),
         lastOnlineTime = lastOnlineAt, batteryLevel = batteryLevel,
         controlMode = controlMode, sceneMode = sceneMode, groupId = groupId,
         groupName = null, sceneType = scene, latitude = latitude, longitude = longitude,
@@ -303,6 +312,31 @@ class DeviceService(
         childNickname = childNickname,
         childAvatar = childAvatar
     )
+
+    /**
+     * 在线状态的"惰性超时"兜底判定：仅影响返回给家长端的值，不改库。
+     *
+     * 背景：设备上线状态此前完全依赖两个事件 —— MQTT 断线触发 [setOffline]，或孩子端心跳
+     * 触发 [applyHeartbeat] 置 ONLINE。但存在两个盲区：
+     * 1. local profile 下 MQTT 关闭，[setOffline] 永不触发；
+     * 2. HTTP 降级心跳只把状态置为 ONLINE，从不置 OFFLINE。
+     * 结果：孩子端一旦卸载/关机/断网，服务端 [onlineStatus] 永远停在最后一次的 "ONLINE"，
+     * 家长端便一直显示"在线"，进而"解绑后设备仍在列表里、还被优先选为当前设备"。
+     *
+     * 这里以最后一次心跳时间 [Device.lastOnlineAt] 兜底：若距今超过 [ONLINE_STALE_MS]
+     * （默认 2 分钟，覆盖 30~60s 心跳间隔 + 网络抖动冗余），即视为已离线返回 "OFFLINE"。
+     * 不依赖 MQTT、不回写库，零风险且立即生效。
+     */
+    private fun effectiveOnlineStatus(dev: Device): String {
+        if (dev.onlineStatus != "ONLINE") return dev.onlineStatus
+        val last = dev.lastOnlineAt ?: return "OFFLINE"
+        return if (System.currentTimeMillis() - last > ONLINE_STALE_MS) "OFFLINE" else "ONLINE"
+    }
+
+    private companion object {
+        /** 在线状态超时阈值：最后一次心跳距今超过该值即判为离线（毫秒，默认 2 分钟）。 */
+        const val ONLINE_STALE_MS = 120_000L
+    }
 
     /**
      * 孩子端自定义个人资料（姓名 / 昵称 / 头像），写库即生效。

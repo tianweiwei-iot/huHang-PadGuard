@@ -17,6 +17,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -32,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -51,6 +57,7 @@ fun ChildLoginScreen(viewModel: ChildLoginViewModel = hiltViewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val serverUrl by viewModel.serverUrl.collectAsStateWithLifecycle()
     var showAdvanced by remember { mutableStateOf(false) }
+    var passwordVisible by remember { mutableStateOf(false) }
 
     if (showAdvanced) {
         ServerConfigDialog(
@@ -103,11 +110,19 @@ fun ChildLoginScreen(viewModel: ChildLoginViewModel = hiltViewModel()) {
                 label = { Text("密码") },
                 singleLine = true,
                 enabled = state !is LoginUiState.Loading,
-                visualTransformation = PasswordVisualTransformation(),
+                visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                     keyboardType = KeyboardType.Password,
                     imeAction = ImeAction.Done
                 ),
+                trailingIcon = {
+                    IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                        Icon(
+                            imageVector = if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                            contentDescription = if (passwordVisible) "隐藏密码" else "显示密码"
+                        )
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp)
             )

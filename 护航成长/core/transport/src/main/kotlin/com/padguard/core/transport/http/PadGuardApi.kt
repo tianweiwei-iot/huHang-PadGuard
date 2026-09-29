@@ -103,9 +103,20 @@ interface PadGuardApi {
     @POST("device/locations")
     suspend fun uploadLocations(@Body body: LocationUploadRequest): Response<ApiEnvelope<JsonElement>>
 
-    /** §5.7 指令拉取（仅 POLLING 降级模式使用） */
+    /**
+     * §5.7 指令拉取（仅 POLLING 降级模式使用）
+     *
+     * [waitMs] > 0 时走长轮询：此刻没有待办指令的话，服务端会把请求挂起到
+     * 有指令入库或超时为止。无 MQTT 环境下这是把「锁屏 / 解锁 / 实时看屏」
+     * 从「等一个轮询周期」压到「一次 RTT」的关键；传 0 则退回即时返回，与旧服务端一致。
+     *
+     * 取值须小于终端 HTTP 读超时（30s），否则终端会先掐断连接。
+     */
     @GET("device/commands")
-    suspend fun commands(@Query("since") since: Long): Response<ApiEnvelope<List<Command>>>
+    suspend fun commands(
+        @Query("since") since: Long,
+        @Query("waitMs") waitMs: Long
+    ): Response<ApiEnvelope<List<Command>>>
 
     /** §5.8 心跳降级上报（仅 MQTT 不可用时使用） */
     @POST("device/heartbeat")

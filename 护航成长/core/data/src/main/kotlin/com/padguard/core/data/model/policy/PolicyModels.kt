@@ -183,6 +183,7 @@ data class InstallPolicy(
 
 @Serializable
 data class AppLimitPolicy(
+    @SerialName("enabled") val enabled: Boolean = true,
     @SerialName("dailyTotalMinutes") val dailyTotalMinutes: Int = 0,
     /** 工作日（周一~周五）每日总额度，分钟；>0 时优先于 [dailyTotalMinutes] */
     @SerialName("weekdayTotalMinutes") val weekdayTotalMinutes: Int = 0,
@@ -201,10 +202,16 @@ data class AppLimitPolicy(
      * 表现为"时间管控设置不了 / 改了没反应"，设备还会按旧额度继续锁屏。
      * 未配置对应档位（0）时回退到 dailyTotalMinutes，保持与老策略包兼容。
      */
-    fun quotaFor(isWeekend: Boolean): Int = when {
-        isWeekend && weekendTotalMinutes > 0 -> weekendTotalMinutes
-        !isWeekend && weekdayTotalMinutes > 0 -> weekdayTotalMinutes
-        else -> dailyTotalMinutes
+    fun quotaFor(isWeekend: Boolean): Int {
+        // 家长端「启用时间管控」总开关关闭时，任何时长额度都不生效，
+        // 孩子端按"无限制"处理；否则家长在控制端关掉开关后设备仍按旧额度锁屏，
+        // 表现为"时间管控关不掉"，与开关语义直接冲突。
+        if (!enabled) return 0
+        return when {
+            isWeekend && weekendTotalMinutes > 0 -> weekendTotalMinutes
+            !isWeekend && weekdayTotalMinutes > 0 -> weekdayTotalMinutes
+            else -> dailyTotalMinutes
+        }
     }
 }
 
@@ -244,6 +251,7 @@ data class KeywordPolicy(
 
 @Serializable
 data class SchedulePolicy(
+    @SerialName("enabled") val enabled: Boolean = true,
     @SerialName("timezone") val timezone: String = "Asia/Shanghai",
     @SerialName("rules") val rules: List<ScheduleRule> = emptyList()
 )

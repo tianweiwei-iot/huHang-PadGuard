@@ -60,6 +60,8 @@ import com.padguard.data.model.UrlBlacklistRequest
 import com.padguard.data.model.ViolationStatsDto
 import com.padguard.data.model.WebActivityStatsDto
 import com.padguard.data.model.WebPolicyDto
+import com.padguard.data.model.TabletUsageSettingsDto
+import com.padguard.data.model.TimeRangeDto
 import com.padguard.domain.model.Alert
 import com.padguard.domain.model.AlertCategory
 import com.padguard.domain.model.AlertLevel
@@ -90,6 +92,8 @@ import com.padguard.domain.model.TimeRestriction
 import com.padguard.domain.model.UsageStats
 import com.padguard.domain.model.User
 import com.padguard.domain.model.UserRole
+import com.padguard.domain.model.TabletUsageSettings
+import com.padguard.domain.model.TimeRange
 import com.padguard.domain.repository.ViolationStats
 import com.padguard.domain.repository.WebActivityStats
 import com.padguard.domain.repository.AlertRepository
@@ -279,7 +283,10 @@ class ApiDataSource @Inject constructor(
         )
 
     override suspend fun unbindDevice(deviceId: String): Result<Unit> {
-        val result = exec { deviceApi.unbindDevice(deviceId) }.map { Unit }
+        // 解绑接口响应体为空，走 execRaw（ResponseBody 原始接收）：
+        // 用 exec { ... ApiResponse<Unit> } 会让 Moshi 在构建 converter 时就抛
+        // "Unable to create converter for kotlin.Unit"，请求根本发不出去。
+        val result = execRaw { deviceApi.unbindDevice(deviceId) }
         // 解绑后必须立刻刷新列表：否则要等 POLL_INTERVAL_MS 轮询才更新，
         // 家长端看着设备还在列表里，会误以为"解绑没生效"。
         // 注意必须写成显式 suspend 调用 —— Result.onSuccess 的 lambda 不是挂起上下文。
@@ -752,11 +759,13 @@ class ApiDataSource @Inject constructor(
     override suspend fun applyPolicyTemplate(deviceId: String, templateId: String): Result<Unit> =
         exec { policyApi.applyTemplate(deviceId, com.padguard.data.model.ApplyTemplateRequest(templateId)) }.map { Unit }
 
-    override suspend fun getTabletUsageSettings(deviceId: String): Result<com.padguard.domain.model.TabletUsageSettings> =
-        Result.failure(Exception("服务端未提供平板使用时间设置接口，待后端补齐。"))
+    override suspend fun getTabletUsageSettings(deviceId: String): Result<TabletUsageSettings> =
+        exec { policyApi.getTabletUsageSettings(deviceId) }
+            .map { resp -> resp.data?.toDomain() ?: throw Exception("读取时间管控设置失败") }
 
-    override suspend fun updateTabletUsageSettings(settings: com.padguard.domain.model.TabletUsageSettings): Result<com.padguard.domain.model.TabletUsageSettings> =
-        Result.failure(Exception("服务端未提供平板使用时间设置接口，待后端补齐。"))
+    override suspend fun updateTabletUsageSettings(settings: TabletUsageSettings): Result<TabletUsageSettings> =
+        exec { policyApi.updateTabletUsageSettings(settings.deviceId, settings.toDto()) }
+            .map { resp -> resp.data?.toDomain() ?: throw Exception("保存时间管控设置失败") }
 
     // ==================== StatisticsRepository ====================
 
@@ -939,6 +948,32 @@ private fun TimeRestrictionDto.toDomain(): TimeRestriction = TimeRestriction(
 private fun TimeRestriction.toDto(): TimeRestrictionDto = TimeRestrictionDto(
     id = id, deviceId = deviceId, dayOfWeek = dayOfWeek, startTime = startTime, endTime = endTime,
     maxMinutes = maxMinutes, isEnabled = isEnabled
+)
+
+private fun TabletUsageSettingsDto.toDomain(): TabletUsageSettings = TabletUsageSettings(
+    deviceId = deviceId,
+    enabled = enabled,
+    enabledTimeRanges = enabledTimeRanges?.map { TimeRange(it.startTime, it.endTime) }
+        ?: listOf(TimeRange("08:00", "18:00")),
+    weekdayLimitMinutes = weekdayLimitMinutes,
+    weekendLimitMinutes = weekendLimitMinutes,
+    restAfterMinutes = restAfterMinutes,
+    restDurationMinutes = restDurationMinutes,
+    timeUpMessage = timeUpMessage,
+    // 回读时不再带 syncToDevice（那是下发瞬间的动作标志），保持页面状态干净
+    syncToDevice = false
+)
+
+private fun TabletUsageSettings.toDto(): TabletUsageSettingsDto = TabletUsageSettingsDto(
+    deviceId = deviceId,
+    enabled = enabled,
+    enabledTimeRanges = enabledTimeRanges.map { TimeRangeDto(it.startTime, it.endTime) },
+    weekdayLimitMinutes = weekdayLimitMinutes,
+    weekendLimitMinutes = weekendLimitMinutes,
+    restAfterMinutes = restAfterMinutes,
+    restDurationMinutes = restDurationMinutes,
+    timeUpMessage = timeUpMessage,
+    syncToDevice = true
 )
 
 private fun InstalledAppDto.toDomain(): InstalledApp = InstalledApp(

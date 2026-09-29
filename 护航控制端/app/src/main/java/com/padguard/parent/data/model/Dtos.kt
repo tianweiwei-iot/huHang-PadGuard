@@ -393,6 +393,7 @@ data class TimeRangeDto(
 @JsonClass(generateAdapter = true)
 data class TabletUsageSettingsDto(
     val deviceId: String,
+    val enabled: Boolean = true,
     val enabledTimeRanges: List<TimeRangeDto>?,
     val weekdayLimitMinutes: Int,
     val weekendLimitMinutes: Int,

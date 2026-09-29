@@ -46,6 +46,9 @@ class ScheduleEvaluator @Inject constructor(
      * @return 命中的锁定规则；null 表示当前不需要因时段而锁屏
      */
     fun evaluate(policy: SchedulePolicy, atMillis: Long = timeProvider.now()): ScheduleVerdict {
+        // 家长端「启用时间管控」总开关关闭时，不按时段锁机：
+        // 否则关掉开关后孩子端仍会在"可用时段"之外锁屏，与开关语义冲突。
+        if (!policy.enabled) return ScheduleVerdict.Unlocked
         if (policy.rules.isEmpty()) return ScheduleVerdict.Unlocked
 
         val zone = runCatching { ZoneId.of(policy.timezone) }.getOrElse {

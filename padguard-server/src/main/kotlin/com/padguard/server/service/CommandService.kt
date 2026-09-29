@@ -10,9 +10,12 @@ import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.CommandRepository
 import com.padguard.server.repository.DeviceRepository
 import com.fasterxml.jackson.databind.ObjectMapper
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.util.Base64
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -60,6 +63,9 @@ class CommandService(
             deviceId,
             CommandPacket(msgId, type, 1, now, expiresAt, priority, strPayload, signature)
         )
+        // MQTT 不可用（家庭/本地部署无 broker）时唤醒正在长轮询的孩子端，
+        // 让它不必等下一个轮询周期就能取走这条指令。
+        notifyWaiters(deviceId)
         return CommandDto(msgId, type, "PENDING", strPayload, now, null)
     }
 
@@ -87,7 +93,16 @@ class CommandService(
         val now = System.currentTimeMillis()
         expiredCommandSweeper.sweep(deviceId, now)
 
-        val cursor = since.takeIf { it in 1L..now } ?: 0L
+        // 游标合法性校验（含**时钟偏移容错**）：
+        // 终端时钟略快于服务端时，since 会落在「未来」——此前直接判非法归零，
+        // 等于每次轮询都下发全部 PENDING 指令，叠加回执延迟就会重复执行
+        // （实测录屏每 3 秒被丢弃重启一次）。对轻微超前 clamp 到服务端当前时间：
+        // 语义等价于"截至此刻之前创建的指令我只拉一次"，比归零安全得多。
+        val cursor = when {
+            since in 1L..now -> since
+            since > now -> now
+            else -> 0L
+        }
         return commandRepository.findByDeviceIdOrderByCreatedAtAsc(deviceId)
             .filter { it.status == STATUS_PENDING && it.expiresAt > now && it.createdAt >= cursor }
             .take(MAX_POLLING_BATCH)
@@ -102,6 +117,49 @@ class CommandService(
                     signature = it.signature ?: ""
                 )
             }
+    }
+
+    // ==================== 长轮询（MQTT 缺失时的低延迟通道） ====================
+    //
+    // 无 broker 环境下孩子端退化为 HTTPS 定时轮询，而**轮询周期就是指令延迟的下限**：
+    // 60s 一轮意味着家长点「锁屏」最坏要等一分钟才生效，实时看屏同样迟迟不出首帧。
+    // 长轮询把请求挂在服务端，指令一入库立刻唤醒，延迟从「一个轮询周期」降到「一次 RTT」，
+    // 且空闲时只在超时时刻才往返一次，请求数比高频轮询更少。
+    //
+    // 这里只存回调、不引入 Spring Web 类型，保持 Service 层与传输方式解耦。
+
+    /** deviceId -> 挂起中的长轮询回调 */
+    private val waiters = ConcurrentHashMap<String, ConcurrentLinkedQueue<(List<CommandPacket>) -> Unit>>()
+
+    /**
+     * 注册一个长轮询等待者。
+     *
+     * @return true 表示已挂起（调用方应把 DeferredResult 交给 Spring 异步完成）；
+     *         false 表示此刻已有待办指令，[onReady] 已同步触发，请求可立即结束
+     */
+    fun registerWaiter(deviceId: String, since: Long, onReady: (List<CommandPacket>) -> Unit): Boolean {
+        val pending = pendingForPolling(deviceId, since)
+        if (pending.isNotEmpty()) {
+            onReady(pending)
+            return false
+        }
+        waiters.computeIfAbsent(deviceId) { ConcurrentLinkedQueue() }.add(onReady)
+        return true
+    }
+
+    /** 超时或连接断开时摘除回调，避免队列无限增长 */
+    fun removeWaiter(deviceId: String, onReady: (List<CommandPacket>) -> Unit) {
+        waiters[deviceId]?.remove(onReady)
+    }
+
+    /** 唤醒该设备所有挂起的轮询请求。重复下发由终端 CommandGate 按 msgId 去重，安全。 */
+    private fun notifyWaiters(deviceId: String) {
+        val queue = waiters[deviceId] ?: return
+        while (true) {
+            val onReady = queue.poll() ?: break
+            runCatching { onReady(pendingForPolling(deviceId, 0)) }
+                .onFailure { log.warn("notify long-poll waiter failed: {}", it.message) }
+        }
     }
 
     /**
@@ -125,9 +183,20 @@ class CommandService(
         return Base64.getEncoder().encodeToString(mac.doFinal(data.toByteArray(Charsets.UTF_8)))
     }
 
-    private companion object {
+    companion object {
         const val STATUS_PENDING = "PENDING"
         /** 单次轮询下发上限：既保证批次可控，也避免异常堆积时一次性拉取过多 */
         const val MAX_POLLING_BATCH = 50
+
+        /**
+         * 长轮询挂起上限。
+         *
+         * 必须**小于终端 HTTP 读超时（30s）**：一旦服务端挂起时间超过终端读超时，
+         * 终端会先掐断连接，家长端表现为指令迟迟不生效，而服务端日志只剩一条断开记录，
+         * 极难定位。取 20s 留 10s 余量覆盖网络排队与 GC 停顿。
+         */
+        const val MAX_WAIT_MS = 20_000L
+
+        private val log = LoggerFactory.getLogger(CommandService::class.java)
     }
 }

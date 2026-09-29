@@ -168,6 +168,20 @@ class ScreenCaptureService : Service() {
     @Volatile private var videoTrackIndex = -1
     private val screenRecording = AtomicBoolean(false)
 
+    // 录制循环（drainEncoder）与收尾/丢弃路径（stop / release muxer）跑在不同 IO 协程上，
+    // 曾出现「收尾已 release muxer、循环里最后一次 drainEncoder 仍持有旧引用并 writeSampleData」
+    // 的竞态 → IllegalStateException: writeSampleData returned an error → **整个孩子端进程崩溃**，
+    // 录屏文件随之丢失（家长端自然收不到视频）。用这把锁把 drain 与 stop/release 串行化。
+    private val muxerLock = Any()
+    /** MP4 要求每条 track 的 pts 单调递增；surface 输入时间戳理论上单调，此处兜底防抖动 */
+    private var lastWrittenPtsUs = Long.MIN_VALUE / 2
+    /** muxer 写入失败后置位：后续写入跳过，收尾时不再上传（半截 MP4 没有 moov 头，必然打不开） */
+    @Volatile private var recordWriteFailed = false
+    /** 本次录制实际写入 muxer 的样本数：收尾时 0 样本的文件是空壳 MP4，绝不能上传 */
+    @Volatile private var recordSampleCount = 0
+    /** muxer.stop() 是否成功：stop 失败的文件只有未收尾的占位 moov，播放器必报损坏 */
+    @Volatile private var muxerStopOk = false
+
     /** 已进入前台状态；重复 startForeground 会触发系统回收 MediaProjection，见 [enterForeground] */
     private var foregroundEntered = false
 
@@ -391,6 +405,14 @@ class ScreenCaptureService : Service() {
         // 从此这台设备的录屏功能**永久失效**，家长端只看到"录屏启动失败"却查不到任何原因。
         // 残留录制的产物没有对应的 stop 事件，上传也没人认领，直接丢弃最安全。
         if (screenRecording.get()) {
+            // 同一任务的重复 start 指令：服务端在回执延迟/时钟偏移下会把同一条
+            // screenRecord 反复下发（实测 3 秒一次）。若每次都当"残留"丢弃重启，
+            // 录制永远只有几秒、且每次丢弃都强制释放编解码器（曾引发
+            // dequeueOutputBuffer 与 release 并发的进程崩溃）。同任务幂等忽略才是正解。
+            if (activeTaskId == taskId) {
+                Logger.i(TAG) { "duplicate screen record start for $taskId, keep current recording" }
+                return
+            }
             Logger.w(TAG) { "stale screen record detected (task=${activeTaskId}), discard it before starting $taskId" }
             releaseRecordingResources()
             recordFile = null
@@ -432,6 +454,9 @@ class ScreenCaptureService : Service() {
                 encoderSurface = surface
                 muxerStarted = false
                 videoTrackIndex = -1
+                recordWriteFailed = false
+                recordSampleCount = 0
+                muxerStopOk = false
 
                 // 常驻采集会话保持不变：VD 一直输出到 ImageReader，录屏与实时看屏共用这路帧。
                 val reader = ensureCaptureSession(projection, w, h, metrics.densityDpi)
@@ -545,17 +570,19 @@ class ScreenCaptureService : Service() {
 
     /** 仅释放编解码器与封装器，不动 screenRecording / recordJob 标志（收尾流程由调用方控制） */
     private fun releaseCodecAndMuxer() {
-        val codec = videoCodec
-        val muxer = videoMuxer
-        val surface = encoderSurface
-        videoCodec = null
-        videoMuxer = null
-        encoderSurface = null
-        // 先释放封装器再释放编解码器，顺序反了会触发 MediaMuxer 内部异常
-        runCatching { muxer?.release() }
-        runCatching { codec?.stop() }
-        runCatching { codec?.release() }
-        runCatching { surface?.release() }
+        synchronized(muxerLock) {
+            val codec = videoCodec
+            val muxer = videoMuxer
+            val surface = encoderSurface
+            videoCodec = null
+            videoMuxer = null
+            encoderSurface = null
+            // 先释放封装器再释放编解码器，顺序反了会触发 MediaMuxer 内部异常
+            runCatching { muxer?.release() }
+            runCatching { codec?.stop() }
+            runCatching { codec?.release() }
+            runCatching { surface?.release() }
+        }
     }
 
     /**
@@ -578,23 +605,41 @@ class ScreenCaptureService : Service() {
         screenRecording.set(false)
         runCatching { withTimeoutOrNull(3000L) { recordJob?.join() } }
         recordStopJob?.cancel()
-        // 2) 通知编码器收尾 + 抽干 + 停封装器
-        runCatching { videoCodec?.signalEndOfInputStream() }
-            .onFailure { Logger.w(TAG) { "signalEndOfInputStream: ${it.message}" } }
+        // 2) 通知编码器收尾 + 抽干 + 停封装器（与 drainEncoder 共用 muxerLock 串行化）
+        synchronized(muxerLock) {
+            runCatching { videoCodec?.signalEndOfInputStream() }
+                .onFailure { Logger.w(TAG) { "signalEndOfInputStream: ${it.message}" } }
+        }
         runCatching { drainEncoder(end = true) }
             .onFailure { Logger.w(TAG) { "drainEncoder: ${it.message}" } }
-        runCatching { videoMuxer?.stop() }.onFailure { Logger.w(TAG) { "muxer stop: ${it.message}" } }
+        synchronized(muxerLock) {
+            if (videoMuxer != null && muxerStarted) {
+                // stop() 成功与否直接决定文件可不可播：stop 失败意味着磁盘上的
+                // 只是 MediaMuxer 启动时写的"占位 moov"（样本表为空），播放器必报损坏。
+                // 置 muxerStopOk 供上传判据使用，绝不能让半成品混进家长端相册。
+                muxerStopOk = runCatching { videoMuxer?.stop() }.isSuccess
+                if (!muxerStopOk) Logger.w(TAG) { "muxer stop failed, file is not playable and will be discarded" }
+            }
+        }
         // 3) 释放编解码与封装资源
         releaseCodecAndMuxer()
         recordJob = null
         muxerStarted = false
         videoTrackIndex = -1
 
-        if (upload && taskId != null && file != null && file.exists() && file.length() > 0) {
+        if (upload && taskId != null && file != null && file.exists() &&
+            file.length() > 0 && !recordWriteFailed && muxerStopOk && recordSampleCount > 0
+        ) {
             when (val r = remote.uploadMedia(taskId, durationSec, MIME_VIDEO_MP4, file)) {
-                is ApiResult.Success -> Logger.i(TAG) { "screen record uploaded: $taskId ${file.length() / 1024}KB" }
+                is ApiResult.Success -> Logger.i(TAG) { "screen record uploaded: $taskId ${file.length() / 1024}KB samples=$recordSampleCount" }
                 else -> Logger.w(TAG) { "screen record upload failed: $r" }
             }
+        } else if (upload && recordWriteFailed) {
+            Logger.w(TAG) { "screen record had muxer write failure, skip uploading broken file" }
+        } else if (upload && !muxerStopOk) {
+            Logger.w(TAG) { "screen record muxer not finalized, skip uploading unplayable file" }
+        } else if (upload && recordSampleCount <= 0) {
+            Logger.w(TAG) { "screen record has no encoded samples ($recordSampleCount), skip uploading empty file" }
         } else if (upload) {
             Logger.w(TAG) { "screen record produced no file, nothing to upload" }
         }
@@ -616,42 +661,79 @@ class ScreenCaptureService : Service() {
      *
      * 必须持续调用：编码器输出缓冲满了就会停止接收新输入，帧循环会因此卡死。
      * [end] 为 true 时抽到 END_OF_STREAM 为止（收尾阶段）。
+     *
+     * **整个函数必须在 muxerLock 内**：dequeueOutputBuffer 会阻塞等待编码器输出，
+     * 若此时另一线程在收尾/丢弃路径里 release codec，系统会取消挂起的 dequeue
+     * 并抛 `IllegalStateException: Pending dequeue output buffer request cancelled`
+     * —— 这是把整个孩子端进程打崩的真实事故（实测 2026-09-29 14:18）。
+     * 只锁 writeSampleData 挡不住这一处，锁必须覆盖 dequeue。
      */
     private fun drainEncoder(end: Boolean) {
-        val codec = videoCodec ?: return
-        val muxer = videoMuxer ?: return
-        val info = MediaCodec.BufferInfo()
-        val timeoutUs = if (end) 100_000L else 10_000L
-        while (true) {
-            val index = codec.dequeueOutputBuffer(info, timeoutUs)
-            if (index == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                if (!end) return
-                // 收尾时多抽几轮，直到拿到 EOS；拿不到也不要无限等
-                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
-                continue
-            }
-            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                if (!muxerStarted) {
-                    videoTrackIndex = muxer.addTrack(codec.outputFormat)
-                    muxer.start()
-                    muxerStarted = true
+        synchronized(muxerLock) {
+            val codec = videoCodec ?: return
+            val muxer = videoMuxer ?: return
+            val info = MediaCodec.BufferInfo()
+            val timeoutUs = if (end) 100_000L else 10_000L
+            // 收尾阶段的时间上限：正常 EOS 毫秒级就到；编码器异常时绝不能在锁内死等，
+            // 否则 finalizeRecording 永远走不到 muxer.stop()，文件永远是未收尾的占位 moov
+            val endDeadline = if (end) SystemClock.elapsedRealtime() + DRAIN_END_TIMEOUT_MS else 0L
+            while (true) {
+                val index = try {
+                    codec.dequeueOutputBuffer(info, timeoutUs)
+                } catch (t: Throwable) {
+                    // codec 被并发释放等场景：放弃本次抽数，交由上层收尾逻辑兜底
+                    Logger.w(TAG) { "dequeueOutputBuffer aborted: ${t.message}" }
+                    return
                 }
-                continue
-            }
-            if (index < 0) return
-            val buffer = codec.getOutputBuffer(index) ?: run {
+                if (index == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                    if (!end) return
+                    if (SystemClock.elapsedRealtime() > endDeadline) {
+                        Logger.w(TAG) { "drainEncoder(end) timed out waiting EOS" }
+                        return
+                    }
+                    continue
+                }
+                if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    if (!muxerStarted) {
+                        // 双重检查：等锁期间收尾可能已把 muxer 停掉/释放
+                        if (videoMuxer == null) return
+                        videoTrackIndex = muxer.addTrack(codec.outputFormat)
+                        muxer.start()
+                        muxerStarted = true
+                        lastWrittenPtsUs = Long.MIN_VALUE / 2
+                    }
+                    continue
+                }
+                if (index < 0) return
+                val buffer = codec.getOutputBuffer(index) ?: run {
+                    codec.releaseOutputBuffer(index, false)
+                    return
+                }
+                if (info.size > 0 && muxerStarted &&
+                    (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+                ) {
+                    buffer.position(info.offset)
+                    buffer.limit(info.offset + info.size)
+                    // writeSampleData 绝不允许抛出进程级崩溃（历史事故：收尾竞态导致
+                    // writeSampleData returned an error → 孩子端整个崩掉）。失败只标记并放弃本帧。
+                    if (videoMuxer == null || recordWriteFailed) {
+                        codec.releaseOutputBuffer(index, false)
+                        return
+                    }
+                    runCatching {
+                        if (info.presentationTimeUs > lastWrittenPtsUs) {
+                            muxer.writeSampleData(videoTrackIndex, buffer, info)
+                            lastWrittenPtsUs = info.presentationTimeUs
+                            recordSampleCount++
+                        }
+                    }.onFailure { t ->
+                        recordWriteFailed = true
+                        Logger.w(TAG) { "writeSampleData failed (recording aborted, file will be discarded): ${t.message}" }
+                    }
+                }
                 codec.releaseOutputBuffer(index, false)
-                return
+                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
             }
-            if (info.size > 0 && muxerStarted &&
-                (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
-            ) {
-                buffer.position(info.offset)
-                buffer.limit(info.offset + info.size)
-                muxer.writeSampleData(videoTrackIndex, buffer, info)
-            }
-            codec.releaseOutputBuffer(index, false)
-            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
         }
     }
 
@@ -763,28 +845,39 @@ class ScreenCaptureService : Service() {
                 var lastSent: ByteArray? = null
                 var lastRealFrameAt = 0L
                 while (streaming.get() && SystemClock.elapsedRealtime() < streamDeadlineMs) {
-                    // 录屏期间 VirtualDisplay 的输出被切给了 MediaRecorder，
-                    // 此时 ImageReader 拿不到帧，如实跳过而不是推黑帧给家长。
-                    if (mediaRecorder != null) {
-                        SystemClock.sleep(LIVE_FRAME_INTERVAL_MS)
-                        continue
-                    }
-                    val jpeg = grabFrameScaled(reader, metrics.widthPixels, metrics.heightPixels)
-                    val payload = if (jpeg != null) {
-                        lastSent = jpeg
-                        lastRealFrameAt = SystemClock.elapsedRealtime()
-                        jpeg
-                    } else {
-                        // 无新帧：距上次重发超过保活间隔就复用上一帧，否则只写心跳。
-                        // 这样既保证服务端 lastFrameAt 持续刷新（家长端判定流活着），
-                        // 又不会在静止画面下把同样的 30KB 每 200ms 推一次白白吃满上行带宽。
-                        val cached = lastSent
-                        if (cached != null &&
+                    val payload: ByteArray?
+                    if (mediaRecorder != null || screenRecording.get()) {
+                        // 录屏期间让帧：录制循环与推流共用同一个常驻 ImageReader，
+                        // 两条消费端各自 acquireLatestImage 会互相偷帧 —— 实测 21 秒
+                        // 只抢到 9 帧，录出来的视频近乎幻灯片。录屏期间录制循环独占
+                        // 帧源（它每 6 帧会顺手刷新 lastFrame），这里改用缓存帧保活，
+                        // 家长端看屏在录制期间退化为低频刷新，录制质量不受损。
+                        payload = if (lastFrame != null &&
                             SystemClock.elapsedRealtime() - lastRealFrameAt >= LIVE_KEEPALIVE_MS
                         ) {
                             lastRealFrameAt = SystemClock.elapsedRealtime()
-                            cached
+                            lastFrame
                         } else null
+                        SystemClock.sleep(LIVE_FRAME_INTERVAL_MS)
+                    } else {
+                        val jpeg = grabFrameScaled(reader, metrics.widthPixels, metrics.heightPixels)
+                        payload = if (jpeg != null) {
+                            lastSent = jpeg
+                            lastRealFrameAt = SystemClock.elapsedRealtime()
+                            jpeg
+                        } else {
+                            // 无新帧：距上次重发超过保活间隔就复用上一帧，否则只写心跳。
+                            // 这样既保证服务端 lastFrameAt 持续刷新（家长端判定流活着），
+                            // 又不会在静止画面下把同样的 30KB 每 200ms 推一次白白吃满上行带宽。
+                            val cached = lastSent
+                            if (cached != null &&
+                                SystemClock.elapsedRealtime() - lastRealFrameAt >= LIVE_KEEPALIVE_MS
+                            ) {
+                                lastRealFrameAt = SystemClock.elapsedRealtime()
+                                cached
+                            } else null
+                        }
+                        if (jpeg == null) SystemClock.sleep(LIVE_FRAME_INTERVAL_MS)
                     }
                     try {
                         if (payload == null) {
@@ -801,7 +894,6 @@ class ScreenCaptureService : Service() {
                         Logger.i(TAG) { "live stream write ended after $frames frames: ${t.message}" }
                         return
                     }
-                    if (jpeg == null) SystemClock.sleep(LIVE_FRAME_INTERVAL_MS)
                 }
                 Logger.i(TAG) { "live stream finished, frames=$frames" }
             }
@@ -1144,6 +1236,9 @@ class ScreenCaptureService : Service() {
         private const val RECORD_FRAME_RATE = 10
         private const val RECORD_BIT_RATE = 4_000_000
         private const val RECORD_I_FRAME_INTERVAL = 2
+
+        /** 收尾阶段等 EOS 的上限：正常毫秒级到达；编码器异常时到点放弃，避免在锁内死等 */
+        private const val DRAIN_END_TIMEOUT_MS = 3000L
 
         // ---- 实时看屏推流参数 ----
         /** 目标帧率 5fps：足够"看着是实时的"，又不至于把上行带宽吃满 */

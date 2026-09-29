@@ -46,6 +46,8 @@ import com.padguard.child.ui.components.GlyphBadge
 import com.padguard.child.ui.theme.PadGuardTheme
 import com.padguard.core.common.Logger
 import com.padguard.core.data.repository.UnlockRequestRepository
+import com.padguard.core.engine.admin.Capability
+import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.lock.LockController
 import com.padguard.core.engine.lock.LockState
 import dagger.hilt.android.AndroidEntryPoint
@@ -80,8 +82,18 @@ class LockScreenActivity : ComponentActivity() {
 
     @Inject lateinit var unlockRequestRepository: UnlockRequestRepository
     @Inject lateinit var lockController: LockController
+    @Inject lateinit var admin: DeviceAdminBridge
 
     private val handler = Handler(Looper.getMainLooper())
+
+    /**
+     * 一次锁屏会话内是否已经调用过系统级 `lockNow()`。
+     *
+     * 抢占复位会反复 onCreate/startActivity，若每次都 lockNow() 会导致
+     * 屏幕反复熄灭、孩子根本看不清锁屏页，也会被 ROM 判定为异常行为。
+     * 因此只在"本次锁定刚开始"时压一次系统锁，后续复位不再重复。
+     */
+    private var systemLockPushed = false
 
     /** 申请弹窗状态（Compose 层读写，Activity 只负责持有） */
     private var showRequestDialog by mutableStateOf(false)
@@ -93,6 +105,11 @@ class LockScreenActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showOverLockScreen()
+        admin.refreshControlMode()
+        // 屏蔽下拉通知栏与快捷设置：否则孩子能从通知栏进设置去关管控 / 卸载我们。
+        // 抢占复位会反复进 onCreate，这里做成幂等的"置一次"，不会反复调用系统 API。
+        applyStatusBarDisabled(true)
+        pushSystemLockIfNeeded()
 
         // 无解锁入口：拦截系统返回键，禁止逃逸。
         onBackPressedDispatcher.addCallback(
@@ -117,6 +134,8 @@ class LockScreenActivity : ComponentActivity() {
             lockController.state.collect { state ->
                 if (!state.locked) {
                     exitLockTask()
+                    // 解锁必须恢复状态栏，否则家长会永久失去下拉通知栏 —— 这是严重副作用
+                    applyStatusBarDisabled(false)
                     if (!isFinishing) finish()
                 }
             }
@@ -162,28 +181,48 @@ class LockScreenActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        resumed = true
         // 每次回到前台都重新确认一次锁定任务：系统可能在切后台时解除了固定。
         // startLockTask 幂等，重复调用无副作用（非白名单应用会抛异常，已用 runCatching 兜住）。
         enterLockTask()
-        // 重新抢占时清掉待执行的复位动作，避免重复拉起造成闪屏
+        // 已经回到前台，撤掉持续抢占，避免重复拉起造成闪屏
         handler.removeCallbacks(relaunchRunnable)
+    }
+
+    override fun onStop() {
+        resumed = false
+        super.onStop()
     }
 
     override fun onPause() {
         super.onPause()
         // 只有"仍处于锁定态却被切走"才需要抢回前台；
         // 正常解锁时 lockController 已清空原因，这里不会误拉起。
+        resumed = false
         if (stillLocked()) {
             handler.postDelayed(relaunchRunnable, RELAUNCH_DELAY_MS)
         }
     }
 
-    private val relaunchRunnable = Runnable {
-        if (!isFinishing && stillLocked()) {
+    /**
+     * 持续抢占：只要仍处于锁定态且没回到前台，就反复把自己拉回栈顶。
+     *
+     * 单次抢占是不够的 —— 部分 ROM 会限制后台启动 Activity，孩子上滑回桌面后
+     * 一次拉起可能被系统吃掉，锁屏就再也回不来（表现同样是"锁了还能玩"）。
+     * 因此这里在重新回到前台（onResume 撤掉回调）之前会持续重试。
+     */
+    private val relaunchRunnable = object : Runnable {
+        override fun run() {
+            if (isFinishing || !stillLocked()) return
+            if (resumed) return
             Logger.w(TAG) { "lock screen pushed to background while locked, re-arming" }
-            show(this, currentDetail)
+            show(this@LockScreenActivity, currentDetail)
+            handler.postDelayed(this, RELAUNCH_RETRY_MS)
         }
     }
+
+    /** 是否真正处于前台（由 onResume/onPause/onStop 维护） */
+    @Volatile private var resumed = false
 
     private fun stillLocked(): Boolean = lockController.state.value.locked
 
@@ -193,6 +232,41 @@ class LockScreenActivity : ComponentActivity() {
 
     private fun exitLockTask() {
         LockTaskSupport.stop(this)
+    }
+
+    /**
+     * 禁用 / 恢复状态栏（需 Device Owner）。
+     *
+     * 没有 DO 时该能力不可用，属降级场景 —— 此时靠 [pushSystemLockIfNeeded] 的
+     * 系统级锁屏与抢占复位兜底，不能因为拿不到 DO 就什么都不做。
+     */
+    private fun applyStatusBarDisabled(disabled: Boolean) {
+        if (!admin.can(Capability.STATUS_BAR)) return
+        admin.setStatusBarDisabled(disabled)
+    }
+
+    /**
+     * 无 Device Owner 时的系统级兜底。
+     *
+     * `startLockTask()` 只有在 DO 白名单里才生效；没有 DO 时锁屏页就是一个普通 Activity，
+     * 孩子从屏幕底部上滑（手势导航 HOME）即可回到桌面 —— 这正是"锁了还能滑走"的根因。
+     *
+     * 此时退而求其次调用设备管理器级别的 `lockNow()`：它会立刻灭屏并唤起系统锁屏（keyguard）。
+     * 在 keyguard 之上，系统的 HOME 手势与最近任务均被禁用，等于借系统之力把手势逃逸堵住；
+     * 我们的锁屏页通过 [showOverLockScreen] 的 setShowWhenLocked 显示在 keyguard 之上，
+     * 孩子看到的仍是"平板已锁定"而不是系统锁屏界面。
+     */
+    private fun pushSystemLockIfNeeded() {
+        if (systemLockPushed) return
+        // 已经是 DO：Lock Task 本身就是最强的封锁，再 lockNow() 只会多灭一次屏，无收益
+        if (admin.isDeviceOwner()) return
+        if (!admin.can(Capability.LOCK_NOW)) {
+            Logger.w(TAG) { "no Device Admin active: system-level lock unavailable, lock screen can be swiped away" }
+            return
+        }
+        admin.lockNow()
+        systemLockPushed = true
+        Logger.i(TAG) { "system lockNow() pushed (no Device Owner): gesture navigation blocked by keyguard" }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -382,6 +456,8 @@ class LockScreenActivity : ComponentActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(relaunchRunnable)
+        // 兜底恢复：任何退出路径（含被系统回收）都不能把家长的状态栏永远留在禁用态
+        applyStatusBarDisabled(false)
         if (instance === this) instance = null
         super.onDestroy()
     }
@@ -395,8 +471,15 @@ class LockScreenActivity : ComponentActivity() {
 
         private val DURATION_OPTIONS = listOf(15, 30, 60)
 
-        /** 被切走后重新抢占前台的延迟：太短会和系统动画打架，太长会留下可操作窗口 */
-        private const val RELAUNCH_DELAY_MS = 800L
+        /**
+         * 被切走后重新抢占前台的延迟。
+         * 原为 800ms：孩子上滑后能看到近 1 秒的桌面，足以再点开一个应用，
+         * 观感就是"锁屏能滑走"。压到 250ms，只够看到切换动画，来不及做任何操作。
+         */
+        private const val RELAUNCH_DELAY_MS = 250L
+
+        /** 抢占未成功时的重试间隔：持续抢占直到真正回到前台 */
+        private const val RELAUNCH_RETRY_MS = 500L
 
         /** 当前运行中的实例，供 [dismiss] 直接 finish，避免再发一次 Intent */
         @Volatile

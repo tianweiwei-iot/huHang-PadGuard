@@ -156,6 +156,7 @@ data class TimeRangeDto(val startTime: String, val endTime: String)
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class TabletUsageSettingsDto(
     val deviceId: String = "",
+    val enabled: Boolean = true,
     val enabledTimeRanges: List<TimeRangeDto>? = null,
     val weekdayLimitMinutes: Int = 120,
     val weekendLimitMinutes: Int = 180,

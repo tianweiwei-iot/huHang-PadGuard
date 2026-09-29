@@ -69,11 +69,20 @@ interface DeviceApi {
     @POST("devices/bind-code")
     suspend fun generateBindCode(): Response<ApiResponse<BindCodeResponse>>
 
-    /** 解绑设备 */
+    /**
+     * 解绑设备。
+     *
+     * 响应体为空，必须用 ResponseBody 接收：
+     * 若声明为 `ApiResponse<Unit>`，Moshi 无法为 kotlin.Unit 创建适配器，
+     * Retrofit 会在**创建 converter 阶段**直接抛
+     * `IllegalArgumentException: Unable to create converter for kotlin.Unit`，
+     * 请求根本发不出去 —— 表现为"点解绑就报错，但服务端一切正常"。
+     * 与下方 setAppHidden 采用同一范式。
+     */
     @POST("devices/{deviceId}/unbind")
     suspend fun unbindDevice(
         @Path("deviceId") deviceId: String
-    ): Response<ApiResponse<Unit>>
+    ): Response<okhttp3.ResponseBody>
 
     /** 修改设备别名 */
     @PUT("devices/{deviceId}/name")

@@ -149,6 +149,8 @@ class DeviceSetting(
     @Column(name = "daily_limit_minutes") var dailyLimitMinutes: Int = 120,
     @Column(name = "web_blocked_urls", columnDefinition = "text") var webBlockedUrls: String? = null,
     // ---- 平板使用时间设置（家长端「时间管控」页，GET/PUT policies/{deviceId}/tablet-usage-settings）----
+    /** 启用时间管控总开关：false 时孩子端不按时长/时段执行管控。缺省为 true（存量行迁移后默认开启）。 */
+    @Column(name = "time_control_enabled") var timeControlEnabled: Boolean = true,
     // 可空 + null 视为默认值：存量行（迁移前创建）这些列为 NULL，读取时由服务层兜底
     @Column(name = "weekday_limit_minutes") var weekdayLimitMinutes: Int? = 120,
     @Column(name = "weekend_limit_minutes") var weekendLimitMinutes: Int? = 180,

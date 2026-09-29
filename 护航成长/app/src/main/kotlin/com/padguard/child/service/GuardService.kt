@@ -43,6 +43,7 @@ import com.padguard.core.engine.PolicyEngine
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.command.EngineEffect
 import com.padguard.core.engine.enforcer.LimitVerdict
+import com.padguard.core.engine.lock.LockController
 import com.padguard.core.transport.Downlink
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
@@ -57,6 +58,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -107,6 +109,7 @@ class GuardService : Service() {
     @Inject lateinit var policyRepository: PolicyRepository
     @Inject lateinit var logRepository: LogRepository
     @Inject lateinit var admin: DeviceAdminBridge
+    @Inject lateinit var lockController: LockController
     @Inject lateinit var permissionGranter: PermissionGranter
     @Inject lateinit var timeProvider: TimeProvider
     @Inject lateinit var unlockRequestRepository: UnlockRequestRepository
@@ -116,6 +119,15 @@ class GuardService : Service() {
     @Inject lateinit var photoCapture: PhotoCapture
     @Inject lateinit var appInstaller: AppInstaller
     @Inject lateinit var watermark: WatermarkOverlay
+
+    /**
+     * 当前是否"已绑定"（由 [observeBinding] 维护）。
+     *
+     * 未绑定时必须停止一切管控执行：没有家长就没有管控依据。
+     * 若仍按本地陈旧缓存策略执行，会出现"家长端已看不到这台设备、孩子端却被锁死无法操作"的死锁；
+     * 而系统级 lockNow() 一旦落下，应用自身再也解不开，只能靠 adb 救援。
+     */
+    private val boundNow = AtomicBoolean(false)
 
     /**
      * 服务自己的作用域，不用 `@ApplicationScope`。
@@ -129,6 +141,8 @@ class GuardService : Service() {
     private var downlinkJob: Job? = null
     private var effectJob: Job? = null
     private var bindingJob: Job? = null
+    /** 指令专用拉取循环（见 [startCommandLoop]） */
+    private var commandJob: Job? = null
 
     private val transportStarted = AtomicBoolean(false)
     private val bootstrapped = AtomicBoolean(false)
@@ -220,6 +234,12 @@ class GuardService : Service() {
         scope.launch { runSafely("ensurePermissions") { permissionGranter.ensureGranted() } }
         scope.launch {
             runSafely("applyCachedPolicy") {
+                // 未绑定时不落地本地缓存策略：没有家长就没有管控依据，
+                // 否则服务端清库后，孩子端会靠陈旧缓存继续锁屏，形成"家长看不到设备、平板锁死"的死锁。
+                if (!authRepository.isBound.first()) {
+                    Logger.w(TAG) { "not bound: skip cached policy, keep device unlocked" }
+                    return@runSafely
+                }
                 if (reason == REASON_BOOT) {
                     policyEngine.onDeviceBoot()
                     logRepository.append(
@@ -236,6 +256,7 @@ class GuardService : Service() {
         observeDownlink()
         observeBinding()
         startMainLoop()
+        startCommandLoop()
     }
 
     /**
@@ -250,9 +271,17 @@ class GuardService : Service() {
         bindingJob = scope.launch {
             authRepository.isBound.distinctUntilChanged().collect { bound ->
                 if (!bound) {
-                    Logger.w(TAG) { "device not bound yet, transport stays offline" }
+                    // 关键：没有绑定关系就绝不继续管控，并主动清空所有锁定原因。
+                    // 绑定关系是服务端资产（除非家长手动解绑 / 服务端删除，否则一直存在），
+                    // 但服务端清库或设备被解绑后，若本地仍按陈旧缓存策略执行，平板会陷入
+                    // "家长端看不到设备、孩子端却锁死无法操作"的死锁 —— 而系统级 lockNow()
+                    // 一旦落下，应用自身再也解不开（lockNow 只能锁、不能程序化解）。
+                    boundNow.set(false)
+                    lockController.releaseAll()
+                    Logger.w(TAG) { "device not bound: transport offline, all locks released" }
                     return@collect
                 }
+                boundNow.set(true)
                 startTransport()
             }
         }
@@ -270,6 +299,45 @@ class GuardService : Service() {
         }
         runSafely("transportStart") { remote.start() }
         runSafely("policyRefreshOnConnect") { refreshPolicy() }
+    }
+
+    // ==================== 指令拉取循环 ====================
+
+    /**
+     * 独立的指令拉取循环 —— 实时性优化的关键。
+     *
+     * ## 为什么必须独立出来
+     * 原先兜底拉取挂在心跳成功分支里，且被 `COMMAND_PULL_INTERVAL_MS = 60s` 限流，
+     * 而心跳本身是 30s 一次。两条节奏叠加后，LOCK_SCREEN / UNLOCK / 截屏 /
+     * 录屏这类"只下发一次"的指令最坏要 **60 秒**才落地 ——
+     * 现场表现就是"家长点了锁屏，平板半天没反应"，这正是实时性差的主因。
+     *
+     * 更关键的是：MQTT 未启用（或 Broker 不可达）时，HTTP 拉取是**唯一**的指令通道，
+     * 这条通道慢 = 所有远程操作都慢。家长端发起实时看屏时首帧也要等这条通道，
+     * 所以"获取实时屏幕慢"和"锁屏慢"其实是同一个根因。
+     *
+     * ## 为什么用固定节奏轮询而不是长轮询
+     * 长轮询（服务端挂起请求直到有指令）延迟更低，但会让 Tomcat 每设备常驻一个线程，
+     * 规模化部署时代价高，且反向代理的空闲超时会把长连接掐断，排查成本极高。
+     * 短轮询的请求体/响应体都是几十字节，局域网 RTT 通常 <5ms、外网 <100ms，
+     * 3s 一跳即可把最坏延迟从 60s 压到 ~3s，是"可靠 + 够快"的折中。
+     *
+     * 在线时按 [COMMAND_PULL_INTERVAL_MS] 快拉；离线时放慢到 [COMMAND_PULL_IDLE_MS]，
+     * 避免断网期间无意义地高频打日志。
+     */
+    private fun startCommandLoop() {
+        commandJob?.cancel()
+        commandJob = scope.launch {
+            while (isActive) {
+                // 只有确认在线才高频拉：离线时 pull 必然失败，快拉只会刷屏日志
+                if (online) {
+                    runSafely("drainPendingCommands") { drainPendingCommands() }
+                    delay(COMMAND_PULL_INTERVAL_MS)
+                } else {
+                    delay(COMMAND_PULL_IDLE_MS)
+                }
+            }
+        }
     }
 
     // ==================== 主循环 ====================
@@ -290,7 +358,11 @@ class GuardService : Service() {
                 val monitoring = policyEngine.monitoring()
 
                 // ---------- 每轮必做：采样 + 锁定判定 ----------
-                runSafely("tick") { doTick(collectForegroundApp = monitoring.collectAppUsage) }
+                // 未绑定时跳过：没有家长就没有管控依据，
+                // 否则本地陈旧缓存策略会把已无归属的设备锁死（见 [boundNow] 的说明）。
+                if (boundNow.get()) {
+                    runSafely("tick") { doTick(collectForegroundApp = monitoring.collectAppUsage) }
+                }
 
                 // ---------- 心跳 ----------
                 if (now >= nextHeartbeat) {
@@ -302,7 +374,9 @@ class GuardService : Service() {
                 if (now >= nextSelfCheck) {
                     // force = true：这里的目的就是把"被用户绕过去的限制"重新压回来，
                     // 版本没变也必须重下，否则自检等于空转。
-                    runSafely("selfCheck") { policyEngine.applyCurrent(force = true) }
+                    if (boundNow.get()) {
+                        runSafely("selfCheck") { policyEngine.applyCurrent(force = true) }
+                    }
                     nextSelfCheck = now + SELF_CHECK_INTERVAL_MS
                 }
 
@@ -473,17 +547,15 @@ class GuardService : Service() {
                 }
                 if (ack.flushLogs) runSafely("flushOnAck") { uploadPending() }
                 if (ack.pendingCommandCount > 0) {
-                    // 服务端若日后上报待执行指令数，这里就是"确实漏了推送"的强信号
-                    Logger.w(TAG) { "server reports ${ack.pendingCommandCount} pending commands" }
+                    // 服务端明确告知有指令在等：这是"推送确实漏了"的强信号，
+                    // 立刻补拉一次，不必再等 [COMMAND_PULL_INTERVAL_MS] 的下一跳。
+                    // 心跳 30s 一次，这条路径把最坏延迟从"等轮询"再削一大截。
+                    Logger.w(TAG) { "server reports ${ack.pendingCommandCount} pending commands, pulling now" }
+                    runSafely("pullOnHeartbeatHint") { drainPendingCommands() }
                 }
-                // 指令兜底拉取：MQTT 推送不是绝对可靠（重连窗口、QoS 边界都可能丢一条）。
-                // 对 LIVE_VIEW_START 这类每 5 秒重发一次的高频指令无所谓，
-                // 但 LOCK_SCREEN / 录屏 / 截屏**只下发一次**，丢一条就是
-                // "家长端点了、平板毫无反应"，且再也补不回来（家长只会以为功能坏了）。
-                // 服务端当前不上报待执行指令数，无法做到"按需触发"，故改为低频定时兜底。
-                if (System.currentTimeMillis() - lastCommandPullAtMs >= COMMAND_PULL_INTERVAL_MS) {
-                    runSafely("drainPendingCommands") { drainPendingCommands() }
-                }
+                // 注：兜底拉取已移到 [startCommandLoop] 的独立循环，不再挂在这里。
+                // 原因：心跳 30s 一次，把拉取挂在心跳上会让 LOCK_SCREEN / 解锁这类
+                // 只下发一次的指令最坏要 30~60s 才落地，表现为"点了没反应 / 延迟很高"。
             }
             is ApiResult.BizError -> {
                 lastHeartbeatOk = false
@@ -948,8 +1020,11 @@ class GuardService : Service() {
      * MQTT 模式下指令走推送通道，但推送并非绝对可靠：重连窗口、QoS 边界都可能丢一条。
      * 高频重复的指令丢了无所谓，一次性指令（锁屏 / 录屏 / 截屏）丢了就永远补不回来。
      *
-     * 服务端 `pendingForPolling` **只返回 PENDING 指令**，已执行/已回执的不会再回来，
-     * 因此这里与推送通道并存是安全的，不会把同一条指令执行两遍。
+     * 服务端 `pendingForPolling` 只返回 PENDING 指令 —— **前提是执行后必须回执**：
+     * 之前这里执行完就完事，从不上报 ack，指令在服务端永远是 PENDING；
+     * 叠加终端时钟偏移导致服务端把游标判非法归零后，同一条指令每个轮询周期
+     * 都会被重发重执行一遍（实测录屏每 3 秒被丢弃重启一次，永远录不出完整视频）。
+     * 现在与推送通道保持一致：执行 → 回执，让服务端把指令收敛为终态。
      */
     private suspend fun drainPendingCommands() {
         val deviceId = authRepository.getDeviceId()
@@ -963,7 +1038,13 @@ class GuardService : Service() {
                     "fallback pull: ${list.size} command(s) missed by push -> ${list.map { it.type.name }}"
                 }
                 list.forEach { cmd ->
-                    runSafely("fallbackCmd:${cmd.type.name}") { policyEngine.execute(cmd, deviceId) }
+                    runSafely("fallbackCmd:${cmd.type.name}") {
+                        // 去重在 CommandExecutor 内做（推送/轮询双通道共用漏斗）；
+                        // 无论新执行还是去重忽略，都要回执，让服务端收敛指令状态
+                        val ack = policyEngine.execute(cmd, deviceId)
+                        runCatching { remote.sendAck(ack) }
+                            .onFailure { Logger.w(TAG) { "fallback ack ${cmd.msgId} failed: $it" } }
+                    }
                 }
             }
             is ApiResult.BizError ->
@@ -988,12 +1069,24 @@ class GuardService : Service() {
         // → 回到绑定页，而服务端那边设备仍是已绑定且在线，日志里找不到任何解绑操作。
         // 表现为「绑定态莫名其妙丢失、监控功能全线失效」，排查时极易误判为存储故障。
         //
-        // 判据：用当前设备令牌打一次服务端。令牌仍然有效 = 服务端并未真正解绑
-        // = 这是一条陈旧指令，忽略；只有服务端明确判定令牌失效/设备未绑定才真的清。
-        val stillBound = when (val r = remote.syncTime()) {
+        // 判据：用当前设备令牌打一次「需鉴权」的服务端接口核实。
+        // 令牌仍然有效 = 服务端并未真正解绑 = 这是一条陈旧指令，忽略；
+        // 只有服务端明确判定令牌失效(40101)/设备未绑定(40301)才真的清。
+        //
+        // 注意：绝不能复用 syncTime()（底层是 /api/v1/device/time）——该接口在
+        // WebConfig 中被排除在设备鉴权之外（免鉴权、无副作用，仅用于绑定前的连通自检），
+        // 任何令牌（含已被服务端吊销为 "revoked_..." 的令牌）都能拿到 serverTime，
+        // 用它判断"是否仍绑定"会永远返回 true，导致解绑指令被当成陈旧指令忽略、
+        // 本地凭据永不清除（表现：家长端解绑了、孩子端却还在受控 / 再也绑不上别的账号）。
+        //
+        // 改用 fetchPolicy()：已解绑设备的令牌与服务端 deviceTokenHash 不匹配，
+        // ChildAuthInterceptor 返回 401(TOKEN_INVALID)/403(DEVICE_UNBOUND)，
+        // 由 ApiCaller 归一为 ApiResult.BizError，命中 UNBOUND_CODES 即确认解绑。
+        // 另：鉴权失败经 ApiCaller 映射为 BizError 而非 Failure，故两个错误分支都要判断。
+        val stillBound = when (val r = remote.fetchPolicy(0)) {
             is ApiResult.Success -> true
+            is ApiResult.BizError -> r.code !in UNBOUND_CODES
             is ApiResult.Failure -> r.code !in UNBOUND_CODES
-            else -> true
         }
         if (stillBound) {
             Logger.w(TAG) { "stale unbind ignored: device credentials still valid on server" }
@@ -1064,7 +1157,17 @@ class GuardService : Service() {
          * 太短会与 MQTT 推送重复争抢，太长则一次性指令（锁屏/录屏）丢失后补偿过慢；
          * 60s 对"家长点了没反应"是可接受的补偿延迟，请求开销也可忽略。
          */
-        private const val COMMAND_PULL_INTERVAL_MS = 60_000L
+        /**
+         * 指令兜底拉取间隔。
+         *
+         * 原为 60s：远程锁屏 / 解锁 / 截屏 / 实时看屏首帧都要等这么久，
+         * 是"实时性差"的第一根因。压到 3s：单次请求/响应仅几十字节，
+         * 局域网 RTT <5ms、外网 <100ms，代价可忽略，最坏延迟从 60s 降到 ~3s。
+         */
+        private const val COMMAND_PULL_INTERVAL_MS = 3_000L
+
+        /** 离线时的拉取间隔（放慢，避免断网期间高频失败刷日志） */
+        private const val COMMAND_PULL_IDLE_MS = 10_000L
 
         /** 策略自检间隔：把被绕过的限制重新压回来 */
         private const val SELF_CHECK_INTERVAL_MS = 5 * 60_000L
