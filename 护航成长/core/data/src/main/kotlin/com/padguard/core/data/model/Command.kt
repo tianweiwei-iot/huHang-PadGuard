@@ -78,6 +78,16 @@ enum class CommandType {
     /** 停止录屏 */
     STOP_SCREEN_RECORD,
 
+    /**
+     * 开启实时看屏：孩子端持续把屏幕帧推到服务端，家长端拉流观看。
+     * 与 SCREENSHOT（单张静态图）的区别：这是一条**持续的视频流**，
+     * 孩子屏幕上滑动一下家长端同一秒就能看到，而不是等下一次轮询。
+     */
+    LIVE_VIEW_START,
+
+    /** 停止实时看屏（关闭推流，省电省流量） */
+    LIVE_VIEW_STOP,
+
     /** 策略一键重置：终端丢弃本地缓存并重新拉取全量 */
     RESET_POLICY,
 
@@ -92,6 +102,15 @@ enum class CommandType {
 
     /** 临时挂起/恢复应用：payload { packageName, suspended } */
     SET_APP_SUSPENDED,
+
+    /**
+     * 隐藏/显示应用（使用权限开关）：payload { packageName, hidden }
+     *
+     * 与 [SET_APP_SUSPENDED] 的区别：挂起的应用仍在桌面，只是点开会被系统拦截并提示"已停用"，
+     * 孩子天天看到一个点不开的图标，既碍眼又等于在提示"这里有个被禁的应用"。
+     * 隐藏则是让应用从桌面彻底消失，符合"没开启权限的应用不显示"的产品约定。
+     */
+    SET_APP_HIDDEN,
 
     /** 屏幕水印启停：payload { enabled, content } */
     SET_WATERMARK,

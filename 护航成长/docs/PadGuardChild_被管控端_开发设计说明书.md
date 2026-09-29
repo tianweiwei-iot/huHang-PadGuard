@@ -141,6 +141,8 @@
 - **§6.3 应用管控** — `AppPolicyEnforcer`（白/黑名单、挂起 `setPackagesSuspended`、阻止卸载 `setUninstallBlocked`、无障碍/输入法白名单）。
 - **§6.4 内容与上网** — `WebEnforcer`（URL 黑白名单、安全搜索、弹窗拦截；浏览器限制需 DO/PO）。
 - **§6.6 远程锁屏/重启/关机** — `DeviceAdminBridge.lockNow/reboot` + `CommandExecutor`；关机无公开 API，`GuardService` 以锁屏覆盖层兜底。
+  - **锁屏覆盖层的"真锁"前提**：`LockScreenActivity` 只有在 **Device Owner 已激活** 时才会调用 `startLockTask()`（`LockTaskSupport.start` 内部先校验 `isDeviceOwnerApp` + 自身在 `setLockTaskPackages` 白名单内）。此时系统禁用手势导航 / 返回 / 最近任务 / HOME / 状态栏下拉，锁屏页物理上无法逃逸。
+  - **未激活 DO 时不得调用 `startLockTask()`**：否则会退化成"屏幕固定"，系统必然弹出「应用已固定」提示且长按返回即可解除，反而给出逃逸入口。因此 `LockTaskSupport.start` 在白名单校验失败时直接跳过，由全屏 + 抢占式复位兜底。**部署时必须完成 DO 激活**（QR/NFC  provisioning 或 `adb shell dpm set-device-owner com.padguard.child/.receiver.PadGuardDeviceAdminReceiver`），否则锁屏强度降级。
 - **§6.11 防绕过** — `SecurityEnforcer`（防卸载、自动对时、root 检测、无障碍/输入法白名单）。
 - **§6.12 报告与日志** — `LogRepository` + 安全日志 / 使用报告采集。
 - **§6.13 Kiosk** — `KioskEnforcer`（`setLockTaskPackages` + `setPersistentPreferredLauncher`，需 DO）。

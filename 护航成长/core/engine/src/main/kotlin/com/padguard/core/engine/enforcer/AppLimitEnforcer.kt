@@ -116,16 +116,19 @@ class AppLimitEnforcer @Inject constructor(
         dayKey: String = usageRepository.dayKey(timeProvider.now()),
         nowElapsed: Long = timeProvider.elapsedRealtime()
     ): LimitVerdict {
-        // 每日总时长优先级最高：总额耗尽后任何应用都不该继续使用
-        if (policy.dailyTotalMinutes > 0) {
+        // 每日总时长优先级最高：总额耗尽后任何应用都不该继续使用。
+        // 额度按"工作日 / 周末"取（见 [AppLimitPolicy.quotaFor]）——
+        // 只看 dailyTotalMinutes 会让家长端保存的工作日/周末额度完全不生效。
+        val quotaMinutes = policy.quotaFor(isWeekend(timeProvider.now()))
+        if (quotaMinutes > 0) {
             val usedMs = usageRepository.getTotalUsage(dayKey)
-            val quotaMs = policy.dailyTotalMinutes * 60_000L
+            val quotaMs = quotaMinutes * 60_000L
             if (usedMs >= quotaMs) {
                 return LimitVerdict.Blocked(
                     packageName = "",
                     reason = LimitReason.DAILY_TOTAL,
                     usedMinutes = (usedMs / 60_000L).toInt(),
-                    quotaMinutes = policy.dailyTotalMinutes
+                    quotaMinutes = quotaMinutes
                 )
             }
             reminderFor(policy, "", quotaMs - usedMs)?.let { return it }
@@ -212,6 +215,17 @@ class AppLimitEnforcer @Inject constructor(
         if (dayType in rule.dayTypes) return true
         // 与 ScheduleEvaluator 保持一致：未单独配置节假日时退化按周末处理
         return dayType == DayType.HOLIDAY && DayType.WEEKEND in rule.dayTypes
+    }
+
+    /**
+     * 今天是否按"周末"额度计算。
+     *
+     * 复用 [ScheduleEvaluator.dayTypeOf] 与时段锁机共用同一套节假日/调休判定，
+     * 避免出现"时段锁按节假日放行、总时长却按工作日额度卡死"的错乱。
+     */
+    private fun isWeekend(nowWall: Long): Boolean {
+        val today = Instant.ofEpochMilli(nowWall).atZone(ZoneId.systemDefault()).toLocalDate()
+        return scheduleEvaluator.dayTypeOf(today) == DayType.WEEKEND
     }
 
     /**

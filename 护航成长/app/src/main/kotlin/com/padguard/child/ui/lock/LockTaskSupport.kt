@@ -48,11 +48,19 @@ object LockTaskSupport {
     /**
      * 进入锁定任务模式。
      *
-     * 即便白名单设置失败也要尝试一次：部分 ROM 在"用户手动固定过一次"后也允许锁定，
-     * 失败与否不影响页面本身显示，只是少了系统级的逃逸拦截。
+     * **白名单校验失败时绝不能调用 startLockTask()**：
+     * 不在 Device Owner 白名单里的应用调用它，系统会退化成"屏幕固定"——
+     * 立刻弹一条「应用已固定」提示，并且长按返回即可解除，
+     * 既达不到"锁死"的目的，还平白给孩子一个逃逸提示与入口。
+     * 这种场景下宁可不用系统固定，靠锁屏页自己的全屏 + 抢占复位兜底。
+     *
+     * @return true 表示真正进入了锁定任务（Device Owner 白名单生效）
      */
     fun start(activity: android.app.Activity): Boolean {
-        ensureWhitelisted(activity)
+        if (!ensureWhitelisted(activity)) {
+            Logger.w(TAG) { "not a lock-task whitelisted app, skip startLockTask to avoid pinning prompt" }
+            return false
+        }
         return try {
             activity.startLockTask()
             true

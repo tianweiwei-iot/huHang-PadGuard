@@ -1,9 +1,14 @@
 package com.padguard.parent.data.remote
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import com.padguard.data.api.AlertApi
 import com.padguard.data.api.AppManageApi
 import com.padguard.data.api.AuthApi
 import com.padguard.data.api.DeviceApi
+import com.padguard.data.api.FileApi
 import com.padguard.data.api.LocationApi
 import com.padguard.data.api.MessageApi
 import com.padguard.data.api.MonitorApi
@@ -12,6 +17,10 @@ import com.padguard.data.api.StatisticsApi
 import com.padguard.parent.data.auth.TokenManager
 import com.padguard.data.model.AlertDto
 import com.padguard.data.model.ApiResponse
+import com.padguard.data.model.AppHiddenRequest
+import com.padguard.data.model.AppHiddenBatchRequest
+import com.padguard.data.model.AppLimitRequest
+import com.padguard.domain.repository.UploadedMedia
 import com.padguard.data.model.AppInstallRequest
 import com.padguard.data.model.AppPolicyDto
 import com.padguard.data.model.BatchSuspendRequest
@@ -98,15 +107,19 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Response
 import retrofit2.Retrofit
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -134,9 +147,11 @@ class ApiDataSource @Inject constructor(
     private val statisticsApi: StatisticsApi,
     private val alertApi: AlertApi,
     private val appManageApi: AppManageApi,
+    private val fileApi: FileApi,
     private val tokenManager: TokenManager,
     private val authenticatedClient: OkHttpClient,
-    private val retrofit: Retrofit
+    private val retrofit: Retrofit,
+    private val serverPrefs: com.padguard.parent.di.ServerPrefs
 ) : AuthRepository, DeviceRepository, MonitorRepository, PolicyRepository,
     StatisticsRepository, AlertRepository, MessageRepository, LocationRepository {
 
@@ -160,6 +175,17 @@ class ApiDataSource @Inject constructor(
                 val err = runCatching { resp.errorBody()?.string() }.getOrNull()
                 Result.failure(Exception("HTTP ${resp.code()}: ${err ?: resp.message()}"))
             }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** 只关心"指令有没有被服务端接受"的写操作（返回体无需解析） */
+    private suspend fun execRaw(call: suspend () -> Response<okhttp3.ResponseBody>): Result<Unit> {
+        return try {
+            val resp = call()
+            if (resp.isSuccessful) Result.success(Unit)
+            else Result.failure(Exception("HTTP ${resp.code()}: ${resp.message()}"))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -358,7 +384,20 @@ class ApiDataSource @Inject constructor(
     // ==================== MonitorRepository ====================
 
     override suspend fun requestScreenshot(deviceId: String): Result<ScreenshotData> =
-        exec { monitorApi.requestScreenshot(deviceId) }.map { it.data?.toDomain() ?: throw Exception("截屏请求失败") }
+        // 服务端只回执"指令已受理"，画面要等孩子端上传后从截屏历史里取。
+        // 这里返回一个只带 taskId 的占位对象供上层判成败，真正的图走 getScreenshotHistory。
+        exec { monitorApi.requestScreenshot(deviceId) }.map { ack ->
+            val d = ack.data ?: throw Exception("截屏请求失败")
+            com.padguard.domain.model.ScreenshotData(
+                deviceId = d.deviceId,
+                imageUrl = null,
+                thumbnailUrl = null,
+                capturedAt = d.requestedAt ?: System.currentTimeMillis(),
+                width = 0,
+                height = 0,
+                status = d.status ?: "PENDING"
+            )
+        }
 
     override suspend fun getDeviceInfo(deviceId: String): Result<Device> =
         exec { deviceApi.getDeviceDetail(deviceId) }.map { it.data?.toDomain() ?: throw Exception("设备不存在") }
@@ -379,14 +418,16 @@ class ApiDataSource @Inject constructor(
             }
         }
 
+    // 拍照 / 录音：服务端只回执任务（TaskAcceptedDto），文件由孩子端上传后另查。
+    // 返回值语义改为**任务 ID**（不再是文件 url），调用方据此轮询 getMediaTask。
     override suspend fun takePhoto(deviceId: String): Result<String> =
-        exec { monitorApi.takePhoto(deviceId) }.map { it.data?.url ?: throw Exception("拍照请求失败") }
+        exec { monitorApi.takePhoto(deviceId) }.map { it.data?.taskId ?: throw Exception("拍照请求失败") }
 
     override suspend fun startRecording(deviceId: String): Result<String> =
-        exec { monitorApi.startRecording(deviceId) }.map { it.data?.url ?: throw Exception("录音请求失败") }
+        exec { monitorApi.startRecording(deviceId) }.map { it.data?.taskId ?: throw Exception("录音请求失败") }
 
     override suspend fun stopRecording(deviceId: String): Result<String> =
-        exec { monitorApi.stopRecording(deviceId) }.map { it.data?.url ?: throw Exception("停止录音失败") }
+        exec { monitorApi.stopRecording(deviceId) }.map { it.data?.taskId ?: throw Exception("停止录音失败") }
 
     override suspend fun startScreenRecord(
         deviceId: String,
@@ -394,10 +435,93 @@ class ApiDataSource @Inject constructor(
         withAudio: Boolean
     ): Result<com.padguard.domain.model.ScreenRecordTask> =
         exec { monitorApi.startScreenRecord(deviceId, StartRecordRequest(resolution.name, withAudio)) }
-            .map { it.data?.toDomain() ?: throw Exception("录屏启动失败") }
+            .map { ack ->
+                val d = ack.data ?: throw Exception("录屏启动失败")
+                // 服务端回执里没有分辨率/开始时间，这些以家长端本次选择的为准
+                com.padguard.domain.model.ScreenRecordTask(
+                    taskId = d.taskId,
+                    deviceId = deviceId,
+                    startedAt = d.requestedAt ?: System.currentTimeMillis(),
+                    resolution = resolution,
+                    withAudio = withAudio
+                )
+            }
 
-    override suspend fun stopScreenRecord(taskId: String): Result<String> =
-        exec { monitorApi.stopScreenRecord(taskId) }.map { it.data?.url ?: throw Exception("停止录屏失败") }
+    override suspend fun stopScreenRecord(deviceId: String, taskId: String): Result<Unit> =
+        exec { monitorApi.stopScreenRecord(deviceId, taskId) }.map { }
+
+    override suspend fun getMediaTask(
+        deviceId: String,
+        taskId: String
+    ): Result<com.padguard.data.model.MediaTaskStatusDto> =
+        exec { monitorApi.getMediaTask(deviceId, taskId) }
+            .map { dto ->
+                val d = dto.data ?: throw Exception("媒体任务不存在")
+                // 服务端返回的是相对路径（/v1/files/{id}），这里解析成绝对地址再交给上层：
+                // 上层要拿它直接起 Intent 交给系统播放器，相对路径没法用。
+                // 占位 baseUrl 的 host 由 HostSelectionInterceptor 改写为真实服务器，与 downloadImage 同一套做法。
+                val abs = d.url?.let { retrofit.baseUrl().resolve(it)?.toString() }
+                if (abs != null) d.copy(url = abs) else d
+            }
+
+    override suspend fun startLiveView(deviceId: String): Result<Unit> = execRaw {
+        monitorApi.startLiveView(deviceId)
+    }
+
+    override suspend fun stopLiveView(deviceId: String): Result<Unit> = execRaw {
+        monitorApi.stopLiveView(deviceId)
+    }
+
+    /**
+     * 拉实时画面流。
+     *
+     * 帧格式与服务端约定为 `4 字节大端长度 + JPEG`；长度为 0 是心跳帧（用来保活、
+     * 也用来区分"孩子端没画面"和"连接断了"），直接跳过。
+     *
+     * 读超时必须为 0：这是**一条长连接**，帧与帧之间本来就可能隔几百毫秒，
+     * 沿用默认读超时会在正常观看途中被判定超时掐断。
+     *
+     * **必须摘掉 HttpLoggingInterceptor**：全局 client 配的是 `Level.BODY`，
+     * 对普通 JSON 接口没问题，但拉流是**永不结束**的响应体 —— 拦截器会一直把流读进缓冲区
+     * 等着凑齐"完整 body"再打印，结果业务代码一帧也拿不到（界面永远停在"连接中"），
+     * 还会白白吃掉几百 MB 内存。这是"服务端 200、服务端也有帧，家长端却黑屏"的元凶。
+     */
+    override fun liveFrames(deviceId: String): Flow<Bitmap> = flow {
+        val url = retrofit.baseUrl().resolve("stream/$deviceId/live")
+            ?: throw IllegalStateException("非法拉流地址: $deviceId")
+        val client = authenticatedClient.newBuilder()
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .apply {
+                interceptors().removeAll { it is HttpLoggingInterceptor }
+                networkInterceptors().removeAll { it is HttpLoggingInterceptor }
+            }
+            .build()
+        // 显式声明接受任意类型：统一拦截器会给所有请求加 `Accept: application/json`，
+        // 而拉流返回的是二进制流，服务端一旦按 Accept 做内容协商就会判 406/500。
+        // 服务端已改为不声明 produces，这里再兜一道，避免任何一边回退就重现"一直连接中"。
+        val call = client.newCall(
+            Request.Builder().url(url).get().header("Accept", "*/*").build()
+        )
+        try {
+            call.execute().use { resp ->
+                if (!resp.isSuccessful) throw IllegalStateException("拉流失败: HTTP ${resp.code}")
+                val source = resp.body?.source() ?: throw IllegalStateException("拉流失败: 空响应")
+                while (currentCoroutineContext().isActive) {
+                    val len = try {
+                        source.readInt()
+                    } catch (t: Throwable) {
+                        break // 流正常结束（孩子端停止推流 / 家长端关页面）
+                    }
+                    if (len <= 0) continue
+                    if (len > MAX_FRAME_BYTES) break
+                    val bytes = source.readByteArray(len.toLong())
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { emit(it) }
+                }
+            }
+        } finally {
+            runCatching { call.cancel() }
+        }
+    }.flowOn(Dispatchers.IO)
 
     override suspend fun getScreenMonitorSettings(deviceId: String): Result<ScreenMonitorSettings> =
         exec { monitorApi.getScreenMonitorSettings(deviceId) }.map { it.data?.toDomain() ?: throw Exception("读取监控设置失败") }
@@ -414,6 +538,20 @@ class ApiDataSource @Inject constructor(
 
     override suspend fun getPublishedMessages(deviceId: String, limit: Int): Result<List<PublishedMessage>> =
         exec { messageApi.getPublishedMessages(deviceId, limit) }.map { it.data.orEmpty().map { m -> m.toDomain() } }
+
+    override suspend fun uploadMedia(
+        fileName: String,
+        contentType: String,
+        bytes: ByteArray
+    ): Result<UploadedMedia> {
+        val part = okhttp3.MultipartBody.Part.createFormData(
+            "file", fileName, bytes.toRequestBody(contentType.toMediaTypeOrNull())
+        )
+        return exec { fileApi.upload(part) }.map {
+            val dto = it.data ?: throw Exception("素材上传失败：服务端未返回文件信息")
+            UploadedMedia(dto.fileId, dto.url, dto.fileName, dto.contentType, dto.size)
+        }
+    }
 
     // ==================== LocationRepository ====================
 
@@ -466,7 +604,12 @@ class ApiDataSource @Inject constructor(
 
     override suspend fun getAppInventory(deviceId: String): Result<List<InstalledApp>> =
         exec { appManageApi.getInstalledApps(deviceId) }
-            .map { it.data.orEmpty().map { dto -> dto.toDomain() } }
+            .map { list ->
+                list.data.orEmpty().map { dto ->
+                    // 台账图标是相对路径，这里统一拼成可加载的绝对地址（见 [absoluteUrl]）
+                    dto.toDomain().copy(iconUrl = absoluteUrl(dto.iconUrl))
+                }
+            }
 
     override suspend fun installRemoteApp(deviceId: String, app: DistributableApp): Result<Unit> =
         exec {
@@ -486,6 +629,60 @@ class ApiDataSource @Inject constructor(
     ): Result<Unit> =
         exec { appManageApi.suspendAppsBatch(deviceId, BatchSuspendRequest(packages, suspended)) }.map { Unit }
 
+    override suspend fun setAppHidden(deviceId: String, packageName: String, hidden: Boolean): Result<Unit> =
+        execRaw { appManageApi.setAppHidden(deviceId, AppHiddenRequest(packageName, hidden)) }
+
+    override suspend fun setAppsHiddenBatch(
+        deviceId: String,
+        packages: List<String>,
+        hidden: Boolean,
+        all: Boolean
+    ): Result<Int> =
+        exec { appManageApi.setAppsHiddenBatch(deviceId, AppHiddenBatchRequest(packages, hidden, all)) }
+            .map { it.data?.get("sent") ?: 0 }
+
+    override suspend fun setAppLimit(
+        deviceId: String,
+        packageName: String,
+        minutes: Int
+    ): Result<Unit> =
+        exec { appManageApi.setAppLimit(deviceId, packageName, AppLimitRequest(minutes)) }.map { Unit }
+
+    /**
+     * 本地 APK 远程安装：上传 → 拿地址 → 下发 INSTALL_APP。
+     *
+     * 两步都必须有：服务端只签发"去这个地址下载并安装"的指令，
+     * 不会替家长托管安装包。家长手里的 APK 在手机上，孩子端根本访问不到，
+     * 必须先落到服务端。
+     */
+    override suspend fun installLocalApk(
+        deviceId: String,
+        fileName: String,
+        contentType: String,
+        bytes: ByteArray,
+        packageName: String,
+        appName: String?
+    ): Result<Unit> {
+        val part = okhttp3.MultipartBody.Part.createFormData(
+            "file", fileName,
+            bytes.toRequestBody(contentType.toMediaTypeOrNull())
+        )
+        val uploaded = exec { fileApi.upload(part) }
+            .map { it.data ?: throw Exception("上传失败：服务端未返回文件信息") }
+            .getOrElse { return Result.failure(it) }
+
+        return exec {
+            appManageApi.installApp(
+                deviceId,
+                AppInstallRequest(
+                    apkUrl = uploaded.url,
+                    packageName = packageName,
+                    appName = appName ?: fileName.removeSuffix(".apk")
+                )
+            )
+        }.map { Unit }
+    }
+
     override suspend fun getWebPolicy(deviceId: String): Result<com.padguard.domain.model.WebPolicy> =
         exec { policyApi.getWebPolicy(deviceId) }.map { it.data?.toDomain() ?: throw Exception("读取上网策略失败") }
 
@@ -496,21 +693,24 @@ class ApiDataSource @Inject constructor(
         exec { policyApi.setBrowserDisabled(deviceId, BrowserDisableRequest(disabled)) }.map { Unit }
 
     override suspend fun lockScreen(deviceId: String): Result<Unit> =
-        exec { policyApi.lockScreen(deviceId) }.map { Unit }
+        execRaw { policyApi.lockScreen(deviceId) }
+
+    override suspend fun unlockScreen(deviceId: String): Result<Unit> =
+        execRaw { policyApi.unlockScreen(deviceId) }
 
     override suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit> =
         Result.failure(Exception("服务端未提供护眼参数接口，暂不支持。"))
 
     override suspend fun unlock(deviceId: String): Result<Unit> =
-        exec { policyApi.unlock(deviceId) }.map { Unit }
+        execRaw { policyApi.unlock(deviceId) }
 
     override suspend fun tempUnlock(deviceId: String, durationMinutes: Int): Result<Unit> =
-        exec {
+        execRaw {
             policyApi.tempUnlock(
                 deviceId,
                 com.padguard.data.model.TempUnlockRequest(durationMinutes = durationMinutes)
             )
-        }.map { Unit }
+        }
 
     override suspend fun getUnlockTickets(deviceId: String): Result<List<com.padguard.domain.repository.UnlockTicket>> =
         exec { policyApi.getUnlockTickets(deviceId) }.map { list ->
@@ -526,22 +726,25 @@ class ApiDataSource @Inject constructor(
     override suspend fun approveUnlockTicket(
         deviceId: String, ticketId: String, durationMinutes: Int?
     ): Result<Unit> =
-        exec {
+        execRaw {
             policyApi.approveUnlockTicket(
                 deviceId, ticketId,
                 com.padguard.data.model.UnlockApproveRequest(durationMinutes = durationMinutes)
             )
-        }.map { Unit }
+        }
 
     override suspend fun ignoreUnlockTicket(deviceId: String, ticketId: String): Result<Unit> =
-        exec {
+        execRaw {
             policyApi.rejectUnlockTicket(
                 deviceId, ticketId, com.padguard.data.model.UnlockRejectRequest(reason = "家长已忽略")
             )
-        }.map { Unit }
+        }
+
+    override suspend fun dismissUnlockTicket(deviceId: String, ticketId: String): Result<Unit> =
+        execRaw { policyApi.dismissUnlockTicket(deviceId, ticketId) }
 
     override suspend fun setControlMode(deviceId: String, mode: ControlMode): Result<Unit> =
-        exec { policyApi.setControlMode(deviceId, com.padguard.data.model.ModeChangeRequest(mode.name)) }.map { Unit }
+        execRaw { policyApi.setControlMode(deviceId, com.padguard.data.model.ModeChangeRequest(mode.name)) }
 
     override suspend fun getPolicyTemplates(sceneType: SceneType): Result<List<com.padguard.domain.repository.PolicyTemplate>> =
         exec { policyApi.getTemplates(sceneType.name) }.map { it.data.orEmpty().map { t -> t.toDomain() } }
@@ -562,7 +765,12 @@ class ApiDataSource @Inject constructor(
             .map { it.data?.toDomain() ?: throw Exception("获取统计失败") }
 
     override suspend fun getTodayUsage(deviceId: String): Result<UsageStats> =
-        exec { statisticsApi.getTodayUsage(deviceId) }.map { it.data?.toDomain() ?: throw Exception("获取今日使用失败") }
+        exec { statisticsApi.getTodayUsage(deviceId) }
+            .map { (it.data?.toDomain() ?: throw Exception("获取今日使用失败")).withAbsoluteIcons() }
+
+    /** 用量条目里的图标同样是相对路径，统一补成绝对地址（见 [absoluteUrl]） */
+    private fun UsageStats.withAbsoluteIcons(): UsageStats =
+        copy(appUsages = appUsages.map { it.copy(iconUrl = absoluteUrl(it.iconUrl)) })
 
     override suspend fun getAppUsageHistory(
         deviceId: String,
@@ -635,7 +843,26 @@ class ApiDataSource @Inject constructor(
         return null
     }
 
+    /**
+     * 把服务端返回的相对图片地址拼成可加载的绝对地址。
+     *
+     * 服务端存的是 `/v1/files/<id>` 这种不带 host 的相对路径（同一份数据可能在
+     * 家庭电脑、云服务器之间迁移，存绝对路径必然失效）；
+     * 但图片加载器（Coil）只认完整 URL，不拼就是一片空白。
+     * 这里在**取数时**拼接而不是落库：服务器地址是运行时可改的（换网络/换电脑都变），
+     * 写死在任何一层都会导致改完地址后图标集体裂开。
+     */
+    private fun absoluteUrl(path: String?): String? {
+        val p = path?.takeIf { it.isNotBlank() } ?: return null
+        if (p.startsWith("http://", ignoreCase = true) || p.startsWith("https://", ignoreCase = true)) return p
+        val base = serverPrefs.getBaseUrl().trim().trimEnd('/')
+        return base + if (p.startsWith("/")) p else "/$p"
+    }
+
     companion object {
+        /** 单帧大小上限（5MB）：异常大帧只可能是协议错乱，直接断流重连而不是 OOM */
+        private const val MAX_FRAME_BYTES = 5 * 1024 * 1024
+
         private const val POLL_INTERVAL_MS = 10_000L
         private const val BIND_POLL_ATTEMPTS = 20
         private const val BIND_POLL_INTERVAL_MS = 2_000L
@@ -657,7 +884,11 @@ private fun DeviceDto.toDomain(): Device = Device(
     appVersion = appVersion, onlineStatus = safeEnum(onlineStatus) { DeviceOnlineStatus.UNKNOWN },
     lastOnlineTime = lastOnlineTime, batteryLevel = batteryLevel,
     controlMode = safeEnum(controlMode) { ControlMode.NORMAL }, groupId = groupId, groupName = groupName,
-    sceneType = safeEnum(sceneType) { SceneType.FAMILY }, latitude = latitude, longitude = longitude
+    sceneType = safeEnum(sceneType) { SceneType.FAMILY }, latitude = latitude, longitude = longitude,
+    remoteLocked = remoteLocked ?: false,
+    childName = childName,
+    childNickname = childNickname,
+    childAvatar = childAvatar
 )
 
 private fun DeviceGroupDto.toDomain(): DeviceGroup = DeviceGroup(
@@ -722,7 +953,9 @@ private fun InstalledAppDto.toDomain(): InstalledApp = InstalledApp(
     updateTime = updateTime,
     lastSeenAt = lastSeenAt,
     blocked = blocked,
-    dailyLimitMinutes = dailyLimitMinutes
+    dailyLimitMinutes = dailyLimitMinutes,
+    iconUrl = iconUrl,
+    hidden = hidden
 )
 
 private fun AppPolicyDto.toDomain(): AppPolicy = AppPolicy(
@@ -753,8 +986,20 @@ private fun UsageStatsDto.toDomain(): UsageStats = UsageStats(
 )
 
 private fun AppUsageDto.toDomain(): AppUsage = AppUsage(
-    packageName = packageName, appName = appName, usageMinutes = usageMinutes, iconUrl = iconUrl
+    packageName = packageName,
+    appName = appName,
+    usageMinutes = usageMinutes,
+    iconUrl = iconUrl,
+    // 起止时间：服务端按天聚合出的真实区间（毫秒），转成界面直接可显示的 HH:mm:ss
+    startTime = startAt?.takeIf { it > 0 }?.let { clockOf(it) },
+    endTime = endAt?.takeIf { it > 0 }?.let { clockOf(it) },
+    startAt = startAt,
+    endAt = endAt,
+    launchCount = launchCount
 )
+
+private fun clockOf(millis: Long): String =
+    java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(millis))
 
 private fun DailyUsageDto.toDomain(): DailyUsage = DailyUsage(date = date, usageMinutes = usageMinutes, violationCount = violationCount)
 

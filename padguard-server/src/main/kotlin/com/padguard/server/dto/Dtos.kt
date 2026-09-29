@@ -22,7 +22,15 @@ data class DeviceDto(
     val osVersion: String?, val appVersion: String?, val onlineStatus: String,
     val lastOnlineTime: Long?, val batteryLevel: Int?, val controlMode: String?,
     val sceneMode: String?, val groupId: String?, val groupName: String?,
-    val sceneType: String?, val latitude: Double?, val longitude: Double?
+    val sceneType: String?, val latitude: Double?, val longitude: Double?,
+    /** 家长是否仍处于远程锁屏状态；驱动家长端「锁屏 / 解锁」按钮的切换 */
+    val remoteLocked: Boolean = false,
+    /** 孩子端自定义资料：姓名 */
+    val childName: String? = null,
+    /** 孩子端自定义资料：昵称 */
+    val childNickname: String? = null,
+    /** 孩子端自定义资料：头像 URL */
+    val childAvatar: String? = null
 )
 
 data class LockRequest(val reason: String? = null)
@@ -69,6 +77,16 @@ data class BindByAccountRequest(
 /** 孩子端自定义设备名（凭设备令牌鉴权） */
 data class DeviceNameRequest(val name: String)
 
+/**
+ * 孩子端自定义个人资料（凭设备令牌鉴权）。
+ * 各字段独立可选：传 null / 空串表示不修改该项，便于孩子端逐项设置。
+ */
+data class DeviceProfileRequest(
+    val childName: String? = null,
+    val childNickname: String? = null,
+    val childAvatar: String? = null
+)
+
 data class BindResult(
     val deviceId: String, val deviceToken: String, val mqttUsername: String,
     val mqttPassword: String, val hmacSecret: String, val expiresAt: Long
@@ -103,15 +121,29 @@ data class HeartbeatDto(
 )
 
 // ============ MQTT 数据包 ============
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class CommandPacket(
     val msgId: String, val type: String, val version: Int = 1,
     val timestamp: Long, val expiresAt: Long, val priority: String,
     val payload: Map<String, Any?>?, val signature: String
 )
 
+/**
+ * 指令回执。
+ *
+ * **所有字段必须给默认值**：孩子端实际上传的是包装体 `{deviceId, acks:[...]}`，
+ * 历史上这里按"裸 AckPacket"强解析，`msgId` 拿不到就抛
+ * `MissingKotlinParameterException` → 整个 ack 接口 500。
+ * 后果是**每一条指令的回执都失败**：服务端指令永远停在"已下发"，
+ * 家长端表现为"锁屏 / 录屏 / 截屏指令发送失败"，而孩子端其实已经执行成功 ——
+ * 这是最典型的一类"看起来是端的问题、实际是协议不匹配"的故障。
+ *
+ * 字段给默认值 + [JsonIgnoreProperties] 后，单条与批量两种载荷都能安全解析。
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class AckPacket(
-    val msgId: String, val deviceId: String, val status: String,
-    val executedAt: Long?, val errorCode: String? = null,
+    val msgId: String = "", val deviceId: String = "", val status: String = "",
+    val executedAt: Long? = null, val errorCode: String? = null,
     val errorMessage: String? = null, val retryCount: Int = 0
 )
 

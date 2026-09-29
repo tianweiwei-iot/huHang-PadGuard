@@ -96,6 +96,31 @@ class MonitorService(
     }
 
     /**
+     * 开启实时看屏。
+     *
+     * 为什么是"下发一条指令"而不是"家长端直接连孩子端"：
+     * 孩子平板在局域网内没有可路由的地址（且家长端往往在移动网络下），
+     * 只能由孩子端主动把帧推到服务端、家长端再从服务端拉。
+     * 这条指令就是"开始推流"的开关；家长端观看期间会周期性重发它做续期，
+     * 一旦家长关掉页面或掉线，续期停止，孩子端的推流会在 TTL 到点后自动结束。
+     */
+    fun startLiveView(userId: String, deviceId: String): Map<String, Any> {
+        requireOwned(userId, deviceId)
+        commandService.issueCommand(
+            deviceId, CommandType.LIVE_VIEW_START, emptyMap(), priority = "HIGH"
+        )
+        return mapOf("deviceId" to deviceId, "live" to true)
+    }
+
+    fun stopLiveView(userId: String, deviceId: String): Map<String, Any> {
+        requireOwned(userId, deviceId)
+        commandService.issueCommand(
+            deviceId, CommandType.LIVE_VIEW_STOP, emptyMap(), priority = "HIGH"
+        )
+        return mapOf("deviceId" to deviceId, "live" to false)
+    }
+
+    /**
      * 停止录屏：必须真正下发 STOP_SCREEN_RECORD 指令。
      *
      * 之前只查库返回任务、**根本没下发指令**，家长端却收到 200 success ——
@@ -188,6 +213,25 @@ class MonitorService(
             t.finishedAt = System.currentTimeMillis()
             mediaTaskRepository.save(t)
         }
+    }
+
+    /**
+     * 取媒体任务的完整状态（含文件地址）。
+     *
+     * 停止录屏是**异步**的：HTTP 下发 stop 指令后，孩子端要收尾编码器、
+     * 把 mp4 上传回来，服务端才会把任务置为 READY 并填上 url。
+     * 因此家长端点完"停止"不能立刻拿到地址，必须轮询这个接口直到 status=READY。
+     */
+    fun getMediaTask(userId: String, taskId: String): MediaTaskStatusDto {
+        val task = mediaTaskRepository.findById(taskId).orElse(null)
+            ?: throw BizException(ParentErr.PARAM_ERROR, "任务不存在", Audience.PARENT)
+        requireOwned(userId, task.deviceId)
+        return MediaTaskStatusDto(
+            taskId = task.id, deviceId = task.deviceId, kind = task.kind, status = task.status,
+            url = task.url, mimeType = task.mimeType, size = task.size,
+            durationSeconds = task.durationSeconds,
+            startedAt = task.startedAt, finishedAt = task.finishedAt
+        )
     }
 
     /** 取媒体任务结果（停止录音/录屏后回传文件地址用） */

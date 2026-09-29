@@ -1,6 +1,7 @@
 package com.padguard.data.local
 
 import android.content.Context
+import android.graphics.Bitmap
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
@@ -10,9 +11,11 @@ import com.padguard.domain.model.*
 import com.padguard.domain.repository.*
 import com.padguard.domain.KnownAppIcons
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -458,10 +461,28 @@ class LocalDataSource @Inject constructor(
         return Result.success(task)
     }
 
-    override suspend fun stopScreenRecord(taskId: String): Result<String> {
-        val task = activeRecordTasks.remove(taskId)
+    override suspend fun stopScreenRecord(deviceId: String, taskId: String): Result<Unit> {
+        activeRecordTasks.remove(taskId)
             ?: return Result.failure(IllegalStateException("录屏任务不存在或已结束"))
-        return Result.success("https://mock.padguard.com/screen-records/${task.deviceId}_${task.startedAt}.mp4")
+        return Result.success(Unit)
+    }
+
+    // 本地演示模式没有真实编码产物，查询固定返回"尚无文件"，由调用方静默处理
+    override suspend fun getMediaTask(
+        deviceId: String,
+        taskId: String
+    ): Result<com.padguard.data.model.MediaTaskStatusDto> =
+        Result.failure(IllegalStateException("本地模式无录屏文件"))
+
+    // ---- 实时看屏（本地模式下无真实画面流） ----
+
+    override suspend fun startLiveView(deviceId: String): Result<Unit> = Result.success(Unit)
+
+    override suspend fun stopLiveView(deviceId: String): Result<Unit> = Result.success(Unit)
+
+    override fun liveFrames(deviceId: String): Flow<Bitmap> = flow {
+        // 本地模式没有真实设备推流，挂起即可（页面显示"连接中"）
+        delay(Long.MAX_VALUE)
     }
 
     // ---- 屏幕监控设置 ----
@@ -504,6 +525,13 @@ class LocalDataSource @Inject constructor(
         limit: Int
     ): Result<List<PublishedMessage>> =
         Result.success(publishedMessagesStore[deviceId].orEmpty().take(limit))
+
+    override suspend fun uploadMedia(
+        fileName: String,
+        contentType: String,
+        bytes: ByteArray
+    ): Result<UploadedMedia> =
+        Result.success(UploadedMedia("local_$fileName", "file://$fileName", fileName, contentType, bytes.size.toLong()))
 
     /** 发布记录摘要：文字取内容，媒体类取「素材名 · 文字说明」。 */
     private fun summarizeMessage(request: MessagePublishRequest): String = when (request.contentType) {
@@ -615,6 +643,34 @@ class LocalDataSource @Inject constructor(
         suspended: Boolean
     ): Result<Unit> = Result.success(Unit)
 
+    override suspend fun setAppHidden(
+        deviceId: String,
+        packageName: String,
+        hidden: Boolean
+    ): Result<Unit> = Result.success(Unit)
+
+    override suspend fun setAppsHiddenBatch(
+        deviceId: String,
+        packages: List<String>,
+        hidden: Boolean,
+        all: Boolean
+    ): Result<Int> = Result.success(0)
+
+    override suspend fun setAppLimit(
+        deviceId: String,
+        packageName: String,
+        minutes: Int
+    ): Result<Unit> = Result.success(Unit)
+
+    override suspend fun installLocalApk(
+        deviceId: String,
+        fileName: String,
+        contentType: String,
+        bytes: ByteArray,
+        packageName: String,
+        appName: String?
+    ): Result<Unit> = Result.success(Unit)
+
     override suspend fun getWebPolicy(deviceId: String): Result<WebPolicy> =
         Result.success(WebPolicy(deviceId = deviceId))
 
@@ -625,6 +681,9 @@ class LocalDataSource @Inject constructor(
         Result.success(Unit)
 
     override suspend fun lockScreen(deviceId: String): Result<Unit> =
+        Result.success(Unit)
+
+    override suspend fun unlockScreen(deviceId: String): Result<Unit> =
         Result.success(Unit)
 
     override suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit> =
@@ -644,6 +703,9 @@ class LocalDataSource @Inject constructor(
     ): Result<Unit> = Result.success(Unit)
 
     override suspend fun ignoreUnlockTicket(deviceId: String, ticketId: String): Result<Unit> =
+        Result.success(Unit)
+
+    override suspend fun dismissUnlockTicket(deviceId: String, ticketId: String): Result<Unit> =
         Result.success(Unit)
 
     override suspend fun setControlMode(deviceId: String, mode: ControlMode): Result<Unit> =

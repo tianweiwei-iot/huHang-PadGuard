@@ -311,6 +311,18 @@ class PolicyExtensionService(
         }
         val webUrls = settings.webBlockedUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
 
+        // 单个应用的每日时长上限：以 app_policies.daily_limit_minutes 为准，下发给孩子的 appLimit.rules。
+        // 与「设备每日总时长」（device_settings.daily_limit_minutes）是两套独立维度。
+        val limitRules = appPolicies
+            .filter { (it.dailyLimitMinutes ?: 0) > 0 }
+            .map {
+                mapOf(
+                    "packageName" to it.packageName,
+                    "dailyMinutes" to it.dailyLimitMinutes,
+                    "dayTypes" to listOf("WEEKDAY", "WEEKEND")
+                )
+            }
+
         val pkg = mutableMapOf<String, Any?>(
             "version" to version,
             "deviceId" to deviceId,
@@ -328,14 +340,23 @@ class PolicyExtensionService(
             } else {
                 mapOf("developerOptions" to "DISABLE", "usbDebug" to "DISABLE")
             },
-            "app" to mapOf("mode" to "WHITELIST", "whitelist" to whitelist, "blacklist" to blacklist),
+            // 默认必须是**黑名单**而不是白名单。
+            //
+            // 白名单的语义是"不在名单里的一律挂起"，而名单来自 app_policy 子表 ——
+            // 只要台账新增了一个尚未建策略行的应用（孩子刚装的游戏、系统更新带出来的新组件），
+            // 它就不在名单里，于是被静默挂起：孩子端表现为"这应用打不开了"，
+            // 家长端却什么都没设置过，排查时根本对不上。
+            // 更极端的情况是子表为空（新建设备、数据迁移），白名单为空 = 全设备应用被挂起 = 变砖。
+            // 家长端现在的操作语义本来就是"禁用某个应用"（黑名单），这里保持一致。
+            "app" to mapOf("mode" to "BLACKLIST", "whitelist" to whitelist, "blacklist" to blacklist),
             "appLimit" to mapOf(
                 "dailyTotalMinutes" to (settings.dailyLimitMinutes ?: 0),
                 "weekdayTotalMinutes" to (settings.weekdayLimitMinutes ?: 120),
                 "weekendTotalMinutes" to (settings.weekendLimitMinutes ?: 180),
                 "restAfterMinutes" to (settings.restAfterMinutes ?: 60),
                 "restDurationMinutes" to (settings.restDurationMinutes ?: 15),
-                "timeUpMessage" to settings.timeUpMessage
+                "timeUpMessage" to settings.timeUpMessage,
+                "rules" to limitRules
             ),
             "schedule" to mapOf("timezone" to "Asia/Shanghai", "rules" to scheduleRules + usageRangeRules),
             "web" to mapOf("mode" to "BLACKLIST", "blacklist" to webUrls, "browserDisabled" to settings.browserDisabled),

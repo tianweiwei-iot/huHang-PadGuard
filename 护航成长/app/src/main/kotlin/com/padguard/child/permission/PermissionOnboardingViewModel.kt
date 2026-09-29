@@ -40,7 +40,7 @@ class PermissionOnboardingViewModel @Inject constructor(
     private val authRepository: AuthRepository
 ) : ViewModel() {
 
-    enum class Phase { IDLE, RUNNING, DONE, ERROR, NEED_PROVISIONING }
+    enum class Phase { IDLE, RUNNING, DONE, ERROR, NEED_RUNTIME_PERMISSION, NEED_PROVISIONING }
 
     private val _phase = MutableStateFlow(Phase.IDLE)
     val phase: StateFlow<Phase> = _phase.asStateFlow()
@@ -60,13 +60,48 @@ class PermissionOnboardingViewModel @Inject constructor(
     /**
      * 一键开始。
      *
-     * DO/PO 设备：直接进入后台静默授予；其余设备：进入预置引导（无最高权限则无法静默拿全权限）。
+     * **Device Owner 不再是前置条件**（上架合规要求：不索取与功能无关的最高权限）。
+     * - DO/PO 设备：后台静默授予，用户零感知；
+     * - 普通设备：走标准的系统运行时权限弹窗，授予后立即进入 App，管控能力完整。
+     *
+     * 预置成为设备所有者降级为**可选增强**（防卸载 / 加固基线），放在 [NEED_PROVISIONING]
+     * 里由实施人员按需进入，绝不再阻塞装机流程。
      */
     fun start() {
         _error.value = null
         admin.refreshControlMode()
         if (admin.hasOwnerPrivileges()) runBackgroundGrant()
-        else _phase.value = Phase.NEED_PROVISIONING
+        else _phase.value = Phase.NEED_RUNTIME_PERMISSION
+    }
+
+    /** 普通设备需要家长在系统弹窗里确认的运行时权限（与 manifest 声明一一对应） */
+    val runtimePermissions: List<String> get() = permissionGranter.requiredPermissions
+
+    /** 权限展示名（供 UI 列表渲染） */
+    fun labelOf(perm: String): String = permissionGranter.labelOf(perm)
+
+    /** 可选的增强项入口：想启用防卸载 / 加固基线时才需要 */
+    fun openProvisioning() {
+        _phase.value = Phase.NEED_PROVISIONING
+    }
+
+    /**
+     * 运行时权限弹窗结果。
+     *
+     * 定位类权限被拒**不阻断装机**：没有定位时电子围栏与实时定位自动停用，
+     * 其余管控能力照常。这比"少一个权限就卡住不让用"更符合家长的实际诉求
+     * ——也避免了"必须同意全部权限才能用"被应用市场判定为强制授权。
+     */
+    fun onRuntimePermissionResult(result: Map<String, Boolean>) {
+        val denied = result.filterValues { !it }.keys
+        if (denied.isNotEmpty()) {
+            Logger.w(TAG) { "runtime permissions denied: $denied (entering degraded mode)" }
+            _error.value = "已跳过：${denied.map { permissionGranter.labelOf(it) }.joinToString("、")}，相关功能将不可用"
+        }
+        viewModelScope.launch {
+            runCatching { authRepository.savePermissionsDone() }
+            _phase.value = Phase.DONE
+        }
     }
 
     /**

@@ -15,8 +15,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.lifecycleScope
 import com.padguard.child.ui.theme.PadGuardTheme
+import com.padguard.core.data.repository.AuthRepository
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import javax.inject.Inject
 
 /**
  * 绑定流程宿主 Activity（说明书 §4.2 / §4.3）。
@@ -28,6 +33,8 @@ import dagger.hilt.android.AndroidEntryPoint
  */
 @AndroidEntryPoint
 class BindActivity : ComponentActivity() {
+
+    @Inject lateinit var authRepository: AuthRepository
 
     /** 扫码 / NFC 解析出的绑定码，透传给 BindScreen 走既有提交流程。 */
     private var scannedCode by mutableStateOf<String?>(null)
@@ -46,6 +53,18 @@ class BindActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // ---- 自愈：已经绑定就立刻退出，绝不把孩子卡在绑定页 ----
+        //
+        // MainActivity 的入口分流依赖 DataStore Flow，冷启动瞬间可能先读到"未绑定"
+        // （DataStore 尚未就绪 / 首帧为空）而把本页拉起来。若本页不自愈，孩子会一直
+        // 停在一个根本不需要走的绑定流程里，家长端却显示设备"在线"——
+        // 于是所有管控指令都沉底，表现为"实时看屏/截屏/锁屏/录屏全部失灵"。
+        // 这里持续等待并在确认已绑定时立刻退出，回到栈里的 MainActivity。
+        lifecycleScope.launch {
+            runCatching { authRepository.isBound.first { it } }
+                .onSuccess { finish() }
+        }
 
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
         nfcPendingIntent = PendingIntent.getActivity(

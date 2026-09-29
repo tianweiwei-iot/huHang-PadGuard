@@ -22,6 +22,7 @@ import com.padguard.child.capture.CaptureConsent
 import com.padguard.child.capture.CapturePermissionActivity
 import com.padguard.child.login.ChildLoginScreen
 import com.padguard.child.permission.PermissionOnboardingScreen
+import com.padguard.child.service.GuardService
 import com.padguard.child.ui.nav.PadGuardApp
 import com.padguard.child.ui.theme.PadGuardTheme
 import com.padguard.core.data.repository.AuthRepository
@@ -75,15 +76,29 @@ private fun EntryRouter(authRepository: AuthRepository) {
         loggedIn == false -> ChildLoginScreen()
 
         // ③ 已登录但未绑定设备：跳绑定流程（扫码 / 验证码 / NFC 绑定家长）
+        //
+        // 这里**绝不能带 FLAG_ACTIVITY_CLEAR_TASK**：那会把 MainActivity 一起清出任务栈，
+        // 绑定页 finish 之后任务栈就空了，孩子直接被丢回桌面，App 再也回不去，
+        // 而家长端还显示设备在线——管控从此"看起来都正常、实际全都收不到指令"。
+        // 保留 MainActivity 在栈内，绑定页 finish 即可自然回落主页。
         isBound == false -> LaunchedEffect(Unit) {
             val intent = Intent(context, BindActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
         }
 
         // ④ 全部就绪：主页常驻；未同意协议则叠加授权弹窗
         else -> {
             PadGuardApp()
+
+            // 已登录且已绑定：确保守护服务在跑。
+            // 守护服务此前只在开机 / 设备管理员启用时启动，一旦被系统回收或用户在
+            // 「最近任务」划掉，心跳与 MQTT 上行就断，家长端看到设备一直 OFFLINE。
+            // startForegroundService 对已运行的服务只会再投递一次 intent（幂等），
+            // 因此每次进主页兜底拉一次是安全的。
+            LaunchedEffect(Unit) {
+                GuardService.start(context, "mainEntry")
+            }
 
             // 装机就绪后预置一次屏幕采集授权。
             // MediaProjection 必须由用户在系统弹窗确认一次，这里提前拿掉，

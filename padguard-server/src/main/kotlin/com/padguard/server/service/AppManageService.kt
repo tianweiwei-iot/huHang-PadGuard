@@ -3,13 +3,19 @@ package com.padguard.server.service
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
+import com.padguard.server.domain.AppPolicy
 import com.padguard.server.domain.InstalledApp
+import com.padguard.server.dto.AppHiddenBatchRequest
+import com.padguard.server.dto.AppHiddenRequest
 import com.padguard.server.dto.AppInstallRequest
 import com.padguard.server.dto.AppInventoryRequest
+import com.padguard.server.dto.AppLimitRequest
 import com.padguard.server.dto.InstalledAppDto
 import com.padguard.server.repository.AppPolicyRepository
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.InstalledAppRepository
+import com.padguard.server.service.PolicyExtensionService
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import java.util.UUID
 
@@ -34,11 +40,15 @@ import java.util.UUID
  */
 @Service
 class AppManageService(
+    private val fileStorageService: FileStorageService,
     private val deviceRepository: DeviceRepository,
     private val installedAppRepository: InstalledAppRepository,
     private val appPolicyRepository: AppPolicyRepository,
-    private val commandService: CommandService
+    private val commandService: CommandService,
+    private val policyExtensionService: PolicyExtensionService
 ) {
+
+    private val log = LoggerFactory.getLogger(AppManageService::class.java)
 
     // ==================== 孩子端上报 ====================
 
@@ -78,26 +88,59 @@ class AppManageService(
                         installTime = item.installTime,
                         updateTime = item.updateTime,
                         firstSeenAt = now,
-                        lastSeenAt = now
+                        lastSeenAt = now,
+                        iconUrl = storeIcon(pkg, item.iconBase64),
+                        iconHash = iconHash(item.iconBase64),
+                        // 开启管控后新上报的应用默认处于「未授权 / 隐藏」状态：
+                        // 孩子端只有被管控端显式授权的应用才可见可用，其余一律隐藏。
+                        hidden = true
                     )
+                )
+                // 新应用默认隐藏：下发隐藏指令让孩子端真正不显示该应用。
+                // 家长在管控端「授权」后会收到 SET_APP_HIDDEN(false) 取消隐藏。
+                commandService.issueCommand(
+                    deviceId, CommandType.SET_APP_HIDDEN,
+                    mapOf(CommandKey.PACKAGE_NAME to pkg, CommandKey.HIDDEN to true)
                 )
                 inserted++
             } else {
+                // 图标只在内容真的变了时才重新落盘（见 [storeIcon] 说明）
+                val (hash, url) = iconUpdate(pkg, item.iconBase64, current.iconHash)
                 // 只在字段真的变了时才写库：孩子端上报频率不低，
                 // 无条件 save 会让每次上报都产生 N 条 UPDATE，白白拖慢数据库。
-                val changed = current.appName != item.appName ||
-                    current.versionName != item.versionName ||
-                    current.versionCode != item.versionCode ||
+                val iconChanged = url != null && hash != current.iconHash
+                // 隐藏状态永远以设备上报为准：家长可能在设备离线时点过开关，
+                // 服务端若只记住自己的值，就会显示一个"已经不生效"的状态。
+                val hiddenChanged = item.hidden != null && item.hidden != current.hidden
+                // 被隐藏的应用读不到包信息（Android 11+ 的包可见性对隐藏包同样生效），
+                // 上报里只剩一个裸包名。这时绝不能拿"包名当应用名、0 当版本号"去覆盖已有记录：
+                // 家长端点一次"关闭使用权限"，列表里的"计算器"就会退化成一串包名，
+                // 看起来像数据损坏。缺字段时沿用旧值，等它恢复可见后再被真实值刷新。
+                val nextName = item.appName
+                    ?.takeIf { it.isNotBlank() && it != pkg }
+                    ?: current.appName
+                val nextVersionName = item.versionName ?: current.versionName
+                val nextVersionCode = item.versionCode?.takeIf { it > 0L } ?: current.versionCode
+                val changed = current.appName != nextName ||
+                    current.versionName != nextVersionName ||
+                    current.versionCode != nextVersionCode ||
                     current.installed != true ||
-                    current.updateTime != item.updateTime
+                    current.updateTime != item.updateTime ||
+                    iconChanged ||
+                    hiddenChanged
                 if (changed) {
-                    current.appName = item.appName
-                    current.versionName = item.versionName
-                    current.versionCode = item.versionCode
+                    current.appName = nextName
+                    current.versionName = nextVersionName
+                    current.versionCode = nextVersionCode
                     current.isSystem = item.isSystem ?: current.isSystem
                     current.installed = true
                     current.updateTime = item.updateTime
                     current.lastSeenAt = now
+                    if (iconChanged) {
+                        current.iconUrl = url
+                        current.iconHash = hash
+                    }
+                    if (hiddenChanged) current.hidden = item.hidden ?: current.hidden
                     installedAppRepository.save(current)
                     updated++
                 }
@@ -115,6 +158,44 @@ class AppManageService(
             }
         }
         return mapOf("inserted" to inserted, "updated" to updated, "removed" to removed)
+    }
+
+    /**
+     * 计算本次上报图标的哈希与（必要时）新地址。
+     *
+     * @return `hash` 为图标内容哈希（无图标时为 null）；`url` 仅在**内容变化**时非空。
+     *
+     * 为什么要按哈希判断而不是每次都存：
+     * 孩子端每 30 分钟全量上报一次，一台设备上百个应用。
+     * 无条件落盘意味着每天产生上百 × 48 次文件写入，磁盘很快堆满历史图标，
+     * 而这些文件里绝大多数是同一张图的重复副本。
+     */
+    private fun iconUpdate(pkg: String, base64: String?, currentHash: String?): Pair<String?, String?> {
+        val hash = iconHash(base64) ?: return null to null
+        if (hash == currentHash) return hash to null
+        return hash to storeIcon(pkg, base64)
+    }
+
+    private fun iconHash(base64: String?): String? {
+        val bytes = decodeIcon(base64) ?: return null
+        return java.security.MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    /** 落盘图标并返回可访问地址；解码失败返回 null（个别 ROM 的图标无法解码，不能因此让整条台账失败） */
+    private fun storeIcon(pkg: String, base64: String?): String? {
+        val bytes = decodeIcon(base64) ?: return null
+        return runCatching { fileStorageService.store("image/png", bytes, "$pkg.png") }
+            .onFailure { log.warn("store icon failed for {}: {}", pkg, it.message) }
+            .getOrNull()
+    }
+
+    private fun decodeIcon(base64: String?): ByteArray? {
+        if (base64.isNullOrBlank()) return null
+        return runCatching { java.util.Base64.getDecoder().decode(base64) }
+            .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
     }
 
     // ==================== 家长端查询 ====================
@@ -143,7 +224,9 @@ class AppManageService(
                     updateTime = it.updateTime,
                     lastSeenAt = it.lastSeenAt,
                     blocked = policy?.isBlocked ?: false,
-                    dailyLimitMinutes = policy?.dailyLimitMinutes
+                    dailyLimitMinutes = policy?.dailyLimitMinutes,
+                    iconUrl = it.iconUrl,
+                    hidden = it.hidden
                 )
             }
     }
@@ -180,6 +263,86 @@ class AppManageService(
             entity.lastSeenAt = now
             installedAppRepository.save(entity)
         }
+
+    /**
+     * 隐藏 / 显示应用（家长端「使用权限」开关）。
+     *
+     * 为什么不用挂起（SET_APP_SUSPENDED）替代：
+     * 挂起的应用图标仍在桌面，点开只是被系统拦一下并提示"已停用"。
+     * 孩子天天看到一堆点不开的图标，既碍眼，又等于明晃晃地标注"这里有被禁的应用"，
+     * 反而刺激去找绕过办法。隐藏才是"没开启权限就不显示"的正确实现。
+     *
+     * 这里同时把台账的 hidden 标记写回：家长端列表的开关状态直接读这个字段，
+     * 不必等设备下一次周期上报（隐藏后孩子端会立即同步，但网络可能不通）。
+     */
+    fun setAppHidden(userId: String, deviceId: String, req: AppHiddenRequest) {
+        requireOwned(userId, deviceId)
+        val entity = installedAppRepository.findByDeviceIdAndPackageName(deviceId, req.packageName)
+            ?: throw BizException(ParentErr.PARAM_ERROR, "设备上没有这个应用", Audience.PARENT)
+        entity.hidden = req.hidden
+        entity.lastSeenAt = System.currentTimeMillis()
+        installedAppRepository.save(entity)
+        commandService.issueCommand(
+            deviceId, CommandType.SET_APP_HIDDEN,
+            mapOf(
+                CommandKey.PACKAGE_NAME to req.packageName,
+                CommandKey.HIDDEN to req.hidden
+            )
+        )
+    }
+
+    /**
+     * 批量设置应用「使用权限」（隐藏 / 显示）。
+     *
+     * `all=true` 时作用于全部已安装应用——对应管控端「一键授权全部 / 一键取消全部」。
+     * 与 [setAppHidden] 同语义：隐藏即对孩子端不可见、不可用。
+     */
+    fun setAppsHiddenBatch(userId: String, deviceId: String, req: AppHiddenBatchRequest): Int {
+        requireOwned(userId, deviceId)
+        val targets = if (req.all) {
+            installedAppRepository.findByDeviceIdAndInstalledTrue(deviceId).map { it.packageName }
+        } else {
+            req.packages
+        }.filter { it.isNotBlank() && it != SELF_PACKAGE }
+
+        var sent = 0
+        for (pkg in targets.distinct()) {
+            val entity = installedAppRepository.findByDeviceIdAndPackageName(deviceId, pkg)
+                ?: InstalledApp(
+                    id = UUID.randomUUID().toString(), deviceId = deviceId,
+                    packageName = pkg, firstSeenAt = System.currentTimeMillis()
+                )
+            entity.hidden = req.hidden
+            entity.lastSeenAt = System.currentTimeMillis()
+            installedAppRepository.save(entity)
+            commandService.issueCommand(
+                deviceId, CommandType.SET_APP_HIDDEN,
+                mapOf(CommandKey.PACKAGE_NAME to pkg, CommandKey.HIDDEN to req.hidden)
+            )
+            sent++
+        }
+        return sent
+    }
+
+    /**
+     * 设置单个应用的每日使用时长上限（分钟）。
+     *
+     * 落库到 [AppPolicy.dailyLimitMinutes]，并经 [PolicyExtensionService] 重建策略包，
+     * 以 `appLimit.rules` 形式下发给孩子端 [com.padguard.core.engine.enforcer.AppLimitEnforcer] 执行。
+     * 0 表示不限制。
+     */
+    fun setAppLimit(userId: String, deviceId: String, packageName: String, minutes: Int) {
+        requireOwned(userId, deviceId)
+        var policy = appPolicyRepository.findByDeviceIdAndPackageName(deviceId, packageName)
+        if (policy == null) {
+            policy = AppPolicy(deviceId = deviceId, packageName = packageName)
+            appPolicyRepository.save(policy)
+            policy = appPolicyRepository.findByDeviceIdAndPackageName(deviceId, packageName)!!
+        }
+        policy.dailyLimitMinutes = if (minutes > 0) minutes else null
+        appPolicyRepository.save(policy)
+        policyExtensionService.rebuildPolicy(deviceId)
+    }
 
     /**
      * 远程卸载。

@@ -29,9 +29,15 @@ object CommandType {
     const val STOP_RECORD = "STOP_RECORD"
     const val SCREEN_RECORD = "SCREEN_RECORD"
     const val STOP_SCREEN_RECORD = "STOP_SCREEN_RECORD"
+    /** 开启实时看屏推流（孩子端持续上传屏幕帧，家长端拉流观看） */
+    const val LIVE_VIEW_START = "LIVE_VIEW_START"
+    /** 停止实时看屏推流 */
+    const val LIVE_VIEW_STOP = "LIVE_VIEW_STOP"
     const val INSTALL_APP = "INSTALL_APP"
     const val UNINSTALL_APP = "UNINSTALL_APP"
     const val SET_APP_SUSPENDED = "SET_APP_SUSPENDED"
+    /** 隐藏/显示应用：家长端"使用权限"开关。与挂起的区别见孩子端 CommandType.SET_APP_HIDDEN */
+    const val SET_APP_HIDDEN = "SET_APP_HIDDEN"
     const val REFRESH_POLICY = "REFRESH_POLICY"
     const val UPDATE_CONFIG = "UPDATE_CONFIG"
     const val FLUSH_LOGS = "FLUSH_LOGS"
@@ -63,6 +69,7 @@ object CommandKey {
     const val APK_URL = "apkUrl"
     const val VERSION_CODE = "versionCode"
     const val SUSPENDED = "suspended"
+    const val HIDDEN = "hidden"
     /** 截图任务号，必须携带，否则上传结果无法与本次请求关联 */
     const val SHOT_ID = "shotId"
     /** 媒体任务号（拍照/录音/录屏） */

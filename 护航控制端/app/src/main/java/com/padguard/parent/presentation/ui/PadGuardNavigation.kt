@@ -4,10 +4,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -18,14 +21,17 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.padguard.domain.model.ReportPeriod
 import com.padguard.parent.presentation.viewmodel.SessionViewModel
+import com.padguard.presentation.ui.alert.AlertCenterScreen
 import com.padguard.presentation.ui.auth.LoginScreen
 import com.padguard.presentation.ui.components.AppSoftBackground
+import com.padguard.presentation.ui.components.UnlockRequestDialog
 import com.padguard.presentation.ui.control.ControlPolicyScreen
 import com.padguard.presentation.ui.device.DeviceDetailScreen
 import com.padguard.presentation.ui.main.MainScreen
 import com.padguard.presentation.ui.realtime.LocationScreen
 import com.padguard.presentation.ui.realtime.MessagePublishScreen
 import com.padguard.presentation.ui.realtime.ScreenMonitorScreen
+import com.padguard.presentation.viewmodel.UnlockRequestCenterViewModel
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -112,6 +118,21 @@ fun PadGuardNavHost(
         }
     }
 
+    // ---- 全局解锁申请 ----
+    // 这里取到的 ViewModel 是 Activity 作用域（本 Composable 位于 Activity 的 setContent 根），
+    // 因此弹窗与消息中心天然共享同一份轮询数据，且生命周期与整个 App 一致 ——
+    // 家长翻到哪个页面都能收到申请，不会被某个页面的销毁打断。
+    val unlockVm: UnlockRequestCenterViewModel = hiltViewModel()
+    val unlockState by unlockVm.uiState.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // 操作反馈：处理完弹窗即退出，只留一条轻提示，不打断当前所在页面
+    LaunchedEffect(unlockState.actionMessage) {
+        val msg = unlockState.actionMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(msg)
+        unlockVm.clearActionMessage()
+    }
+
     // 全局浅灰背景铺在导航根部：登录页、主框架与全部二级页共享同一底色，
     // 各页 Scaffold 透明化让底色透出（白卡层次依赖该背景）。
     AppSoftBackground(modifier = Modifier) {
@@ -141,7 +162,20 @@ fun PadGuardNavHost(
             )
         }
         composable(Screen.Main.route) {
-            MainScreen(rootNavController = navController)
+            MainScreen(
+                rootNavController = navController,
+                unreadAlertCount = unlockState.unreadCount,
+                onNavigateToAlerts = { navController.navigate(Screen.AlertList.route) }
+            )
+        }
+        composable(Screen.AlertList.route) {
+            AlertCenterScreen(
+                state = unlockState,
+                onBack = { navController.popBackStack() },
+                onApprove = { entry, minutes -> unlockVm.approve(entry.ticket, minutes) },
+                onReject = { entry -> unlockVm.reject(entry.ticket) },
+                onRefresh = unlockVm::refresh
+            )
         }
         composable(Screen.DeviceDetail.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
@@ -207,6 +241,23 @@ fun PadGuardNavHost(
                 onBack = { navController.popBackStack() }
             )
         }
+        }
+
+        // ---- 全局弹层：铺在 NavHost 之上，因此覆盖所有页面 ----
+        // 放在 NavHost 内部就会被限制在某一个目的地里，失去"无论哪个界面都弹出"的意义。
+        unlockState.popup?.let { entry ->
+            UnlockRequestDialog(
+                entry = entry,
+                processing = unlockState.processing,
+                // 忽略：归档进消息中心，不下发消息给孩子
+                onIgnore = { unlockVm.dismiss(entry.ticket) },
+                // 去处理：直接按申请时长同意放行（孩子此刻正等着，多一步跳转就多一分钟干等）
+                onHandle = { unlockVm.approve(entry.ticket, entry.ticket.durationMinutes) }
+            )
+        }
+
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+            SnackbarHost(hostState = snackbarHostState)
         }
     }
 }

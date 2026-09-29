@@ -226,23 +226,33 @@ class PolicyEngine @Inject constructor(
         val limit = appLimitEnforcer.track(policy.appLimit, foregroundPackage, screenOn)
         var blockedPackage: String? = null
         if (limit is LimitVerdict.Blocked) {
+            // 家长已放行（临时解锁）的应用本轮不拦。
+            // 孩子端最常见的申请入口是"应用拦截页"，家长同意的正是"再玩一会儿这一个应用"；
+            // 若这里不看放行状态，拦截页会在下一个 15 秒采样点立刻重新盖上 ——
+            // 家长端显示"已同意"，孩子端却毫无变化，家长只会以为功能坏了。
+            val tempReleased = limit.packageName.isNotBlank() &&
+                lockController.isTempUnlockActive(limit.packageName)
             if (limit.reason == LimitReason.DAILY_TOTAL) {
-                autoReasons[LockReason.DAILY_LIMIT] = LockDetail(limit.message())
+                if (!tempReleased) autoReasons[LockReason.DAILY_LIMIT] = LockDetail(limit.message())
             } else {
                 // 单应用超额只拦这个应用，不锁整机（见类注释的设计取舍）
-                blockedPackage = limit.packageName
+                blockedPackage = if (tempReleased) null else limit.packageName
             }
-            raiseOnce(
-                key = "limit:${limit.reason}:${limit.packageName}",
-                type = RiskType.TIME_LIMIT_EXCEEDED,
-                level = RiskLevel.NORMAL,
-                detail = mapOf(
-                    "packageName" to limit.packageName,
-                    "reason" to limit.reason.name,
-                    "usedMinutes" to limit.usedMinutes.toString(),
-                    "quotaMinutes" to limit.quotaMinutes.toString()
+            if (tempReleased) {
+                Logger.i(TAG) { "limit(${limit.reason}) skipped: ${limit.packageName} temp-unlocked by parent" }
+            } else {
+                raiseOnce(
+                    key = "limit:${limit.reason}:${limit.packageName}",
+                    type = RiskType.TIME_LIMIT_EXCEEDED,
+                    level = RiskLevel.NORMAL,
+                    detail = mapOf(
+                        "packageName" to limit.packageName,
+                        "reason" to limit.reason.name,
+                        "usedMinutes" to limit.usedMinutes.toString(),
+                        "quotaMinutes" to limit.quotaMinutes.toString()
+                    )
                 )
-            )
+            }
         }
 
         // ---------- 3. 护眼休息 ----------

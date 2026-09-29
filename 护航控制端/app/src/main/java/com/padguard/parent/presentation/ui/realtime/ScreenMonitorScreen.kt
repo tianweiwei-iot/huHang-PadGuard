@@ -21,7 +21,9 @@ import androidx.compose.material.icons.automirrored.filled.ScreenShare
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -40,6 +42,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -51,6 +54,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -77,6 +81,7 @@ fun ScreenMonitorScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = androidx.compose.ui.platform.LocalContext.current
     val toast = uiState.toast
 
     LaunchedEffect(toast) {
@@ -85,6 +90,9 @@ fun ScreenMonitorScreen(
             viewModel.clearToast()
         }
     }
+
+    // 离开页面即停止孩子端推流，避免后台无谓耗电
+    DisposableEffect(Unit) { onDispose { viewModel.stopLive() } }
 
     Scaffold(
         containerColor = Color.Transparent,
@@ -102,10 +110,10 @@ fun ScreenMonitorScreen(
             LiveScreenCard(
                 liveImage = uiState.liveImage?.asImageBitmap(),
                 fetchingFrame = uiState.fetchingFrame,
+                liveConnected = uiState.liveConnected,
+                liveHint = uiState.liveHint,
                 updatedAtMillis = uiState.screenshot?.capturedAt,
-                resolutionText = uiState.screenshot?.let { s ->
-                    if (s.width > 0 && s.height > 0) "${s.width}×${s.height}" else null
-                },
+                resolutionText = uiState.liveImage?.let { b -> "${b.width}×${b.height}" },
                 isRecording = uiState.isRecording,
                 recordingSeconds = uiState.recordingSeconds,
                 onRefresh = viewModel::refreshScreenshot
@@ -113,19 +121,38 @@ fun ScreenMonitorScreen(
 
             ScreenActionRow(
                 isRecording = uiState.isRecording,
+                remoteLocked = uiState.remoteLocked,
                 allowRemoteLock = uiState.settings.allowRemoteLock,
                 onCapture = viewModel::captureScreenshot,
                 onToggleRecord = viewModel::toggleRecording,
-                onLock = viewModel::lockScreen
+                onLock = viewModel::toggleRemoteLock
             )
 
             uiState.lastRecordSummary?.let { summary ->
-                Text(
-                    text = summary,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(horizontal = 4.dp)
-                )
+                Row(
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = summary,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+                        modifier = Modifier.weight(1f)
+                    )
+                    // 录屏文件由孩子端异步上传，url 到位后才给出回放入口。
+                    // /v1/files/{id} 无需鉴权，可直接交给系统播放器（浏览器/视频应用）。
+                    if (!uiState.lastRecordUrl.isNullOrBlank()) {
+                        OutlinedButton(onClick = { openUrl(context, uiState.lastRecordUrl!!) }) {
+                            Icon(
+                                Icons.Filled.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("回放")
+                        }
+                    }
+                }
             }
 
             ScreenSettingsCard(
@@ -145,6 +172,8 @@ fun ScreenMonitorScreen(
 private fun LiveScreenCard(
     liveImage: ImageBitmap?,
     fetchingFrame: Boolean,
+    liveConnected: Boolean,
+    liveHint: String?,
     updatedAtMillis: Long?,
     resolutionText: String?,
     isRecording: Boolean,
@@ -210,10 +239,14 @@ private fun LiveScreenCard(
                         fontWeight = FontWeight.SemiBold
                     )
                     Spacer(modifier = Modifier.height(4.dp))
+                    // 卡住时优先显示真实原因，而不是让家长对着"正在连接…"干等
                     Text(
-                        text = if (fetchingFrame) "正在获取画面…" else "等待被控端上传画面（首次需在被控端完成授权）",
+                        text = liveHint
+                            ?: if (fetchingFrame) "正在连接实时画面…" else "等待平板上传实时画面",
                         color = Color.White.copy(alpha = 0.75f),
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = if (liveHint != null) TextAlign.Center else TextAlign.Unspecified,
+                        modifier = Modifier.padding(horizontal = 20.dp)
                     )
                     if (updatedAtMillis != null && updatedAtMillis > 0) {
                         Text(
@@ -225,30 +258,24 @@ private fun LiveScreenCard(
                 }
             }
 
-            if (liveImage == null) {
-                // 右上角手动刷新：占位态下家长可主动触发
-                IconButton(
-                    onClick = onRefresh,
-                    modifier = Modifier.align(Alignment.TopEnd)
-                ) {
-                    Icon(
-                        Icons.Default.Refresh,
-                        contentDescription = "刷新画面",
-                        tint = Color.White.copy(alpha = 0.85f)
-                    )
-                }
-            }
-
-            // 左上角状态角标：录屏中（含计时） / 实时
+            // 左上角状态角标：录屏中（含计时） / 实时在线 / 连接中
             Surface(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(12.dp),
-                color = if (isRecording) PadGuardColors.WarningRed else PadGuardColors.OnlineGreen,
+                color = when {
+                    isRecording -> PadGuardColors.WarningRed
+                    liveConnected -> PadGuardColors.OnlineGreen
+                    else -> Color(0x88000000)
+                },
                 shape = RoundedCornerShape(6.dp)
             ) {
                 Text(
-                    text = if (isRecording) "REC ${TimeFormat.formatDuration(recordingSeconds)}" else "LIVE",
+                    text = when {
+                        isRecording -> "REC ${TimeFormat.formatDuration(recordingSeconds)}"
+                        liveConnected -> "LIVE"
+                        else -> "连接中"
+                    },
                     color = Color.White,
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
@@ -275,6 +302,7 @@ private fun LiveScreenCard(
 @Composable
 private fun ScreenActionRow(
     isRecording: Boolean,
+    remoteLocked: Boolean,
     allowRemoteLock: Boolean,
     onCapture: () -> Unit,
     onToggleRecord: () -> Unit,
@@ -311,15 +339,26 @@ private fun ScreenActionRow(
             Spacer(modifier = Modifier.width(6.dp))
             Text(if (isRecording) "停止" else "录屏")
         }
+        // 锁屏 / 解锁是同一个按钮的两个方向。
+        // 只做"锁屏"的话，孩子端锁上之后界面上再也找不到解锁入口，
+        // 家长等于把自己关在门外，只能干等孩子端策略自行恢复。
         OutlinedButton(
             onClick = onLock,
             modifier = Modifier.weight(1f),
             shape = RoundedCornerShape(12.dp),
-            enabled = allowRemoteLock
+            // 解锁必须始终可用：设备正锁着时若因开关关闭而点不了，就再也解不开了
+            enabled = remoteLocked || allowRemoteLock,
+            colors = ButtonDefaults.outlinedButtonColors(
+                contentColor = if (remoteLocked) PadGuardColors.WarningRed else MaterialTheme.colorScheme.primary
+            )
         ) {
-            Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+            Icon(
+                if (remoteLocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
             Spacer(modifier = Modifier.width(6.dp))
-            Text("锁屏")
+            Text(if (remoteLocked) "解锁" else "锁屏")
         }
     }
 }
@@ -332,15 +371,6 @@ private fun ScreenSettingsCard(
     onSave: () -> Unit
 ) {
     RealtimeCard(title = "屏幕监控设置") {
-        SettingSliderRow(
-            title = "自动刷新间隔",
-            valueText = TimeFormat.formatDuration(settings.autoRefreshSeconds),
-            value = settings.autoRefreshSeconds.toFloat(),
-            valueRange = REFRESH_SECONDS_RANGE,
-            steps = (REFRESH_SECONDS_RANGE.endInclusive - REFRESH_SECONDS_RANGE.start).toInt() - 1,
-            onValueChange = { value -> onEdit { it.copy(autoRefreshSeconds = value.roundToInt()) } }
-        )
-
         SettingSwitchRow(
             title = "高清画面",
             subtitle = "开启后画面更清晰，流量消耗相应增加",
@@ -428,6 +458,27 @@ private fun ScreenshotHistoryCard(history: List<ScreenshotData>) {
             if (index != history.lastIndex) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
             }
+        }
+    }
+}
+
+/**
+ * 用系统播放器打开录屏文件。
+ *
+ * 服务端 `/v1/files/{id}` 无需鉴权，可直接交给外部应用，不必自己下载再配 FileProvider。
+ * 找不到可处理的应用时降级为浏览器打开，至少不会点了没反应。
+ */
+private fun openUrl(context: android.content.Context, url: String) {
+    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+        .addCategory(android.content.Intent.CATEGORY_BROWSABLE)
+    runCatching {
+        context.startActivity(intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+    }.onFailure {
+        runCatching {
+            context.startActivity(
+                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
         }
     }
 }

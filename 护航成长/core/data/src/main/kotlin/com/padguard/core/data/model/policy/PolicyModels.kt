@@ -184,10 +184,29 @@ data class InstallPolicy(
 @Serializable
 data class AppLimitPolicy(
     @SerialName("dailyTotalMinutes") val dailyTotalMinutes: Int = 0,
+    /** 工作日（周一~周五）每日总额度，分钟；>0 时优先于 [dailyTotalMinutes] */
+    @SerialName("weekdayTotalMinutes") val weekdayTotalMinutes: Int = 0,
+    /** 周末（周六、周日）每日总额度，分钟；>0 时优先于 [dailyTotalMinutes] */
+    @SerialName("weekendTotalMinutes") val weekendTotalMinutes: Int = 0,
     @SerialName("rules") val rules: List<AppLimitRule> = emptyList(),
     /** 临近耗尽时提醒的剩余分钟数阈值 */
     @SerialName("reminderMinutes") val reminderMinutes: List<Int> = listOf(5, 1)
-)
+) {
+    /**
+     * 当日真正生效的总时长上限。
+     *
+     * 服务端策略包会同时下发 `dailyTotalMinutes` / `weekdayTotalMinutes` / `weekendTotalMinutes`
+     * 三项，而家长端「平板使用时间设置」保存的正是**工作日/周末**这两项。
+     * 若这里只认 dailyTotalMinutes，家长改的额度就永远落不到设备上 ——
+     * 表现为"时间管控设置不了 / 改了没反应"，设备还会按旧额度继续锁屏。
+     * 未配置对应档位（0）时回退到 dailyTotalMinutes，保持与老策略包兼容。
+     */
+    fun quotaFor(isWeekend: Boolean): Int = when {
+        isWeekend && weekendTotalMinutes > 0 -> weekendTotalMinutes
+        !isWeekend && weekdayTotalMinutes > 0 -> weekdayTotalMinutes
+        else -> dailyTotalMinutes
+    }
+}
 
 @Serializable
 data class AppLimitRule(

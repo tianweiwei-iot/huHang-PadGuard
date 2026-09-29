@@ -67,9 +67,34 @@ class ChildUplinkHandler(
         }
     }
 
-    /** 处理指令回执：可由 MQTT 上行或 HTTP 降级端点复用 */
+    /**
+     * 处理指令回执：MQTT 上行与 HTTP 降级端点共用。
+     *
+     * **必须同时兼容三种载荷形状**，否则回执会整体失败（历史故障）：
+     * 1. 裸回执 `{msgId, status, ...}`（MQTT 上行）
+     * 2. 批量包装 `{deviceId, acks:[{...}, {...}]}`（孩子端 HTTP 上报的实际格式）
+     * 3. 数组 `[{...}, {...}]`
+     *
+     * 之前只认第 1 种，孩子端发的第 2 种被强行按 AckPacket 解析 → msgId 缺失 → 抛异常 →
+     * HTTP 500。结果是**所有指令的回执全部石沉大海**：家长端只看到"指令发送失败"，
+     * 而孩子端其实早已执行成功（锁屏已生效、截图已上传），形成极难定位的"假失败"。
+     */
     fun handleAck(deviceId: String, json: String) {
-        val ack = objectMapper.readValue(json, AckPacket::class.java)
+        val root = runCatching { objectMapper.readTree(json) }.getOrNull() ?: return
+        val nodes: List<com.fasterxml.jackson.databind.JsonNode> = when {
+            root.isArray -> root.toList()
+            root.has("acks") && root.get("acks").isArray -> root.get("acks").toList()
+            else -> listOf(root)
+        }
+        for (node in nodes) {
+            val ack = runCatching { objectMapper.treeToValue(node, AckPacket::class.java) }.getOrNull()
+                ?: continue
+            if (ack.msgId.isBlank()) continue
+            applyAck(deviceId, ack)
+        }
+    }
+
+    private fun applyAck(deviceId: String, ack: AckPacket) {
         val cmd = commandRepository.findByMsgId(ack.msgId) ?: return
         cmd.status = ack.status
         cmd.executedAt = ack.executedAt

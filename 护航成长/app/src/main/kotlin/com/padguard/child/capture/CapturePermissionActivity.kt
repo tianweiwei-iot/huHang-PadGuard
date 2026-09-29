@@ -44,10 +44,16 @@ class CapturePermissionActivity : ComponentActivity() {
             // 只存令牌不取投影：此刻还没有 mediaProjection 前台服务，
             // 在这里 getMediaProjection 会被系统直接拒绝（Android 14+）
             ScreenCaptureSession.storeToken(manager, result.resultCode, data)
+            // 记住"用户同意过"：进程重启（含设备重启）后令牌必然失效，
+            // 届时据此静默重启一次授权，而不是从此再也不采集（历史 bug）。
+            CaptureConsent.markGranted(this)
+            CaptureConsentPrompter.clear(this)
             Logger.i(TAG) { "media projection granted, token stored" }
             dispatch()
         } else {
             Logger.w(TAG) { "media projection denied, dropping pending capture" }
+            CaptureConsent.markDenied(this)
+            CaptureConsentPrompter.clear(this)
             ScreenCaptureService.pendingIntent = null
             // P1/P2：之前拒绝后只记日志，孩子和家长都不知道发生了什么，
             // 家长端只会一直"等待授权"。这里给出明确提示，说明如何恢复。
@@ -62,6 +68,9 @@ class CapturePermissionActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 供派发方确认"授权页真的起来了"：从后台启动 Activity 时系统会**静默丢弃**，
+        // 既不抛异常也不给任何回调，只有靠这里的落点才能发现启动失败。
+        lastCreateAtMs = android.os.SystemClock.elapsedRealtime()
 
         captureIntent = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             intent.getParcelableExtra(EXTRA_CAPTURE_INTENT, Intent::class.java)
@@ -113,7 +122,12 @@ class CapturePermissionActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "CapturePermissionActivity"
-        private const val EXTRA_CAPTURE_INTENT = "capture_intent"
+        const val EXTRA_CAPTURE_INTENT = "capture_intent"
+
+        /** 最近一次 onCreate 的单调时刻，用于反查"启动请求是否真的落地" */
+        @Volatile
+        var lastCreateAtMs: Long = 0L
+            private set
 
         fun intent(context: Context): Intent =
             Intent(context, CapturePermissionActivity::class.java)

@@ -16,7 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.padguard.child.MainActivity
 import com.padguard.child.R
-import com.padguard.child.capture.CapturePermissionActivity
+import com.padguard.child.capture.CaptureConsentPrompter
 import com.padguard.child.capture.PhotoCapture
 import com.padguard.child.capture.ScreenCaptureService
 import com.padguard.child.capture.ScreenCaptureSession
@@ -24,6 +24,7 @@ import com.padguard.child.maintain.AppInstaller
 import com.padguard.child.monitor.AppInventoryCollector
 import com.padguard.child.monitor.DeviceSnapshotCollector
 import com.padguard.child.monitor.ForegroundAppMonitor
+import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.monitor.LocationCollector
 import com.padguard.child.ui.block.AppBlockActivity
 import com.padguard.child.ui.lock.LockScreenActivity
@@ -106,6 +107,7 @@ class GuardService : Service() {
     @Inject lateinit var policyRepository: PolicyRepository
     @Inject lateinit var logRepository: LogRepository
     @Inject lateinit var admin: DeviceAdminBridge
+    @Inject lateinit var permissionGranter: PermissionGranter
     @Inject lateinit var timeProvider: TimeProvider
     @Inject lateinit var unlockRequestRepository: UnlockRequestRepository
     @Inject lateinit var locationCollector: LocationCollector
@@ -135,6 +137,16 @@ class GuardService : Service() {
 
     /** 已上报过的应用用量（包名 -> 累计毫秒），用于计算增量，避免服务端重复累加 */
     private val reportedAppUsage = ConcurrentHashMap<String, Long>()
+
+    /**
+     * 每个应用上一次上报的时刻（包名 -> 墙钟毫秒）。
+     *
+     * 用于给增量段补"起点"：本次上报代表 [上次时刻, 现在] 这段使用，
+     * 服务端按天取 min/max 才能还原真实的开始/停止时间。
+     * 不记这个的话，每段增量的起点都会退化成"当日首次使用"，
+     * 家长看到的是所有应用都在同一时刻开始，时间点失去意义。
+     */
+    private val reportedAppUsageAt = ConcurrentHashMap<String, Long>()
     @Volatile private var reportedAppUsageDay = ""
 
     /** 锁屏页当前是否已被拉起，避免每轮 tick 重复 startActivity 造成闪屏 */
@@ -144,6 +156,12 @@ class GuardService : Service() {
     // 通知栏展示用的运行时状态
     @Volatile private var online = false
     @Volatile private var lastHeartbeatOk = false
+
+    /**
+     * 上次兜底拉取指令的时刻（见 [drainPendingCommands]）。
+     * 初值取当前时间：避免刚启动就把历史上遗留的 PENDING 指令全部捞回来执行一遍。
+     */
+    @Volatile private var lastCommandPullAtMs = System.currentTimeMillis()
 
     override fun onCreate() {
         super.onCreate()
@@ -197,6 +215,9 @@ class GuardService : Service() {
      * 若反过来先等连接成功再 apply，一次断网就等于全面失管，这是不可接受的。
      */
     private fun bootstrap(reason: String) {
+        // 自愈补授必须放在最前：通知权限一旦缺失，屏幕采集的引导通知孩子收不到，
+        // 实时看屏就会永久卡在"连接中"，且平板上毫无提示。
+        scope.launch { runSafely("ensurePermissions") { permissionGranter.ensureGranted() } }
         scope.launch {
             runSafely("applyCachedPolicy") {
                 if (reason == REASON_BOOT) {
@@ -302,8 +323,10 @@ class GuardService : Service() {
                 // 安装/卸载指令执行完后会置 [appSyncRequested]，
                 // 让家长在几秒内看到清单变化，而不是等满 30 分钟。
                 if (now >= nextAppSync || appSyncRequested.getAndSet(false)) {
-                    runSafely("appSync") { syncAppInventory() }
-                    nextAppSync = now + APP_SYNC_INTERVAL_MS
+                    // 失败要快重试：开机后 15 秒那一次几乎必然撞上"网络还没就绪"，
+                    // 若按 30 分钟周期重试，家长端会有半小时看不到应用列表、以为设备没连上。
+                    val synced = runSafely("appSync") { syncAppInventory() } == true
+                    nextAppSync = now + if (synced) APP_SYNC_INTERVAL_MS else APP_SYNC_RETRY_MS
                 }
 
                 updateNotification()
@@ -332,17 +355,22 @@ class GuardService : Service() {
      * 频繁上报既费流量又会让孩子端看起来"在偷传数据"。
      * 应用装卸本身就是低频事件，30 分钟的滞后对家长的判断没有实质影响。
      */
-    private suspend fun syncAppInventory() {
+    /** @return 是否上报成功，用于决定下一次重试的时间 */
+    private suspend fun syncAppInventory(): Boolean {
         val deviceId = authRepository.getDeviceId()
-        if (deviceId.isBlank()) return
+        if (deviceId.isBlank()) return false
         val apps = appInventory.collect()
-        if (apps.isEmpty()) return
-        when (val r = remote.uploadApps(deviceId, apps)) {
+        if (apps.isEmpty()) return false
+        return when (val r = remote.uploadApps(deviceId, apps)) {
             is ApiResult.Success -> {
                 val ack = r.value
                 Logger.d(TAG) { "app inventory synced: ${apps.size} (+${ack.inserted} ~${ack.updated} -${ack.removed})" }
+                true
             }
-            else -> Logger.w(TAG) { "app inventory sync failed: $r" }
+            else -> {
+                Logger.w(TAG) { "app inventory sync failed: $r" }
+                false
+            }
         }
     }
 
@@ -394,6 +422,10 @@ class GuardService : Service() {
         reason: String
     ) {
         if (blockedPackage == null) {
+            // 家长放行（或额度跨日重置）后必须主动收掉拦截页：
+            // 它是盖在被拦应用之上的 Activity，不 finish 掉就一直停在那儿，
+            // 孩子看到的是"同意了也没变化"。
+            AppBlockActivity.dismiss(this)
             lastBlockedPackage = null
             return
         }
@@ -441,10 +473,16 @@ class GuardService : Service() {
                 }
                 if (ack.flushLogs) runSafely("flushOnAck") { uploadPending() }
                 if (ack.pendingCommandCount > 0) {
-                    // 不在这里主动 pullCommands：MQTT 模式下拉取会和推送产生双通道竞争，
-                    // 而 transport 层的健康检查本就会在通道异常时降级到轮询。
-                    // 这里只留一条可观测线索，便于事后判断"是否发生过推送丢失"。
+                    // 服务端若日后上报待执行指令数，这里就是"确实漏了推送"的强信号
                     Logger.w(TAG) { "server reports ${ack.pendingCommandCount} pending commands" }
+                }
+                // 指令兜底拉取：MQTT 推送不是绝对可靠（重连窗口、QoS 边界都可能丢一条）。
+                // 对 LIVE_VIEW_START 这类每 5 秒重发一次的高频指令无所谓，
+                // 但 LOCK_SCREEN / 录屏 / 截屏**只下发一次**，丢一条就是
+                // "家长端点了、平板毫无反应"，且再也补不回来（家长只会以为功能坏了）。
+                // 服务端当前不上报待执行指令数，无法做到"按需触发"，故改为低频定时兜底。
+                if (System.currentTimeMillis() - lastCommandPullAtMs >= COMMAND_PULL_INTERVAL_MS) {
+                    runSafely("drainPendingCommands") { drainPendingCommands() }
                 }
             }
             is ApiResult.BizError -> {
@@ -520,6 +558,7 @@ class GuardService : Service() {
         val key = usageRepository.dayKey()
         if (key != reportedAppUsageDay) {
             reportedAppUsage.clear()
+            reportedAppUsageAt.clear()
             reportedAppUsageDay = key
         }
         val snapshot = usageRepository.snapshotAppUsage(key)
@@ -531,6 +570,9 @@ class GuardService : Service() {
             val delta = stat.usedMs - reported
             if (delta < USAGE_REPORT_MIN_DELTA_MS) continue
             reportedAppUsage[stat.packageName] = stat.usedMs
+            val now = System.currentTimeMillis()
+            val startAt = reportedAppUsageAt[stat.packageName] ?: stat.firstUsedAt
+            reportedAppUsageAt[stat.packageName] = now
             logRepository.append(
                 type = LogType.APP_USAGE,
                 payload = mapOf(
@@ -540,7 +582,12 @@ class GuardService : Service() {
                     // 所以这里只能以字符串形式传；服务端 StatisticsService.durationSecOf
                     // 同时兼容 Number 与 String（toIntOrNull），不会再把时长算成 0。
                     "durationSec" to (delta / 1000).toString(),
-                    "dayKey" to key
+                    "dayKey" to key,
+                    // 起止时间：家长端"今日使用情况"要展示每个应用的开始/停止时间。
+                    // 报的是增量段，所以起点取"上次已报到的时刻"（没有就用当日首次），
+                    // 终点是当下 —— 服务端按天聚合时取 min(起点)/max(终点) 即还原出全天区间。
+                    "startAt" to startAt.toString(),
+                    "endAt" to now.toString()
                 )
             )
             emitted++
@@ -661,6 +708,11 @@ class GuardService : Service() {
             EngineEffect.DismissLockScreen -> {
                 lockScreenShown = false
                 LockScreenActivity.dismiss(this)
+                // 家长放行最常发生在"孩子从拦截页提交申请"的场景，
+                // 这里必须同步收掉拦截页，否则要等下一轮自检（最长 15s）才关，
+                // 孩子会认为家长同意了却没生效。
+                AppBlockActivity.dismiss(this)
+                lastBlockedPackage = null
             }
 
             is EngineEffect.ShowMessage -> MessageActivity.show(
@@ -676,6 +728,9 @@ class GuardService : Service() {
 
             EngineEffect.FlushLogs, EngineEffect.FlushBeforeShutdown -> uploadPending()
 
+            // 应用被隐藏/显示后立刻重报台账，让家长端马上看到开关生效
+            EngineEffect.SyncAppInventory -> syncAppInventory()
+
             is EngineEffect.RefreshPolicy -> refreshPolicy()
 
             // ---------- 采集类：真实执行，结果单独回传 ----------
@@ -684,14 +739,12 @@ class GuardService : Service() {
             // 因此这里必须把最终成败写进日志流，否则管控端只会看到"受理成功"却永远等不到产物。
             is EngineEffect.CaptureScreenshot -> {
                 val captureIntent = ScreenCaptureService.screenshotIntent(this, effect.shotId)
-                if (ScreenCaptureSession.hasToken()) {
-                    ScreenCaptureService.startAuthorized(this, captureIntent)
-                } else {
-                    // 后台收到采集指令时，Android 10+ 会拦掉直接弹出的授权页，
-                    // 改为发高优先级通知：孩子点击通知即用户主动触发，系统必然放行（修复 P1 永远等待授权）
-                    promptCaptureConsent(captureIntent)
-                }
-                reportEffectResult(effect.msgId, "screenshot", true, "已触发采集（首次需孩子在平板通知中点击授权屏幕采集）")
+                // 已授权 → 静默执行；未授权 → 高优先级通知引导一次（后台不能直接弹 Activity）
+                val silent = dispatchCapture(captureIntent)
+                reportEffectResult(
+                    effect.msgId, "screenshot", true,
+                    if (silent) "已静默采集并上传" else "已下发（需孩子在通知中点一次开启屏幕采集）"
+                )
             }
 
             is EngineEffect.CapturePhoto -> {
@@ -708,13 +761,30 @@ class GuardService : Service() {
             }
 
             is EngineEffect.StartScreenRecord -> {
-                ScreenCaptureService.startScreenRecord(
+                // 录屏此前直接走 ScreenCaptureService.startScreenRecord → 后台 startActivity 被 Android 10+ 拦掉，
+                // 授权页永远出不来，家长端只看到"录屏启动失败"。统一走派发口后与截屏同一条链路。
+                val captureIntent = ScreenCaptureService.screenRecordIntent(
                     this, effect.taskId, effect.resolution, effect.withAudio
                 )
-                reportEffectResult(effect.msgId, "screenRecord", true, "已开始录制")
+                val silent = dispatchCapture(captureIntent)
+                reportEffectResult(
+                    effect.msgId, "screenRecord", silent,
+                    if (silent) "已开始录制" else "未取得屏幕采集授权：已发送引导通知，待孩子点击开启"
+                )
             }
 
             EngineEffect.StopScreenRecord -> ScreenCaptureService.stopScreenRecord(this)
+
+            is EngineEffect.StartLiveView -> {
+                val captureIntent = ScreenCaptureService.liveStreamIntent(this)
+                val silent = dispatchCapture(captureIntent)
+                reportEffectResult(
+                    effect.msgId, "liveView", silent,
+                    if (silent) "已开始实时推流" else "未取得屏幕采集授权：已发送引导通知，待孩子点击开启"
+                )
+            }
+
+            EngineEffect.StopLiveView -> ScreenCaptureService.stopLiveStream(this)
 
             is EngineEffect.StartAudioRecord -> {
                 ScreenCaptureService.startAudioRecord(this, effect.taskId)
@@ -861,30 +931,45 @@ class GuardService : Service() {
     }
 
     /**
-     * 屏幕采集授权引导通知（修复 P1 关键路径）。
+     * 派发一条屏幕采集请求。
      *
-     * 家长端下发截屏/录屏时，被控端多在后台收到。Android 10+ 禁止后台直接弹出授权 Activity，
-     * 孩子看不到系统"是否允许录制屏幕"弹窗，自然不会授权，家长端便一直停在"首次需要授权"。
+     * @return true = 已持有授权，请求静默下发（孩子完全无感）；
+     *         false = 尚无授权，已发高优先级通知引导，需孩子点一次。
      *
-     * 这里复用守护服务自身常驻通知的渠道，发一条**高优先级**通知，点击即跳转授权页
-     * （用户主动触发，系统必然放行）。孩子点一下授权，采集链路才真正跑起来。
-     * 用与常驻通知相同的 [NOTIFICATION_ID]，授权后下次 [updateNotification] 会把它覆盖回低优先级常驻态。
+     * 注意：绝不能在这里直接 `startActivity` 拉授权页 —— 守护服务是后台上下文，
+     * Android 10+ 会静默拦掉，孩子永远看不到系统授权框，家长端就卡在"等待授权"。
      */
-    private fun promptCaptureConsent(captureIntent: Intent) {
-        val pi = CapturePermissionActivity.capturePermissionPendingIntent(this, captureIntent)
-        val consentNotif = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.guard_notification_title))
-            .setContentText("家长请求查看屏幕：点击此处授权屏幕采集")
-            .setSmallIcon(R.drawable.ic_guard_notification)
-            .setContentIntent(pi)
-            .setOngoing(false)
-            .setAutoCancel(true)
-            .setShowWhen(false)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .build()
-        runCatching {
-            getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, consentNotif)
+    private fun dispatchCapture(captureIntent: Intent): Boolean =
+        CaptureConsentPrompter.dispatch(this, captureIntent)
+
+    /**
+     * 指令兜底拉取（触发点见心跳对账处）。
+     *
+     * MQTT 模式下指令走推送通道，但推送并非绝对可靠：重连窗口、QoS 边界都可能丢一条。
+     * 高频重复的指令丢了无所谓，一次性指令（锁屏 / 录屏 / 截屏）丢了就永远补不回来。
+     *
+     * 服务端 `pendingForPolling` **只返回 PENDING 指令**，已执行/已回执的不会再回来，
+     * 因此这里与推送通道并存是安全的，不会把同一条指令执行两遍。
+     */
+    private suspend fun drainPendingCommands() {
+        val deviceId = authRepository.getDeviceId()
+        if (deviceId.isBlank()) return
+        when (val r = remote.pullCommands(lastCommandPullAtMs)) {
+            is ApiResult.Success -> {
+                val list = r.value
+                lastCommandPullAtMs = System.currentTimeMillis()
+                if (list.isEmpty()) return
+                Logger.w(TAG) {
+                    "fallback pull: ${list.size} command(s) missed by push -> ${list.map { it.type.name }}"
+                }
+                list.forEach { cmd ->
+                    runSafely("fallbackCmd:${cmd.type.name}") { policyEngine.execute(cmd, deviceId) }
+                }
+            }
+            is ApiResult.BizError ->
+                Logger.w(TAG) { "fallback pull rejected: ${r.code} ${r.message}" }
+            is ApiResult.Failure ->
+                Logger.w(TAG) { "fallback pull failed: ${r.message}" }
         }
     }
 
@@ -895,7 +980,29 @@ class GuardService : Service() {
      * 送回绑定页。若只清不跳转，孩子会停在一个"看起来还在管控中"的空壳界面上。
      */
     private suspend fun handleRemoteUnbind() {
-        authRepository.clear()
+        // ---- 解绑必须与服务端核实，不能照单全收 ----
+        //
+        // MQTT 侧是 cleanSession=false + QoS1，服务端历史上 publish 过的 unbind=1 会
+        // 在设备**每次重连时被重复投递**（Paho 本地持久化 + Broker 会话队列）。
+        // 照单全收的后果极其隐蔽：绑定成功 → 一重启就收到陈旧 unbind → 立刻自清凭据
+        // → 回到绑定页，而服务端那边设备仍是已绑定且在线，日志里找不到任何解绑操作。
+        // 表现为「绑定态莫名其妙丢失、监控功能全线失效」，排查时极易误判为存储故障。
+        //
+        // 判据：用当前设备令牌打一次服务端。令牌仍然有效 = 服务端并未真正解绑
+        // = 这是一条陈旧指令，忽略；只有服务端明确判定令牌失效/设备未绑定才真的清。
+        val stillBound = when (val r = remote.syncTime()) {
+            is ApiResult.Success -> true
+            is ApiResult.Failure -> r.code !in UNBOUND_CODES
+            else -> true
+        }
+        if (stillBound) {
+            Logger.w(TAG) { "stale unbind ignored: device credentials still valid on server" }
+            return
+        }
+        Logger.w(TAG) { "server confirmed unbind, clearing local credentials" }
+        // 只清设备绑定、保留家庭账号登录态：解绑后应直接回到绑定页重新绑定，
+        // 而不是退回登录页（孩子不知道家长密码，会永久卡死）。
+        authRepository.clearDeviceBinding()
         runCatching { ScreenCaptureService.stopScreenRecord(this) }
         runCatching { ScreenCaptureService.stopAudioRecord(this) }
         withContext(Dispatchers.Main) {
@@ -919,15 +1026,21 @@ class GuardService : Service() {
      * 服务还在前台、通知还挂着，但采样、心跳、自检全部停摆，
      * 从外部看完全正常，这是最危险的失效形态。
      */
-    private suspend inline fun runSafely(tag: String, crossinline block: suspend () -> Unit) {
+    /**
+     * 兜底执行一个周期性任务。
+     *
+     * 单个任务抛异常不能拖垮整个守护循环（否则一次 NPE 就等于管控全停），
+     * 因此这里只记录不扩散；返回值供调用方决定重试节奏（null 表示本次抛异常）。
+     */
+    private suspend inline fun <T> runSafely(tag: String, crossinline block: suspend () -> T): T? =
         try {
             block()
         } catch (t: Throwable) {
             // CancellationException 必须放行，否则协程取消会被吞掉，服务停不下来
             if (t is kotlinx.coroutines.CancellationException) throw t
             Logger.e(TAG, t) { "task '$tag' failed" }
+            null
         }
-    }
 
     companion object {
         private const val TAG = "GuardService"
@@ -946,11 +1059,24 @@ class GuardService : Service() {
         /** 采样基准间隔。15s 是权衡结果：更短会明显增加耗电，更长会让"时段锁"生效延迟到肉眼可见 */
         private const val MIN_TICK_MS = 15_000L
 
+        /**
+         * 指令兜底拉取间隔。
+         * 太短会与 MQTT 推送重复争抢，太长则一次性指令（锁屏/录屏）丢失后补偿过慢；
+         * 60s 对"家长点了没反应"是可接受的补偿延迟，请求开销也可忽略。
+         */
+        private const val COMMAND_PULL_INTERVAL_MS = 60_000L
+
         /** 策略自检间隔：把被绕过的限制重新压回来 */
         private const val SELF_CHECK_INTERVAL_MS = 5 * 60_000L
 
         /** 篡改自检间隔 */
         private const val TAMPER_SCAN_INTERVAL_MS = 60_000L
+
+        /**
+         * 服务端判定"这台设备确实已不在绑定关系里"的错误码。
+         * 只有命中这些码才允许执行本地解绑清理，见 [handleRemoteUnbind]。
+         */
+        private val UNBOUND_CODES = setOf(ApiCode.TOKEN_INVALID, ApiCode.DEVICE_UNBOUND)
 
         /** 日志上报最小间隔，防止服务端把 logUploadIntervalSec 配成 0 导致刷接口 */
         private const val LOG_UPLOAD_MIN_INTERVAL_MS = 60_000L
@@ -963,6 +1089,13 @@ class GuardService : Service() {
 
         /** 安装/卸载指令后补同步的等待时间，等 PackageInstaller 会话真正落地 */
         private const val APP_SYNC_AFTER_INSTALL_DELAY_MS = 10_000L
+
+        /**
+         * 台账同步失败后的重试间隔。
+         * 开机后 15 秒那一次经常撞上"Wi-Fi 刚连上、HTTP 还没通"，
+         * 若直接退回 30 分钟周期，家长端会长时间空着。
+         */
+        private const val APP_SYNC_RETRY_MS = 60_000L
 
         /**
          * 应用用量上报的最小增量。

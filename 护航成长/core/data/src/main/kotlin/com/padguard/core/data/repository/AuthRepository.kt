@@ -40,6 +40,9 @@ class AuthRepository @Inject constructor(
         val STUDENT_NAME = stringPreferencesKey("student_name")
         val TENANT_ID = stringPreferencesKey("tenant_id")
         val AGREEMENT_VERSION = stringPreferencesKey("agreement_version")
+        // === 孩子端自定义个人资料（姓名见 STUDENT_NAME，昵称 / 头像另存）===
+        val CHILD_NICKNAME = stringPreferencesKey("child_nickname")
+        val CHILD_AVATAR = stringPreferencesKey("child_avatar")
 
         // === 被管控端登录态（复用家长家庭账号） ===
         val CHILD_PHONE = stringPreferencesKey("child_phone")
@@ -146,6 +149,22 @@ class AuthRepository @Inject constructor(
         store.edit { it[Keys.STUDENT_NAME] = name }
     }
 
+    /** 孩子端自定义昵称（实时同步至服务端 + 家长端）。 */
+    val childNickname: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.CHILD_NICKNAME].orEmpty() }
+
+    suspend fun saveChildNickname(nickname: String) {
+        store.edit { it[Keys.CHILD_NICKNAME] = nickname }
+    }
+
+    /** 孩子端自定义头像 URL（由 /device/avatar 上传后返回，实时同步至服务端 + 家长端）。 */
+    val childAvatar: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.CHILD_AVATAR].orEmpty() }
+
+    suspend fun saveChildAvatar(url: String) {
+        store.edit { it[Keys.CHILD_AVATAR] = url }
+    }
+
     /** 持久化已同意的协议版本（同意授权后由 [PermissionGranter] 调用）。 */
     suspend fun saveAgreement(version: String = CURRENT_AGREEMENT_VERSION) {
         store.edit { it[Keys.AGREEMENT_VERSION] = version }
@@ -213,7 +232,28 @@ class AuthRepository @Inject constructor(
     }
 
     /**
-     * 解绑清理。
+     * 只清"设备绑定"相关凭据，保留家庭账号登录态与权限完成态。
+     *
+     * 为什么必须有这个方法：远程解绑（家长端操作 / 服务端回收）后，孩子端应当**直接回到绑定页**，
+     * 而不是把登录态一起清掉、逼孩子重新输入家长账号密码——那一步在平板上没法自助完成
+     * （孩子通常不知道家长密码），设备会卡死在登录页再也绑不回来。
+     * 登录态与绑定态是两件事，必须分开清。
+     */
+    suspend fun clearDeviceBinding() {
+        store.edit {
+            it.remove(Keys.DEVICE_ID)
+            it.remove(Keys.DEVICE_TOKEN)
+            it.remove(Keys.MQTT_USERNAME)
+            it.remove(Keys.MQTT_PASSWORD)
+            it.remove(Keys.HMAC_SECRET)
+            it.remove(Keys.TOKEN_EXPIRES_AT)
+            it.remove(Keys.BOUND_AT)
+            it.remove(Keys.DEVICE_NAME)
+        }
+    }
+
+    /**
+     * 解绑清理（全清）。
      * 注意：终端**无自主解绑权限**，本方法仅在收到服务端/管理员授权的解绑指令时调用。
      */
     suspend fun clear() {

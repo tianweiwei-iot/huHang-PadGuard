@@ -16,12 +16,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import android.graphics.BitmapFactory
+import android.net.Uri
+import com.padguard.domain.model.Device
 import com.padguard.domain.model.DeviceOnlineStatus
 import com.padguard.presentation.ui.components.FeatureGridItem
 import com.padguard.presentation.ui.components.FeatureItem
@@ -29,7 +35,9 @@ import com.padguard.presentation.ui.components.SoftCard
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.DeviceDetailViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.withContext
 
 /**
  * 设备详情页（纯家庭场景）
@@ -91,7 +99,10 @@ fun DeviceDetailScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            uiState.device?.let { device -> DeviceHeaderCard(device) }
+            uiState.device?.let { device ->
+                DeviceHeaderCard(device)
+                ChildProfileCard(device)
+            }
 
             QuickCommandGrid(
                 onCommand = { cmd ->
@@ -191,6 +202,88 @@ private fun DeviceHeaderCard(device: com.padguard.domain.model.Device) {
                     Icon(Icons.Default.BatteryFull, contentDescription = "电量", tint = color, modifier = Modifier.size(26.dp))
                     Text("$it%", style = MaterialTheme.typography.labelSmall, color = color)
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 孩子端自定义资料卡：展示孩子头像 / 姓名 / 昵称（实时同步自孩子端）。
+ * 头像为服务端 URL，用零依赖的 Bitmap 流式解码加载；无头像时回退到姓名首字。
+ */
+@Composable
+private fun ChildProfileCard(device: Device) {
+    val hasProfile = !device.childName.isNullOrBlank() ||
+            !device.childNickname.isNullOrBlank() || !device.childAvatar.isNullOrBlank()
+    if (!hasProfile) return
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            AsyncChildAvatar(
+                source = device.childAvatar,
+                letter = device.childName ?: device.childNickname ?: "",
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(24.dp))
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = device.childName ?: device.childNickname ?: "孩子",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (!device.childNickname.isNullOrBlank() && !device.childName.isNullOrBlank()) {
+                    Text(
+                        text = "昵称：${device.childNickname}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                Text(
+                    text = "孩子资料（来自孩子端设置）",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                )
+            }
+        }
+    }
+}
+
+/** 零依赖头像加载：source 为 http(s) URL，加载失败 / 为空时回退到姓名首字。 */
+@Composable
+private fun AsyncChildAvatar(source: String?, letter: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var bitmap by remember(source) { mutableStateOf<android.graphics.Bitmap?>(null) }
+
+    LaunchedEffect(source) {
+        bitmap = null
+        if (!source.isNullOrBlank()) {
+            bitmap = withContext(Dispatchers.IO) {
+                runCatching {
+                    java.net.URL(source).openStream()?.use { BitmapFactory.decodeStream(it) }
+                }.getOrNull()
+            }
+        }
+    }
+
+    Surface(color = MaterialTheme.colorScheme.primaryContainer, modifier = modifier) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                Text(
+                    text = letter.take(1).ifBlank { "孩" },
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
         }
     }

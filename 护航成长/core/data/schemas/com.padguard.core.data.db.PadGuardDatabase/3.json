@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 3,
-    "identityHash": "3e07aec8971a0073df45099425526bfa",
+    "identityHash": "8e4cbe8d2ef2f99f00e64074b6d1a218",
     "entities": [
       {
         "tableName": "policy",
@@ -185,7 +185,7 @@
       },
       {
         "tableName": "app_usage",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`packageName` TEXT NOT NULL, `dayKey` TEXT NOT NULL, `usedMs` INTEGER NOT NULL, `launchCount` INTEGER NOT NULL, `lastUpdateAt` INTEGER NOT NULL, PRIMARY KEY(`packageName`, `dayKey`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`packageName` TEXT NOT NULL, `dayKey` TEXT NOT NULL, `usedMs` INTEGER NOT NULL, `launchCount` INTEGER NOT NULL, `lastUpdateAt` INTEGER NOT NULL, `firstUsedAt` INTEGER NOT NULL, `lastUsedAt` INTEGER NOT NULL, PRIMARY KEY(`packageName`, `dayKey`))",
         "fields": [
           {
             "fieldPath": "packageName",
@@ -214,6 +214,18 @@
           {
             "fieldPath": "lastUpdateAt",
             "columnName": "lastUpdateAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstUsedAt",
+            "columnName": "firstUsedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastUsedAt",
+            "columnName": "lastUsedAt",
             "affinity": "INTEGER",
             "notNull": true
           }
@@ -477,7 +489,7 @@
     "views": [],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '3e07aec8971a0073df45099425526bfa')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '8e4cbe8d2ef2f99f00e64074b6d1a218')"
     ]
   }
 }

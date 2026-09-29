@@ -331,6 +331,19 @@ class MockRemoteDataSource @Inject constructor(
         return ApiResult.Success(Unit, timeProvider.now())
     }
 
+    override suspend fun uploadAvatar(bytes: ByteArray, fileName: String): ApiResult<String> {
+        simulateNetwork<String>()?.let { return it }
+        val url = "https://mock.padguard.local/avatar/${fileName}"
+        Logger.i(TAG) { "avatar uploaded (mock): url=$url" }
+        return ApiResult.Success(url, timeProvider.now())
+    }
+
+    override suspend fun updateChildProfile(childName: String?, childNickname: String?): ApiResult<Unit> {
+        simulateNetwork<Unit>()?.let { return it }
+        Logger.i(TAG) { "child profile updated (mock): name=$childName nickname=$childNickname" }
+        return ApiResult.Success(Unit, timeProvider.now())
+    }
+
     override suspend fun pullCommands(since: Long): ApiResult<List<Command>> {
         simulateNetwork<List<Command>>()?.let { return it }
         val drained = stateMutex.withLock {

@@ -22,8 +22,12 @@ android {
             useSupportLibrary = true
         }
 
-        // Build config fields for API base URL
-        buildConfigField("String", "BASE_URL", "\"https://api.padguard.com/v1/\"")
+        // 服务端地址构建期注入。
+        // 本项目是局域网/私有化部署（服务端跑在家长电脑上），不存在公网接入点。
+        // 曾在此填写虚构公网域名 api.padguard.com：DNS 根本解析不了，家长端所有接口
+        // 一律"连不上"，且用户完全无法判断是地址问题还是网络问题。改为与 debug 一致的内网地址，
+        // 真实部署在登录页「⚙ 高级设置」改成家长电脑的实际 IP 即可（改完立即生效，无需重打包）。
+        buildConfigField("String", "BASE_URL", "\"http://192.168.1.10:8090/v1/\"")
     }
 
     buildTypes {

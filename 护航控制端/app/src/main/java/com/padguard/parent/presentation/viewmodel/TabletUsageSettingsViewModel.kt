@@ -105,7 +105,12 @@ class TabletUsageSettingsViewModel @Inject constructor(
     fun save() {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, saved = false, error = null)
-            policyRepository.updateTabletUsageSettings(_uiState.value.settings)
+            // 保存必须立即下发到设备。
+            // syncToDevice=false 时服务端只落库、不重建策略包，孩子端要等下一次自然重建才生效，
+            // 家长看到的就是"保存成功但平板毫无反应"，被当成"时间管控设置不了"。
+            policyRepository.updateTabletUsageSettings(
+                _uiState.value.settings.copy(syncToDevice = true)
+            )
                 .onSuccess { synced ->
                     _uiState.value = TabletUsageSettingsUiState(
                         settings = synced,

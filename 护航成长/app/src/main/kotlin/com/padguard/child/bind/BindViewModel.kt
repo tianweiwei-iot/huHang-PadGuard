@@ -14,6 +14,7 @@ import com.padguard.core.transport.http.ApiResult
 import com.padguard.core.transport.http.BindByAccountRequest
 import com.padguard.core.transport.http.BindRequest
 import com.padguard.core.transport.http.PadGuardApi
+import com.padguard.child.service.GuardService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -147,6 +148,10 @@ class BindViewModel @Inject constructor(
                     authRepository.saveBindResult(result.value, deviceSn = req.deviceSn)
                     // 绑定成功后记录账号密码：便于掉线/重置后直接恢复，也供「我的」页查看
                     authRepository.saveChildCredentials(account, pwd)
+                    // 绑定成功 ≠ 可控：守护服务承担心跳/策略同步/MQTT 上行，
+                    // 而它此前只在开机或设备管理员启用时启动，绑定完成后从未拉起，
+                    // 导致设备一直 OFFLINE、家长端看得到设备却管不了。这里立即拉起。
+                    GuardService.start(app, "bindSuccess-account")
                 }.getOrElse { e ->
                     _state.value = _state.value.copy(
                         step = BindStep.Failed,
@@ -175,6 +180,8 @@ class BindViewModel @Inject constructor(
             is ApiResult.Success -> {
                 val saved = runCatching {
                     authRepository.saveBindResult(result.value, deviceSn = req.deviceSn)
+                    // 同上：绑定码方式同样必须在成功后立刻拉起守护服务，否则设备永远离线。
+                    GuardService.start(app, "bindSuccess-code")
                 }.getOrElse { e ->
                     _state.value = _state.value.copy(
                         step = BindStep.Failed,

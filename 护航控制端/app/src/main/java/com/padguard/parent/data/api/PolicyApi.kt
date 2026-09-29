@@ -86,47 +86,87 @@ interface PolicyApi {
     ): Response<ApiResponse<Unit>>
 
     // === 远程指令 ===
+    //
+    // 这几个指令接口**一律用 ResponseBody 不解析响应体**：
+    // 服务端返回的是指令对象（msgId/type/status/payload...），
+    // 而这里原先声明 `ApiResponse<Unit>`，Moshi 拿不到 Unit 的适配器，
+    // 在**解析阶段**就抛异常 → 家长端弹"锁屏指令发送失败"，
+    // 但服务端其实已经把指令下发成功、孩子端也照常锁屏了。
+    // 指令类接口只关心 HTTP 是否成功，用 execRaw 处理即可。
     @POST("policies/{deviceId}/lock")
     suspend fun lockScreen(
         @Path("deviceId") deviceId: String
-    ): Response<ApiResponse<Unit>>
+    ): Response<okhttp3.ResponseBody>
+
+    /** 与 [lockScreen] 对称的解锁通道；缺了它远程锁屏就是单向闸门 */
+    @POST("policies/{deviceId}/unlock")
+    suspend fun unlockScreen(
+        @Path("deviceId") deviceId: String
+    ): Response<okhttp3.ResponseBody>
 
     @POST("policies/{deviceId}/mode")
     suspend fun setControlMode(
         @Path("deviceId") deviceId: String,
         @Body request: ModeChangeRequest
-    ): Response<ApiResponse<Unit>>
+    ): Response<okhttp3.ResponseBody>
 
     // === 解锁 / 解锁申请 ===
     @POST("policies/{deviceId}/unlock")
     suspend fun unlock(
         @Path("deviceId") deviceId: String
-    ): Response<ApiResponse<Unit>>
+    ): Response<okhttp3.ResponseBody>
 
     @POST("policies/{deviceId}/temp-unlock")
     suspend fun tempUnlock(
         @Path("deviceId") deviceId: String,
         @Body request: TempUnlockRequest
-    ): Response<ApiResponse<Unit>>
+    ): Response<okhttp3.ResponseBody>
 
     @GET("devices/{deviceId}/unlock-tickets")
     suspend fun getUnlockTickets(
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<List<UnlockTicketDto>>>
 
+    /**
+     * 同意放行。
+     *
+     * 声明为 `ResponseBody` 而不是 `ApiResponse<Unit>`：Moshi 没有 Unit 的适配器，
+     * 用前者会在**解析响应**时抛异常，服务端其实已经批准并下发了指令，
+     * 家长端却弹"操作失败"，家长反复点击、孩子端反复收到解锁指令。
+     * 指令类接口只关心 HTTP 是否成功，交给 execRaw 处理即可。
+     */
     @POST("devices/{deviceId}/unlock-tickets/{ticketId}/approve")
     suspend fun approveUnlockTicket(
         @Path("deviceId") deviceId: String,
         @Path("ticketId") ticketId: String,
         @Body request: UnlockApproveRequest
-    ): Response<ApiResponse<Unit>>
+    ): Response<okhttp3.ResponseBody>
 
+    /**
+     * 拒绝申请。
+     *
+     * 声明为 `ResponseBody` 而非 `ApiResponse<Unit>`：Moshi 没有 Unit 的适配器，
+     * 一旦声明成泛型实体就会在**解析阶段**抛异常，界面弹出"操作失败"——
+     * 而实际上服务端已经处理成功了。与 unlock/temp-unlock 等"只发指令不看返回值"
+     * 的接口保持同一套写法（tempUnlock 早已是这样）。
+     */
     @POST("devices/{deviceId}/unlock-tickets/{ticketId}/reject")
     suspend fun rejectUnlockTicket(
         @Path("deviceId") deviceId: String,
         @Path("ticketId") ticketId: String,
         @Body request: UnlockRejectRequest
-    ): Response<ApiResponse<Unit>>
+    ): Response<okhttp3.ResponseBody>
+
+    /**
+     * 忽略（归档）解锁申请：关闭弹窗并留在消息中心，不下发消息给孩子、工单仍可批准。
+     * 响应体是空对象，必须用 execRaw 走"不看返回值"的通道，
+     * 否则会重蹈 ApiResponse<Unit> 解析失败导致"发送失败"的覆辙。
+     */
+    @POST("devices/{deviceId}/unlock-tickets/{ticketId}/dismiss")
+    suspend fun dismissUnlockTicket(
+        @Path("deviceId") deviceId: String,
+        @Path("ticketId") ticketId: String
+    ): Response<okhttp3.ResponseBody>
 
     // === 策略模板 ===
     @GET("policies/templates")

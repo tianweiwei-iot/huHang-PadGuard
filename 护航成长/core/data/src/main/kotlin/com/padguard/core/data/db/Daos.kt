@@ -107,7 +107,11 @@ interface AppUsageDao {
                 dayKey = dayKey,
                 usedMs = (current?.usedMs ?: 0L) + deltaMs,
                 launchCount = current?.launchCount ?: 0,
-                lastUpdateAt = now
+                lastUpdateAt = now,
+                // 首次使用时间只在"这一天的第一条记录"时落定，之后不再被覆盖；
+                // 否则每次累加都会把它推到当下，家长看到的就是"开始时间≈结束时间"，这个字段等于没有。
+                firstUsedAt = current?.firstUsedAt?.takeIf { it > 0 } ?: now,
+                lastUsedAt = now
             )
         )
     }
@@ -122,7 +126,10 @@ interface AppUsageDao {
                 dayKey = dayKey,
                 usedMs = current?.usedMs ?: 0L,
                 launchCount = (current?.launchCount ?: 0) + 1,
-                lastUpdateAt = now
+                lastUpdateAt = now,
+                // 启动本身也是一次"使用"：首次启动即为首次使用，供家长端展示开始时间
+                firstUsedAt = current?.firstUsedAt?.takeIf { it > 0 } ?: now,
+                lastUsedAt = now
             )
         )
     }

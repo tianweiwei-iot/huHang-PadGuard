@@ -1,35 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  设备管理器策略声明。
+  设备管理器策略声明（已按上架合规瘦身）。
 
-  这里声明的是"本应用打算使用哪些 DeviceAdmin 能力"。
-  注意区分两件事：
-  1. 本文件决定 DEVICE_ADMIN（普通设备管理器）级别能用哪些 API；
-  2. Device Owner / Profile Owner 的能力（用户限制、LockTask、防卸载等）
-     由是否为 owner 决定，与本文件无关，不需要也无法在这里声明。
+  ## 定位：Device Owner 是可选增强，不是必需能力
+  本产品在没有 Device Owner / 设备管理员身份时，全部管控能力（锁屏、应用黑白名单、
+  时长管控、网址管控、实时看屏、录屏、定位、应用台账）照常工作。
+  DO 只额外提供"防卸载 / 加固基线 / 禁用摄像头"这类**防绕过**增强项，
+  装机时不强制、不阻断流程，装不上就降级运行。
 
-  因此即使本文件写得再全，没有 DO 身份也拿不到管控能力 —— 这是 Android 的设计，
-  端上无法绕过。部署文档必须写清 DO 的设置方式（adb dpm / QR 预置）。
+  ## 为什么删掉这些策略
+  · wipe-data：远程清空设备数据是应用市场审核的最高级红线，
+    工信部与 Google Play 都会因此直接打回；本产品不需要它，恢复出厂应由家长手动操作。
+  · limit-password / expire-password / reset-password / watch-login / encrypted-storage：
+    密码策略类能力对家长管控无实际用途，却要在安装时向用户展示"本应用可更改你的锁屏密码"
+    这类高危提示，是典型的"索取与功能无关的高权限"。
 
-  reset-password 在 Android 8.0+ 对 DO 已失效（resetPassword 抛异常），
-  这里仍保留声明只为兼容旧设备，代码里不会调用它。
+  ## 保留的三项与管控能力直接对应
+  · force-lock：远程一键锁屏（家长端核心指令之一）
+  · disable-keyguard-features：锁屏期间裁剪下拉通知/快捷设置，防止孩子绕过锁屏
+  · disable-camera：策略禁用摄像头
 -->
 <device-admin xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-policies>
         <!-- 远程锁屏：lockNow() -->
         <force-lock />
-        <!-- 远程擦除：wipeData()，仅在管控端二次确认后执行 -->
-        <wipe-data />
         <!-- 禁用摄像头：setCameraDisabled() -->
         <disable-camera />
         <!-- 锁屏界面特性裁剪：setKeyguardDisabledFeatures() -->
         <disable-keyguard-features />
-        <!-- 密码策略与失败次数监控 -->
-        <limit-password />
-        <watch-login />
-        <expire-password />
-        <encrypted-storage />
-        <!-- 兼容旧设备，Android 8+ 不再调用 -->
-        <reset-password />
     </uses-policies>
 </device-admin>

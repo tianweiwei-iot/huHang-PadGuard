@@ -59,7 +59,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.padguard.core.common.Logger
+import com.padguard.core.transport.TransportSettings
 import com.padguard.child.ui.lock.LockTaskSupport
+import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import com.padguard.child.ui.theme.PadGuardTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +71,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+
+private const val TAG = "MessageActivity"
 
 /**
  * 管理员消息/公告全屏弹窗（[com.padguard.core.engine.command.EngineEffect.ShowMessage] 落地）。
@@ -89,7 +94,10 @@ import java.net.URL
  * 因此这里刻意不用居中 Column 堆叠（那会把标题推到中间），
  * 而是用 Box + align(TopCenter) 放通知条、align(Center) 放内容。
  */
+@AndroidEntryPoint
 class MessageActivity : ComponentActivity() {
+
+    @Inject lateinit var transportSettings: TransportSettings
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -115,6 +123,12 @@ class MessageActivity : ComponentActivity() {
         contentType = intent?.getStringExtra(EXTRA_CONTENT_TYPE) ?: "TEXT"
         mediaUrl = intent?.getStringExtra(EXTRA_MEDIA_URL).orEmpty()
         mediaName = intent?.getStringExtra(EXTRA_MEDIA_NAME).orEmpty()
+
+        // 服务端默认返回相对路径（如 /v1/files/{id}），直接交给 HttpURLConnection 会因
+        // MalformedURLException 静默失败，导致图片/视频/音频在孩子端看不到。
+        // 这里按当前服务器 baseUrl 的 origin 拼成绝对地址，一次解析贯穿整条渲染链。
+        val base = transportSettings.baseUrl.value.trimEnd('/')
+        if (mediaUrl.isNotBlank()) mediaUrl = resolveAbsoluteUrl(mediaUrl, base)
 
         // 霸屏不提供任何关闭入口；非阻塞且有时长则到点自动关闭
         // 倒计时以「首次展示」为基准：被系统弹窗打断后 re-arm 重拉本页时不重置，
@@ -382,7 +396,10 @@ private fun MessageContent(
                             )
 
                         mediaUrl.isNotBlank() && contentType == "AUDIO" ->
-                            RemoteAudio(mediaUrl, mediaName, autoPlay = blocking)
+                            // 语音一律自动播放：家长发语音就是为了让孩子"听到"，
+                            // 要求孩子先点一下播放，等于把这条信息变成了一条需要打开的通知——
+                            // 孩子不看就等于没发。图片/视频本身是可见的，不存在这个问题。
+                            RemoteAudio(mediaUrl, mediaName, autoPlay = true)
 
                         else -> {
                             if (body.isNotBlank()) {
@@ -628,8 +645,17 @@ private fun RemoteAudio(url: String, name: String, autoPlay: Boolean) {
     }
 }
 
-/** 把远端素材下载到缓存目录；返回本地文件 */
-private fun downloadToCache(context: Context, url: String): File {
+/**
+ * 把远端素材下载到缓存目录；返回本地文件。
+ *
+ * 服务端 [com.padguard.server.service.FileStorageService] 默认返回**相对路径**
+ * （如 `/v1/files/{id}`，因为 `padguard.base-url` 在单机部署下留空）。
+ * 直接 `URL("/v1/files/...")` 会抛 `MalformedURLException`、素材静默加载失败，
+ * 表现就是"图片/视频/音频发出去孩子端看不到"。这里把相对路径按当前服务器
+ * `baseUrl` 的 origin 拼成绝对地址再下载。
+ */
+private fun downloadToCache(context: Context, rawUrl: String): File {
+    val url = resolveAbsoluteUrl(rawUrl, "")
     val out = File(context.cacheDir, "msg_" + url.hashCode().toString().replace("-", "n"))
     if (out.exists() && out.length() > 0) return out
     val conn = URL(url).openConnection() as HttpURLConnection
@@ -637,6 +663,12 @@ private fun downloadToCache(context: Context, url: String): File {
         conn.connectTimeout = 10_000
         conn.readTimeout = 30_000
         conn.instanceFollowRedirects = true
+        val code = conn.responseCode
+        if (code !in 200..299) {
+            // 把服务端错误（401/403/404/500）显式抛出，交由上层置为"加载失败"，而不是写入一个空文件
+            Logger.w(TAG) { "素材下载失败 HTTP $code: $url" }
+            throw java.io.IOException("HTTP $code")
+        }
         conn.inputStream.use { input ->
             out.outputStream().use { output -> input.copyTo(output) }
         }
@@ -644,4 +676,14 @@ private fun downloadToCache(context: Context, url: String): File {
         conn.disconnect()
     }
     return out
+}
+
+/** 相对路径（以 `/` 开头）按 baseUrl 的 origin 拼成绝对地址；已是绝对地址则原样返回。 */
+private fun resolveAbsoluteUrl(raw: String, baseUrl: String): String {
+    if (!raw.startsWith("/")) return raw
+    val schemeSlash = baseUrl.indexOf("://")
+    val start = if (schemeSlash >= 0) schemeSlash + 3 else 0
+    val slash = baseUrl.indexOf('/', start)
+    val origin = if (slash >= 0) baseUrl.substring(0, slash) else baseUrl
+    return origin + raw
 }

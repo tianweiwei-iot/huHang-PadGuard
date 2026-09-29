@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -52,6 +53,20 @@ fun PermissionOnboardingScreen(viewModel: PermissionOnboardingViewModel = hiltVi
     val error by viewModel.error.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
+    // 普通（非 Device Owner）设备的标准运行时权限申请。
+    // 系统弹窗由家长在装机时一次性确认，此后全程无打扰；
+    // 单个权限被拒只降级对应功能，不阻断装机（避免"强制授权"的合规风险）。
+    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { result -> viewModel.onRuntimePermissionResult(result) }
+
+    // 进入待授权态即弹出系统权限弹窗；结果回来后进入 DONE，不会再重复弹
+    androidx.compose.runtime.LaunchedEffect(phase) {
+        if (phase == PermissionOnboardingViewModel.Phase.NEED_RUNTIME_PERMISSION) {
+            permissionLauncher.launch(viewModel.runtimePermissions.toTypedArray())
+        }
+    }
+
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         when (phase) {
             PermissionOnboardingViewModel.Phase.IDLE ->
@@ -60,6 +75,15 @@ fun PermissionOnboardingScreen(viewModel: PermissionOnboardingViewModel = hiltVi
             PermissionOnboardingViewModel.Phase.RUNNING,
             PermissionOnboardingViewModel.Phase.DONE ->
                 ProgressView(steps = steps, done = phase == PermissionOnboardingViewModel.Phase.DONE)
+
+            // 系统权限弹窗期间显示等待页（弹窗由系统绘制，本页只做兜底提示与手动重试）
+            PermissionOnboardingViewModel.Phase.NEED_RUNTIME_PERMISSION ->
+                RuntimePermissionView(
+                    permissions = viewModel.runtimePermissions.map { viewModel.labelOf(it) },
+                    onRequest = { permissionLauncher.launch(viewModel.runtimePermissions.toTypedArray()) },
+                    onSkip = viewModel::forceContinue,
+                    onAdvanced = viewModel::openProvisioning
+                )
 
             PermissionOnboardingViewModel.Phase.NEED_PROVISIONING ->
                 ProvisioningView(
@@ -81,16 +105,73 @@ private fun IdleView(onStart: () -> Unit) {
         modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
         verticalArrangement = Arrangement.Center
     ) {
-        Text("获取设备管理权限", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("启用平板管控", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Text(
-            "点击后将一键获取平板最高管理权限，并在后台完成全部管控所需权限的授予，过程无需手动操作。",
+            "仅需授予管控必需的几项权限（相机、麦克风、位置、存储）。" +
+                "本应用不索取设备最高管理权限，也不读取短信与通话记录。",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
         Spacer(Modifier.height(28.dp))
         Button(onClick = onStart, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(12.dp)) {
-            Text("一键获取最高权限", style = MaterialTheme.typography.titleMedium)
+            Text("开始启用", style = MaterialTheme.typography.titleMedium)
+        }
+    }
+}
+
+/**
+ * 等待系统运行时权限弹窗的兜底页。
+ *
+ * 正常情况下系统弹窗盖在本页之上，家长点完就直接进 DONE；
+ * 若系统弹窗被 ROM 拦掉（少数国产 ROM 会静默拒绝后台弹窗），家长仍可点「重新申请」重试，
+ * 或点「跳过」以受限模式进入 —— 绝不因为权限把装机流程卡死。
+ */
+@Composable
+private fun RuntimePermissionView(
+    permissions: List<String>,
+    onRequest: () -> Unit,
+    onSkip: () -> Unit,
+    onAdvanced: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("请确认管控所需权限", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "系统正在弹出授权窗口，请逐项允许。未授予的权限只会导致对应功能不可用，不影响其余管控能力。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+        Spacer(Modifier.height(16.dp))
+        permissions.forEach { name ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.RadioButtonUnchecked,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(name, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onRequest, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(12.dp)) {
+            Text("重新申请", style = MaterialTheme.typography.titleMedium)
+        }
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(onClick = onSkip, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(12.dp)) {
+            Text("跳过，以受限模式进入")
+        }
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(onClick = onAdvanced, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(12.dp)) {
+            Text("高级：启用防卸载（可选）")
         }
     }
 }

@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -17,7 +18,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import kotlinx.coroutines.launch
 import com.padguard.domain.model.InstalledApp
+import com.padguard.presentation.ui.components.AppIcon
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.viewmodel.AppManageUiState
 import com.padguard.presentation.viewmodel.AppManageViewModel
@@ -41,6 +44,29 @@ fun AppManageScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var pendingUninstall by remember { mutableStateOf<InstalledApp?>(null) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // 本地 APK 选取：家长手里的安装包在手机上，必须先选出来上传，孩子端才下载得到
+    val apkPicker = rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            ApkFileReader.read(context, uri)
+                .onSuccess { apk ->
+                    viewModel.installLocalApk(
+                        bytes = apk.bytes,
+                        fileName = apk.fileName,
+                        packageName = apk.packageName,
+                        appName = apk.appName
+                    )
+                }
+                .onFailure { e ->
+                    snackbarHostState.showSnackbar("读取安装包失败：${e.message}")
+                }
+        }
+    }
 
     LaunchedEffect(Unit) {
         viewModel.uiState.collectLatest {
@@ -59,6 +85,9 @@ fun AppManageScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { apkPicker.launch("application/vnd.android.package-archive") }) {
+                        Icon(Icons.Default.Add, contentDescription = "安装应用到平板")
+                    }
                     IconButton(onClick = { viewModel.toggleSelectionMode() }) {
                         Icon(
                             if (uiState.selectionMode) Icons.Default.Close else Icons.Default.Checklist,
@@ -97,6 +126,11 @@ fun AppManageScreen(
                 onShowSystemAppsChange = viewModel::setShowSystemApps
             )
 
+            BatchAllowBar(
+                onGrantAll = { viewModel.setAllAllowed(true) },
+                onRevokeAll = { viewModel.setAllAllowed(false) }
+            )
+
             when {
                 uiState.isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
@@ -126,6 +160,9 @@ fun AppManageScreen(
                             selected = app.packageName in uiState.selected,
                             onToggleSelected = { viewModel.toggleSelected(app.packageName) },
                             onToggleSuspended = { viewModel.setSuspended(app, !app.suspended) },
+                            onToggleAllowed = { viewModel.setAllowed(app, !app.allowed) },
+                            onDecreaseLimit = { viewModel.setAppLimit(app, (app.dailyLimitMinutes ?: 0) - 15) },
+                            onIncreaseLimit = { viewModel.setAppLimit(app, (app.dailyLimitMinutes ?: 0) + 15) },
                             onUninstall = { pendingUninstall = app }
                         )
                     }
@@ -194,6 +231,9 @@ private fun InstalledAppItem(
     selected: Boolean,
     onToggleSelected: () -> Unit,
     onToggleSuspended: () -> Unit,
+    onToggleAllowed: () -> Unit,
+    onDecreaseLimit: () -> Unit,
+    onIncreaseLimit: () -> Unit,
     onUninstall: () -> Unit
 ) {
     Card(
@@ -203,47 +243,97 @@ private fun InstalledAppItem(
             containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.White
         )
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (selectionMode) {
-                Checkbox(checked = selected, onCheckedChange = { onToggleSelected() })
-            }
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(10.dp)),
-                contentAlignment = Alignment.Center
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.Android, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-            }
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(app.appName, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    statusText(app),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = statusColor(app)
+                if (selectionMode) {
+                    Checkbox(checked = selected, onCheckedChange = { onToggleSelected() })
+                }
+                // 真实图标（孩子端采集上报）。加载失败/还没采集到时由 AppIcon 回退成字母徽章，
+                // 不会出现一排一模一样的机器人占位图 —— 那种列表家长根本没法扫。
+                AppIcon(
+                    packageName = app.packageName,
+                    appName = app.appName,
+                    iconUrl = app.iconUrl,
+                    size = 40.dp
                 )
-                Text(
-                    app.packageName,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = PadGuardColors.TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            if (!selectionMode) {
-                IconButton(onClick = onToggleSuspended) {
-                    Icon(
-                        if (app.suspended) Icons.Default.PlayArrow else Icons.Default.Block,
-                        contentDescription = if (app.suspended) "恢复" else "挂起",
-                        tint = if (app.suspended) PadGuardColors.SuccessGreen else PadGuardColors.TextSecondary
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(app.appName, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        statusText(app),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = statusColor(app)
+                    )
+                    Text(
+                        app.packageName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = PadGuardColors.TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
-                IconButton(onClick = onUninstall) {
-                    Icon(Icons.Default.DeleteOutline, contentDescription = "卸载", tint = PadGuardColors.WarningRed)
+                if (!selectionMode) {
+                    // 使用权限开关：关闭即在孩子端隐藏，这是最常用、也最需要"能反复拨"的操作，
+                    // 所以做成显式开关而不是藏进菜单。
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Switch(
+                            checked = app.allowed,
+                            onCheckedChange = { onToggleAllowed() }
+                        )
+                        Text(
+                            if (app.allowed) "允许" else "隐藏",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (app.allowed) PadGuardColors.SuccessGreen else PadGuardColors.TextSecondary
+                        )
+                    }
+                    IconButton(onClick = onToggleSuspended) {
+                        Icon(
+                            if (app.suspended) Icons.Default.PlayArrow else Icons.Default.Block,
+                            contentDescription = if (app.suspended) "恢复" else "挂起",
+                            tint = if (app.suspended) PadGuardColors.SuccessGreen else PadGuardColors.TextSecondary
+                        )
+                    }
+                    IconButton(onClick = onUninstall) {
+                        Icon(Icons.Default.DeleteOutline, contentDescription = "卸载", tint = PadGuardColors.WarningRed)
+                    }
+                }
+            }
+
+            // 每应用使用时长控制：+/- 步进 15 分钟；减到 0 即视为不限制。
+            // 仅在非批量模式显示，避免与批量操作互相干扰。
+            if (!selectionMode) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "每日时长",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = PadGuardColors.TextSecondary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    IconButton(
+                        onClick = onDecreaseLimit,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(Icons.Default.Remove, contentDescription = "减少时长", tint = MaterialTheme.colorScheme.primary)
+                    }
+                    Text(
+                        text = if (app.dailyLimitMinutes == null || app.dailyLimitMinutes == 0) "不限制" else "${app.dailyLimitMinutes} 分钟",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.widthIn(min = 64.dp),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    IconButton(
+                        onClick = onIncreaseLimit,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "增加时长", tint = MaterialTheme.colorScheme.primary)
+                    }
                 }
             }
         }
@@ -278,9 +368,39 @@ private fun BatchActionBar(
     }
 }
 
+/**
+ * 一键授权全部 / 一键取消全部。
+ * 对应需求：开启管控后所有应用默认隐藏，家长可一键把全部应用开放给孩子，或一键全部收回。
+ */
+@Composable
+private fun BatchAllowBar(
+    onGrantAll: () -> Unit,
+    onRevokeAll: () -> Unit
+) {
+    Surface(tonalElevation = 1.dp) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "使用权限",
+                style = MaterialTheme.typography.labelMedium,
+                color = PadGuardColors.TextSecondary
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            OutlinedButton(onClick = onRevokeAll) { Text("一键取消全部") }
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(onClick = onGrantAll) { Text("一键授权全部") }
+        }
+    }
+}
+
 private fun statusText(app: InstalledApp): String = when {
     !app.installed -> "已卸载（历史记录）"
-    app.suspended -> "已挂起（图标已隐藏）"
+    app.hidden -> "权限已关闭（孩子端不显示）"
+    app.suspended -> "已挂起（打开即拦截）"
     app.blocked -> "已禁用（打开即拦截）"
     app.dailyLimitMinutes != null -> "限时 ${app.dailyLimitMinutes} 分钟 / 天"
     app.isSystem -> "系统应用"

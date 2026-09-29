@@ -4,6 +4,7 @@ import android.app.admin.DevicePolicyManager
 import android.app.AppOpsManager
 import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
@@ -14,8 +15,10 @@ import androidx.lifecycle.viewModelScope
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.model.policy.ControlMode
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.core.common.Logger
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
+import com.padguard.core.transport.http.ApiResult
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -54,16 +57,24 @@ class ProfileViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            combine(
+            // combine 仅对 2~5 个流有解构重载；超过 5 个会退化为 vararg(Array) 重载，解构参数推断失败。
+            // 这里把 7 个流拆成「5 + 2」两段组合。
+            val base = combine(
                 authRepository.studentName,
                 authRepository.deviceSn,
                 authRepository.isBound,
                 authRepository.deviceName,
                 authRepository.rememberedCredentials
             ) { name, sn, bound, deviceName, creds ->
+                ProfileBase(name, sn, bound, deviceName, creds)
+            }
+            combine(base, authRepository.childNickname, authRepository.childAvatar) { b, nickname, avatar ->
+                val (name, sn, bound, deviceName, creds) = b
                 val adminState = detectAdminState()
                 ProfileUiState(
                     studentName = name,
+                    childNickname = nickname,
+                    childAvatar = avatar,
                     deviceSn = sn.ifBlank { Build.SERIAL ?: "未识别" },
                     deviceName = deviceName,
                     isBound = bound,
@@ -102,6 +113,55 @@ class ProfileViewModel @Inject constructor(
             val deviceId = runCatching { authRepository.getDeviceId() }.getOrDefault("")
             if (deviceId.isNotBlank()) {
                 remote.updateDeviceName(deviceId, trimmed)
+            }
+        }
+    }
+
+    /**
+     * 孩子端自定义"孩子姓名"，本地持久化 + 实时上报服务端（家长端台账同步可见）。
+     */
+    fun saveStudentName(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            authRepository.saveStudentName(trimmed)
+            val deviceId = runCatching { authRepository.getDeviceId() }.getOrDefault("")
+            if (deviceId.isNotBlank()) {
+                remote.updateChildProfile(childName = trimmed)
+            }
+        }
+    }
+
+    /**
+     * 孩子端自定义昵称，本地持久化 + 实时上报服务端（家长端台账同步可见）。
+     */
+    fun saveNickname(nickname: String) {
+        val trimmed = nickname.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            authRepository.saveChildNickname(trimmed)
+            val deviceId = runCatching { authRepository.getDeviceId() }.getOrDefault("")
+            if (deviceId.isNotBlank()) {
+                remote.updateChildProfile(childNickname = trimmed)
+            }
+        }
+    }
+
+    /**
+     * 孩子端选择头像（图库图片），上传服务端拿到 URL 后本地持久化。
+     * 服务端 /device/avatar 已顺便把 URL 写入台账，家长端拉取即可显示。
+     */
+    fun saveAvatar(uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val bytes = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }.getOrNull() ?: return@launch
+            val deviceId = runCatching { authRepository.getDeviceId() }.getOrDefault("")
+            if (deviceId.isBlank()) return@launch
+            when (val r = remote.uploadAvatar(bytes, "avatar_${System.currentTimeMillis()}.jpg")) {
+                is ApiResult.Success -> authRepository.saveChildAvatar(r.value)
+                is ApiResult.BizError -> Logger.w(TAG) { "头像上传失败：${r.message}" }
+                is ApiResult.Failure -> Logger.w(TAG) { "头像上传失败：${r.message}" }
             }
         }
     }
@@ -163,6 +223,8 @@ class ProfileViewModel @Inject constructor(
 
 data class ProfileUiState(
     val studentName: String = "",
+    val childNickname: String = "",
+    val childAvatar: String = "",
     val deviceSn: String = "未识别",
     val deviceName: String = "",
     val isBound: Boolean = false,
@@ -189,3 +251,14 @@ enum class AdminState {
     /** 设备所有者 / 资料所有者（DO/PO）：全部能力可用 */
     OWNER
 }
+
+/** combine 第一段的聚合结果（5 个流），避免 combine 退化为 vararg(Array) 重载 */
+private data class ProfileBase(
+    val studentName: String,
+    val deviceSn: String,
+    val isBound: Boolean,
+    val deviceName: String,
+    val creds: Pair<String, String>
+)
+
+private const val TAG = "ProfileViewModel"

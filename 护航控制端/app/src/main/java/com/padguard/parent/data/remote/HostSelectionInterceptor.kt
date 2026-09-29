@@ -33,6 +33,19 @@ class HostSelectionInterceptor @Inject constructor(
     }
 
     private fun rewrite(original: HttpUrl, target: HttpUrl): HttpUrl {
+        // 服务端返回的图片地址形如 "/v1/files/{id}"，它已经是**服务端根路径**，
+        // 不带占位前缀（接口注解里的相对路径才带）。
+        // 若继续按"拼到 target 基路径之后"处理，就会变成 /v1/v1/files/{id} → 404/500，
+        // 表现为"截屏明明拍到了，家长端却永远加载不出来"。这种情形只能换 host、保留原路径。
+        if (!original.encodedPath.startsWith(PLACEHOLDER_PREFIX)) {
+            return original.newBuilder()
+                .scheme(target.scheme)
+                .host(target.host)
+                .port(target.port)
+                .encodedQuery(original.encodedQuery)
+                .build()
+        }
+
         // 剥掉占位前缀，只保留接口自身的相对路径
         val relative = original.encodedPath.removePrefix(PLACEHOLDER_PREFIX).trimStart('/')
         return target.newBuilder()

@@ -21,9 +21,14 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
 
-        // 服务端地址与 MQTT Broker 由构建期注入，正式环境在 release 中覆盖
-        buildConfigField("String", "DEFAULT_BASE_URL", "\"https://api.padguard.cn/api/v1/\"")
-        buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"ssl://mqtt.padguard.cn:8883\"")
+        // 服务端地址与 MQTT Broker 由构建期注入。
+        // 本项目是局域网/私有化部署（服务端跑在家长电脑上），不存在公网接入点，
+        // 因此默认地址用内网示例地址，与 debug 保持一致。
+        // 曾在此填写虚构公网域名 api.padguard.cn：DNS 根本解析不了，
+        // 客户端只会得到"无法连接"，且用户完全无法判断是地址问题还是网络问题。
+        // 真实部署请在 App 内「高级设置」改成家长电脑的实际 IP（或由打包脚本注入）。
+        buildConfigField("String", "DEFAULT_BASE_URL", "\"http://192.168.1.10:8090/api/v1/\"")
+        buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://192.168.1.10:1883\"")
     }
 
     signingConfigs {

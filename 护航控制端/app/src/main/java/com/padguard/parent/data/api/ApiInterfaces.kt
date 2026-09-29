@@ -109,11 +109,17 @@ interface DeviceApi {
  */
 interface MonitorApi {
 
-    /** 请求实时截屏 */
+    /**
+     * 请求实时截屏。
+     *
+     * 返回的是**指令受理回执**（只有 taskId/status），不是截图本身：
+     * 图片由孩子端拍完单独上传，得再从截屏历史轮询。
+     * 按 ScreenshotDto 解析虽然字段可空不会崩，但 imageUrl 恒为 null，兜底通道形同虚设。
+     */
     @POST("monitor/{deviceId}/screenshot")
     suspend fun requestScreenshot(
         @Path("deviceId") deviceId: String
-    ): Response<ApiResponse<ScreenshotDto>>
+    ): Response<ApiResponse<ScreenshotAcceptedDto>>
 
     /** 获取截屏历史 */
     @GET("monitor/{deviceId}/screenshots")
@@ -134,36 +140,87 @@ interface MonitorApi {
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<LocationDto>>
 
-    /** 远程拍照 */
+    /**
+     * 远程拍照。
+     *
+     * 服务端返回 TaskAcceptedDto（taskId/kind/status/requestedAt），**没有 url**。
+     * 之前按 MediaResultDto 解析，其 url 是非空字段 → Moshi 直接抛
+     * "Required value 'url' missing"，这一步在解析阶段就失败，根本走不到业务。
+     */
     @POST("monitor/{deviceId}/photo")
     suspend fun takePhoto(
         @Path("deviceId") deviceId: String
-    ): Response<ApiResponse<MediaResultDto>>
+    ): Response<ApiResponse<TaskAcceptedDto>>
 
-    /** 远程录音 - 开始 */
+    /** 远程录音 - 开始（同样只回执任务，无 url） */
     @POST("monitor/{deviceId}/record/start")
     suspend fun startRecording(
         @Path("deviceId") deviceId: String
-    ): Response<ApiResponse<MediaResultDto>>
+    ): Response<ApiResponse<TaskAcceptedDto>>
 
-    /** 远程录音 - 停止 */
+    /** 远程录音 - 停止（同样只回执任务，无 url） */
     @POST("monitor/{deviceId}/record/stop")
     suspend fun stopRecording(
         @Path("deviceId") deviceId: String
-    ): Response<ApiResponse<MediaResultDto>>
+    ): Response<ApiResponse<TaskAcceptedDto>>
 
-    /** 开始录屏 */
+    /**
+     * 开始录屏。
+     *
+     * 服务端返回 TaskAcceptedDto（taskId/kind/status/requestedAt）。
+     * 之前按 ScreenRecordTaskDto 解析，其 deviceId/startedAt/resolution/withAudio 均无默认值
+     * → Moshi 抛缺字段异常，**家长端一点"录屏"就报启动失败**，而服务端其实早已下发指令。
+     * 这是"录屏不可用"的直接原因：指令一直是通的，坏在家长端的响应解析。
+     */
     @POST("monitor/{deviceId}/screen-record/start")
     suspend fun startScreenRecord(
         @Path("deviceId") deviceId: String,
         @Body request: StartRecordRequest
-    ): Response<ApiResponse<ScreenRecordTaskDto>>
+    ): Response<ApiResponse<TaskAcceptedDto>>
 
-    /** 停止录屏，返回录屏文件 */
-    @POST("monitor/screen-record/{taskId}/stop")
+    /**
+     * 停止录屏。
+     *
+     * 两处必须与服务端对齐，否则家长端"停止录屏"必然失败：
+     * 1. 路径必须带 deviceId：服务端是 `/v1/monitor/{deviceId}/screen-record/{taskId}/stop`。
+     *    少了 deviceId 会命中 5001「No static resource」，录屏只能靠孩子端 10 分钟兜底自动收尾。
+     * 2. 返回的是**任务接受回执**（无 url），不是录屏文件地址：
+     *    mp4 由孩子端编码后单独上传入库，停指令下发时文件还不存在。
+     *    按 MediaResultDto 取 url 恒为 null，会误报"停止录屏失败"。
+     */
+    @POST("monitor/{deviceId}/screen-record/{taskId}/stop")
     suspend fun stopScreenRecord(
+        @Path("deviceId") deviceId: String,
         @Path("taskId") taskId: String
-    ): Response<ApiResponse<MediaResultDto>>
+    ): Response<ApiResponse<TaskAcceptedDto>>
+
+    /**
+     * 查询媒体任务状态与文件地址。
+     *
+     * 停止录屏是异步收尾：孩子端要停编码器、上传 mp4，服务端才会置 READY 并填 url。
+     * 家长端据此轮询，拿到 url 后才展示"回放"入口。
+     */
+    @GET("monitor/{deviceId}/media/{taskId}")
+    suspend fun getMediaTask(
+        @Path("deviceId") deviceId: String,
+        @Path("taskId") taskId: String
+    ): Response<ApiResponse<MediaTaskStatusDto>>
+
+    /**
+     * 开启实时看屏推流。
+     * 观看期间必须周期性重发：孩子端的推流有 TTL，续期停止即自动结束，
+     * 这样家长关掉页面或掉线后，孩子平板不会一直推流耗电耗流量。
+     * 返回体不解析（只需要 HTTP 成功与否），用 ResponseBody 避开 Moshi 对空泛型的兼容问题。
+     */
+    @POST("monitor/{deviceId}/live/start")
+    suspend fun startLiveView(
+        @Path("deviceId") deviceId: String
+    ): Response<okhttp3.ResponseBody>
+
+    @POST("monitor/{deviceId}/live/stop")
+    suspend fun stopLiveView(
+        @Path("deviceId") deviceId: String
+    ): Response<okhttp3.ResponseBody>
 
     /** 获取屏幕监控设置 */
     @GET("monitor/{deviceId}/screen-settings")
@@ -275,4 +332,51 @@ interface AppManageApi {
         @Path("deviceId") deviceId: String,
         @Body request: BatchSuspendRequest
     ): Response<ApiResponse<Map<String, Int>>>
+
+    /**
+     * 使用权限开关：关闭 = 在孩子端隐藏该应用（不是卸载）。
+     * 响应体为空，用 ResponseBody 接收，避免 ApiResponse<Unit> 触发 Moshi 解析失败。
+     */
+    @PUT("devices/{deviceId}/apps/hidden")
+    suspend fun setAppHidden(
+        @Path("deviceId") deviceId: String,
+        @Body request: AppHiddenRequest
+    ): Response<okhttp3.ResponseBody>
+
+    /**
+     * 批量设置使用权限（隐藏 / 显示）。
+     * `hidden=true` = 在孩子端隐藏（关闭权限）；`all=true` 作用于全部已安装应用。
+     * 响应 data 形如 `{"sent": n}`。
+     */
+    @PUT("devices/{deviceId}/apps/hidden/batch")
+    suspend fun setAppsHiddenBatch(
+        @Path("deviceId") deviceId: String,
+        @Body request: AppHiddenBatchRequest
+    ): Response<ApiResponse<Map<String, Int>>>
+
+    /**
+     * 设置单个应用的每日使用时长上限（分钟）。0 表示不限制。
+     */
+    @PUT("devices/{deviceId}/apps/{packageName}/limit")
+    suspend fun setAppLimit(
+        @Path("deviceId") deviceId: String,
+        @Path("packageName") packageName: String,
+        @Body request: AppLimitRequest
+    ): Response<ApiResponse<Unit>>
+}
+
+/**
+ * 文件通道：家长端上传素材 / APK。
+ *
+ * 此前家长侧**没有任何写入文件的通道**（只有孩子端上报截图/录屏时能写），
+ * 于是信息发布只能填外部 URL、远程安装无从下手 —— 功能等于没做。
+ * 这里补上 multipart 上传，是信息发布素材与远程安装 APK 的共同地基。
+ */
+interface FileApi {
+
+    @Multipart
+    @POST("media/upload")
+    suspend fun upload(
+        @Part file: okhttp3.MultipartBody.Part
+    ): Response<ApiResponse<FileUploadDto>>
 }

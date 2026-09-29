@@ -42,6 +42,9 @@ class LockController @Inject constructor(
     /** 临时解锁到期的墙钟点，用于重启后兜底判定 */
     private var tempUnlockUntilWall: Long = 0L
 
+    /** 本次临时解锁放行的应用；空串表示整机放行。见 [tempUnlock] 的说明 */
+    private var tempUnlockPackage: String = ""
+
     /**
      * 请求锁定。
      *
@@ -109,23 +112,41 @@ class LockController @Inject constructor(
      *
      * 会立刻清空当前锁定态，并在到期前抑制自动锁定。到期后不需要显式恢复：
      * [isTempUnlockActive] 返回 false 后，下一轮自检会把仍成立的原因重新锁上。
+     *
+     * @param packageName 家长放行的是**哪个应用**；空表示整台设备放行。
+     *
+     * ## 为什么必须带上包名
+     * 孩子端最常见的申请入口是「应用拦截页」（单应用时长/次数用完），
+     * 而不是整机锁屏页。家长审批通过的是"再玩 30 分钟这一个应用"。
+     * 如果临时解锁只作用于整机锁定态，拦截页会在下一次 15 秒采样时立刻重新弹出 ——
+     * 家长明明点了同意、孩子那边纹丝不动，正是"同意放行后毫无反应"的直接成因。
+     * 因此放行范围必须跟着包名走，由 [isTempUnlockActive] 同时供限额判定与挂起恢复使用。
      */
-    fun tempUnlock(durationMinutes: Int) {
+    fun tempUnlock(durationMinutes: Int, packageName: String = "") {
         val minutes = durationMinutes.coerceIn(1, MAX_TEMP_UNLOCK_MINUTES)
         val durationMs = minutes * 60_000L
         tempUnlockUntilElapsed = timeProvider.elapsedRealtime() + durationMs
         tempUnlockUntilWall = timeProvider.now() + durationMs
+        tempUnlockPackage = packageName.trim()
         _state.value = LockState(tempUnlockUntilMillis = tempUnlockUntilWall)
-        Logger.i(TAG) { "temp unlock for $minutes min, until=$tempUnlockUntilWall" }
+        Logger.i(TAG) { "temp unlock for $minutes min, pkg='${tempUnlockPackage}', until=$tempUnlockUntilWall" }
     }
 
     fun cancelTempUnlock() {
         if (tempUnlockUntilElapsed == 0L) return
         tempUnlockUntilElapsed = 0L
         tempUnlockUntilWall = 0L
+        tempUnlockPackage = ""
         _state.value = _state.value.copy(tempUnlockUntilMillis = 0L)
         Logger.i(TAG) { "temp unlock cancelled" }
     }
+
+    /**
+     * 本轮放行覆盖到的包名；空串表示整机放行（对所有应用生效）。
+     *
+     * 注意只在 [isTempUnlockActive] 判定为**有效期内**时才有意义，取用前必须先判定。
+     */
+    fun tempUnlockTarget(): String = tempUnlockPackage
 
     /**
      * 临时解锁是否仍在有效期内。
@@ -133,24 +154,27 @@ class LockController @Inject constructor(
      * 双时钟判定：单调时钟为主（防改时间），墙钟为辅（防重启后单调时钟归零导致的"永久解锁"）。
      * 两者任一判定为过期即视为过期 —— 宁可提前恢复管控，也不能出现管控真空。
      */
-    fun isTempUnlockActive(): Boolean {
+    fun isTempUnlockActive(packageName: String? = null): Boolean {
         if (tempUnlockUntilElapsed == 0L) return false
         val elapsedExpired = timeProvider.elapsedRealtime() >= tempUnlockUntilElapsed
         val wallExpired = timeProvider.now() >= tempUnlockUntilWall
         if (elapsedExpired || wallExpired) {
             tempUnlockUntilElapsed = 0L
             tempUnlockUntilWall = 0L
+            tempUnlockPackage = ""
             _state.value = _state.value.copy(tempUnlockUntilMillis = 0L)
             Logger.i(TAG) { "temp unlock expired (elapsed=$elapsedExpired, wall=$wallExpired)" }
             return false
         }
-        return true
+        // 整机放行（未指定包名）覆盖任何应用；指定了包名则只对那一个应用生效
+        return tempUnlockPackage.isEmpty() || packageName == null || packageName == tempUnlockPackage
     }
 
     /** 重启后调用：单调时钟已归零，临时解锁一律失效，避免出现管控真空 */
     fun onDeviceBoot() {
         tempUnlockUntilElapsed = 0L
         tempUnlockUntilWall = 0L
+        tempUnlockPackage = ""
         _state.value = LockState()
         Logger.i(TAG) { "state reset after boot" }
     }

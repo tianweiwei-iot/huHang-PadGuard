@@ -8,6 +8,7 @@ import com.padguard.server.dto.*
 import com.padguard.server.repository.AlertRepository
 import com.padguard.server.repository.DeviceEventRepository
 import com.padguard.server.repository.DeviceRepository
+import com.padguard.server.repository.InstalledAppRepository
 import com.padguard.server.repository.UsageLogRepository
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.data.domain.Pageable
@@ -24,6 +25,7 @@ class StatisticsService(
     private val usageLogRepository: UsageLogRepository,
     private val deviceEventRepository: DeviceEventRepository,
     private val alertRepository: AlertRepository,
+    private val installedAppRepository: InstalledAppRepository,
     private val fileStorageService: FileStorageService,
     private val objectMapper: ObjectMapper
 ) {
@@ -118,12 +120,53 @@ class StatisticsService(
     private fun sumMinutes(logs: List<UsageLog>): Int =
         logs.filter { it.type == "APP_USAGE" }.sumOf { durationSecOf(it) / 60 }
 
+    /**
+     * 按应用聚合使用明细（时长 + 起止时间 + 图标 + 启动次数）。
+     *
+     * 三处容易踩空的细节：
+     * 1. **起止时间取 min/max 而不是最后一条**：上报是按增量分段的，
+     *    只有跨全部段取最小起点与最大终点，才是"今天从几点用到几点"；
+     * 2. **时长以秒求和后再转分钟**：各段 `durationSec/60` 会把不足 1 分钟的使用直接抹成 0，
+     *    孩子开一下应用又退出来，家长端就完全看不到这个应用；
+     * 3. **图标来自台账而不是日志**：图标随应用台账上报，使用日志里没有，
+     *    这里按包名回查 installed_apps 补上，查不到返回 null 让客户端回落默认图标。
+     */
     private fun topApps(logs: List<UsageLog>, limit: Int): List<AppUsageDto> {
-        val byPkg = logs.filter { it.type == "APP_USAGE" }.groupBy { parsePayload(it)["packageName"] as? String ?: "unknown" }
-        return byPkg.map { (pkg, ls) ->
-            val min = ls.sumOf { durationSecOf(it) / 60 }
-            AppUsageDto(pkg, parsePayload(ls.first())["appName"] as? String ?: pkg, min, null)
-        }.sortedByDescending { it.usageMinutes }.take(limit)
+        val appLogs = logs.filter { it.type == "APP_USAGE" }
+        if (appLogs.isEmpty()) return emptyList()
+
+        val iconOf = installedAppRepository.findByDeviceId(deviceIdOf(appLogs))
+            .associate { it.packageName to it.iconUrl }
+
+        return appLogs
+            .groupBy { parsePayload(it)["packageName"] as? String ?: "unknown" }
+            .map { (pkg, ls) ->
+                val payloads = ls.map { parsePayload(it) }
+                val totalSec = ls.sumOf { durationSecOf(it) }
+                val starts = payloads.mapNotNull { asLong(it["startAt"]) }
+                val ends = payloads.mapNotNull { asLong(it["endAt"]) }
+                AppUsageDto(
+                    packageName = pkg,
+                    appName = payloads.firstNotNullOfOrNull { it["appName"] as? String } ?: pkg,
+                    usageMinutes = totalSec / 60,
+                    iconUrl = iconOf[pkg],
+                    startAt = starts.minOrNull(),
+                    endAt = ends.maxOrNull(),
+                    launchCount = ls.size
+                )
+            }
+            .sortedByDescending { it.usageMinutes }
+            .take(limit)
+    }
+
+    /** 从这批日志反推设备 ID（聚合图标时需要按设备查台账） */
+    private fun deviceIdOf(logs: List<UsageLog>): String = logs.first().deviceId
+
+    /** 起止时间在 JSON 里可能是数字也可能是字符串，两种都要认 */
+    private fun asLong(raw: Any?): Long? = when (raw) {
+        is Number -> raw.toLong().takeIf { it > 0 }
+        is String -> raw.toLongOrNull()?.takeIf { it > 0 }
+        else -> null
     }
 
     private fun domainOf(log: UsageLog): String? {

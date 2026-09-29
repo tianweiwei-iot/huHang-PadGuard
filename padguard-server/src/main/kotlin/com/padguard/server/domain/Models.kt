@@ -21,6 +21,12 @@ class Device(
     @Id var id: String = "",                 // = deviceId (服务端下发 UUID)
     @Column(name = "user_id") var userId: String? = null,
     var name: String? = null,
+    /** 孩子端自定义资料：姓名（对应"孩子姓名"） */
+    @Column(name = "child_name") var childName: String? = null,
+    /** 孩子端自定义资料：昵称 */
+    @Column(name = "child_nickname") var childNickname: String? = null,
+    /** 孩子端自定义资料：头像 URL（由 /device/avatar 上传后返回） */
+    @Column(name = "child_avatar") var childAvatar: String? = null,
     @Column(name = "device_sn") var deviceSn: String? = null,
     var fingerprint: String? = null,
     var model: String? = null,
@@ -41,6 +47,20 @@ class Device(
     @Column(name = "hmac_secret") var hmacSecret: String = "",
     @Column(name = "device_token_hash") var deviceTokenHash: String = "",
     @Column(name = "mqtt_password") var mqttPassword: String = "",
+    /**
+     * 家长是否仍处于「远程锁屏」状态。
+     *
+     * 必须有这个字段：远程锁屏是一次性的指令下发，服务端原本不留痕，
+     * 家长端就无从知道自己刚才到底锁上了没有 —— 按钮只能一直显示"锁屏"，
+     * 孩子锁着却找不到解锁入口。有了它，按钮才能如实切换成"解锁"。
+     *
+     * 只表示**家长主动发起**的远程锁屏，不参与因限额/时段触发的自动锁屏：
+     * 后者由孩子端本地策略自行恢复，家长不该（也无法）用远程解锁去覆盖它。
+     */
+    // 可空：ddl-auto 给老库加列时已有行是 NULL，非空 Boolean 会在读取时直接抛
+    // "Can not set boolean field to null value"，整个应用起不来。DTO 出口处再兜底成 false。
+    @Column(name = "remote_locked", columnDefinition = "boolean default false")
+    var remoteLocked: Boolean? = false,
     @Column(name = "created_at") var createdAt: Long = 0
 )
 

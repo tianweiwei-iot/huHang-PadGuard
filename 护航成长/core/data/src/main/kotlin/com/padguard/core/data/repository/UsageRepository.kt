@@ -49,14 +49,14 @@ class UsageRepository @Inject constructor(
 
     suspend fun getAppUsage(packageName: String, key: String): AppUsageStat? =
         appUsageDao.get(key, packageName)?.let {
-            AppUsageStat(it.packageName, it.dayKey, it.usedMs, it.launchCount, it.lastUpdateAt)
+            AppUsageStat(it.packageName, it.dayKey, it.usedMs, it.launchCount, it.lastUpdateAt, it.firstUsedAt, it.lastUsedAt)
         }
 
     suspend fun getTotalUsage(key: String): Long = dailyUsageDao.get(key)?.totalMs ?: 0L
 
     fun observeAppUsage(key: String): Flow<List<AppUsageStat>> =
         appUsageDao.observeByDay(key).map { list ->
-            list.map { AppUsageStat(it.packageName, it.dayKey, it.usedMs, it.launchCount, it.lastUpdateAt) }
+            list.map { AppUsageStat(it.packageName, it.dayKey, it.usedMs, it.launchCount, it.lastUpdateAt, it.firstUsedAt, it.lastUsedAt) }
         }
 
     /**
@@ -68,7 +68,7 @@ class UsageRepository @Inject constructor(
      */
     suspend fun snapshotAppUsage(key: String = dayKey()): List<AppUsageStat> =
         appUsageDao.snapshotByDay(key).map {
-            AppUsageStat(it.packageName, it.dayKey, it.usedMs, it.launchCount, it.lastUpdateAt)
+            AppUsageStat(it.packageName, it.dayKey, it.usedMs, it.launchCount, it.lastUpdateAt, it.firstUsedAt, it.lastUsedAt)
         }
 
     /**

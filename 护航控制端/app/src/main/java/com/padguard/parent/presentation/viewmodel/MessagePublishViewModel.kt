@@ -28,6 +28,8 @@ data class MessagePublishUiState(
     val fullScreen: Boolean = false,
     val playAudio: Boolean = true,
     val history: List<PublishedMessage> = emptyList(),
+    /** 素材上传中：大视频在弱网下要传一会，界面必须给出反馈，否则家长会以为选错了 */
+    val isUploading: Boolean = false,
     val isPublishing: Boolean = false,
     val toast: String? = null
 ) {
@@ -78,19 +80,32 @@ class MessagePublishViewModel @Inject constructor(
     }
 
     /**
-     * 选择素材。
+     * 真正上传本地选取的素材。
      *
-     * Mock 阶段：直接生成一份占位素材，用于打通发布链路。
-     * 接入真实后端时，此处应改为 Android Photo Picker（图片/视频）或 SAF 文档选择器（声音）。
+     * 早期这里是写死的 mock 地址（`https://mock.padguard.com/...`）：
+     * 界面看起来"选好了素材"，孩子端拿到的却是一个根本不存在的域名，
+     * 表现就是"家长发布成功、孩子端一片空白"，且没有任何报错可查。
+     * 现在改为先上传再回填真实地址，发布链路才真正闭环。
      */
-    fun pickMedia() {
-        val asset = when (_uiState.value.contentType) {
-            MessageContentType.TEXT -> return
-            MessageContentType.IMAGE -> MOCK_IMAGE
-            MessageContentType.VIDEO -> MOCK_VIDEO
-            MessageContentType.AUDIO -> MOCK_AUDIO
+    fun attachMedia(bytes: ByteArray, fileName: String, contentType: String) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isUploading = true, toast = null)
+            messageRepository.uploadMedia(fileName = fileName, contentType = contentType, bytes = bytes)
+                .onSuccess { media ->
+                    _uiState.value = _uiState.value.copy(
+                        isUploading = false,
+                        mediaName = media.fileName,
+                        mediaUrl = media.url,
+                        toast = "素材已就绪：${media.fileName}"
+                    )
+                }
+                .onFailure { e ->
+                    _uiState.value = _uiState.value.copy(
+                        isUploading = false,
+                        toast = "素材上传失败：${e.message}"
+                    )
+                }
         }
-        _uiState.value = _uiState.value.copy(mediaName = asset.first, mediaUrl = asset.second)
     }
 
     fun clearMedia() {
@@ -150,10 +165,5 @@ class MessagePublishViewModel @Inject constructor(
 
     private companion object {
         const val MAX_HISTORY = 20
-
-        // Mock 素材（名称 to 资源地址）
-        val MOCK_IMAGE = "家长留言图片.png" to "https://mock.padguard.com/assets/image_notice.png"
-        val MOCK_VIDEO = "学习提醒视频.mp4" to "https://mock.padguard.com/assets/study_reminder.mp4"
-        val MOCK_AUDIO = "语音提醒.m4a" to "https://mock.padguard.com/assets/voice_notice.m4a"
     }
 }

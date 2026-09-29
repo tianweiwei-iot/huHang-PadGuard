@@ -21,6 +21,21 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
+/**
+ * v3 -> v4：给 app_usage 补两列墙钟时间。
+ *
+ * 历史行没有这两个时间点，用 lastUpdateAt 兜底回填（它至少是"最近一次写入的时刻"），
+ * 比直接填 0 更接近真实；后续写入会由 DAO 层按真实首次/末次语义覆盖。
+ */
+private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE app_usage ADD COLUMN firstUsedAt INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE app_usage ADD COLUMN lastUsedAt INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("UPDATE app_usage SET firstUsedAt = lastUpdateAt WHERE firstUsedAt = 0")
+        db.execSQL("UPDATE app_usage SET lastUsedAt = lastUpdateAt WHERE lastUsedAt = 0")
+    }
+}
+
 private val Context.authDataStore: DataStore<Preferences> by preferencesDataStore(name = "padguard_auth")
 private val Context.configDataStore: DataStore<Preferences> by preferencesDataStore(name = "padguard_config")
 
@@ -32,6 +47,10 @@ object DatabaseModule {
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): PadGuardDatabase =
         Room.databaseBuilder(context, PadGuardDatabase::class.java, PadGuardDatabase.NAME)
+            // v3 -> v4：app_usage 增加首次/末次使用时间两列。
+            // 必须显式迁移而不能依赖 destructive：老库里存着当日累计时长，
+            // 一旦重建，孩子已用的时长归零，等于白送一段绕过限额的使用时间。
+            .addMigrations(MIGRATION_3_4)
             // 离线管控场景下数据库损坏会导致管控失效，这里允许重建
             // （策略可从服务端重新拉取，日志丢失可接受，优先保证可用性）
             .fallbackToDestructiveMigration()

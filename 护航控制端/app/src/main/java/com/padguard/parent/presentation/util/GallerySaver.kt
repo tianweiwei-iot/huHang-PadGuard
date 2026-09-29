@@ -44,6 +44,32 @@ class GallerySaver @Inject constructor(
         uri.toString()
     }
 
+    /**
+     * 保存 MP4 字节到系统视频库，归档到 Movies/PadGuard。
+     * 家长在系统相册/文件管理器里能直接找到录屏文件 —— 满足「录像保存在家长端平板」。
+     */
+    fun saveVideo(bytes: ByteArray): Result<String> = runCatching {
+        val resolver = context.contentResolver
+        val displayName = "PadGuard_Rec_${FILE_FORMAT.format(Date())}.mp4"
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/PadGuard")
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            ?: error("系统视频库拒绝写入")
+        try {
+            resolver.openOutputStream(uri)?.use { it.write(bytes) }
+                ?: error("无法打开视频输出流")
+        } finally {
+            values.clear()
+            values.put(MediaStore.Video.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        }
+        uri.toString()
+    }
+
     private companion object {
         val FILE_FORMAT = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
     }

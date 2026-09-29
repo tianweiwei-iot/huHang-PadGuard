@@ -214,10 +214,28 @@ class InstalledApp(
     var installed: Boolean = true,
     /** 是否被管控端挂起（DO 的 setPackagesSuspended，不是卸载） */
     var suspended: Boolean = false,
+    /**
+     * 是否被隐藏（家长关闭使用权限，孩子端桌面不再显示；应用仍在，不是卸载）
+     *
+     * 必须带数据库默认值：家庭部署包用的是 `ddl-auto=update`，
+     * 老库里已经有台账数据时，`add column hidden boolean not null` 会因为
+     * 无法给既有行填充 NOT NULL 而执行失败（H2 报 NULL not allowed），
+     * 之后每次查询该表都报 "Column hidden not found"，整个应用列表接口 500。
+     */
+    @org.hibernate.annotations.ColumnDefault("false")
+    var hidden: Boolean = false,
     @Column(name = "install_time") var installTime: Long? = null,
     @Column(name = "update_time") var updateTime: Long? = null,
     @Column(name = "first_seen_at") var firstSeenAt: Long = 0,
-    @Column(name = "last_seen_at") var lastSeenAt: Long = 0
+    @Column(name = "last_seen_at") var lastSeenAt: Long = 0,
+    /** 应用图标的可访问地址（空表示尚未采集到） */
+    @Column(name = "icon_url") var iconUrl: String? = null,
+    /**
+     * 图标内容哈希。
+     * 孩子端每 30 分钟全量上报一次，若每次都重新落盘，
+     * 上百个图标会反复产生文件写入并堆满磁盘。只在哈希变化时覆盖。
+     */
+    @Column(name = "icon_hash") var iconHash: String? = null
 )
 
 @Entity

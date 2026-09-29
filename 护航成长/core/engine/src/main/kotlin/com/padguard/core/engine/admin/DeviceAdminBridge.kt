@@ -56,6 +56,11 @@ class DeviceAdminBridge @Inject constructor(
     private val dpm: DevicePolicyManager =
         context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
 
+    /** 见 [recordHidden]：系统无"列出隐藏应用"接口，只能本地记账 */
+    private val hiddenPrefs by lazy {
+        context.getSharedPreferences("padguard_hidden_apps", Context.MODE_PRIVATE)
+    }
+
     /**
      * 当前 App 是否为可调试构建（debug 签名）。
      *
@@ -373,7 +378,46 @@ class DeviceAdminBridge @Inject constructor(
             require(can(Capability.HIDE_PACKAGES)) { "requires DO/PO" }
             val ok = dpm.setApplicationHidden(admin, packageName, hidden)
             require(ok) { "setApplicationHidden returned false (package missing?)" }
+        }.also { if (it is OpResult.Ok) recordHidden(packageName, hidden) }
+
+    /**
+     * 本地记录"我们隐藏过哪些应用"。
+     *
+     * 系统没有"列出所有被隐藏应用"的接口，而 Android 11+ 的包可见性限制又让
+     * `getInstalledPackages` 拿不到全量列表 —— 两边一叠加，隐藏后的应用就再也无法枚举：
+     * 启动器里查不到它（隐藏的本意），包列表里也看不到它（可见性限制）。
+     * 只能自己记账：谁被我们藏过，就记在这里，台账采集时补回列表。
+     */
+    private fun recordHidden(packageName: String, hidden: Boolean) {
+        runCatching {
+            hiddenPrefs.edit().apply {
+                if (hidden) putBoolean(packageName, true) else remove(packageName)
+            }.apply()
         }
+    }
+
+    /** 被本应用隐藏、因此已从启动器消失的包名集合 */
+    fun hiddenPackages(): Set<String> = runCatching {
+        hiddenPrefs.all.filterValues { it == true }.keys
+    }.getOrDefault(emptySet())
+
+    /**
+     * 应用当前是否被隐藏。
+     *
+     * 台账采集需要它：被隐藏的应用 `getLaunchIntentForPackage` 为 null，
+     * 采集器若只按"有启动入口"过滤，隐藏后的应用就会从台账里消失，
+     * 服务端据此判定"已卸载"，家长端列表里这个应用凭空不见 —— 
+     * 家长会发现"关掉权限之后应用就找不回来了"，于是再也不敢用这个开关。
+     * 这里让采集器能把"被隐藏"和"真卸载"区分开。
+     */
+    fun isApplicationHidden(packageName: String): Boolean {
+        val admin = adminComponent ?: return false
+        if (!can(Capability.HIDE_PACKAGES)) return false
+        return runCatching { dpm.isApplicationHidden(admin, packageName) }.getOrDefault(false)
+    }
+
+    /** 本应用自身的包名：用于拒绝"把自己隐藏掉"这类自杀式指令 */
+    val selfPackageName: String get() = context.packageName
 
     fun setUninstallBlocked(packageName: String, blocked: Boolean): OpResult =
         guarded("setUninstallBlocked:$packageName=$blocked") {

@@ -1,7 +1,9 @@
 package com.padguard.server.controller
 
 import com.padguard.server.common.ApiResponse
+import com.padguard.server.domain.Device
 import com.padguard.server.dto.*
+import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.service.AuthService
 import com.padguard.server.service.CommandKey
 import com.padguard.server.service.CommandService
@@ -9,6 +11,7 @@ import com.padguard.server.service.CommandType
 import com.padguard.server.service.DeviceService
 import com.padguard.server.service.GroupService
 import com.padguard.server.service.PolicyService
+import org.slf4j.LoggerFactory
 import org.springframework.web.bind.annotation.*
 
 @RestController
@@ -90,7 +93,8 @@ class ParentDeviceController(
 class PolicyController(
     private val commandService: CommandService,
     private val policyService: PolicyService,
-    private val deviceService: DeviceService
+    private val deviceService: DeviceService,
+    private val deviceRepository: DeviceRepository
 ) {
     @PostMapping("/policies/{deviceId}/lock")
     fun lock(
@@ -99,6 +103,9 @@ class PolicyController(
         @RequestBody(required = false) req: LockRequest?
     ): ApiResponse<*> {
         deviceService.getDevice(userId, deviceId) // 校验设备归属
+        // 先落状态再下发指令：家长端靠这个字段把按钮切成"解锁"，
+        // 顺序颠倒会出现"指令已下发但界面仍显示锁屏"的错觉。
+        setRemoteLocked(deviceId, true)
         return ApiResponse.ok(
             commandService.issueCommand(
                 deviceId, CommandType.LOCK_SCREEN, mapOf(CommandKey.REASON to req?.reason)
@@ -120,11 +127,30 @@ class PolicyController(
         @RequestBody(required = false) req: LockRequest?
     ): ApiResponse<*> {
         deviceService.getDevice(userId, deviceId)
+        setRemoteLocked(deviceId, false)
         return ApiResponse.ok(
             commandService.issueCommand(
                 deviceId, CommandType.UNLOCK, mapOf(CommandKey.REASON to req?.reason)
             )
         )
+    }
+
+    /**
+     * 记录远程锁屏状态。
+     *
+     * 只改这一个字段并立即落库：家长端下一次拉设备列表就能读到，
+     * 按钮也就跟着切成"锁屏"/"解锁"。写失败不能让整个接口失败 ——
+     * 指令已经下发、孩子端确实会锁上，因状态落库失败而报错只会误导家长以为没生效。
+     */
+    private fun setRemoteLocked(deviceId: String, locked: Boolean) {
+        val dev = deviceRepository.findById(deviceId).orElse(null) ?: return
+        dev.remoteLocked = locked
+        runCatching { deviceRepository.save(dev) }
+            .onFailure { log.warn("persist remoteLocked=$locked failed: ${it.message}") }
+    }
+
+    companion object {
+        private val log = LoggerFactory.getLogger(PolicyController::class.java)
     }
 
     /** 限时解锁：payload 中的 durationMinutes 到点后自动恢复管控 */

@@ -32,7 +32,13 @@ import com.padguard.presentation.viewmodel.ProfileViewModel
  * 此处 Scaffold 透明化让底色透出；底部导航栏为纯白实底。
  */
 @Composable
-fun MainScreen(rootNavController: NavHostController) {
+fun MainScreen(
+    rootNavController: NavHostController,
+    /** 未读消息数（解锁申请），驱动首页铃铛红点 */
+    unreadAlertCount: Int = 0,
+    /** 点击铃铛进入消息中心 */
+    onNavigateToAlerts: () -> Unit = {}
+) {
     val homeVm: HomeViewModel = hiltViewModel()
     val homeUiState by homeVm.uiState.collectAsState()
     val navController = rememberNavController()
@@ -80,6 +86,8 @@ fun MainScreen(rootNavController: NavHostController) {
             composable("home") {
                 HomeScreen(
                     uiState = homeUiState,
+                    unreadAlertCount = unreadAlertCount,
+                    onNavigateToAlerts = onNavigateToAlerts,
                     onSelectDevice = homeVm::selectDevice,
                     onDeviceClick = { rootNavController.navigate(Screen.DeviceDetail.create(it)) },
                     onNavigateToControl = { rootNavController.navigate(Screen.Control.create(it)) },

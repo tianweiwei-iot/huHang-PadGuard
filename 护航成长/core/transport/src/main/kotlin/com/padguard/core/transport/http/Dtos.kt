@@ -119,6 +119,21 @@ data class MediaAck(
     @SerialName("accepted") val accepted: Boolean = false
 )
 
+/** §5.12 头像上传回执：服务端返回可访问的 URL */
+@Serializable
+data class AvatarAck(
+    @SerialName("url") val url: String = "",
+    @SerialName("accepted") val accepted: Boolean = false
+)
+
+/** §5.13 孩子端自定义个人资料请求体（姓名 / 昵称 / 头像 URL 独立可选） */
+@Serializable
+data class DeviceProfileRequest(
+    @SerialName("childName") val childName: String? = null,
+    @SerialName("childNickname") val childNickname: String? = null,
+    @SerialName("childAvatar") val childAvatar: String? = null
+)
+
 // ==================== 应用台账 ====================
 
 /**
@@ -135,7 +150,24 @@ data class AppInventoryItem(
     @SerialName("versionCode") val versionCode: Long? = null,
     @SerialName("isSystem") val isSystem: Boolean? = null,
     @SerialName("installTime") val installTime: Long? = null,
-    @SerialName("updateTime") val updateTime: Long? = null
+    @SerialName("updateTime") val updateTime: Long? = null,
+    /**
+     * 应用图标（48dp 见方的 PNG，Base64）。
+     *
+     * 家长端"今日使用情况"要按图标辨认应用——一堆只有文字的列表里，
+     * 家长要认出"com.tencent.mm 是微信"得靠猜。
+     *
+     * 为什么不传 URL 而传内联 Base64：图标属于设备本地资产，孩子端没有可对外访问的图床，
+     * 先传图再传清单会引入"图传成功、清单失败"的不一致态。
+     * 48dp PNG 压缩后约 1~3KB，一次全量同步（约 100 个应用）约 200KB，30 分钟一次完全可以接受。
+     * 服务端按内容哈希判断是否变化，没变就不重复落盘。
+     */
+    @SerialName("iconBase64") val iconBase64: String? = null,
+    /**
+     * 是否已被管控端隐藏（家长关闭了使用权限）。
+     * 隐藏的应用没有启动入口，但仍是已安装状态，不能与"已卸载"混为一谈。
+     */
+    @SerialName("hidden") val hidden: Boolean? = null
 )
 
 @Serializable

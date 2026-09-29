@@ -13,6 +13,7 @@ import com.padguard.core.data.model.policy.AppListMode
 import com.padguard.core.data.model.policy.AppPolicy
 import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -41,7 +42,8 @@ import javax.inject.Singleton
 @Singleton
 class AppPolicyEnforcer @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val admin: DeviceAdminBridge
+    private val admin: DeviceAdminBridge,
+    private val lockController: LockController
 ) {
 
     private val packageManager: PackageManager get() = context.packageManager
@@ -79,11 +81,25 @@ class AppPolicyEnforcer @Inject constructor(
             }
         }
 
-        // 只处理已安装的包，未安装的挂起调用会白白失败并污染报告
-        val installedTarget = target.filter { isInstalled(it) }
+        // 家长临时放行的应用不挂起。
+        // 周期自检（默认 5 分钟）会重新 apply 一次策略，若不排除这些包，
+        // 家长刚同意放行、应用几分钟后又被挂起 —— 与"单应用拦截页不认放行"
+        // 是同一类"同意了却没生效"。到期后 isTempUnlockActive 转 false，下一轮自动挂回。
+        val installedTarget = target
+            .filter { isInstalled(it) }
+            .filterNot { lockController.isTempUnlockActive(it) }
 
         // 先解挂"上一轮挂起、本轮不该挂"的，再挂本轮的 —— 顺序反了会有一瞬间全部可用
-        val toRelease = (lastSuspended - installedTarget.toSet()).filter { isInstalled(it) }
+        //
+        // 解挂集合**不能只依赖内存里的 lastSuspended**：它是进程内变量，
+        // 而 DPM 的挂起状态是写进系统的、重启后依然生效。
+        // 于是只要孩子端进程重启过一次（杀进程、OTA、断电重启都算），
+        // 内存记录清空 → 本轮算出的解挂集合为空 → 上一轮挂起的应用**永远放不出来**，
+        // 家长看到的是"一批应用莫名其妙变灰、点开关也恢复不了"。
+        // 这里以设备的真实挂起状态为准：凡当前还挂着、且本轮不该挂的，一律放出。
+        val suspendedOnDevice = launchable.filter { admin.isPackageSuspended(it) }
+        val toRelease = ((lastSuspended + suspendedOnDevice).toSet() - installedTarget.toSet())
+            .filter { isInstalled(it) }
         if (toRelease.isNotEmpty()) {
             val result = admin.setPackagesSuspended(toRelease, false)
             report.note("app.release=${result.succeeded.size}")

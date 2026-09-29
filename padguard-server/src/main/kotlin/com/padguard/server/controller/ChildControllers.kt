@@ -88,6 +88,34 @@ class ChildReportController(
         @RequestParam since: Long = 0
     ): DeviceApiResponse<*> = DeviceApiResponse.ok(commandService.pendingForPolling(deviceId, since))
 
+    /**
+     * 孩子端自定义个人资料（姓名 / 昵称 / 头像 URL），凭设备令牌鉴权。
+     * 写库即生效，并向家长端推送更新事件，满足「自定义 + 实时同步至家长端」。
+     */
+    @PostMapping("/profile")
+    fun updateProfile(
+        @RequestAttribute("deviceId") deviceId: String,
+        @RequestBody req: DeviceProfileRequest
+    ) = DeviceApiResponse.ok(buildMap {
+        deviceService.updateChildProfile(deviceId, req)
+        put("deviceId", deviceId)
+    })
+
+    /** 孩子端上传头像，返回可访问的 URL；落库后家长端拉取设备台账即可显示。 */
+    @PostMapping("/avatar", consumes = [MediaType.MULTIPART_FORM_DATA_VALUE])
+    fun uploadAvatar(
+        @RequestAttribute("deviceId") deviceId: String,
+        @RequestParam("file") file: org.springframework.web.multipart.MultipartFile
+    ): DeviceApiResponse<*> {
+        val url = fileStorageService.store(
+            file.contentType ?: "image/jpeg",
+            file.bytes,
+            file.originalFilename ?: "avatar.jpg"
+        )
+        deviceService.updateChildProfile(deviceId, DeviceProfileRequest(childAvatar = url))
+        return DeviceApiResponse.ok(mapOf("url" to url))
+    }
+
     /** HTTP 降级 ack 通道：本地免 Docker（MQTT 关闭）时，孩子端经此回执指令，闭环主链路 */
     @PostMapping("/ack")
     fun ack(

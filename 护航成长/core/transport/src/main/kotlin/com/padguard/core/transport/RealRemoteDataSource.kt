@@ -26,6 +26,8 @@ import com.padguard.core.transport.http.LocationUploadRequest
 import com.padguard.core.transport.http.LogUploadRequest
 import com.padguard.core.transport.http.LogUploadResponse
 import com.padguard.core.transport.http.MediaAck
+import com.padguard.core.transport.http.AvatarAck
+import com.padguard.core.transport.http.DeviceProfileRequest
 import com.padguard.core.transport.http.PadGuardApi
 import com.padguard.core.transport.http.PolicyFetchResult
 import com.padguard.core.transport.http.ScreenshotAck
@@ -273,6 +275,22 @@ class RealRemoteDataSource @Inject constructor(
         // 服务端写入台账并下发 downConfig(deviceName) 同步给家长端看板。
         return caller.callIgnoringData("device-name") {
             api.updateName(DeviceNameRequest(name))
+        }
+    }
+
+    override suspend fun uploadAvatar(bytes: ByteArray, fileName: String): ApiResult<String> {
+        val body = bytes.toRequestBody("image/jpeg".toMediaTypeOrNull())
+        val filePart = MultipartBody.Part.createFormData("file", fileName, body)
+        return when (val r = caller.call("device-avatar") { api.uploadAvatar(filePart) }) {
+            is ApiResult.Success -> ApiResult.Success(r.value.url, r.serverTime)
+            is ApiResult.BizError -> r
+            is ApiResult.Failure -> r
+        }
+    }
+
+    override suspend fun updateChildProfile(childName: String?, childNickname: String?): ApiResult<Unit> {
+        return caller.callIgnoringData("device-profile") {
+            api.updateProfile(DeviceProfileRequest(childName = childName, childNickname = childNickname))
         }
     }
 

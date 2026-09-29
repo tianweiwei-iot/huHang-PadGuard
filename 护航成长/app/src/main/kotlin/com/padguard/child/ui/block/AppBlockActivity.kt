@@ -63,6 +63,7 @@ class AppBlockActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        instance = this
         val pkg = intent?.getStringExtra(EXTRA_PACKAGE).orEmpty()
         val reason = intent?.getStringExtra(EXTRA_REASON).orEmpty()
         val label = resolveLabel(pkg)
@@ -116,6 +117,11 @@ class AppBlockActivity : ComponentActivity() {
         }.getOrDefault(pkg)
     }
 
+    override fun onDestroy() {
+        if (instance === this) instance = null
+        super.onDestroy()
+    }
+
     /** 用户想离开：回桌面而非回到被拦应用 */
     private fun goHome() {
         val i = Intent(Intent.ACTION_MAIN).apply {
@@ -129,6 +135,22 @@ class AppBlockActivity : ComponentActivity() {
     companion object {
         private const val EXTRA_PACKAGE = "package"
         private const val EXTRA_REASON = "reason"
+
+        /**
+         * 当前在前的拦截页实例。
+         *
+         * 家长同意放行后必须能把它关掉：拦截页一旦盖在应用之上，
+         * 孩子即使已经拿到放行也不会自动回到应用 —— 屏幕上仍是"已被管控限制"，
+         * 家长端却显示"已同意"，这就是最典型的"同意了却毫无反应"。
+         */
+        private var instance: AppBlockActivity? = null
+
+        /** 放行/解除拦截时关闭拦截页；没有在前的拦截页时是安全的空操作 */
+        fun dismiss(context: Context) {
+            instance?.let { activity ->
+                if (!activity.isFinishing) activity.finish()
+            }
+        }
 
         /**
          * @param reason 人类可读的拦截原因（如「今日使用时长已达上限」）。

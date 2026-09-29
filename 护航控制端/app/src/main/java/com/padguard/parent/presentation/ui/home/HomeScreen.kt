@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.padguard.domain.model.*
 import com.padguard.presentation.ui.components.SoftCard
 import com.padguard.presentation.ui.components.SoftHeroCard
@@ -54,6 +55,9 @@ import com.padguard.presentation.viewmodel.HomeUiState
 @Composable
 fun HomeScreen(
     uiState: HomeUiState,
+    /** 未读消息数：铃铛红点。解锁申请已提升为全局弹窗，首页不再内联卡片 */
+    unreadAlertCount: Int = 0,
+    onNavigateToAlerts: () -> Unit = {},
     onSelectDevice: (String) -> Unit,
     onDeviceClick: (String) -> Unit,
     onNavigateToControl: (String) -> Unit,
@@ -81,7 +85,7 @@ fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // === 1. 顶部标题栏 ===
-            item { HomeTopBar(userName = uiState.userName) }
+            item { HomeTopBar(userName = uiState.userName, unreadCount = unreadAlertCount, onBellClick = onNavigateToAlerts) }
 
             // === 2. 空状态：尚未绑定任何孩子设备 ===
             // HomeViewModel 在设备列表非空时会自动选中首个设备，故 devices 为空即代表「无绑定设备」。
@@ -106,18 +110,8 @@ fun HomeScreen(
                     item { OfflineAlertBanner(deviceName = selectedDevice.name) }
                 }
 
-                // === 4.1 孩子端解锁申请：置顶，家长可忽略或去处理 ===
-                uiState.pendingUnlockTicket?.let { ticket ->
-                    item {
-                        UnlockRequestCard(
-                            ticket = ticket,
-                            deviceName = selectedDevice?.name.orEmpty(),
-                            onIgnore = onIgnoreUnlockTicket,
-                            onHandle = { if (deviceId.isNotEmpty()) onNavigateToControl(deviceId) },
-                            modifier = Modifier.padding(horizontal = 16.dp)
-                        )
-                    }
-                }
+                // 解锁申请已提升为根层的全局弹窗（见 PadGuardNavHost），
+                // 首页不再内联卡片 —— 否则家长在首页会同时看到弹窗和卡片两份同样的申请。
 
                 // === 5. 今日平板使用情况环卡 + 应用记录 ===
                 item {
@@ -168,7 +162,18 @@ fun HomeScreen(
 // ==================== 子组件 ====================
 
 @Composable
-private fun HomeTopBar(userName: String) {
+/**
+ * 顶部标题栏 + 消息入口。
+ *
+ * 铃铛此前是一个纯装饰图标：没有 onClick、没有红点，点了没反应。
+ * 而产品要求"忽略后可以在这里查看和处理"，它必须是真入口，
+ * 且要带未读红点——否则家长不知道自己错过了几条申请。
+ */
+private fun HomeTopBar(
+    userName: String,
+    unreadCount: Int = 0,
+    onBellClick: () -> Unit = {}
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -188,21 +193,40 @@ private fun HomeTopBar(userName: String) {
                 color = PadGuardColors.TextSecondary
             )
         }
-        // 通知按钮：白底圆形轻投影
+        // 通知按钮：白底圆形轻投影 + 未读红点
         Box(
             modifier = Modifier
                 .size(40.dp)
                 .shadow(elevation = 2.dp, shape = CircleShape, spotColor = PadGuardColors.CardShadow, ambientColor = PadGuardColors.CardShadow)
                 .clip(CircleShape)
-                .background(Color.White),
+                .background(Color.White)
+                .clickable(onClick = onBellClick),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 Icons.Default.Notifications,
-                contentDescription = "通知",
-                tint = PadGuardColors.TextSecondary,
+                contentDescription = "消息中心",
+                tint = if (unreadCount > 0) PadGuardColors.PrimaryBlue else PadGuardColors.TextSecondary,
                 modifier = Modifier.size(20.dp)
             )
+            if (unreadCount > 0) {
+                // 红点画在右上角：只给数量不遮挡图标，超过 99 收敛为 99+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(16.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFFF3B30)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (unreadCount > 99) "99+" else unreadCount.toString(),
+                        color = Color.White,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
         }
     }
 }
@@ -421,13 +445,9 @@ private fun TodayUsageModule(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "每日限额 ${TimeFormat.formatDurationFromMinutes(safeLimit)} · 点此调整",
+                        text = "每日限额 ${TimeFormat.formatDurationFromMinutes(safeLimit)}",
                         color = Color.White.copy(alpha = 0.8f),
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier
-                            .clickable(onClick = onLimitClick)
-                            .padding(vertical = 1.dp),
-                        textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+                        style = MaterialTheme.typography.labelSmall
                     )
                 }
             }

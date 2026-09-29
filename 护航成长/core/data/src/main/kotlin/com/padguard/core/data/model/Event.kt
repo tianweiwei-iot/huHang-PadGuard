@@ -171,5 +171,9 @@ data class AppUsageStat(
     val dayKey: String,
     val usedMs: Long,
     val launchCount: Int,
-    val lastUpdateAt: Long
+    val lastUpdateAt: Long,
+    /** 当日首次使用的墙钟时间（家长端"开始使用时间"） */
+    val firstUsedAt: Long = 0L,
+    /** 当日最后一次使用的墙钟时间（家长端"停止使用时间"） */
+    val lastUsedAt: Long = 0L
 )

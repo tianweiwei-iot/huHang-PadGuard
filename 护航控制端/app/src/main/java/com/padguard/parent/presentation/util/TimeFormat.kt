@@ -80,6 +80,15 @@ object TimeFormat {
     fun formatClockFromMillis(millis: Long): String =
         formatClock(SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date(millis)))
 
+    /**
+     * 时刻（紧凑）：毫秒时间戳 -> `HH:mm`。
+     *
+     * 列表行里同时要放应用名、起止区间和总时长，三段式（"20时15分00秒"）会被截断，
+     * 家长往往只能看到开始时间、看不到结束时间。这里只保留时和分。
+     */
+    fun formatHourMinute(millis: Long): String =
+        SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(millis))
+
     /** 日期 + 时刻：毫秒时间戳 -> `MM月dd日 XX时YY分ZZ秒`。 */
     fun formatDateTimeFromMillis(millis: Long): String =
         SimpleDateFormat("MM月dd日 ", Locale.CHINA).format(Date(millis)) + formatClockFromMillis(millis)

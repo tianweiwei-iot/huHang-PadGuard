@@ -1,7 +1,11 @@
 package com.padguard.child.permission
 
 import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import com.padguard.core.common.Logger
+import dagger.hilt.android.qualifiers.ApplicationContext
 import com.padguard.core.data.repository.AgreementRepository
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.engine.admin.DeviceAdminBridge
@@ -26,25 +30,34 @@ import javax.inject.Singleton
  */
 @Singleton
 class PermissionGranter @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val admin: DeviceAdminBridge,
     private val authRepository: AuthRepository,
     private val agreementRepository: AgreementRepository
 ) {
 
-    /** §7 运行时权限清单（与 AndroidManifest 声明一一对应）。 */
-    val requiredPermissions: List<String> = listOf(
-        Manifest.permission.ACCESS_FINE_LOCATION,
-        Manifest.permission.ACCESS_COARSE_LOCATION,
-        Manifest.permission.READ_PHONE_STATE,
-        Manifest.permission.SEND_SMS,
-        Manifest.permission.READ_SMS,
-        Manifest.permission.RECEIVE_SMS,
-        Manifest.permission.READ_CALL_LOG,
-        Manifest.permission.CAMERA,
-        Manifest.permission.RECORD_AUDIO,
-        Manifest.permission.READ_EXTERNAL_STORAGE,
-        Manifest.permission.WRITE_EXTERNAL_STORAGE
-    )
+    /**
+     * §7 运行时权限清单（与 AndroidManifest 声明一一对应）。
+     *
+     * 已按上架合规要求瘦身：短信、通话记录、电话状态全部移除 —— 它们与管控能力无关，
+     * 却是 Google Play 专项申报与国内工信部整治的高危项。
+     * 设备标识由服务端在绑定时下发，不依赖 IMEI。
+     */
+    val requiredPermissions: List<String> = buildList {
+        add(Manifest.permission.ACCESS_FINE_LOCATION)
+        add(Manifest.permission.ACCESS_COARSE_LOCATION)
+        add(Manifest.permission.CAMERA)
+        add(Manifest.permission.RECORD_AUDIO)
+        add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        // 通知权限（Android 13+）必须一起授予。
+        // 缺了它，孩子端连"点击开启屏幕采集"的引导通知都发不出来 ——
+        // 而实时看屏在没有 MediaProjection 令牌时**只能**靠这条通知把授权页带起来，
+        // 结果是家长端一直停在"连接中"，且平板上看不到任何提示，排查时极难定位。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     data class GrantReport(
         val granted: List<String> = emptyList(),
@@ -87,15 +100,11 @@ class PermissionGranter @Inject constructor(
     fun labelOf(perm: String): String = when (perm) {
         Manifest.permission.ACCESS_FINE_LOCATION -> "精确定位"
         Manifest.permission.ACCESS_COARSE_LOCATION -> "大致定位"
-        Manifest.permission.READ_PHONE_STATE -> "电话状态"
-        Manifest.permission.SEND_SMS -> "发送短信"
-        Manifest.permission.READ_SMS -> "读取短信"
-        Manifest.permission.RECEIVE_SMS -> "接收短信"
-        Manifest.permission.READ_CALL_LOG -> "通话记录"
         Manifest.permission.CAMERA -> "相机"
         Manifest.permission.RECORD_AUDIO -> "麦克风"
         Manifest.permission.READ_EXTERNAL_STORAGE -> "读取存储"
         Manifest.permission.WRITE_EXTERNAL_STORAGE -> "写入存储"
+        Manifest.permission.POST_NOTIFICATIONS -> "通知"
         else -> perm.substringAfterLast('.')
     }
 
@@ -175,6 +184,35 @@ class PermissionGranter @Inject constructor(
     /** 兼容旧调用方：无进度回调的静默授予。 */
     suspend fun grantAll(version: String = AuthRepository.CURRENT_AGREEMENT_VERSION): GrantReport =
         grantAllWithProgress(version) { }
+
+    /**
+     * 开机/服务重启后的自愈补授：只把**当前缺失**的运行时权限重新置为已授予。
+     *
+     * 与 [grantAll] 的区别：不写协议、不做加固基线（那些是一次性的，重复执行没意义还拖慢启动），
+     * 因此可以被守护服务在每次 bootstrap 时无副作用地调用。
+     *
+     * 为什么必须有这一步：DO 的静默授予只在孩子点「同意并授权」那一次执行过。
+     * 之后只要重装应用（覆盖安装会重置运行时权限）或系统清掉授予状态，
+     * 权限就永久丢失 —— 表现最明显的就是通知权限缺失：
+     * 屏幕采集的引导通知孩子根本收不到，家长端一直转圈"连接中"，
+     * 而平板上没有任何提示，从现象完全看不出是权限问题。
+     */
+    suspend fun ensureGranted(): Int = withContext(Dispatchers.Default) {
+        val missing = requiredPermissions.filter {
+            context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) return@withContext 0
+        var ok = 0
+        for (perm in missing) {
+            when (admin.grantRuntimePermission(perm)) {
+                is OpResult.Ok -> ok++
+                is OpResult.Failed -> Logger.w(TAG) { "re-grant failed: $perm" }
+                is OpResult.Unsupported -> Unit
+            }
+        }
+        Logger.i(TAG) { "ensureGranted: missing=${missing.size}, reGranted=$ok" }
+        ok
+    }
 
     companion object {
         private const val TAG = "PermissionGranter"

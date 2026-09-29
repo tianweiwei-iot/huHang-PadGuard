@@ -5,6 +5,7 @@ import com.padguard.data.api.AlertApi
 import com.padguard.data.api.AppManageApi
 import com.padguard.data.api.AuthApi
 import com.padguard.data.api.DeviceApi
+import com.padguard.data.api.FileApi
 import com.padguard.data.api.LocationApi
 import com.padguard.data.api.MessageApi
 import com.padguard.data.api.MonitorApi
@@ -156,4 +157,9 @@ object NetworkModule {
     @Singleton
     fun provideAppManageApi(retrofit: Retrofit): AppManageApi =
         retrofit.create(AppManageApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideFileApi(retrofit: Retrofit): FileApi =
+        retrofit.create(FileApi::class.java)
 }

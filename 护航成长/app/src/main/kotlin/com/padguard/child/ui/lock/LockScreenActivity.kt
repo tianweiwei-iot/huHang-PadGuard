@@ -14,6 +14,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -48,6 +49,7 @@ import com.padguard.core.data.repository.UnlockRequestRepository
 import com.padguard.core.engine.lock.LockController
 import com.padguard.core.engine.lock.LockState
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -102,7 +104,24 @@ class LockScreenActivity : ComponentActivity() {
             }
         )
 
-        val detail = intent?.getStringExtra(EXTRA_DETAIL).orEmpty()
+        // 服务端下发的 reason 可能是字面量 "null"（历史上下发过 {"reason":"null"}），
+        // 直接显示会在锁屏页正中摆一个刺眼的 null，这里连同空串一起滤掉。
+        val rawDetail = intent?.getStringExtra(EXTRA_DETAIL).orEmpty()
+        val detail = rawDetail.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }.orEmpty()
+        currentDetail = detail
+
+        // 解锁即退出：不等外部调 dismiss()。
+        // 屏幕固定/抢占复位都可能让外部拿不到本实例，只靠 dismiss() 会留下
+        // "已经解锁了，锁屏页还挂着、平板仍不能操作"的死角。
+        lifecycleScope.launch {
+            lockController.state.collect { state ->
+                if (!state.locked) {
+                    exitLockTask()
+                    if (!isFinishing) finish()
+                }
+            }
+        }
+
         setContent {
             PadGuardTheme {
                 LockScreenContent(detail = detail)
@@ -226,53 +245,68 @@ class LockScreenActivity : ComponentActivity() {
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                GlyphBadge("锁", MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.height(24.dp))
-                Text(
-                    text = "设备已锁定",
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
-                Spacer(Modifier.height(12.dp))
-                if (detail.isNotBlank()) {
+            // 说明文案居中，「申请解锁」固定在页面底部：
+            // 底部是拇指最舒服的位置，也避免孩子误以为"按钮就是主要内容"。
+            Box(modifier = Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 32.dp)
+                        .padding(top = 32.dp, bottom = 132.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    GlyphBadge("锁", MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.height(24.dp))
                     Text(
-                        text = detail,
+                        text = "平板已锁定，需解锁后才能继续使用",
                         textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = MaterialTheme.typography.headlineMedium,
                         color = MaterialTheme.colorScheme.onBackground
                     )
                     Spacer(Modifier.height(12.dp))
-                }
-                Text(
-                    text = "请遵守管控规则，到达允许时间后自动解锁。",
-                    textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
-                )
-
-                requestHint?.let { hint ->
-                    Spacer(Modifier.height(16.dp))
+                    if (detail.isNotBlank()) {
+                        Text(
+                            text = detail,
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
                     Text(
-                        text = hint,
+                        text = "除申请解锁外，当前无法进行其它操作。",
                         textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
                     )
+
+                    requestHint?.let { hint ->
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            text = hint,
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
 
-                Spacer(Modifier.height(32.dp))
-                Button(
-                    onClick = { showRequestDialog = true },
-                    shape = RoundedCornerShape(12.dp)
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 32.dp)
+                        .padding(bottom = 40.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(text = "申请解锁")
+                    Button(
+                        onClick = { showRequestDialog = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(text = "申请解锁")
+                    }
                 }
             }
         }

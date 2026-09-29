@@ -24,7 +24,8 @@ import androidx.room.RoomDatabase
         UnlockRequestEntity::class,
         AgreementEntity::class
     ],
-    version = 3,
+    // v4：app_usage 增加 firstUsedAt / lastUsedAt（家长端要展示开始/结束时间）
+    version = 4,
     exportSchema = true
 )
 abstract class PadGuardDatabase : RoomDatabase() {

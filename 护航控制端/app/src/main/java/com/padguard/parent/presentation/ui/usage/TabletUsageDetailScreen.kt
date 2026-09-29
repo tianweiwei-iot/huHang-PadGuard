@@ -329,8 +329,14 @@ private fun AppUsageClickableRow(app: AppUsage, onClick: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            // 起止时间：优先用真实毫秒渲染成紧凑的 "20:15 ~ 23:30"；
+            // 列表行空间有限，"20时15分00秒 ~ 23时30分00秒" 这种三段式会被截断到看不出结束时间。
             val sub = buildString {
-                if (app.startTime != null && app.endTime != null) {
+                if (app.startAt != null && app.endAt != null && app.startAt > 0 && app.endAt > 0) {
+                    append(TimeFormat.formatHourMinute(app.startAt))
+                    append(" ~ ")
+                    append(TimeFormat.formatHourMinute(app.endAt))
+                } else if (app.startTime != null && app.endTime != null) {
                     append(TimeFormat.formatClock(app.startTime))
                     append(" ~ ")
                     append(TimeFormat.formatClock(app.endTime))

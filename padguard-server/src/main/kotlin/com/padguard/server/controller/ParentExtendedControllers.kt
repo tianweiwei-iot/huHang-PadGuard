@@ -45,6 +45,24 @@ class ParentMonitorController(
     fun screenRecordStop(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @PathVariable taskId: String) =
         ApiResponse.ok(monitorService.stopScreenRecord(userId, taskId))
 
+    /**
+     * 查询媒体任务（录屏 / 录音）状态与文件地址。
+     *
+     * 停止录屏后文件是孩子端异步上传的，家长端需轮询到这里返回 status=READY 才能拿到 url 播放。
+     */
+    @GetMapping("/{deviceId}/media/{taskId}")
+    fun mediaTask(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @PathVariable taskId: String) =
+        ApiResponse.ok(monitorService.getMediaTask(userId, taskId))
+
+    /** 开启实时看屏推流（观看期间需周期性重发做续期） */
+    @PostMapping("/{deviceId}/live/start")
+    fun liveStart(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+        ApiResponse.ok(monitorService.startLiveView(userId, deviceId))
+
+    @PostMapping("/{deviceId}/live/stop")
+    fun liveStop(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+        ApiResponse.ok(monitorService.stopLiveView(userId, deviceId))
+
     @GetMapping("/{deviceId}/screen-settings")
     fun screenSettings(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
         ApiResponse.ok(monitorService.getScreenSettings(userId, deviceId))
@@ -208,6 +226,37 @@ class ParentAppManageController(private val appManageService: AppManageService) 
         return ApiResponse.ok<Any?>(null)
     }
 
+    /** 使用权限开关：开启 = 应用出现在孩子端桌面；关闭 = 隐藏（不是卸载） */
+    @PutMapping("/hidden")
+    fun hidden(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: AppHiddenRequest
+    ): ApiResponse<*> {
+        appManageService.setAppHidden(userId, deviceId, req)
+        return ApiResponse.ok<Any?>(null)
+    }
+
+    /** 批量设置应用使用权限（隐藏 / 显示）。`all=true` 作用于全部已安装应用。 */
+    @PutMapping("/hidden/batch")
+    fun hiddenBatch(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: AppHiddenBatchRequest
+    ) = ApiResponse.ok(mapOf("sent" to appManageService.setAppsHiddenBatch(userId, deviceId, req)))
+
+    /** 设置单个应用的每日使用时长上限（分钟）。 */
+    @PutMapping("/{packageName}/limit")
+    fun appLimit(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @PathVariable packageName: String,
+        @RequestBody req: AppLimitRequest
+    ): ApiResponse<*> {
+        appManageService.setAppLimit(userId, deviceId, packageName, req.minutes)
+        return ApiResponse.ok<Any?>(null)
+    }
+
     @PutMapping("/suspend/batch")
     fun suspendBatch(
         @RequestAttribute("userId") userId: String,
@@ -285,4 +334,12 @@ class ParentUnlockController(private val unlockService: UnlockService) {
     @PostMapping("/{deviceId}/unlock-tickets/{ticketId}/reject")
     fun reject(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @PathVariable ticketId: String, @RequestBody(required = false) req: UnlockRejectRequest?) =
         ApiResponse.ok<Any?>(run { unlockService.reject(userId, deviceId, ticketId, req ?: UnlockRejectRequest()); null })
+
+    /**
+     * 忽略：关掉弹窗、归档进消息中心，不下发消息给孩子，工单保留为可批准状态。
+     * 与 reject 的区别见 [com.padguard.server.service.UnlockService.dismiss]。
+     */
+    @PostMapping("/{deviceId}/unlock-tickets/{ticketId}/dismiss")
+    fun dismiss(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @PathVariable ticketId: String) =
+        ApiResponse.ok<Any?>(run { unlockService.dismiss(userId, deviceId, ticketId); null })
 }

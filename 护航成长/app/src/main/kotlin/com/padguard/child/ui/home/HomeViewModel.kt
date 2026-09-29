@@ -59,9 +59,11 @@ class HomeViewModel @Inject constructor(
                 usageRepository.observeTodayUsageMinutes(),
                 logRepository.observeRecentBlocks(limit = 5)
             ) { studentName, policy, usedMinutes, blocks ->
-                val dailyQuota = policy.appLimit.dailyTotalMinutes
-                val remaining = (dailyQuota - usedMinutes).coerceAtLeast(0)
                 val nowMillis = timeProvider.now()
+                // 额度必须与锁机判定取同一档位（工作日 / 周末），
+                // 否则首页显示的"剩余时长"和实际锁屏时机对不上。
+                val dailyQuota = policy.appLimit.quotaFor(isWeekend(nowMillis, policyZone(policy.schedule)))
+                val remaining = (dailyQuota - usedMinutes).coerceAtLeast(0)
                 // 时间轴是「策略时区」的一天：游标、读数、时段判定必须同一时区，
                 // 否则会出现“图例说进行中、游标却停在别处”的自相矛盾
                 val zone = policyZone(policy.schedule)
@@ -90,6 +92,12 @@ class HomeViewModel @Inject constructor(
 
     /** 计划时段以服务端下发的时区为准（通常 Asia/Shanghai）；
      *  即使设备时区被改错，时间轴仍按家长配置的时区走，与锁机判定保持一致 */
+    /** 今天是否按"周末"额度计算（与锁机判定同口径，避免首页剩余时长和实际锁屏时机对不上） */
+    private fun isWeekend(nowMillis: Long, zone: ZoneId): Boolean {
+        val dow = Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate().dayOfWeek
+        return dow == java.time.DayOfWeek.SATURDAY || dow == java.time.DayOfWeek.SUNDAY
+    }
+
     private fun policyZone(schedule: SchedulePolicy): ZoneId =
         runCatching { ZoneId.of(schedule.timezone) }.getOrElse {
             Logger.w("HomeViewModel") { "invalid timezone ${schedule.timezone}, fallback" }

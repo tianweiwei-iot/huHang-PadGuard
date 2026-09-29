@@ -106,7 +106,15 @@ data class Device(
     val groupName: String?,         // 分组名称
     val sceneType: SceneType,
     val latitude: Double?,          // GPS纬度
-    val longitude: Double?          // GPS经度
+    val longitude: Double?,         // GPS经度
+    /** 家长是否仍处于远程锁屏状态：决定「锁屏 / 解锁」按钮显示哪一个 */
+    val remoteLocked: Boolean = false,
+    /** 孩子端自定义资料：姓名（实时同步自孩子端） */
+    val childName: String? = null,
+    /** 孩子端自定义资料：昵称 */
+    val childNickname: String? = null,
+    /** 孩子端自定义资料：头像 URL */
+    val childAvatar: String? = null
 )
 
 /**
@@ -133,7 +141,19 @@ data class AppUsage(
     val iconUrl: String?,
     val startTime: String? = null,  // HH:mm:ss
     val endTime: String? = null,     // HH:mm:ss
-    val usageSeconds: Int = usageMinutes * 60
+    val usageSeconds: Int = usageMinutes * 60,
+    /**
+     * 开始使用的墙钟毫秒。
+     *
+     * 这三个字段此前**只存在于本地演示数据里，真实接口从不填充**——
+     * 映射函数 `AppUsageDto.toDomain()` 只搬了包名/名称/时长/图标，
+     * 于是家长端"开始时间/停止时间"两栏在真机上永远为空，
+     * 看起来就像是"这块代码写好了又不见了"。
+     * 现在服务端在 APP_USAGE 日志里带上 startAt/endAt，这里才真正有值。
+     */
+    val startAt: Long? = null,
+    val endAt: Long? = null,
+    val launchCount: Int = 0
 )
 
 /**
@@ -564,5 +584,15 @@ data class InstalledApp(
     val updateTime: Long? = null,
     val lastSeenAt: Long = 0,
     val blocked: Boolean = false,
-    val dailyLimitMinutes: Int? = null
-)
+    val dailyLimitMinutes: Int? = null,
+    /** 应用图标地址（孩子端采集上报） */
+    val iconUrl: String? = null,
+    /**
+     * 是否已被隐藏（家长关闭了使用权限）。
+     * 隐藏的应用在孩子端桌面不显示，但仍是已安装状态。
+     */
+    val hidden: Boolean = false
+) {
+    /** 使用权限是否开启：未隐藏即视为允许使用 */
+    val allowed: Boolean get() = !hidden
+}

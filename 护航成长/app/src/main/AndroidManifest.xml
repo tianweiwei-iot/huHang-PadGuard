@@ -11,16 +11,31 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- 设备 / 信号（说明书 §6.1） -->
-    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!--
+      权限瘦身说明（上架合规）：
 
-    <!-- 通信（说明书 §6.9 信息发送 / 代收） -->
-    <uses-permission android:name="android.permission.SEND_SMS" />
-    <uses-permission android:name="android.permission.READ_SMS" />
-    <uses-permission android:name="android.permission.RECEIVE_SMS" />
-    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+      以下权限**刻意不声明**，因为它们既非管控必需，又是应用市场审核的高危项：
+      · READ_PHONE_STATE / READ_SMS / RECEIVE_SMS / SEND_SMS / READ_CALL_LOG
+        ——短信与通话记录属最高敏感度权限，Google Play 有专门申报表、国内工信部
+        专项整治也重点治理；本产品唯一的设备标识由服务端下发（bind 时生成 deviceId），
+        完全不需要读 IMEI 或通信记录。
+      · INSTALL_PACKAGES / DELETE_PACKAGES
+        ——签名级系统权限，第三方应用声明了也不会被授予，只会触发市场"保留权限"警告。
+        静默安装走 PackageInstaller 会话 + REQUEST_INSTALL_PACKAGES 即可。
+      · REQUEST_DELETE_PACKAGES
+        ——卸载用系统卸载确认页（ACTION_DELETE）即可，不需要任何权限。
+      · REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+        ——Play 政策仅允许白名单类应用（默认短信/电话/辅助功能）使用，家长管控不在其中，
+        声明即被拒；国内华为/小米也会因此打回。
+      · QUERY_ALL_PACKAGES
+        ——工信部与 Play 双重重点审核项。本产品只关心"孩子桌面上能打开的应用"，
+        用 <queries> 声明启动器入口即可覆盖，无需全量包可见性。
 
-    <!-- 摄像头 / 麦克风（姿态距离监测、远程截屏录屏，说明书 §6.7 / §6.10） -->
+      Device Owner / 设备管理员**不再作为必需能力**：它是可选增强（用于防卸载、
+      加固基线等），未激活时全部管控能力照常工作，只是少了防卸载这类加固项。
+    -->
+
+    <!-- 摄像头 / 麦克风（远程拍照、远程录音、录屏含设备声音，说明书 §6.7 / §6.10） -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
@@ -40,19 +55,19 @@
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
     <!--
-      应用台账采集：Android 11+ 的包可见性限制会让 getInstalledPackages() 默认只返回
-      极少数系统包，应用监控将直接失效。家长管控属于 QUERY_ALL_PACKAGES 的合规用途
-      （设备管理与家长监护），上架时需在 Play 控制台声明该用途。
-      同时用 <queries> 声明"带桌面启动入口的应用"，即使权限被裁剪也能拿到主要清单。
+      应用台账采集：Android 11+ 有包可见性限制，但管控真正需要的只是
+      "孩子桌面上能打开的应用"，用 <queries> 声明启动器入口即可完整覆盖，
+      无需 QUERY_ALL_PACKAGES（上架高危权限）。
+      同时声明 LEANBACK_LAUNCHER 以兼容平板/电视的桌面入口。
     -->
-    <uses-permission
-        android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="QueryAllPackagesPermission" />
-
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
         </intent>
     </queries>
 
@@ -68,12 +83,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
 
-    <!-- 应用内静默安装/卸载：PackageInstaller 会话提交与结果回调都走这里 -->
-    <uses-permission android:name="android.permission.INSTALL_PACKAGES"
-        tools:ignore="ReservedSystemPermission" />
-    <uses-permission android:name="android.permission.DELETE_PACKAGES"
-        tools:ignore="ReservedSystemPermission" />
-    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <!--
+      应用内安装：PackageInstaller 会话提交走 REQUEST_INSTALL_PACKAGES（普通权限，
+      市场可申报）。卸载用系统卸载确认页，不需要任何权限。
+    -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!--
@@ -86,8 +99,18 @@
     <!-- Android 13+ 通知运行时权限 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- 守护服务保活（说明书 §7.1） -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!--
+      应用时长统计 / 单应用限额 / 黑名单事后拦截全都依赖前台应用探测，
+      而探测唯一可靠的来源是 UsageStatsManager（见 ForegroundAppMonitor）。
+
+      必须在这里声明：系统的「设置 → 特殊应用权限 → 使用情况访问」列表
+      只收录**声明了该权限**的应用。缺了这行，引导页把用户送到设置页，
+      列表里却找不到本应用 —— 用户怎么点都开不了，限额与用量统计永远为空。
+      它是 AppOps 权限，不会随安装授予，仍需用户在设置页手动打开。
+    -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <!--
       锁屏/拦截覆盖层不需要 SYSTEM_ALERT_WINDOW：

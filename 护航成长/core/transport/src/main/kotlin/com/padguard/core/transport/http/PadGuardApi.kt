@@ -115,6 +115,17 @@ interface PadGuardApi {
     @POST("device/name")
     suspend fun updateName(@Body body: DeviceNameRequest): Response<ApiEnvelope<JsonElement>>
 
+    /** §5.12 孩子端上传头像，返回可访问 URL */
+    @Multipart
+    @POST("device/avatar")
+    suspend fun uploadAvatar(
+        @Part file: MultipartBody.Part
+    ): Response<ApiEnvelope<AvatarAck>>
+
+    /** §5.13 孩子端自定义个人资料（姓名 / 昵称 / 头像 URL） */
+    @POST("device/profile")
+    suspend fun updateProfile(@Body body: DeviceProfileRequest): Response<ApiEnvelope<JsonElement>>
+
     /**
      * §5.9 指令回执降级通道（契约 V1.1 新增）。
      *

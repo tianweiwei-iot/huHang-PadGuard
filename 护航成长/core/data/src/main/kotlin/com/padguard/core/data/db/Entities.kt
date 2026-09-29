@@ -70,7 +70,18 @@ data class AppUsageEntity(
     val dayKey: String,
     val usedMs: Long,
     val launchCount: Int,
-    val lastUpdateAt: Long
+    val lastUpdateAt: Long,
+    /**
+     * 当日**首次**被记录到使用的墙钟时间。
+     *
+     * 家长端"今日使用情况"要求展示每个应用的开始/停止时间，只有累计时长是不够的：
+     * 家长真正关心的是"晚上九点还在刷视频"这种时段问题，而不是"一共刷了 40 分钟"。
+     * 这里记的是墙钟（System.currentTimeMillis）而非单调时钟——
+     * 时长防篡改用 elapsedRealtime，但展示给家长的时间点必须是真实墙钟，否则显示出来是开机毫秒数。
+     */
+    val firstUsedAt: Long = 0L,
+    /** 当日**最后一次**被记录到使用的墙钟时间，语义同上 */
+    val lastUsedAt: Long = 0L
 )
 
 /**

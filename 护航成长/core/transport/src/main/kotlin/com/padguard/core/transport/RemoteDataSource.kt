@@ -117,4 +117,10 @@ interface RemoteDataSource {
 
     /** 孩子端自定义设备名并上报服务端（实时同步到家长端台账） */
     suspend fun updateDeviceName(deviceId: String, name: String): ApiResult<Unit>
+
+    /** 孩子端上传头像，返回服务端可访问 URL（实时同步到家长端台账） */
+    suspend fun uploadAvatar(bytes: ByteArray, fileName: String): ApiResult<String>
+
+    /** 孩子端自定义个人资料（姓名 / 昵称），实时同步至服务端 + 家长端 */
+    suspend fun updateChildProfile(childName: String? = null, childNickname: String? = null): ApiResult<Unit>
 }

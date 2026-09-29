@@ -9,6 +9,7 @@ import com.padguard.server.domain.Device
 import com.padguard.server.dto.BindRequest
 import com.padguard.server.dto.BindResult
 import com.padguard.server.dto.DeviceDto
+import com.padguard.server.dto.DeviceProfileRequest
 import com.padguard.server.dto.HeartbeatDto
 import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.DeviceRepository
@@ -61,6 +62,11 @@ class DeviceService(
         val existing = matchExistingDevice(userId, req)
         if (existing != null) {
             existing.apply {
+                // 必须重新归属给当前家长。
+                // 复用台账（尤其"孤儿回收"来的历史设备）时若只更新设备信息而不改 userId：
+                // 孤儿设备的 userId 仍是 null，重绑后这台平板在家长端"设备不属于当前用户"、
+                // 设备列表里根本看不到，表现为"绑上了但家长端没有这台设备"。
+                this.userId = userId
                 name = name ?: "孩子平板"
                 deviceSn = req.deviceSn ?: deviceSn
                 fingerprint = req.fingerprint ?: fingerprint
@@ -291,6 +297,31 @@ class DeviceService(
         appVersion = appVersion, onlineStatus = onlineStatus,
         lastOnlineTime = lastOnlineAt, batteryLevel = batteryLevel,
         controlMode = controlMode, sceneMode = sceneMode, groupId = groupId,
-        groupName = null, sceneType = scene, latitude = latitude, longitude = longitude
+        groupName = null, sceneType = scene, latitude = latitude, longitude = longitude,
+        remoteLocked = remoteLocked ?: false,
+        childName = childName,
+        childNickname = childNickname,
+        childAvatar = childAvatar
     )
+
+    /**
+     * 孩子端自定义个人资料（姓名 / 昵称 / 头像），写库即生效。
+     * 任一字段为 null / 空串表示不修改（保留原值），便于孩子端逐项设置。
+     * 更新后向家长端推送事件，家长端设备台账下次刷新即可看到。
+     */
+    fun updateChildProfile(deviceId: String, req: DeviceProfileRequest) {
+        deviceRepository.findById(deviceId).ifPresent { dev ->
+            req.childName?.takeIf { it.isNotBlank() }?.let { dev.childName = it }
+            req.childNickname?.takeIf { it.isNotBlank() }?.let { dev.childNickname = it }
+            req.childAvatar?.takeIf { it.isNotBlank() }?.let { dev.childAvatar = it }
+            deviceRepository.save(dev)
+            dev.userId?.let { uid ->
+                webSocketPush.pushToUser(uid, mapOf(
+                    "type" to "device.profile.updated",
+                    "deviceId" to deviceId,
+                    "timestamp" to System.currentTimeMillis()
+                ))
+            }
+        }
+    }
 }

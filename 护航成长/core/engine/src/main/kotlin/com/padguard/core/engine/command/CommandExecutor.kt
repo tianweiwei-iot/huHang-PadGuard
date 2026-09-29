@@ -78,11 +78,14 @@ class CommandExecutor @Inject constructor(
                 CommandType.STOP_RECORD -> stopAudioRecord(command, deviceId)
                 CommandType.SCREEN_RECORD -> screenRecord(command, deviceId)
                 CommandType.STOP_SCREEN_RECORD -> stopScreenRecord(command, deviceId)
+                CommandType.LIVE_VIEW_START -> startLiveView(command, deviceId)
+                CommandType.LIVE_VIEW_STOP -> stopLiveView(command, deviceId)
                 CommandType.RESET_POLICY -> resetPolicy(command, deviceId)
                 CommandType.REFRESH_POLICY -> refreshPolicy(command, deviceId)
                 CommandType.INSTALL_APP -> installApp(command, deviceId)
                 CommandType.UNINSTALL_APP -> uninstallApp(command, deviceId)
                 CommandType.SET_APP_SUSPENDED -> setAppSuspended(command, deviceId)
+                CommandType.SET_APP_HIDDEN -> setAppHidden(command, deviceId)
                 CommandType.SET_WATERMARK -> setWatermark(command, deviceId)
                 CommandType.PERIPHERAL_OVERRIDE -> peripheralOverride(command, deviceId)
                 CommandType.UPDATE_CONFIG -> updateConfig(command, deviceId)
@@ -146,9 +149,20 @@ class CommandExecutor @Inject constructor(
         if (requested <= 0) {
             return ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "durationMinutes 必须大于 0")
         }
-        lockController.tempUnlock(requested)
+        val pkg = command.payloadString(KEY_PACKAGE_NAME)
+        lockController.tempUnlock(requested, pkg)
+
+        // 被家长"禁用"（黑名单 → 系统挂起）的应用必须同步解挂。
+        // 只清锁定态不够：挂起是写进系统的持久状态，孩子点了图标会弹
+        // "此操作已被管理员禁止"，看起来就是"家长同意了却还是用不了"。
+        // 到期不在这里处理：临时解锁失效后，下一次周期自检会按策略重新挂起。
+        if (pkg.isNotBlank() && admin.isPackageSuspended(pkg)) {
+            admin.setPackagesSuspended(listOf(pkg), false)
+            Logger.i(TAG) { "temp unlock released suspended app: $pkg" }
+        }
+
         _effects.tryEmit(EngineEffect.DismissLockScreen)
-        unlockRequestRepository.approveLatest(command.payloadString(KEY_PACKAGE_NAME))
+        unlockRequestRepository.approveLatest(pkg)
 
         val capped = requested.coerceAtMost(LockController.MAX_TEMP_UNLOCK_MINUTES)
         return if (capped != requested) {
@@ -293,6 +307,23 @@ class CommandExecutor @Inject constructor(
         return ack(command, deviceId, AckStatus.SUCCESS)
     }
 
+    /**
+     * 开启实时看屏推流。
+     *
+     * 幂等：家长端可能在弱网下重发（或重复点开看屏页），重复开启不应产生第二条推流。
+     * 真正的去重在 app 层（ScreenCaptureService 只维护一个推流协程），
+     * 这里照常回执 SUCCESS，让家长端拿到确定结果。
+     */
+    private fun startLiveView(command: Command, deviceId: String): CommandAck {
+        _effects.tryEmit(EngineEffect.StartLiveView(command.msgId))
+        return ack(command, deviceId, AckStatus.SUCCESS)
+    }
+
+    private fun stopLiveView(command: Command, deviceId: String): CommandAck {
+        _effects.tryEmit(EngineEffect.StopLiveView)
+        return ack(command, deviceId, AckStatus.SUCCESS)
+    }
+
     private fun flushLogs(command: Command, deviceId: String): CommandAck {
         _effects.tryEmit(EngineEffect.FlushLogs)
         return ack(command, deviceId, AckStatus.SUCCESS)
@@ -394,6 +425,43 @@ class CommandExecutor @Inject constructor(
         }
     }
 
+    /**
+     * 隐藏 / 显示应用（家长端的"使用权限"开关）。
+     *
+     * 为什么隐藏而不是挂起：见 [CommandType.SET_APP_HIDDEN] 的说明。
+     *
+     * 两条硬性保护：
+     * 1. **绝不允许隐藏自己** —— 把自己藏起来等于管控端彻底失联：
+     *    桌面没有入口、家长下发的指令也没有 Activity 可承载，只能靠 adb 救砖。
+     *    这类"自杀式配置"必须在本层挡掉，不能指望上层永远传对参数。
+     * 2. **隐藏后同步一次台账** —— 否则家长端列表要等下一个 30 分钟周期才反映出来，
+     *    家长会以为开关没生效。
+     */
+    private fun setAppHidden(command: Command, deviceId: String): CommandAck {
+        val pkg = command.payloadString(KEY_PACKAGE_NAME)
+        if (pkg.isBlank()) {
+            return ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "packageName 不能为空")
+        }
+        if (pkg == admin.selfPackageName) {
+            return ack(command, deviceId, AckStatus.FAILED, "SELF_HIDE_DENIED", "不能隐藏管控应用自身")
+        }
+        if (!admin.can(Capability.HIDE_PACKAGES)) {
+            return ack(command, deviceId, AckStatus.UNSUPPORTED, "NO_DEVICE_OWNER", "隐藏应用需要 Device Owner / Profile Owner")
+        }
+        val hidden = command.payloadBoolean(KEY_HIDDEN, true)
+        val result = admin.setApplicationHidden(pkg, hidden)
+        return when (result) {
+            is OpResult.Ok -> {
+                // 立刻同步一次台账：否则家长端要等下一个 30 分钟周期才看到"已隐藏"，
+                // 家长会以为开关没生效而反复点击。
+                _effects.tryEmit(EngineEffect.SyncAppInventory)
+                ack(command, deviceId, AckStatus.SUCCESS)
+            }
+            is OpResult.Unsupported -> ack(command, deviceId, AckStatus.UNSUPPORTED, "UNSUPPORTED", result.reason)
+            is OpResult.Failed -> ack(command, deviceId, AckStatus.FAILED, "HIDE_FAILED", result.reason)
+        }
+    }
+
     // ==================== 外设临时放行 ====================
 
     /**
@@ -489,6 +557,7 @@ class CommandExecutor @Inject constructor(
         const val KEY_VERSION_CODE = "versionCode"
         const val KEY_SUSPENDED = "suspended"
         const val KEY_ENABLED = "enabled"
+        const val KEY_HIDDEN = "hidden"
         const val KEY_ITEM = "item"
         const val KEY_CONFIRM = "confirm"
     }
@@ -532,9 +601,20 @@ sealed interface EngineEffect {
         val msgId: String, val taskId: String, val resolution: String, val withAudio: Boolean
     ) : EngineEffect
     data object StopScreenRecord : EngineEffect
+    /** 开始实时看屏推流（孩子端持续上传屏幕帧） */
+    data class StartLiveView(val msgId: String) : EngineEffect
+    /** 停止实时看屏推流 */
+    data object StopLiveView : EngineEffect
     data class StartAudioRecord(val msgId: String, val taskId: String) : EngineEffect
     data object StopAudioRecord : EngineEffect
     data object FlushLogs : EngineEffect
+
+    /**
+     * 立即同步一次应用台账。
+     * 应用被隐藏/显示后触发：隐藏会让应用从"有启动入口"的过滤条件里消失，
+     * 必须马上重报一次，否则服务端要等下一个周期才知道状态变了。
+     */
+    data object SyncAppInventory : EngineEffect
 
     /** 重启/清除前先把待上报数据落盘并尽力上传 */
     data object FlushBeforeShutdown : EngineEffect

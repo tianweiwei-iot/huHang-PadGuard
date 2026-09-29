@@ -49,6 +49,17 @@ bind.json
 dev.json
 login.json
 *.err
+_*.txt
+_*.json
+_*.py
+_*.mp4
+_*.xml
+_*.bin
+_*.jpg
+.tok
+*.bin
+.rectask
+padguard-server/data/
 
 # ===================== 发布包产物 =====================
 发布包/

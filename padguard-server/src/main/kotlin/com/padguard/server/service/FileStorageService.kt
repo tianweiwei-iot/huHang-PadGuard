@@ -25,7 +25,16 @@ class FileStorageService(
      * 而这种失效往往在很久之后才被发现，数据已经无法重建。
      * 只存文件名、运行时基于当前配置的 [storageDir] 解析，目录搬家就不会失效。
      */
-    fun store(contentType: String, bytes: ByteArray, originalName: String? = null): String {
+    fun store(contentType: String, bytes: ByteArray, originalName: String? = null): String =
+        storeDetailed(contentType, bytes, originalName).url
+
+    /**
+     * 同 [store]，但一并返回 id。
+     *
+     * 家长端上传需要 id：信息发布页要能"撤掉刚选错的素材"，远程安装要按 id 回显文件名。
+     * 只有 url 的话客户端得自己去解析路径取 id —— 一旦 URL 拼接规则变化就会静默失效。
+     */
+    fun storeDetailed(contentType: String, bytes: ByteArray, originalName: String? = null): StoredFile {
         val id = UUID.randomUUID().toString()
         val safeName = sanitize(originalName)
         val fileName = "${id}_$safeName"
@@ -37,8 +46,11 @@ class FileStorageService(
                 size = bytes.size.toLong(), createdAt = System.currentTimeMillis()
             )
         )
-        return url(id)
+        return StoredFile(id, url(id), safeName)
     }
+
+    /** 落盘结果：id 用于后续按文件操作，url 用于直接访问，name 用于界面回显。 */
+    data class StoredFile(val id: String, val url: String, val name: String)
 
     fun url(id: String): String =
         if (baseUrl.isNotBlank()) "${baseUrl.trimEnd('/')}/v1/files/$id" else "/v1/files/$id"

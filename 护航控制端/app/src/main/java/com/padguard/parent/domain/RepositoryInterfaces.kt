@@ -1,5 +1,6 @@
 package com.padguard.domain.repository
 
+import android.graphics.Bitmap
 import com.padguard.domain.model.*
 import kotlinx.coroutines.flow.Flow
 
@@ -135,6 +136,21 @@ interface MonitorRepository {
     /** 请求实时截屏 */
     suspend fun requestScreenshot(deviceId: String): Result<ScreenshotData>
 
+    /**
+     * 实时看屏的视频流。
+     *
+     * 与 [requestScreenshot] 的本质区别：那条链路是"请求一张静态图"，
+     * 这张是**连续的画面**——孩子屏幕上滑动一下，家长端同一秒就能看到。
+     * 每 emit 一个 Bitmap 就是一帧，调用方直接上屏即可。
+     */
+    fun liveFrames(deviceId: String): Flow<Bitmap>
+
+    /** 让孩子端开始推流（观看期间需周期性重发做续期） */
+    suspend fun startLiveView(deviceId: String): Result<Unit>
+
+    /** 停止孩子端推流 */
+    suspend fun stopLiveView(deviceId: String): Result<Unit>
+
     /** 获取设备实时信息（电量、网络等） */
     suspend fun getDeviceInfo(deviceId: String): Result<Device>
 
@@ -164,8 +180,22 @@ interface MonitorRepository {
         withAudio: Boolean
     ): Result<ScreenRecordTask>
 
-    /** 停止录屏，返回录屏文件 URL */
-    suspend fun stopScreenRecord(taskId: String): Result<String>
+    /**
+     * 停止录屏。
+     * 成功仅代表"停止指令已下发"；mp4 由孩子端编码后单独上传入库，不走本返回值。
+     */
+    suspend fun stopScreenRecord(deviceId: String, taskId: String): Result<Unit>
+
+    /**
+     * 查询媒体任务（录屏 / 录音）状态与文件地址。
+     *
+     * 停止是异步的：孩子端收尾编码器并上传 mp4 后，服务端才置 READY 并填 url。
+     * 家长端停止录屏后轮询这里，拿到 url 才能给出"回放"入口。
+     */
+    suspend fun getMediaTask(
+        deviceId: String,
+        taskId: String
+    ): Result<com.padguard.data.model.MediaTaskStatusDto>
 
     // === 屏幕监控设置 ===
     /** 获取屏幕监控设置 */
@@ -188,7 +218,28 @@ interface MessageRepository {
 
     /** 获取某设备的已发布信息记录（按发布时间倒序） */
     suspend fun getPublishedMessages(deviceId: String, limit: Int = 20): Result<List<PublishedMessage>>
+
+    /**
+     * 上传信息发布素材（图片 / 视频 / 音频），返回可直接访问的地址。
+     *
+     * 家长手里的素材都在本机相册或文件里，孩子端访问不到家长的手机，
+     * 必须先落到服务端才能随消息下发。
+     */
+    suspend fun uploadMedia(
+        fileName: String,
+        contentType: String,
+        bytes: ByteArray
+    ): Result<UploadedMedia>
 }
+
+/** 上传完成的素材：url 直接下发给孩子端，fileName 用于界面回显与"撤掉重选" */
+data class UploadedMedia(
+    val fileId: String,
+    val url: String,
+    val fileName: String,
+    val contentType: String,
+    val size: Long
+)
 
 /**
  * 定位仓库接口
@@ -261,6 +312,37 @@ interface PolicyRepository {
     /** 批量挂起 / 恢复 */
     suspend fun setAppsSuspended(deviceId: String, packages: List<String>, suspended: Boolean): Result<Unit>
 
+    /**
+     * 使用权限开关。
+     * @param hidden true = 关闭权限（孩子端桌面不再显示）；false = 开启权限。
+     * 隐藏不等于卸载：应用与数据都还在，重新打开权限即可恢复显示。
+     */
+    suspend fun setAppHidden(deviceId: String, packageName: String, hidden: Boolean): Result<Unit>
+
+    /**
+     * 批量设置使用权限（隐藏 / 显示）。
+     * @param all true 时作用于全部已安装应用（一键授权全部 / 一键取消全部），此时 [packages] 可空。
+     */
+    suspend fun setAppsHiddenBatch(
+        deviceId: String,
+        packages: List<String>,
+        hidden: Boolean,
+        all: Boolean = false
+    ): Result<Int>
+
+    /** 设置单个应用的每日使用时长上限（分钟，0 = 不限制） */
+    suspend fun setAppLimit(deviceId: String, packageName: String, minutes: Int): Result<Unit>
+
+    /** 远程安装本地选取的 APK：先上传到服务端拿到地址，再下发安装指令 */
+    suspend fun installLocalApk(
+        deviceId: String,
+        fileName: String,
+        contentType: String,
+        bytes: ByteArray,
+        packageName: String,
+        appName: String? = null
+    ): Result<Unit>
+
     // === 上网管控 ===
     /** 获取上网策略 */
     suspend fun getWebPolicy(deviceId: String): Result<WebPolicy>
@@ -274,6 +356,9 @@ interface PolicyRepository {
     // === 系统与安全 ===
     /** 一键锁屏 */
     suspend fun lockScreen(deviceId: String): Result<Unit>
+
+    /** 一键解锁：解除家长发起的远程锁屏，按钮回到"锁屏" */
+    suspend fun unlockScreen(deviceId: String): Result<Unit>
 
     /** 设置护眼参数 */
     suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit>
@@ -291,8 +376,14 @@ interface PolicyRepository {
     /** 同意申请（按申请时长放行） */
     suspend fun approveUnlockTicket(deviceId: String, ticketId: String, durationMinutes: Int?): Result<Unit>
 
-    /** 忽略申请：关闭工单，不下发任何消息给孩子 */
+    /** 拒绝申请：关闭工单并给孩子下发"申请未通过" */
     suspend fun ignoreUnlockTicket(deviceId: String, ticketId: String): Result<Unit>
+
+    /**
+     * 忽略（归档）申请：弹窗不再打扰，记录留在消息中心稍后可继续处理。
+     * 与 [ignoreUnlockTicket] 的区别：不下发任何消息给孩子，且工单仍可被批准。
+     */
+    suspend fun dismissUnlockTicket(deviceId: String, ticketId: String): Result<Unit>
 
     // === 模式切换 ===
     /** 切换管控模式 */
@@ -393,6 +484,15 @@ data class UnlockTicket(
     val createdAt: Long = 0L
 ) {
     val isPending: Boolean get() = status == "PENDING"
+
+    /**
+     * 是否仍可被家长处理。
+     *
+     * 注意 `IGNORED` 也算可处理：忽略只是"暂时不打扰"，不是终态。
+     * 早期若把这里写成 `status == "PENDING"`，家长点了忽略之后
+     * 消息中心里的那条记录就永远点不动了 —— 与"忽略后还能处理"的产品约定直接冲突。
+     */
+    val isActionable: Boolean get() = status == "PENDING" || status == "IGNORED"
 
     /** 展示标题：单应用申请显示应用名，整机申请显示「整台设备」 */
     val targetLabel: String get() = appLabel?.takeIf { it.isNotBlank() } ?: "整台设备"
