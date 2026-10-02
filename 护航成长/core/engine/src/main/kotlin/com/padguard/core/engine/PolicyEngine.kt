@@ -6,6 +6,7 @@ import com.padguard.core.data.model.Command
 import com.padguard.core.data.model.CommandAck
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
+import com.padguard.core.data.model.policy.AppListMode
 import com.padguard.core.data.model.policy.PolicyPackage
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.repository.LogRepository
@@ -225,6 +226,7 @@ class PolicyEngine @Inject constructor(
         // ---------- 2. 使用限额 ----------
         val limit = appLimitEnforcer.track(policy.appLimit, foregroundPackage, screenOn)
         var blockedPackage: String? = null
+        var blockedReason = ""
         if (limit is LimitVerdict.Blocked) {
             // 家长已放行（临时解锁）的应用本轮不拦。
             // 孩子端最常见的申请入口是"应用拦截页"，家长同意的正是"再玩一会儿这一个应用"；
@@ -235,7 +237,6 @@ class PolicyEngine @Inject constructor(
             if (limit.reason == LimitReason.DAILY_TOTAL) {
                 if (!tempReleased) autoReasons[LockReason.DAILY_LIMIT] = LockDetail(limit.message())
             } else {
-                // 单应用超额只拦这个应用，不锁整机（见类注释的设计取舍）
                 blockedPackage = if (tempReleased) null else limit.packageName
             }
             if (tempReleased) {
@@ -250,6 +251,36 @@ class PolicyEngine @Inject constructor(
                         "reason" to limit.reason.name,
                         "usedMinutes" to limit.usedMinutes.toString(),
                         "quotaMinutes" to limit.quotaMinutes.toString()
+                    )
+                )
+            }
+        }
+
+        // ---------- 2.5 黑名单前台拦截兜底 ----------
+        // 黑名单的主管控手段是 DO 的「隐藏应用」（图标消失、无法启动），
+        // 但设备失去 Device Owner（重装/解绑后重新激活、ROM 升级等）后会退化为 LEGACY，
+        // 隐藏/挂起都不可用 —— 如果这里不再拦截，孩子就能照常打开被管控的应用（实际故障）。
+        // 因此在每个采样点检查前台包名：命中黑名单就复用单应用拦截页压回去，
+        // 并上报 BLACKLIST_APP_LAUNCH 让家长知道孩子尝试过。
+        if (foregroundPackage != null && blockedPackage == null) {
+            val isBlacklisted = when (policy.app.mode) {
+                AppListMode.BLACKLIST ->
+                    foregroundPackage in policy.app.blacklist ||
+                        policy.app.systemAppRules[foregroundPackage]?.uppercase() == "BLOCK"
+                // 白名单模式不在此兜底：差集逻辑需要"全部可启动应用"参与，
+                // 在采样点做会把桌面、输入法等一并拦死，风险远大于收益（白名单依赖 DO）。
+                AppListMode.WHITELIST -> false
+            }
+            if (isBlacklisted && !lockController.isTempUnlockActive(foregroundPackage)) {
+                blockedPackage = foregroundPackage
+                blockedReason = "该应用已被家长管控，无法使用"
+                raiseOnce(
+                    key = "blacklist:$foregroundPackage",
+                    type = RiskType.BLACKLIST_APP_LAUNCH,
+                    level = RiskLevel.NORMAL,
+                    detail = mapOf(
+                        "packageName" to foregroundPackage,
+                        "mode" to policy.app.mode.name
                     )
                 )
             }
@@ -275,7 +306,8 @@ class PolicyEngine @Inject constructor(
             schedule = schedule,
             limit = limit,
             eyeCare = eyeCare,
-            blockedPackage = blockedPackage
+            blockedPackage = blockedPackage,
+            blockedReason = blockedReason
         )
     }
 
@@ -402,7 +434,9 @@ data class EngineTick(
     val limit: LimitVerdict,
     val eyeCare: EyeCareVerdict,
     /** 非空表示该应用已超额，应被拦截（但不锁整机） */
-    val blockedPackage: String?
+    val blockedPackage: String?,
+    /** 拦截原因文案（限额超额/黑名单命中），供拦截页展示 */
+    val blockedReason: String = ""
 ) {
     val shouldShowLockScreen: Boolean get() = lockState.locked
     val shouldBlockApp: Boolean get() = blockedPackage != null

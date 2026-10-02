@@ -36,8 +36,16 @@ class TimeProvider @Inject constructor() {
 
     /**
      * 对齐服务端标准时间。
+     *
      * @param serverTimeMs 服务端下发的时间戳（UTC 毫秒）
-     * @param roundTripMs  本次请求的往返耗时，用于折半补偿网络延迟
+     * @param roundTripMs  **仅在 serverTimeMs 是「请求到达时刻」加盖时**才传往返耗时做折半补偿。
+     *
+     * ## 为什么调用方通常必须传 0（重要）
+     * 本项目的 serverTime 由服务端在**响应写出那一刻**加盖（长轮询更是要等服务端挂起结束才写响应），
+     * 它与"本地收到响应的时刻"只差一个单向网络时延。此时若再补 `roundTripMs / 2`，
+     * 长轮询会把 20 秒挂起时长的一半（约 10 秒）凭空加到 offset 上，
+     * 导致终端时钟系统性偏快、每轮抖动 —— 表现为上报时间对不上、指令 since 落到未来被过滤。
+     * 因此 [com.padguard.core.transport.http.ApiCaller] 统一以 **0** 调用本方法。
      */
     fun syncServerTime(serverTimeMs: Long, roundTripMs: Long = 0L) {
         val localNow = System.currentTimeMillis()

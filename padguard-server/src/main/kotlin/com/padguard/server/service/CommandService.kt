@@ -96,11 +96,18 @@ class CommandService(
         // 游标合法性校验（含**时钟偏移容错**）：
         // 终端时钟略快于服务端时，since 会落在「未来」——此前直接判非法归零，
         // 等于每次轮询都下发全部 PENDING 指令，叠加回执延迟就会重复执行
-        // （实测录屏每 3 秒被丢弃重启一次）。对轻微超前 clamp 到服务端当前时间：
-        // 语义等价于"截至此刻之前创建的指令我只拉一次"，比归零安全得多。
+        // （实测录屏每 3 秒被丢弃重启一次）。因此对轻微超前做 clamp 而不是归零。
+        //
+        // clamp 目标不能是服务端当前时间 now 本身：终端"上一次真正取走指令"的时刻
+        // 其实早于 now（两轮轮询之间存在数秒的重新发起间隙），
+        // 若钳到 now，`createdAt >= now` 会把这个间隙里刚入库的指令整批判为旧数据丢掉 ——
+        // 表现是家长点了「解锁」，指令已入库却迟迟不下发（解锁有延迟）。
+        // 这里回退一个 [CLOCK_SKEW_GRACE_MS] 的宽容窗口：
+        // 只重放"最近几秒内仍是 PENDING"的指令，已回执的指令早已不是 PENDING，
+        // 因此不会退化成重复执行，但能兜住终端时钟偏快导致的漏发。
         val cursor = when {
             since in 1L..now -> since
-            since > now -> now
+            since > now -> (now - CLOCK_SKEW_GRACE_MS).coerceAtLeast(0L)
             else -> 0L
         }
         return commandRepository.findByDeviceIdOrderByCreatedAtAsc(deviceId)
@@ -187,6 +194,16 @@ class CommandService(
         const val STATUS_PENDING = "PENDING"
         /** 单次轮询下发上限：既保证批次可控，也避免异常堆积时一次性拉取过多 */
         const val MAX_POLLING_BATCH = 50
+
+        /**
+         * 终端时钟超前时的游标宽容窗口（毫秒）。
+         *
+         * 终端时钟快于服务端时 since 落在未来，需回退一小段再取指令，
+         * 否则两轮轮询间隙里刚入库的指令会被整批漏发（家长点了解锁却迟迟不生效）。
+         * 取值只需覆盖"轮询间隙 + 轻微时钟偏差"，不宜过大：
+         * 窗口内只重放仍为 PENDING 的指令，已回执的不会被重复下发。
+         */
+        const val CLOCK_SKEW_GRACE_MS = 15_000L
 
         /**
          * 长轮询挂起上限。

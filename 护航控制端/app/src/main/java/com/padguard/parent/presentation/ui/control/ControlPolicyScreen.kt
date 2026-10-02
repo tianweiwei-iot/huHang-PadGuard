@@ -218,6 +218,15 @@ private fun AppPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolicy
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         item { SectionTitle("应用黑名单与时长限制") }
+        item {
+            val apps = uiState.installedApps
+            val allBlocked = apps.isNotEmpty() && apps.all { it.isBlocked }
+            AllAppsControlCard(
+                appCount = apps.size,
+                allBlocked = allBlocked,
+                onToggle = { viewModel.setAllAppsBlocked(it) }
+            )
+        }
         items(uiState.installedApps) { app ->
             AppPolicyItem(
                 appName = app.appName,
@@ -235,6 +244,36 @@ private fun AppPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolicy
                     viewModel.setAppTimeLimit(app, next)
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun AllAppsControlCard(
+    appCount: Int,
+    allBlocked: Boolean,
+    onToggle: (Boolean) -> Unit
+) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "一键管控全部应用",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = if (allBlocked) "已管控 $appCount 个应用，孩子端不再显示"
+                    else "开启后，全部 $appCount 个应用在孩子端隐藏；系统必要应用自动保留",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Switch(checked = allBlocked, onCheckedChange = onToggle)
         }
     }
 }

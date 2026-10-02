@@ -3,6 +3,8 @@ package com.padguard.child.ui.message
 import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
@@ -13,6 +15,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.MediaController
 import android.widget.VideoView
+import androidx.core.app.NotificationCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
@@ -32,6 +35,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -134,9 +139,7 @@ class MessageActivity : ComponentActivity() {
         // 倒计时以「首次展示」为基准：被系统弹窗打断后 re-arm 重拉本页时不重置，
         // 否则只要来一个系统弹窗，霸屏就永远数不完（实测踩过）。
         val remainMs = beginSession(sessionKey(), durationSec)
-        if (remainMs > 0) {
-            handler.postDelayed({ finishSafely() }, remainMs)
-        }
+        armClose(remainMs)
 
         // 霸屏期间拦截返回键
         if (blocking) {
@@ -160,6 +163,7 @@ class MessageActivity : ComponentActivity() {
                     contentType = contentType,
                     mediaUrl = mediaUrl,
                     mediaName = mediaName,
+                    onMediaDuration = { sec -> extendSession(sec) },
                     onDismiss = { finishSafely() }
                 )
             }
@@ -222,7 +226,34 @@ class MessageActivity : ComponentActivity() {
     private fun finishSafely() {
         endSession()
         if (blocking) LockTaskSupport.stop(this)
+        dismissNotification(this)
         if (!isFinishing) finish()
+    }
+
+    /** 统一的到点关闭调度（幂等）：取消旧回调后按剩余毫秒重新排队，供霸屏延时扩展复用。 */
+    private val closeRunnable = Runnable { finishSafely() }
+
+    private fun armClose(remainMs: Long) {
+        handler.removeCallbacks(closeRunnable)
+        if (remainMs > 0) handler.postDelayed(closeRunnable, remainMs)
+    }
+
+    /**
+     * 音视频素材就绪后由 [MessageContent] 回调：霸屏时长以"音视频时长"为准。
+     *
+     * 规则：仅当音视频时长 **长于** 当前剩余霸屏时才延长截止时间并重排关闭；
+     * 音视频更短则保持原 [durationSec] 到点关闭，避免霸屏被拖长。
+     * 文本/图片消息无音视频时长，不会走到这里，行为不变。
+     */
+    fun extendSession(mediaSec: Int) {
+        if (mediaSec <= 0) return
+        val now = System.currentTimeMillis()
+        val currentRemain = if (deadlineAt > now) (deadlineAt - now) else 0L
+        val mediaRemain = mediaSec * 1000L
+        if (mediaRemain > currentRemain) {
+            deadlineAt = now + mediaRemain
+            armClose(mediaRemain)
+        }
     }
 
     override fun onDestroy() {
@@ -276,10 +307,106 @@ class MessageActivity : ComponentActivity() {
         /** 供外部（如解锁指令）主动关闭霸屏页 */
         fun dismiss(context: Context) {
             endSession()
+            dismissNotification(context)
             instance?.let { activity ->
                 LockTaskSupport.stop(activity)
                 if (!activity.isFinishing) activity.finish()
             }
+        }
+
+        // ==================== 高优先级全屏通知（后台霸屏的关键机制） ====================
+        private const val NOTIF_CHANNEL_ID = "padguard_msg_broadcast"
+        private const val NOTIF_ID_BASE = 9001
+        /** 当前正在展示的消息通知 id；每条消息自增一个独立 id，避免多条消息在通知栏互相覆盖 */
+        @Volatile private var activeNotifId = NOTIF_ID_BASE
+        @Volatile private var msgSeq = 0
+
+        private fun ensureChannel(context: Context) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                val mgr = context.getSystemService(NotificationManager::class.java) ?: return
+                val ch = android.app.NotificationChannel(
+                    NOTIF_CHANNEL_ID, "信息发布", NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    setShowBadge(false)
+                    // 家长下发的信息应突破勿扰，确保孩子一定看到
+                    setBypassDnd(true)
+                    enableLights(true)
+                    enableVibration(true)
+                }
+                mgr.createNotificationChannel(ch)
+            }
+        }
+
+        /**
+         * 发布高优先级全屏通知：系统代拉 [MessageActivity]，绕过 Android 10+ 后台启动限制。
+         * [android.app.NotificationManager.Policy] 与 DO 的 SYSTEM_ALERT_WINDOW 共同保证
+         * 锁屏/后台场景下也能自动霸屏；非 DO 设备退化为置顶横幅，孩子点一下即打开。
+         */
+        private fun postBroadcast(
+            context: Context,
+            title: String,
+            body: String,
+            blocking: Boolean,
+            intent: Intent,
+            notifId: Int
+        ) {
+            val mgr = context.getSystemService(NotificationManager::class.java) ?: return
+            ensureChannel(context)
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                (if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M)
+                    PendingIntent.FLAG_IMMUTABLE else 0)
+            val pi = PendingIntent.getActivity(context, notifId, intent, flags)
+            // 删除意图：孩子把横幅/通知划掉后由系统回调，霸屏消息必须原样重发，
+            // 否则"上滑退出通知"就成了霸屏的唯一逃逸口（实际故障）。
+            val deleteIntent = Intent(context, MessageDismissReceiver::class.java).apply {
+                putExtra(EXTRA_TITLE, title)
+                putExtra(EXTRA_BODY, body)
+                putExtra(EXTRA_DURATION, durationSecOf(intent))
+                putExtra(EXTRA_BLOCKING, blocking)
+                putExtra(EXTRA_CONTENT_TYPE, intent.getStringExtra(EXTRA_CONTENT_TYPE) ?: "TEXT")
+                putExtra(EXTRA_MEDIA_URL, intent.getStringExtra(EXTRA_MEDIA_URL).orEmpty())
+                putExtra(EXTRA_MEDIA_NAME, intent.getStringExtra(EXTRA_MEDIA_NAME).orEmpty())
+            }
+            val dpi = PendingIntent.getBroadcast(context, notifId + 1, deleteIntent, flags)
+            val notification = NotificationCompat.Builder(context, NOTIF_CHANNEL_ID)
+                .setContentTitle(if (title.isNotBlank() && !isSourceLabel(title)) title else SOURCE_LABEL)
+                .setContentText(body.ifBlank { "您有一条新消息" })
+                .setSmallIcon(context.applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_dialog_info)
+                .setFullScreenIntent(pi, true)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setOngoing(true)
+                .setAutoCancel(false)
+                .setShowWhen(false)
+                .setDeleteIntent(dpi)
+                .build()
+            runCatching { mgr.notify(notifId, notification) }
+                .onFailure { Logger.e(TAG, it) { "failed to post broadcast notification" } }
+        }
+
+        /** 从霸屏 Activity 的启动意图里取出时长（供 deleteIntent 复用） */
+        private fun durationSecOf(intent: Intent): Int = intent.getIntExtra(EXTRA_DURATION, 0)
+
+        /** 通知被划掉（DeleteIntent 回调）：霸屏消息原样重发，普通消息不作处理 */
+        fun handleNotificationDeleted(context: Context, intent: Intent) {
+            if (!intent.getBooleanExtra(EXTRA_BLOCKING, false)) return
+            if (instance != null) return
+            Logger.w(TAG) { "blocking broadcast notification dismissed by user, re-posting" }
+            show(
+                context,
+                intent.getStringExtra(EXTRA_TITLE).orEmpty(),
+                intent.getStringExtra(EXTRA_BODY).orEmpty(),
+                intent.getIntExtra(EXTRA_DURATION, 0),
+                true,
+                intent.getStringExtra(EXTRA_CONTENT_TYPE) ?: "TEXT",
+                intent.getStringExtra(EXTRA_MEDIA_URL).orEmpty(),
+                intent.getStringExtra(EXTRA_MEDIA_NAME).orEmpty()
+            )
+        }
+
+        /** 霸屏关闭时清掉常驻通知，避免孩子看到一条过期提醒 */
+        private fun dismissNotification(context: Context) {
+            runCatching { context.getSystemService(NotificationManager::class.java)?.cancel(activeNotifId) }
         }
 
         fun show(
@@ -306,6 +433,19 @@ class MessageActivity : ComponentActivity() {
                         Intent.FLAG_ACTIVITY_SINGLE_TOP
                 )
             }
+            // 每条消息分配独立通知 id：多条消息互不覆盖，且各自携带 fullScreenIntent，
+            // 设备所有者下每条都能独立霸屏（非 DO 退化为独立横幅，孩子逐条点击查看）。
+            val notifId = NOTIF_ID_BASE + ((System.currentTimeMillis().toInt() + (msgSeq++)) and 0x7FFF)
+            // 取消上一条消息通知，避免多条消息通知在栏里互相覆盖、孩子只看到最后一条
+            runCatching {
+                context.getSystemService(NotificationManager::class.java)?.cancel(activeNotifId)
+            }
+            activeNotifId = notifId
+            // 高优先级全屏通知：由系统代拉 Activity，绕过 Android 10+ 后台启动限制，
+            // 实现"无论孩子在哪个应用都霸屏显示"。设备所有者（持 SYSTEM_ALERT_WINDOW）
+            // 即使 Android 12+ 也能后台自动拉起；非 DO 设备降级为置顶横幅（孩子点一下打开）。
+            postBroadcast(context, title, body, blocking, intent, notifId)
+            // 前台时直接拉起，确保即时可见（后台场景交由上面通知的 fullScreenIntent）
             runCatching { context.startActivity(intent) }
                 .onFailure { Logger.e(TAG, it) { "failed to show message" } }
         }
@@ -341,6 +481,7 @@ private fun MessageContent(
     contentType: String,
     mediaUrl: String,
     mediaName: String,
+    onMediaDuration: (Int) -> Unit = {},
     onDismiss: () -> Unit
 ) {
     Surface(
@@ -364,7 +505,10 @@ private fun MessageContent(
             MessageCard(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .fillMaxWidth(0.88f)
+                    // 随内容自适应宽度：短文→窄卡片，长文→在 620dp 内自动换行，
+                    // 不再固定占屏幕 88%，避免平板上消息框被拉得过长。
+                    .wrapContentWidth(Alignment.CenterHorizontally)
+                    .widthIn(min = 200.dp, max = 620.dp)
             ) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
@@ -392,14 +536,15 @@ private fun MessageContent(
                                 url = mediaUrl,
                                 modifier = Modifier.fillMaxWidth().height(240.dp),
                                 // 霸屏期间不给播放控制条：那等于给了孩子一个可点的出口
-                                showControls = !blocking
+                                showControls = !blocking,
+                                onDuration = onMediaDuration
                             )
 
                         mediaUrl.isNotBlank() && contentType == "AUDIO" ->
                             // 语音一律自动播放：家长发语音就是为了让孩子"听到"，
                             // 要求孩子先点一下播放，等于把这条信息变成了一条需要打开的通知——
                             // 孩子不看就等于没发。图片/视频本身是可见的，不存在这个问题。
-                            RemoteAudio(mediaUrl, mediaName, autoPlay = true)
+                            RemoteAudio(mediaUrl, mediaName, autoPlay = true, onDuration = onMediaDuration)
 
                         else -> {
                             if (body.isNotBlank()) {
@@ -567,7 +712,7 @@ private fun RemoteImage(url: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun RemoteVideo(url: String, modifier: Modifier = Modifier, showControls: Boolean = true) {
+private fun RemoteVideo(url: String, modifier: Modifier = Modifier, showControls: Boolean = true, onDuration: (Int) -> Unit = {}) {
     val context = LocalContext.current
     var localPath by remember(url) { mutableStateOf<String?>(null) }
 
@@ -592,7 +737,13 @@ private fun RemoteVideo(url: String, modifier: Modifier = Modifier, showControls
                 setVideoURI(Uri.parse(localPath))
                 // 霸屏时不挂 MediaController：控制条本身就是可点击的交互入口
                 if (showControls) setMediaController(MediaController(ctx))
-                setOnPreparedListener { it.isLooping = true; start() }
+                setOnPreparedListener {
+                    it.isLooping = true
+                    // 视频实际时长回填，驱动霸屏时长跟随音视频
+                    val dur = runCatching { it.duration / 1000 }.getOrDefault(0)
+                    if (dur > 0) onDuration(dur)
+                    start()
+                }
                 setOnErrorListener { _, _, _ -> true }
             }
         },
@@ -601,7 +752,7 @@ private fun RemoteVideo(url: String, modifier: Modifier = Modifier, showControls
 }
 
 @Composable
-private fun RemoteAudio(url: String, name: String, autoPlay: Boolean) {
+private fun RemoteAudio(url: String, name: String, autoPlay: Boolean, onDuration: (Int) -> Unit = {}) {
     val context = LocalContext.current
     var state by remember(url) { mutableStateOf(if (autoPlay) "播放中…" else "音频素材") }
 
@@ -618,6 +769,9 @@ private fun RemoteAudio(url: String, name: String, autoPlay: Boolean) {
                         player.prepare()
                         if (autoPlay) player.start()
                         else state = "音频素材：${name.ifBlank { "未命名" }}"
+                        // 语音实际时长回填，驱动霸屏时长跟随音视频
+                        val dur = runCatching { player.duration / 1000 }.getOrDefault(0)
+                        if (dur > 0) onDuration(dur)
                     }.onFailure { state = "音频播放失败" }
                 }
             }

@@ -1,5 +1,11 @@
 package com.padguard.presentation.ui.realtime
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -14,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -48,6 +55,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -259,6 +267,17 @@ private fun LiveScreenCard(
             }
 
             // 左上角状态角标：录屏中（含计时） / 实时在线 / 连接中
+            // 呼吸闪烁：绿点与录屏 REC·计时共用同一节奏，未连接时不闪，便于一眼识别"实时进行中"
+            val blinkTransition = rememberInfiniteTransition(label = "statusBlink")
+            val blinkAlpha by blinkTransition.animateFloat(
+                initialValue = 1f,
+                targetValue = 0.3f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 700, easing = LinearEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "statusBlinkAlpha"
+            )
             Surface(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -270,17 +289,42 @@ private fun LiveScreenCard(
                 },
                 shape = RoundedCornerShape(6.dp)
             ) {
-                Text(
-                    text = when {
-                        isRecording -> "REC ${TimeFormat.formatDuration(recordingSeconds)}"
-                        liveConnected -> "LIVE"
-                        else -> "连接中"
-                    },
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                )
+                ) {
+                    if (isRecording || liveConnected) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(PadGuardColors.OnlineGreen.copy(alpha = blinkAlpha))
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+                    if (isRecording) {
+                        Text(
+                            text = "REC",
+                            color = PadGuardColors.OnlineGreen.copy(alpha = blinkAlpha),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = TimeFormat.formatDuration(recordingSeconds),
+                            color = PadGuardColors.OnlineGreen.copy(alpha = blinkAlpha),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Text(
+                            text = if (liveConnected) "LIVE" else "连接中",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
             }
 
             IconButton(

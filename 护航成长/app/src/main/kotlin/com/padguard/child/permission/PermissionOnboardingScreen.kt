@@ -34,9 +34,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.padguard.child.agreement.AGREEMENT_TEXT
 import com.padguard.child.permission.PermissionGranter.GrantStep
 
 /**
@@ -103,19 +105,38 @@ fun PermissionOnboardingScreen(viewModel: PermissionOnboardingViewModel = hiltVi
 private fun IdleView(onStart: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = Arrangement.Top
     ) {
-        Text("启用平板管控", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("启用平板守护", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Text(
-            "仅需授予管控必需的几项权限（相机、麦克风、位置、存储）。" +
-                "本应用不索取设备最高管理权限，也不读取短信与通话记录。",
+            "请阅读以下授权内容，点击「一键确认授权」即表示你同意本协议，并一次性授予管控所需的全部权限。",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(16.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+        ) {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp)
+            ) {
+                Text(
+                    text = AGREEMENT_TEXT,
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Start
+                )
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        // 唯一的授权确认入口：一次点击即"同意协议 + 授予全部权限 + 持久化"，
+        // 绑定后不再弹二次确认（旧版已装设备仅迁移时弹一次）。
         Button(onClick = onStart, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(12.dp)) {
-            Text("开始启用", style = MaterialTheme.typography.titleMedium)
+            Text("一键确认授权", style = MaterialTheme.typography.titleMedium)
         }
     }
 }

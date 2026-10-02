@@ -49,6 +49,7 @@ import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
 import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
+import com.padguard.core.transport.http.CredentialStore
 import com.padguard.core.transport.http.PolicyFetchResult
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -119,6 +120,7 @@ class GuardService : Service() {
     @Inject lateinit var photoCapture: PhotoCapture
     @Inject lateinit var appInstaller: AppInstaller
     @Inject lateinit var watermark: WatermarkOverlay
+    @Inject lateinit var credentials: CredentialStore
 
     /**
      * 当前是否"已绑定"（由 [observeBinding] 维护）。
@@ -162,6 +164,11 @@ class GuardService : Service() {
      */
     private val reportedAppUsageAt = ConcurrentHashMap<String, Long>()
     @Volatile private var reportedAppUsageDay = ""
+
+    /** 已上报过的全局总时长（毫秒），与 [reportedAppUsage] 同理只报增量 */
+    @Volatile private var reportedTotalUsage = 0L
+    /** 全局总时长上一次上报的时刻，给增量段补起点 */
+    @Volatile private var reportedTotalAt = 0L
 
     /** 锁屏页当前是否已被拉起，避免每轮 tick 重复 startActivity 造成闪屏 */
     private var lockScreenShown = false
@@ -255,8 +262,14 @@ class GuardService : Service() {
         observeEffects()
         observeDownlink()
         observeBinding()
-        startMainLoop()
-        startCommandLoop()
+        // 必须先等凭据内存快照从 DataStore 加载完成，再启动会发起鉴权请求的循环。
+        // 否则首帧心跳 / 指令拉取会在 CredentialStore 尚未填充 deviceToken 时就发出，
+        // 服务端判 TOKEN_INVALID(40101)，进而触发自愈解绑把有效凭据清掉（启动竞态自残）。
+        scope.launch {
+            runSafely("loadCredentials") { credentials.refresh() }
+            startMainLoop()
+            startCommandLoop()
+        }
     }
 
     /**
@@ -278,7 +291,16 @@ class GuardService : Service() {
                     // 一旦落下，应用自身再也解不开（lockNow 只能锁、不能程序化解）。
                     boundNow.set(false)
                     lockController.releaseAll()
-                    Logger.w(TAG) { "device not bound: transport offline, all locks released" }
+                    // 解绑后彻底释放系统级管控（挂起/隐藏应用、相机/截屏、用户限制、
+                    // 自动对时、自身卸载封锁，最后 relinquish Device Owner / 设备管理员），
+                    // 让本机恢复为普通应用、可被家长端或用户在设置里正常卸载。
+                    // 幂等：未持有对应权限的步骤被 guarded 静默收口为 Unsupported，不会抛异常。
+                    // 这一步同时兜底"历史上已解绑却仍残留 DO/策略"的设备 —— 新版本一启动
+                    // （或开机自启）即自动治愈，无需重新绑定再解绑。
+                    runCatching { admin.releaseControl() }
+                        .onSuccess { Logger.i(TAG) { "control released on unbound observe (${it.size} ops)" } }
+                        .onFailure { t -> Logger.e(TAG, t) { "releaseControl failed on unbound observe" } }
+                    Logger.w(TAG) { "device not bound: all app locks + DPM control released" }
                     return@collect
                 }
                 boundNow.set(true)
@@ -353,6 +375,9 @@ class GuardService : Service() {
             // 等 30 分钟会让「应用」Tab 一直空白；首报完成后回到正常周期。
             var nextAppSync = SystemClock.elapsedRealtime() + APP_SYNC_FIRST_DELAY_MS
 
+            // 使用情况实时同步：独立于日志上报节奏，保证家长端用量数据近实时刷新
+            var nextUsageSync = SystemClock.elapsedRealtime() + USAGE_SYNC_FIRST_DELAY_MS
+
             while (isActive) {
                 val now = SystemClock.elapsedRealtime()
                 val monitoring = policyEngine.monitoring()
@@ -403,6 +428,13 @@ class GuardService : Service() {
                     nextAppSync = now + if (synced) APP_SYNC_INTERVAL_MS else APP_SYNC_RETRY_MS
                 }
 
+                // ---------- 使用情况实时同步 ----------
+                // 独立于日志上报节奏，保证家长端「今日使用情况」近实时刷新
+                if (now >= nextUsageSync) {
+                    runSafely("usageSync") { syncUsageNow() }
+                    nextUsageSync = now + USAGE_SYNC_INTERVAL_MS
+                }
+
                 updateNotification()
                 delay(MIN_TICK_MS)
             }
@@ -431,6 +463,7 @@ class GuardService : Service() {
      */
     /** @return 是否上报成功，用于决定下一次重试的时间 */
     private suspend fun syncAppInventory(): Boolean {
+        if (!credentials.isBound) return false
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return false
         val apps = appInventory.collect()
@@ -467,9 +500,12 @@ class GuardService : Service() {
         reconcileAppBlock(
             blockedPackage = tick.blockedPackage,
             foreground = fg,
-            // 把限额判定的具体原因一并带给拦截页。只说"被限制"会让孩子以为是故障并反复重试，
-            // 说清是"时长用完"还是"打开次数超了"才能形成预期。
-            reason = (tick.limit as? LimitVerdict.Blocked)?.message().orEmpty()
+            // 把限额判定/黑名单命中的具体原因一并带给拦截页。
+            // 只说"被限制"会让孩子以为是故障并反复重试，
+            // 说清是"时长用完"还是"已被管控"才能形成预期。
+            reason = tick.blockedReason.ifBlank {
+                (tick.limit as? LimitVerdict.Blocked)?.message().orEmpty()
+            }
         )
     }
 
@@ -512,6 +548,9 @@ class GuardService : Service() {
     // ==================== 心跳与上报 ====================
 
     private suspend fun sendHeartbeat() {
+        // 凭据快照尚未从 DataStore 加载完成时绝不发鉴权请求：否则空令牌被服务端判
+        // TOKEN_INVALID(40101)，触发自愈解绑把有效凭据清掉（启动竞态自残）。
+        if (!credentials.isBound) return
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return
 
@@ -581,6 +620,7 @@ class GuardService : Service() {
 
     /** 日志与告警分开上报：告警是高危信号，不能被大批量普通日志的失败拖住 */
     private suspend fun uploadPending() {
+        if (!credentials.isBound) return
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return
 
@@ -626,23 +666,65 @@ class GuardService : Service() {
      * UsageRepository 的累计值本来就是按 dayKey 分表的，跨日会自然归零；
      * 若这里不清空记录表，新一天的首次上报会算出"负数增量"并被阈值过滤掉，当天数据就丢了。
      */
+    /**
+     * 使用情况实时同步：把本地累计的用量落成日志并立即上行。
+     *
+     * 与 [uploadPending] 的区别：后者受服务端 logUploadIntervalMs 节制（可能很长），
+     * 这条 30s 节奏只服务"今日使用情况"这一项，让家长端看到的用量尽量接近实时，
+     * 而不是等几分钟才刷新一次。uploadPending 本身幂等（只上行未上报的日志），
+     * 与日志节奏叠跑不会重复上报。
+     */
+    private suspend fun syncUsageNow() {
+        if (!credentials.isBound) return
+        runSafely("appUsageReport") { reportAppUsage() }
+        runSafely("uploadPending") { uploadPending() }
+    }
+
     private suspend fun reportAppUsage() {
         val key = usageRepository.dayKey()
         if (key != reportedAppUsageDay) {
             reportedAppUsage.clear()
             reportedAppUsageAt.clear()
+            reportedTotalUsage = 0L
+            reportedTotalAt = 0L
             reportedAppUsageDay = key
         }
-        val snapshot = usageRepository.snapshotAppUsage(key)
-        if (snapshot.isEmpty()) return
+        val now = System.currentTimeMillis()
 
+        // ---------- 全局总时长（不依赖使用情况访问权限，必须无条件上报） ----------
+        // 只报 APP_USAGE（按应用）的话，未授予 UsageStats 权限的设备一条都发不出，
+        // 服务端"今日总时长"就永远是 0。daily_usage 的累计只依赖亮屏，任何设备都有。
         var emitted = 0
+        val totalMs = usageRepository.getTotalUsage(key)
+        val totalDelta = totalMs - reportedTotalUsage
+        if (totalDelta >= USAGE_REPORT_MIN_DELTA_MS) {
+            reportedTotalUsage = totalMs
+            val startAt = if (reportedTotalAt > 0L) reportedTotalAt else now
+            reportedTotalAt = now
+            logRepository.append(
+                type = LogType.USAGE_TOTAL,
+                payload = mapOf(
+                    "durationSec" to (totalDelta / 1000).toString(),
+                    "dayKey" to key,
+                    "startAt" to startAt.toString(),
+                    "endAt" to now.toString()
+                )
+            )
+            emitted++
+        }
+
+        // ---------- 按应用增量（前台探测可用时才有数据） ----------
+        val snapshot = usageRepository.snapshotAppUsage(key)
+        if (snapshot.isEmpty()) {
+            if (emitted > 0) Logger.d(TAG) { "app usage reported: $emitted item(s) for day=$key" }
+            return
+        }
+
         for (stat in snapshot) {
             val reported = reportedAppUsage[stat.packageName] ?: 0L
             val delta = stat.usedMs - reported
             if (delta < USAGE_REPORT_MIN_DELTA_MS) continue
             reportedAppUsage[stat.packageName] = stat.usedMs
-            val now = System.currentTimeMillis()
             val startAt = reportedAppUsageAt[stat.packageName] ?: stat.firstUsedAt
             reportedAppUsageAt[stat.packageName] = now
             logRepository.append(
@@ -673,6 +755,7 @@ class GuardService : Service() {
     }.getOrDefault(packageName)
 
     private suspend fun refreshPolicy() {
+        if (!credentials.isBound) return
         val current = policyRepository.currentVersion()
         when (val r = remote.fetchPolicy(current)) {
             is ApiResult.Success -> when (val body = r.value) {
@@ -1027,6 +1110,7 @@ class GuardService : Service() {
      * 现在与推送通道保持一致：执行 → 回执，让服务端把指令收敛为终态。
      */
     private suspend fun drainPendingCommands() {
+        if (!credentials.isBound) return
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return
         when (val r = remote.pullCommands(lastCommandPullAtMs)) {
@@ -1061,6 +1145,13 @@ class GuardService : Service() {
      * 送回绑定页。若只清不跳转，孩子会停在一个"看起来还在管控中"的空壳界面上。
      */
     private suspend fun handleRemoteUnbind() {
+        // 防御：本端凭据快照尚未从 DataStore 加载完成（deviceToken 为空）时，
+        // 此刻的 40101/40301 只是"还没准备好"而非"服务端已解绑"；
+        // 若用空令牌去 re-verify，服务端照样判 40101，会误把有效凭据清掉。
+        if (!credentials.isBound) {
+            Logger.w(TAG) { "credentials not loaded yet, skip unbind self-heal" }
+            return
+        }
         // ---- 解绑必须与服务端核实，不能照单全收 ----
         //
         // MQTT 侧是 cleanSession=false + QoS1，服务端历史上 publish 过的 unbind=1 会
@@ -1096,6 +1187,12 @@ class GuardService : Service() {
         // 只清设备绑定、保留家庭账号登录态：解绑后应直接回到绑定页重新绑定，
         // 而不是退回登录页（孩子不知道家长密码，会永久卡死）。
         authRepository.clearDeviceBinding()
+        // 解绑即释放全部管控痕迹 + 释放 Device Owner / 设备管理员：
+        // 使孩子端真正"不受管控"，且管控系统/用户可常规卸载（清除 DO → 卸载）。
+        // 必须放在 stopSelf 之前、且晚于 clearDeviceBinding（此时仍持 DO 权限，可正常撤销策略）。
+        runCatching { admin.releaseControl() }
+            .onSuccess { Logger.i(TAG) { "control released (${it.size} ops) on unbind" } }
+            .onFailure { t -> Logger.e(TAG, t) { "releaseControl failed on unbind" } }
         runCatching { ScreenCaptureService.stopScreenRecord(this) }
         runCatching { ScreenCaptureService.stopAudioRecord(this) }
         withContext(Dispatchers.Main) {
@@ -1183,6 +1280,14 @@ class GuardService : Service() {
 
         /** 日志上报最小间隔，防止服务端把 logUploadIntervalSec 配成 0 导致刷接口 */
         private const val LOG_UPLOAD_MIN_INTERVAL_MS = 60_000L
+
+        /**
+         * 使用情况实时同步间隔：**独立于**日志上报节奏（logUploadIntervalMs 可能远大于此值）。
+         * 家长端"今日使用情况"依赖 APP_USAGE / USAGE_TOTAL 日志上行，
+         * 单独用 30s 节奏刷新，避免服务端把日志间隔配大后用量数据要等几分钟才更新一次。
+         */
+        private const val USAGE_SYNC_INTERVAL_MS = 30_000L
+        private const val USAGE_SYNC_FIRST_DELAY_MS = 10_000L
 
         /** 应用台账全量同步间隔：装卸是低频事件，没必要跟着 15s 的采样节奏跑 */
         private const val APP_SYNC_INTERVAL_MS = 30 * 60_000L

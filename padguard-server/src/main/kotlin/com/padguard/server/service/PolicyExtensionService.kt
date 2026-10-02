@@ -103,13 +103,26 @@ class PolicyExtensionService(
 
     fun setAppBlacklist(userId: String, deviceId: String, req: UpdateBlacklistRequest) {
         requireOwned(userId, deviceId)
+        val blocked = req.blockedPackages.toSet()
         val existing = appPolicyRepository.findByDeviceId(deviceId).associateBy { it.packageName }
-        for (pkg in req.blockedPackages) {
-            val e = existing[pkg] ?: AppPolicy(deviceId = deviceId, packageName = pkg)
-            e.deviceId = deviceId
-            e.packageName = pkg
-            e.isBlocked = true
-            appPolicyRepository.save(e)
+
+        // 全量语义：名单内的置为管控，名单外的解除管控。
+        // 原实现"只增不减"会把应用永久钉死在管控态 —— 家长取消管控（传空名单）后
+        // 这些应用依旧解不开，属设计缺陷；改为以本次名单为准，开启/取消才都成立。
+        for ((pkg, e) in existing) {
+            val shouldBlock = pkg in blocked
+            if (e.isBlocked != shouldBlock) {
+                e.isBlocked = shouldBlock
+                appPolicyRepository.save(e)
+            }
+        }
+        // 名单里、但台账尚未登记的应用（还没上报过清单）也要补建记录
+        for (pkg in blocked) {
+            if (pkg !in existing) {
+                val e = AppPolicy(deviceId = deviceId, packageName = pkg)
+                e.isBlocked = true
+                appPolicyRepository.save(e)
+            }
         }
         rebuildPolicy(deviceId)
     }

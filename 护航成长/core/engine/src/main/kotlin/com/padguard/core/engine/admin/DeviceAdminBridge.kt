@@ -401,6 +401,11 @@ class DeviceAdminBridge @Inject constructor(
         hiddenPrefs.all.filterValues { it == true }.keys
     }.getOrDefault(emptySet())
 
+    /** 从本地隐藏台账中删除一条记录（应用已卸载、或已不在隐藏态时清理残留） */
+    fun forgetHidden(packageName: String) {
+        runCatching { hiddenPrefs.edit().remove(packageName).apply() }
+    }
+
     /**
      * 应用当前是否被隐藏。
      *
@@ -507,6 +512,118 @@ class DeviceAdminBridge @Inject constructor(
             require(can(Capability.LOCK_TASK)) { "requires Device Owner" }
             dpm.clearPackagePersistentPreferredActivities(admin, packageName)
         }
+
+    // ==================== 释放管控（解绑 / 回收） ====================
+
+    /**
+     * 解绑 / 回收时撤销本应用施加的全部管控痕迹，使终端回到普通状态且**可被卸载**。
+     *
+     * 这是「家长端解绑后，孩子端应不受管控、管控系统有权卸载」的落地点。
+     * 旧实现只清绑定凭据、不释放 Device Owner / 设备管理员，导致解绑后：
+     *   1) 已生效的 DPM 策略（挂起/隐藏应用、禁用相机截屏、加固基线、Kiosk 桌面）残留；
+     *   2) 因持 DO 身份，应用无法被常规卸载。
+     * 本方法补齐这两点。
+     *
+     * 安全顺序（与 Kiosk 解除一致，错序会"变砖"）：
+     *   1. 先清常驻桌面偏好 —— 否则后续任何瞬间设备仍强制回本应用；
+     *   2. 再清 LockTask 白名单（保留自身，锁屏能力仍可能用到）；
+     *   3. 还原被本应用挂起 / 隐藏的应用、相机 / 截屏、用户限制、自动对时、自身卸载封锁；
+     *   4. 最后 relinquish Device Owner / 设备管理员 —— 这一步才让应用真正可被卸载，
+     *      必须在所有需要 DO/PO 权限的操作之后执行。
+     *
+     * 设计为幂等：未持有对应权限的步骤被 [guarded] 静默收口为 Unsupported，不会抛异常。
+     */
+    fun releaseControl(): List<Pair<String, OpResult>> {
+        val results = mutableListOf<Pair<String, OpResult>>()
+        val pkg = context.packageName
+
+        // 1 + 2：Kiosk 解除（先清桌面后清白名单，防变砖）
+        results += "clearPersistentLauncher" to clearPersistentPreferredLauncher(pkg)
+        results += "clearLockTaskPackages" to setLockTaskPackages(listOf(pkg))
+
+        // 3a：放出被本应用挂起的应用（以设备真实挂起态为准，覆盖进程重启后丢失的内存记录）
+        val launchable = launchablePackages()
+        val suspended = launchable.filter { isPackageSuspended(it) }
+        if (suspended.isNotEmpty()) {
+            val r = setPackagesSuspended(suspended, false)
+            results += "unsuspend(${suspended.size})" to if (r.error == null && r.failed.isEmpty()) {
+                OpResult.Ok
+            } else {
+                OpResult.Failed("unsuspend", r.error ?: "failed: ${r.failed.take(5)}")
+            }
+        }
+
+        // 3b：恢复被本应用隐藏的应用
+        val hidden = (hiddenPackages() + launchable.filter { isApplicationHidden(it) }).toSet()
+        hidden.forEach { p ->
+            results += "unhide:$p" to setApplicationHidden(p, false)
+        }
+
+        // 3c：还原相机 / 截屏
+        results += "camera" to setCameraDisabled(false)
+        results += "screenCapture" to setScreenCaptureDisabled(false)
+
+        // 3d：清除用户限制（加固基线 + 安装 / 卸载限制）
+        val restrictions = listOf(
+            UserManager.DISALLOW_DEBUGGING_FEATURES,
+            UserManager.DISALLOW_FACTORY_RESET,
+            UserManager.DISALLOW_SAFE_BOOT,
+            UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES,
+            UserManager.DISALLOW_CONFIG_DATE_TIME,
+            UserManager.DISALLOW_INSTALL_APPS,
+            UserManager.DISALLOW_UNINSTALL_APPS
+        )
+        restrictions.forEach { key -> results += "clearRestriction:$key" to clearUserRestriction(key) }
+
+        // 3e：解除自动对时强制（否则改系统时间即可绕过时段管控）
+        results += "autoTime" to setAutoTimeEnforced(false)
+
+        // 3f：解除对自身的卸载封锁（防卸载第一道锁）
+        results += "uninstallBlockSelf" to setUninstallBlocked(pkg, false)
+
+        // 4：释放 Device Owner / 设备管理员 —— 使应用可被常规卸载（最后执行）
+        results += "relinquish" to relinquishDeviceControl()
+
+        return results
+    }
+
+    /**
+     * 释放设备所有者 / 设备管理员身份。
+     *
+     * 只有这一层清掉，被管控端才能像普通应用一样被卸载 —— 这是"管控系统有权卸载"的前提。
+     * DO 与纯 DEVICE_ADMIN 走不同 API；未持有对应权限时静默跳过（[guarded] 收口）。
+     */
+    private fun relinquishDeviceControl(): OpResult = guarded("relinquishDeviceControl") {
+        when {
+            dpm.isDeviceOwnerApp(context.packageName) -> {
+                dpm.clearDeviceOwnerApp(context.packageName)
+            }
+            adminComponent?.let { dpm.isAdminActive(it) } == true -> {
+                adminComponent?.let { dpm.removeActiveAdmin(it) }
+            }
+            else -> Unit
+        }
+    }
+
+    /** 枚举"桌面上能点开"的应用（用于放出挂起 / 隐藏），与 [AppPolicyEnforcer] 同源 */
+    private fun launchablePackages(): Set<String> {
+        val intent = Intent(Intent.ACTION_MAIN)
+            .addCategory(Intent.CATEGORY_LAUNCHER)
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong())
+        } else {
+            null
+        }
+        val resolved = runCatching {
+            if (flags != null) {
+                context.packageManager.queryIntentActivities(intent, flags)
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.queryIntentActivities(intent, PackageManager.MATCH_ALL)
+            }
+        }.getOrNull().orEmpty()
+        return resolved.mapNotNull { it.activityInfo?.packageName }.toSet()
+    }
 
     // ==================== 内部工具 ====================
 

@@ -100,6 +100,13 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
+      信息发布全屏霸屏：高优先级通知的 fullScreenIntent 需要此权限才能
+      在 Android 12+ 后台自动拉起霸屏 Activity（普通权限，随安装授予）。
+      配合已声明的 SYSTEM_ALERT_WINDOW，设备所有者/已授权悬浮窗的设备可零点击霸屏。
+    -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <!--
       应用时长统计 / 单应用限额 / 黑名单事后拦截全都依赖前台应用探测，
       而探测唯一可靠的来源是 UsageStatsManager（见 ForegroundAppMonitor）。
 
@@ -121,6 +128,8 @@
     <application
         android:name=".PadGuardApplication"
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:theme="@style/Theme.PadGuard"
         android:usesCleartextTraffic="true"
@@ -134,6 +143,16 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <!--
+                  CATEGORY_HOME + CATEGORY_DEFAULT：把本应用注册为「桌面」备选。
+                  这是 Kiosk 常驻桌面的前提（KioskEnforcer.resolveOwnLauncher 靠它反查自身），
+                  也是**防变砖的关键兜底**：即便 Device Owner 被清除、addPersistentPreferredActivity
+                  失效，系统仍至少有本 HOME Activity 可回退，绝不会出现「开机无桌面」的砖头状态。
+                  注意：此 Activity 的 EntryRouter 在未绑定/未登录时会回退到 Splash/绑定页，
+                  因此即便被当作桌面拉起，也是可用界面而非黑屏。
+                -->
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
@@ -235,5 +254,10 @@
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
+
+        <!-- 霸屏通知被划掉后的兜底重发（见 MessageActivity.handleNotificationDeleted） -->
+        <receiver
+            android:name=".ui.message.MessageDismissReceiver"
+            android:exported="false" />
     </application>
 </manifest>

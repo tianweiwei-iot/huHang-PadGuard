@@ -100,6 +100,9 @@ class PermissionOnboardingViewModel @Inject constructor(
         }
         viewModelScope.launch {
             runCatching { authRepository.savePermissionsDone() }
+            // 孩子已点击"一键确认授权" → 协议同意随首次引导一次性落库，
+            // 绑定后不再二次弹窗（旧版已装设备仅迁移时弹一次）。
+            runCatching { permissionGranter.persistAgreement() }
             _phase.value = Phase.DONE
         }
     }
@@ -136,6 +139,9 @@ class PermissionOnboardingViewModel @Inject constructor(
         Logger.w(TAG) { "forceContinue without Device Owner: runtime permissions NOT silently granted, entering degraded mode" }
         viewModelScope.launch {
             runCatching { authRepository.savePermissionsDone() }
+            // 孩子已点击"一键确认授权" → 协议同意随首次引导一次性落库，
+            // 绑定后不再二次弹窗（旧版已装设备仅迁移时弹一次）。
+            runCatching { permissionGranter.persistAgreement() }
             _phase.value = Phase.DONE
         }
     }

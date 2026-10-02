@@ -13,6 +13,7 @@ import com.padguard.core.data.model.policy.AppListMode
 import com.padguard.core.data.model.policy.AppPolicy
 import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.core.engine.admin.OpResult
 import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -21,11 +22,11 @@ import javax.inject.Singleton
 /**
  * 应用黑白名单管控。
  *
- * ## 手段选择：为什么用「挂起」而不是「隐藏」或「杀进程」
+ * ## 手段选择：为什么以「隐藏」为主、「挂起」兜底
  * | 手段 | 效果 | 问题 |
  * |---|---|---|
- * | setPackagesSuspended（采用） | 图标变灰、点击弹系统对话框、后台被冻结 | 需 DO/PO |
- * | setApplicationHidden | 应用彻底消失 | 孩子以为应用被删了、更新会失败；仅用于系统应用 |
+ * | setApplicationHidden（采用） | 图标从桌面消失、无法启动 —— 满足"被管控应用孩子端不可见" | 需 DO/PO；被隐藏期间应用无法更新 |
+ * | setPackagesSuspended（降级） | 图标变灰、点击弹系统对话框、后台被冻结 | 需 DO/PO；仍看得见，不满足"不可见" |
  * | killBackgroundProcesses | 只杀后台 | 前台立刻能重开，形同虚设 |
  * | 无障碍服务检测后返回桌面 | 任何权限都能用 | 有可见的启动窗口，且能被"快速切换"绕过；仅降级模式兜底 |
  *
@@ -57,14 +58,6 @@ class AppPolicyEnforcer @Inject constructor(
         applyInstallPolicy(policy, report)
         protectSelf(report)
 
-        if (!admin.can(Capability.SUSPEND_PACKAGES)) {
-            report.markUnsupported(
-                "app.list",
-                "需要 Device Owner / Profile Owner；当前将退化为无障碍服务事后拦截"
-            )
-            return report
-        }
-
         val protectedSet = buildProtectedSet()
         val launchable = launchablePackages()
 
@@ -81,14 +74,92 @@ class AppPolicyEnforcer @Inject constructor(
             }
         }
 
-        // 家长临时放行的应用不挂起。
+        // 家长临时放行的应用不纳管。
         // 周期自检（默认 5 分钟）会重新 apply 一次策略，若不排除这些包，
-        // 家长刚同意放行、应用几分钟后又被挂起 —— 与"单应用拦截页不认放行"
-        // 是同一类"同意了却没生效"。到期后 isTempUnlockActive 转 false，下一轮自动挂回。
+        // 家长刚同意放行、应用几分钟后又被管控 —— 与"单应用拦截页不认放行"
+        // 是同一类"同意了却没生效"。到期后 isTempUnlockActive 转 false，下一轮自动纳回。
         val installedTarget = target
             .filter { isInstalled(it) }
             .filterNot { lockController.isTempUnlockActive(it) }
+            .toSet()
 
+        // 产品要求：被管控的应用在孩子端**不可见**，因此首选「隐藏」（图标从桌面消失）。
+        // 设备不具备隐藏能力（非 DO/PO）时退化为「挂起」（图标变灰、点击拦截），
+        // 保证管控能力本身不因权限缺失而丢失。
+        when {
+            admin.can(Capability.HIDE_PACKAGES) -> {
+                // 历史遗留：旧版本用挂起实现管控，升级后先清掉残留的挂起状态，
+                // 否则应用会同时"变灰"和"消失"，解除管控时也可能清理不干净。
+                releaseSuspension(installedTarget, launchable, report)
+                applyHidden(installedTarget, report)
+            }
+            admin.can(Capability.SUSPEND_PACKAGES) -> {
+                applySuspended(installedTarget, launchable, report, policy.mode)
+            }
+            else -> report.markUnsupported(
+                "app.list",
+                "需要 Device Owner / Profile Owner；当前将退化为无障碍服务事后拦截"
+            )
+        }
+
+        Logger.i(TAG) {
+            "app policy applied: mode=${policy.mode}, controlled=${installedTarget.size}, " +
+                "protected=${protectedSet.size}"
+        }
+        return report
+    }
+
+    /**
+     * 隐藏被管控的应用：图标从桌面消失、无法启动 —— 即产品要求的"孩子端不可见"。
+     *
+     * 差集以 [DeviceAdminBridge.hiddenPackages] 的本地记账为准，而不是进程内变量：
+     * 系统没有"列出已隐藏应用"的接口，记账持久化在 SharedPreferences，
+     * 进程重启后依然算得出"该放出来的应用"，不会像内存变量那样失忆导致应用永久消失。
+     */
+    private fun applyHidden(target: Set<String>, report: EnforceReport) {
+        // 判定"本应用隐藏过且当前确实处于隐藏态"的包：必须用 DPM 接口（isApplicationHidden），
+        // 不能用 getApplicationInfo —— 被隐藏的包在应用可见性层面会被视为"不存在"，
+        // getApplicationInfo 直接抛 NameNotFoundException，导致 isInstalled 返回 false，
+        // 进而被过滤出 toUnhide，取消隐藏的循环根本不会执行：表现就是"把应用移出黑名单后，
+        // 它永久从桌面消失、再也放不回来"（复现：隐藏 WPS → 解除黑名单 → WPS 永远隐藏）。
+        val ledger = admin.hiddenPackages()
+        val actuallyHidden = ledger.filter { admin.isApplicationHidden(it) }.toSet()
+        val toUnhide = actuallyHidden - target
+        val toHide = target - actuallyHidden
+
+        var unhidden = 0
+        for (pkg in toUnhide) {
+            when (val r = admin.setApplicationHidden(pkg, false)) {
+                is OpResult.Ok -> unhidden++
+                is OpResult.Unsupported -> report.markUnsupported("app.unhide", r.reason)
+                is OpResult.Failed -> report.markFailed("app.unhide", "取消隐藏失败: $pkg（${r.reason}）")
+            }
+        }
+
+        // 清理残留台账：曾经记录隐藏、但当前既不在隐藏态也不在管控目标的包
+        //（典型场景：应用已被卸载）。不清理会让失效记录越积越多，且下次 apply 仍会误判。
+        for (pkg in ledger) {
+            if (pkg !in actuallyHidden && pkg !in target) admin.forgetHidden(pkg)
+        }
+
+        var hidden = 0
+        for (pkg in toHide) {
+            when (val r = admin.setApplicationHidden(pkg, true)) {
+                is OpResult.Ok -> hidden++
+                is OpResult.Unsupported -> report.markUnsupported("app.hide", r.reason)
+                is OpResult.Failed -> report.markFailed("app.hide", "隐藏失败: $pkg（${r.reason}）")
+            }
+        }
+        report.note("app.hide=$hidden, app.unhide=$unhidden")
+    }
+
+    /** 降级路径：不具备隐藏能力时用挂起（图标变灰、点击拦截）兜住管控能力。 */
+    private fun applySuspended(
+        target: Set<String>,
+        launchable: Set<String>,
+        report: EnforceReport,
+        mode: AppListMode
+    ) {
         // 先解挂"上一轮挂起、本轮不该挂"的，再挂本轮的 —— 顺序反了会有一瞬间全部可用
         //
         // 解挂集合**不能只依赖内存里的 lastSuspended**：它是进程内变量，
@@ -98,8 +169,7 @@ class AppPolicyEnforcer @Inject constructor(
         // 家长看到的是"一批应用莫名其妙变灰、点开关也恢复不了"。
         // 这里以设备的真实挂起状态为准：凡当前还挂着、且本轮不该挂的，一律放出。
         val suspendedOnDevice = launchable.filter { admin.isPackageSuspended(it) }
-        val toRelease = ((lastSuspended + suspendedOnDevice).toSet() - installedTarget.toSet())
-            .filter { isInstalled(it) }
+        val toRelease = ((lastSuspended + suspendedOnDevice).toSet() - target).filter { isInstalled(it) }
         if (toRelease.isNotEmpty()) {
             val result = admin.setPackagesSuspended(toRelease, false)
             report.note("app.release=${result.succeeded.size}")
@@ -108,9 +178,9 @@ class AppPolicyEnforcer @Inject constructor(
             }
         }
 
-        if (installedTarget.isNotEmpty()) {
-            val result = admin.setPackagesSuspended(installedTarget, true)
-            report.note("app.suspend(${policy.mode})=${result.succeeded.size}")
+        if (target.isNotEmpty()) {
+            val result = admin.setPackagesSuspended(target.toList(), true)
+            report.note("app.suspend($mode)=${result.succeeded.size}")
             if (result.failed.isNotEmpty()) {
                 // 系统保护的包无法挂起属于正常现象，记为降级而非失败
                 report.markUnsupported("app.suspend", "系统拒绝挂起: ${result.failed.take(5)}")
@@ -119,12 +189,17 @@ class AppPolicyEnforcer @Inject constructor(
         } else {
             lastSuspended = emptySet()
         }
+    }
 
-        Logger.i(TAG) {
-            "app policy applied: mode=${policy.mode}, suspended=${lastSuspended.size}, " +
-                "released=${toRelease.size}, protected=${protectedSet.size}"
+    /** 清理历史遗留的挂起状态（升级到"隐藏"方案后，避免应用既变灰又消失）。 */
+    private fun releaseSuspension(target: Set<String>, launchable: Set<String>, report: EnforceReport) {
+        val suspendedOnDevice = launchable.filter { admin.isPackageSuspended(it) }
+        val toRelease = ((lastSuspended + suspendedOnDevice).toSet() - target).filter { isInstalled(it) }
+        if (toRelease.isNotEmpty()) {
+            val result = admin.setPackagesSuspended(toRelease, false)
+            report.note("app.release=${result.succeeded.size}")
         }
-        return report
+        lastSuspended = emptySet()
     }
 
     /** 安装/卸载权限。防卸载的第一道锁就在这里。 */

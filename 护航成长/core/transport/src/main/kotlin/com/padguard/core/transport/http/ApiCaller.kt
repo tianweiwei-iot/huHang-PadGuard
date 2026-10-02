@@ -61,7 +61,6 @@ class ApiCaller @Inject constructor(
         tag: String,
         block: suspend () -> Response<ApiEnvelope<T>>
     ): ApiResult<ApiEnvelope<T>> {
-        val startedAt = System.currentTimeMillis()
         val response = try {
             block()
         } catch (e: IOException) {
@@ -88,9 +87,24 @@ class ApiCaller @Inject constructor(
         val envelope = response.body()
             ?: return ApiResult.Failure(ApiCode.LOCAL_PARSE_ERROR, "$tag: empty body")
 
-        // 对时：折半补偿往返延迟（契约 §5.2）
+        // 对时：**不再**做往返延迟折半补偿。
+        //
+        // 背景（"孩子端时间快了十几秒 / 解锁指令被过滤"的根因）：
+        // 服务端的 serverTime 是在**响应写出那一刻**加盖的，而不是请求到达时刻。
+        // 早先这里把整个调用耗时（System.currentTimeMillis() - startedAt）当作 RTT 传进去，
+        // TimeProvider 又做了 `serverTime + RTT/2` 的补偿 —— 对普通请求影响很小（RTT 仅几十毫秒），
+        // 但长轮询（/device/commands?waitMs=20000）会被服务端挂起整整 20 秒，
+        // 于是 offset 被凭空加上约 10 秒，孩子端 `now()` 系统性偏快十几秒且每轮抖动。
+        //
+        // 后果是连锁的：
+        // 1. 上报的时间戳整体偏快 —— 家长端看板的时间与平板实际时间对不上；
+        // 2. 拉取指令的 since 落在服务端"未来"，被服务端钳制到 now，
+        //    于是"钳制前几秒入库"的解锁 / 锁屏指令被当成旧数据过滤掉 —— 解锁迟迟不生效。
+        //
+        // serverTime 既然是响应时刻的时间戳，它与本地接收时刻只差一个单向网络时延（通常几毫秒），
+        // 直接用 `serverTime - localNow` 即是最准的估计，无需再补 RTT。
         if (envelope.serverTime > 0) {
-            timeProvider.syncServerTime(envelope.serverTime, System.currentTimeMillis() - startedAt)
+            timeProvider.syncServerTime(envelope.serverTime)
         }
 
         if (!envelope.isSuccess) {

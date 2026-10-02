@@ -7,6 +7,7 @@ import com.padguard.server.common.HashUtil
 import com.padguard.server.common.ParentErr
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UserRepository
+import com.padguard.server.service.DeviceService
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.springframework.stereotype.Component
@@ -48,7 +49,8 @@ class ParentAuthInterceptor(
 /** 被管控端（孩子）鉴权：X-Device-Id + Bearer deviceToken -> request attribute "deviceId" */
 @Component
 class ChildAuthInterceptor(
-    private val deviceRepository: DeviceRepository
+    private val deviceRepository: DeviceRepository,
+    private val deviceService: DeviceService
 ) : HandlerInterceptor {
     override fun preHandle(request: HttpServletRequest, response: HttpServletResponse, handler: Any): Boolean {
         if (handler !is HandlerMethod) return true
@@ -65,6 +67,9 @@ class ChildAuthInterceptor(
             throw BizException(ChildErr.TOKEN_INVALID, "invalid device token", Audience.CHILD)
         }
         request.setAttribute("deviceId", deviceId)
+        // 任何已鉴权的孩子端 HTTP 活动都视为存活信号（见 DeviceService.markAlive 注释）：
+        // POLLING 模式下主循环心跳不触达服务端，靠长轮询/日志等高频请求兜底刷新在线状态。
+        deviceService.markAlive(deviceId)
         return true
     }
 }

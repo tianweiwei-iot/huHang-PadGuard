@@ -281,12 +281,22 @@ private fun AppUsageCardList(
             .padding(horizontal = 16.dp)
     ) {
         if (apps.isEmpty()) {
-            Text(
-                text = "暂无应用使用记录",
-                modifier = Modifier.padding(16.dp),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-            )
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "暂无应用使用记录",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+                // 「使用情况访问」是 AppOps 特殊权限，孩子端一旦重装就会被系统重置、
+                // 使用数据随即停采，且采集侧是静默失败。这里给出可执行指引，
+                // 避免家长只看到空白数据却无从下手。
+                Text(
+                    text = "若孩子端刚重装，请在平板上开启：设置 → 应用 → 特殊应用权限 → 使用情况访问，为孩子端授权后即可恢复统计。",
+                    modifier = Modifier.padding(top = 6.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                )
+            }
             return@SoftCard
         }
         Column(modifier = Modifier.padding(vertical = 12.dp)) {

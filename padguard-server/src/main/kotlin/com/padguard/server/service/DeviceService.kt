@@ -68,14 +68,17 @@ class DeviceService(
                 // 设备列表里根本看不到，表现为"绑上了但家长端没有这台设备"。
                 this.userId = userId
                 name = name ?: "孩子平板"
-                deviceSn = req.deviceSn ?: deviceSn
-                fingerprint = req.fingerprint ?: fingerprint
-                model = req.model ?: model
-                brand = req.brand ?: brand
-                osVersion = req.androidVersion ?: osVersion
-                sdkInt = req.sdkInt ?: sdkInt
-                appVersion = req.appVersion ?: appVersion
-                controlMode = req.controlMode ?: controlMode
+                // 只允许"非空"入参覆盖台账字段：空串会把已保存的硬件指纹（deviceSn / fingerprint）
+                // 抹掉，导致这台平板下次重装重新绑定时匹配不到自己，被当成新设备新建台账，
+                // 家长端仍指向已失效的旧 deviceId —— 表现为"重装后数据不再同步"。
+                req.deviceSn?.takeIf { it.isNotBlank() }?.let { deviceSn = it }
+                req.fingerprint?.takeIf { it.isNotBlank() }?.let { fingerprint = it }
+                req.model?.takeIf { it.isNotBlank() }?.let { model = it }
+                req.brand?.takeIf { it.isNotBlank() }?.let { brand = it }
+                req.androidVersion?.takeIf { it.isNotBlank() }?.let { osVersion = it }
+                req.sdkInt?.let { sdkInt = it }
+                req.appVersion?.takeIf { it.isNotBlank() }?.let { appVersion = it }
+                req.controlMode?.let { controlMode = it }
                 this.hmacSecret = hmacSecret
                 deviceTokenHash = HashUtil.sha256(deviceToken)
                 this.mqttPassword = mqttPassword
@@ -300,6 +303,21 @@ class DeviceService(
             }
         }
     }
+
+    /**
+     * 任意已鉴权的孩子端 HTTP 活动（长轮询拉指令、上报日志/截图、ack 等）都视为「存活」信号，
+     * 刷新 [Device.lastOnlineAt] 并把在线状态置为 ONLINE。
+     *
+     * 这是 MQTT 关闭（local profile）环境下的关键兜底：孩子端在 POLLING 模式下只跑「轮询循环」
+     * （pullCommands + uploadLogs），主循环的心跳（/device/heartbeat）并不触达服务端，
+     * 导致 [Device.onlineStatus] 永远停在默认 OFFLINE、家长端看到设备永远离线。
+     * 把这些高频 HTTP 活动当作心跳等价信号，由 [com.padguard.server.security.ChildAuthInterceptor]
+     * 在每次鉴权成功后统一刷新，无需重建孩子端 APK 即可让在线状态正确翻转。
+     *
+     * 仅当状态由 OFFLINE→ONLINE 时才推 WS（[applyHeartbeatOnline] 已处理），
+     * 持续在线期间不会重复推送，零副作用；离线后由 [effectiveOnlineStatus] 的 2 分钟惰性超时兜底判离线。
+     */
+    fun markAlive(deviceId: String) = applyHeartbeatOnline(deviceId)
 
     private fun Device.toDto() = DeviceDto(
         id = id, name = name, deviceId = id, model = model, osVersion = osVersion,

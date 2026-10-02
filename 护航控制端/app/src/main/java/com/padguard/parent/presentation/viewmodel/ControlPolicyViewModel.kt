@@ -158,6 +158,28 @@ class ControlPolicyViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 一键管控 / 一键放行全部应用。
+     *
+     * 走批量接口 [com.padguard.domain.repository.PolicyRepository.updateAppBlacklist]，
+     * 而不是循环调用 [toggleAppBlock]：逐个调用会给服务端打 N 次请求、
+     * 触发 N 次策略重建，既慢，又会让终端在半途停在"部分生效"的中间态。
+     * 批量接口一次下发、一次重建，状态始终一致。
+     */
+    fun setAllAppsBlocked(blocked: Boolean) {
+        viewModelScope.launch {
+            val apps = _uiState.value.installedApps
+            if (apps.isEmpty()) return@launch
+            val packages = if (blocked) apps.map { it.packageName } else emptyList()
+            policyRepository.updateAppBlacklist(deviceId, packages)
+            _uiState.value = _uiState.value.copy(
+                installedApps = apps.map { it.copy(isBlocked = blocked) },
+                toast = if (blocked) "已管控全部 ${apps.size} 个应用，孩子端将不再显示"
+                else "已放行全部应用"
+            )
+        }
+    }
+
     fun setAppTimeLimit(app: AppPolicy, minutes: Int?) {
         viewModelScope.launch {
             val updated = app.copy(dailyLimitMinutes = minutes)

@@ -155,13 +155,7 @@ class PermissionGranter @Inject constructor(
 
         // 协议持久化（孩子已明确同意 → 无论授予结果如何都照常留痕）
         onStep(GrantStep("agreement", "持久化监护协议", GrantStep.State.RUNNING))
-        val sn = runCatching { authRepository.getDeviceSn() }.getOrDefault("")
-        val snMask = if (sn.length >= 4) sn.takeLast(4) else sn
-        val deviceId = runCatching { authRepository.getDeviceId() }.getOrDefault("")
-        runCatching {
-            authRepository.saveAgreement(version)
-            agreementRepository.record(version, snMask, deviceId)
-        }.onFailure { Logger.e(TAG, it) { "persist agreement failed" } }
+        persistAgreement(version)
         onStep(GrantStep("agreement", "持久化监护协议", GrantStep.State.DONE))
 
         Logger.i(TAG) {
@@ -212,6 +206,26 @@ class PermissionGranter @Inject constructor(
         }
         Logger.i(TAG) { "ensureGranted: missing=${missing.size}, reGranted=$ok" }
         ok
+    }
+
+    /**
+     * 持久化监护协议（孩子已明确「同意并授权」后的合规留痕）。
+     *
+     * 抽成独立方法，供两类授权入口共用，确保"同意"在任意路径下只落一次、且必定留痕：
+     * - DO/PO 路径：[grantAllWithProgress] 内部已调用；
+     * - 非 DO 路径：[PermissionOnboardingViewModel] 在系统运行时权限弹窗结果回来后调用。
+     *
+     * 与具体权限是否授予成功解耦：孩子已点击"一键确认授权"即视为明确同意，
+     * 即使部分系统权限被拒/降级，协议同意本身仍照常落库（供管控端查询"已阅已同意"）。
+     */
+    suspend fun persistAgreement(version: String = AuthRepository.CURRENT_AGREEMENT_VERSION) {
+        val sn = runCatching { authRepository.getDeviceSn() }.getOrDefault("")
+        val snMask = if (sn.length >= 4) sn.takeLast(4) else sn
+        val deviceId = runCatching { authRepository.getDeviceId() }.getOrDefault("")
+        runCatching {
+            authRepository.saveAgreement(version)
+            agreementRepository.record(version, snMask, deviceId)
+        }.onFailure { Logger.e(TAG, it) { "persist agreement failed" } }
     }
 
     companion object {

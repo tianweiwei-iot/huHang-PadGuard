@@ -117,8 +117,14 @@ class StatisticsService(
         }
     }
 
-    private fun sumMinutes(logs: List<UsageLog>): Int =
-        logs.filter { it.type == "APP_USAGE" }.sumOf { durationSecOf(it) / 60 }
+    private fun sumMinutes(logs: List<UsageLog>): Int {
+        // 总时长优先取 USAGE_TOTAL（孩子端亮屏即累计，不依赖"使用情况访问"权限）；
+        // 只有当该批日志里完全没有 USAGE_TOTAL（旧版孩子端）时才回退累加 APP_USAGE，
+        // 两者同时累加会把同一段时长算两遍。
+        val totals = logs.filter { it.type == "USAGE_TOTAL" }
+        if (totals.isNotEmpty()) return totals.sumOf { durationSecOf(it) / 60 }
+        return logs.filter { it.type == "APP_USAGE" }.sumOf { durationSecOf(it) / 60 }
+    }
 
     /**
      * 按应用聚合使用明细（时长 + 起止时间 + 图标 + 启动次数）。

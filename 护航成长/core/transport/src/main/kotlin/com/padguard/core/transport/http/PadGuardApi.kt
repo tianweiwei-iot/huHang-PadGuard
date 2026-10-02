@@ -3,6 +3,7 @@ package com.padguard.core.transport.http
 import com.padguard.core.data.model.BindResult
 import com.padguard.core.data.model.Command
 import com.padguard.core.data.model.Heartbeat
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
@@ -25,6 +26,7 @@ import retrofit2.http.Query
 data class DeviceNameRequest(val name: String)
 
 /** §5.1b 账号密码绑定请求体：家长账号 + 设备信息（复用 [BindRequest] 避免字段漂移） */
+@Serializable
 data class BindByAccountRequest(
     val phone: String,
     val password: String,
