@@ -61,6 +61,14 @@ class Device(
     // "Can not set boolean field to null value"，整个应用起不来。DTO 出口处再兜底成 false。
     @Column(name = "remote_locked", columnDefinition = "boolean default false")
     var remoteLocked: Boolean? = false,
+    /**
+     * 未成年人模式分龄档位：UNDER_3 / BAND_3_8 / BAND_8_12 / BAND_12_16 / BAND_16_18。
+     *
+     * 与策略包里的 `minorMode.ageBand` 同源，这里冗余一份是为了让家长端
+     * 拉设备列表就能直接展示"这台是几岁档"，不必先解一遍 policy JSON。
+     * 可空：老库加列时已有行为 NULL（表示"未设置"，按 8–12 岁档回落）。
+     */
+    @Column(name = "age_band") var ageBand: String? = null,
     @Column(name = "created_at") var createdAt: Long = 0
 )
 

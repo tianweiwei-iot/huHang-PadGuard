@@ -22,6 +22,8 @@ import com.padguard.core.engine.enforcer.EyeCareVerdict
 import com.padguard.core.engine.enforcer.KioskEnforcer
 import com.padguard.core.engine.enforcer.LimitReason
 import com.padguard.core.engine.enforcer.LimitVerdict
+import com.padguard.core.engine.enforcer.MinorModeEnforcer
+import com.padguard.core.engine.enforcer.MinorModeVerdict
 import com.padguard.core.engine.enforcer.MonitoringEnforcer
 import com.padguard.core.engine.enforcer.MonitoringRuntime
 import com.padguard.core.engine.enforcer.PeripheralEnforcer
@@ -76,6 +78,7 @@ class PolicyEngine @Inject constructor(
     private val appPolicyEnforcer: AppPolicyEnforcer,
     private val appLimitEnforcer: AppLimitEnforcer,
     private val eyeCareEnforcer: EyeCareEnforcer,
+    private val minorModeEnforcer: MinorModeEnforcer,
     private val webEnforcer: WebEnforcer,
     private val kioskEnforcer: KioskEnforcer,
     private val securityEnforcer: SecurityEnforcer,
@@ -133,13 +136,15 @@ class PolicyEngine @Inject constructor(
 
             admin.refreshControlMode()
 
-            val effective = resolveEffectivePolicy(policy)
+            // 先过生效窗口，再派生未成年人模式基线：
+            // 顺序反了会把过期的分龄额度压到设备上（过期窗口本应回落不管控基线）。
+            val effective = minorModeEnforcer.deriveBaseline(resolveEffectivePolicy(policy))
             val report = EnforceReport()
 
             // 下发顺序不是随意排的，见 ORDER 说明
             report.merge(securityEnforcer.apply(effective.security))
             report.merge(peripheralEnforcer.apply(effective.peripheral))
-            report.merge(systemLockEnforcer.apply(effective.systemLock))
+            report.merge(systemLockEnforcer.apply(effective.systemLock, effective.minorMode.enabled))
             report.merge(appPolicyEnforcer.apply(effective.app))
             report.merge(webEnforcer.apply(effective.web))
             report.merge(monitoringEnforcer.apply(effective.monitoring))
@@ -211,7 +216,10 @@ class PolicyEngine @Inject constructor(
      * @param screenOn 屏幕是否点亮；息屏不计时
      */
     suspend fun tick(foregroundPackage: String?, screenOn: Boolean): EngineTick {
-        val policy = policyRepository.getPolicy()
+        // 未成年人模式的分龄基线在这里派生一次，让下面的限额/护眼判定
+        // 与 applyAll 走的是同一份口径。若各自读原始策略，会出现
+        // "策略已下发但限额还按旧额度算"的错位。
+        val policy = minorModeEnforcer.deriveBaseline(policyRepository.getPolicy())
         val autoReasons = mutableMapOf<LockReason, LockDetail>()
 
         // ---------- 1. 时段锁 ----------
@@ -220,6 +228,16 @@ class PolicyEngine @Inject constructor(
             autoReasons[LockReason.SCHEDULE] = LockDetail(
                 text = "当前处于禁用时段 ${schedule.rule.start}–${schedule.rule.end}",
                 untilMillis = schedule.untilMillis
+            )
+        }
+
+        // ---------- 1.5 未成年人模式夜间宵禁 ----------
+        // 独立于时段锁判定：家长关闭「时段管控」不得解除合规强制项。
+        val minorMode = minorModeEnforcer.evaluate(policy.minorMode)
+        if (minorMode is MinorModeVerdict.Curfew) {
+            autoReasons[LockReason.CURFEW] = LockDetail(
+                text = minorMode.text,
+                untilMillis = minorMode.untilMillis
             )
         }
 
@@ -306,6 +324,7 @@ class PolicyEngine @Inject constructor(
             schedule = schedule,
             limit = limit,
             eyeCare = eyeCare,
+            minorMode = minorMode,
             blockedPackage = blockedPackage,
             blockedReason = blockedReason
         )
@@ -380,6 +399,23 @@ class PolicyEngine @Inject constructor(
 
     fun activePeripheralOverrides(): Map<String, Boolean> = peripheralEnforcer.activeOverrides()
 
+    /** 未成年人模式当前状态（是否开启 / 是否处于宵禁），供状态页与家长展示 */
+    suspend fun minorModeVerdict(): MinorModeVerdict =
+        minorModeEnforcer.evaluate(policyRepository.getPolicy().minorMode)
+
+    /** 当前档位对应的宵禁时段；模式关闭或未启用宵禁时返回 null */
+    suspend fun curfewRule(): com.padguard.core.data.model.policy.ScheduleRule? =
+        minorModeEnforcer.curfewRuleOf(policyRepository.getPolicy().minorMode)
+
+    /**
+     * 未成年人模式是否开启。
+     *
+     * 孩子端据此**隐藏**退出入口：指南要求"退出未成年人模式需家长验证"，
+     * 最稳的实现是孩子端根本不给这个入口，而不是"给了但验证失败"。
+     */
+    suspend fun minorModeEnabled(): Boolean =
+        policyRepository.getPolicy().minorMode.enabled
+
     /** 护眼休息的"跳过"入口，供家长临时授权场景使用 */
     fun skipEyeCareRest() {
         eyeCareEnforcer.skipRest()
@@ -433,6 +469,8 @@ data class EngineTick(
     val schedule: ScheduleVerdict,
     val limit: LimitVerdict,
     val eyeCare: EyeCareVerdict,
+    /** 未成年人模式判定：是否开启、当前是否处于夜间宵禁 */
+    val minorMode: MinorModeVerdict = MinorModeVerdict.Off,
     /** 非空表示该应用已超额，应被拦截（但不锁整机） */
     val blockedPackage: String?,
     /** 拦截原因文案（限额超额/黑名单命中），供拦截页展示 */

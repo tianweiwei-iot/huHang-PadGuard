@@ -184,6 +184,43 @@ class PolicyController(
         return ApiResponse.ok(mapOf("version" to policyService.applyMode(deviceId, req.mode)))
     }
 
+    /**
+     * 一键设置未成年人模式（P1 合规底座）。
+     *
+     * 开启：`{"enabled": true, "ageBand": "BAND_8_12"}`，其余字段省略即按该档位的合规默认值。
+     * 关闭：`{"enabled": false}` —— 端上会同时解除由分龄派生出来的时长/护眼/宵禁限制。
+     * 临时豁免：`{"enabled": true, "exemptMinutes": 30}`，只压过宵禁与护眼，不动每日总额度。
+     */
+    @PostMapping("/policies/{deviceId}/minor-mode")
+    fun minorMode(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: MinorModeRequest
+    ): ApiResponse<*> {
+        deviceService.getDevice(userId, deviceId)
+        return ApiResponse.ok(mapOf("version" to policyService.applyMinorMode(deviceId, req)))
+    }
+
+    /**
+     * 读取未成年人模式当前配置。
+     *
+     * 单独给一个 GET 而不是让家长端去解整个策略包：
+     * 策略包是"下发给孩子端"的结构，字段名与端上模型强耦合，
+     * 家长端直接解会在孩子端改字段时静默读到 null（表现为"开关显示关闭但设备其实锁着"）。
+     */
+    @GetMapping("/policies/{deviceId}/minor-mode")
+    fun getMinorMode(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String
+    ): ApiResponse<*> {
+        deviceService.getDevice(userId, deviceId)
+        return ApiResponse.ok(policyService.minorModeOf(deviceId))
+    }
+
+    /** 各龄档的合规默认值，供家长端在"选择年龄段"界面直接展示后果 */
+    @GetMapping("/policies/age-bands")
+    fun ageBands(): ApiResponse<*> = ApiResponse.ok(policyService.ageBandDefaults())
+
     @GetMapping("/commands/{msgId}")
     fun command(@RequestAttribute("userId") userId: String, @PathVariable msgId: String) =
         ApiResponse.ok(commandService.getCommand(msgId))

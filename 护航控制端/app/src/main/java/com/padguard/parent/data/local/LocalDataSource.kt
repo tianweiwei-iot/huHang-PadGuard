@@ -744,6 +744,27 @@ class LocalDataSource @Inject constructor(
         return Result.success(synced)
     }
 
+    // ==================== 未成年人模式 (Mock) ====================
+
+    private val minorModeStore = mutableMapOf<String, MinorMode>()
+
+    override suspend fun getMinorMode(deviceId: String): Result<MinorMode> =
+        Result.success(minorModeStore[deviceId] ?: MinorMode(deviceId = deviceId))
+
+    override suspend fun setMinorMode(mode: MinorMode, exemptMinutes: Int?): Result<Unit> {
+        // Mock 只保存最终态；豁免到期时间按真实语义写入，便于界面验证倒计时
+        val stored = mode.copy(
+            parentExemptUntil = exemptMinutes?.takeIf { it > 0 }
+                ?.let { System.currentTimeMillis() + it * 60_000L }
+                ?: mode.parentExemptUntil
+        )
+        minorModeStore[mode.deviceId] = stored
+        return Result.success(Unit)
+    }
+
+    override suspend fun getAgeBandDefaults(): Result<Map<AgeBand, AgeBandDefault>> =
+        Result.success(DEFAULT_AGE_BANDS)
+
     // ==================== StatisticsRepository 实现 (Mock) ====================
 
     override suspend fun getUsageStats(deviceId: String, period: ReportPeriod): Result<StatisticsReport> {
@@ -961,3 +982,17 @@ class LocalDataSource @Inject constructor(
     override fun observeAlerts(): Flow<Alert> = kotlinx.coroutines.flow.emptyFlow()
 
 }
+
+/**
+ * Mock 环境下的各龄档默认值。
+ *
+ * 与服务端 `PolicyService.AGE_BAND_DEFAULTS` 保持同一组数字 —— 真实环境由
+ * `GET /policies/age-bands` 下发，这里只是离线预览时的兜底。
+ */
+private val DEFAULT_AGE_BANDS: Map<AgeBand, AgeBandDefault> = mapOf(
+    AgeBand.UNDER_3 to AgeBandDefault(30, 15, 10, "20:00", "07:00"),
+    AgeBand.BAND_3_8 to AgeBandDefault(60, 20, 10, "21:00", "07:00"),
+    AgeBand.BAND_8_12 to AgeBandDefault(60, 30, 10, "22:00", "06:00"),
+    AgeBand.BAND_12_16 to AgeBandDefault(60, 30, 10, "22:00", "06:00"),
+    AgeBand.BAND_16_18 to AgeBandDefault(120, 30, 10, "22:00", "06:00")
+)

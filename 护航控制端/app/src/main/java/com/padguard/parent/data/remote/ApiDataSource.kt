@@ -62,6 +62,9 @@ import com.padguard.data.model.WebActivityStatsDto
 import com.padguard.data.model.WebPolicyDto
 import com.padguard.data.model.TabletUsageSettingsDto
 import com.padguard.data.model.TimeRangeDto
+import com.padguard.data.model.MinorModeDto
+import com.padguard.data.model.MinorModeRequestDto
+import com.padguard.data.model.AgeBandDefaultDto
 import com.padguard.domain.model.Alert
 import com.padguard.domain.model.AlertCategory
 import com.padguard.domain.model.AlertLevel
@@ -96,6 +99,9 @@ import com.padguard.domain.model.TabletUsageSettings
 import com.padguard.domain.model.TimeRange
 import com.padguard.domain.repository.ViolationStats
 import com.padguard.domain.repository.WebActivityStats
+import com.padguard.domain.repository.AgeBand
+import com.padguard.domain.repository.AgeBandDefault
+import com.padguard.domain.repository.MinorMode
 import com.padguard.domain.repository.AlertRepository
 import com.padguard.domain.repository.AuthRepository
 import com.padguard.domain.repository.DeviceRepository
@@ -767,6 +773,24 @@ class ApiDataSource @Inject constructor(
         exec { policyApi.updateTabletUsageSettings(settings.deviceId, settings.toDto()) }
             .map { resp -> resp.data?.toDomain() ?: throw Exception("保存时间管控设置失败") }
 
+    override suspend fun getMinorMode(deviceId: String): Result<MinorMode> =
+        exec { policyApi.getMinorMode(deviceId) }
+            .map { resp -> resp.data?.toDomain(deviceId) ?: throw Exception("读取未成年人模式失败") }
+
+    override suspend fun setMinorMode(mode: MinorMode, exemptMinutes: Int?): Result<Unit> =
+        execRaw { policyApi.setMinorMode(mode.deviceId, mode.toRequest(exemptMinutes)) }
+
+    override suspend fun getAgeBandDefaults(): Result<Map<AgeBand, AgeBandDefault>> =
+        exec { policyApi.getAgeBandDefaults() }.map { resp ->
+            resp.data.orEmpty().mapNotNull { (key, v) ->
+                // 未知档位直接丢弃而不是回落：默认值要如实反映服务端能力，
+                // 回落会让家长看到"某个档位每天 60 分钟"但服务端其实没这个档。
+                val band = AgeBand.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }
+                    ?: return@mapNotNull null
+                band to v.toDomain()
+            }.toMap()
+        }
+
     // ==================== StatisticsRepository ====================
 
     override suspend fun getUsageStats(deviceId: String, period: ReportPeriod): Result<StatisticsReport> =
@@ -962,6 +986,49 @@ private fun TabletUsageSettingsDto.toDomain(): TabletUsageSettings = TabletUsage
     timeUpMessage = timeUpMessage,
     // 回读时不再带 syncToDevice（那是下发瞬间的动作标志），保持页面状态干净
     syncToDevice = false
+)
+
+private fun MinorModeDto.toDomain(deviceId: String): MinorMode = MinorMode(
+    deviceId = deviceId,
+    enabled = enabled,
+    ageBand = AgeBand.fromKey(ageBand),
+    curfewEnabled = curfewEnabled,
+    // 服务端在缺省时也会把档位默认值补上，这里只对异常空串做兜底
+    curfewStart = curfewStart?.takeIf { it.isNotBlank() } ?: "22:00",
+    curfewEnd = curfewEnd?.takeIf { it.isNotBlank() } ?: "06:00",
+    dailyLimitMinutes = dailyLimitMinutes,
+    weekendLimitMinutes = weekendLimitMinutes,
+    continuousMinutes = continuousMinutes,
+    restMinutes = restMinutes,
+    parentExemptUntil = parentExemptUntil
+)
+
+/**
+ * 转请求体。
+ *
+ * 只下发家长**显式设置过**的字段（非 0），其余留空让服务端按档位默认值补齐 ——
+ * 这样"切档"时旧档位的自定义时长不会跟着带过去，
+ * 表现为"从 12–16 岁切到 8–12 岁，时长却还是 2 小时"。
+ */
+private fun MinorMode.toRequest(exemptMinutes: Int?): MinorModeRequestDto = MinorModeRequestDto(
+    enabled = enabled,
+    ageBand = ageBand.key,
+    curfewEnabled = curfewEnabled,
+    curfewStart = curfewStart,
+    curfewEnd = curfewEnd,
+    dailyLimitMinutes = dailyLimitMinutes.takeIf { it > 0 },
+    weekendLimitMinutes = weekendLimitMinutes.takeIf { it > 0 },
+    continuousMinutes = continuousMinutes.takeIf { it > 0 },
+    restMinutes = restMinutes.takeIf { it > 0 },
+    exemptMinutes = exemptMinutes?.takeIf { it > 0 }
+)
+
+private fun AgeBandDefaultDto.toDomain(): AgeBandDefault = AgeBandDefault(
+    dailyLimitMinutes = dailyLimitMinutes,
+    continuousMinutes = continuousMinutes,
+    restMinutes = restMinutes,
+    curfewStart = curfewStart,
+    curfewEnd = curfewEnd
 )
 
 private fun TabletUsageSettings.toDto(): TabletUsageSettingsDto = TabletUsageSettingsDto(

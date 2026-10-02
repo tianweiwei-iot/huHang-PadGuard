@@ -191,4 +191,20 @@ interface PolicyApi {
         @Path("deviceId") deviceId: String,
         @Body request: TabletUsageSettingsDto
     ): Response<ApiResponse<TabletUsageSettingsDto>>
+
+    // === 未成年人模式（P1 合规底座） ===
+    @GET("policies/{deviceId}/minor-mode")
+    suspend fun getMinorMode(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<MinorModeDto>>
+
+    @POST("policies/{deviceId}/minor-mode")
+    suspend fun setMinorMode(
+        @Path("deviceId") deviceId: String,
+        @Body request: MinorModeRequestDto
+    ): Response<okhttp3.ResponseBody>
+
+    /** 各龄档合规默认值；家长端选档界面直接用它展示后果，无需先下发 */
+    @GET("policies/age-bands")
+    suspend fun getAgeBandDefaults(): Response<ApiResponse<Map<String, AgeBandDefaultDto>>>
 }

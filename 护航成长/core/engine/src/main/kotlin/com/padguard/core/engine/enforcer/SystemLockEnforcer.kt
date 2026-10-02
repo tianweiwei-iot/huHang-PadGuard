@@ -37,7 +37,13 @@ class SystemLockEnforcer @Inject constructor(
     private val admin: DeviceAdminBridge
 ) {
 
-    fun apply(policy: SystemLockPolicy): EnforceReport {
+    /**
+     * @param minorModeEnabled 未成年人模式是否开启。
+     *   开启时**强制**封堵恢复出厂与安全模式，忽略策略里 `factoryReset` / `safeBoot`
+     *   的宽松取值 —— 这两项是"退出未成年人模式"的物理路径，
+     *   若能被一条策略放开，指南要求的"退出需家长验证"就形同虚设。
+     */
+    fun apply(policy: SystemLockPolicy, minorModeEnabled: Boolean = false): EnforceReport {
         val report = EnforceReport()
 
         // ---------- 1. 时间篡改（最高优先级） ----------
@@ -120,13 +126,17 @@ class SystemLockEnforcer @Inject constructor(
         }
 
         // ---------- 4. 安全模式 & 恢复出厂 ----------
+        // 未成年人模式下这两项无条件封堵：进安全模式或恢复出厂都能让设备彻底脱离管控，
+        // 是孩子在设备上唯一能自己完成的"退出"。放开它们等于给未成年人模式留后门。
+        val blockSafeBoot = minorModeEnabled || policy.safeBoot.isBlocking()
+        val blockFactoryReset = minorModeEnabled || policy.factoryReset.isBlocking()
         report.record(
-            "systemLock.safeBoot=${policy.safeBoot}",
-            admin.setUserRestriction(UserManager.DISALLOW_SAFE_BOOT, policy.safeBoot.isBlocking())
+            "systemLock.safeBoot=$blockSafeBoot${if (minorModeEnabled) " (未成年人模式强制)" else ""}",
+            admin.setUserRestriction(UserManager.DISALLOW_SAFE_BOOT, blockSafeBoot)
         )
         report.record(
-            "systemLock.factoryReset=${policy.factoryReset}",
-            admin.setUserRestriction(UserManager.DISALLOW_FACTORY_RESET, policy.factoryReset.isBlocking())
+            "systemLock.factoryReset=$blockFactoryReset${if (minorModeEnabled) " (未成年人模式强制)" else ""}",
+            admin.setUserRestriction(UserManager.DISALLOW_FACTORY_RESET, blockFactoryReset)
         )
 
         // ---------- 5. 多用户绕过（策略里没有对应字段，但必须默认封死） ----------

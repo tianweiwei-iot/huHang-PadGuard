@@ -380,9 +380,55 @@ class PolicyExtensionService(
                 "timezone" to "Asia/Shanghai", "rules" to scheduleRules + usageRangeRules
             ),
             "web" to mapOf("mode" to "BLACKLIST", "blacklist" to webUrls, "browserDisabled" to settings.browserDisabled),
-            "monitoring" to mapOf("heartbeatIntervalSec" to settings.autoRefreshSeconds, "logUploadIntervalSec" to 300)
+            "monitoring" to mapOf("heartbeatIntervalSec" to settings.autoRefreshSeconds, "logUploadIntervalSec" to 300),
+            // 未成年人模式**必须原样继承**：它是合规强制项，不属于"由子表重建"的范畴。
+            //
+            // 子表（app_policy / time_restriction / device_settings）里根本没有 minorMode 的落点，
+            // 若这里不显式继承，[ensureRebuilt] 一旦检测到漂移并触发 [rebuildPolicy]，
+            // 新包就会直接没有 minorMode 字段 —— 孩子端按默认值解析得到 enabled=false，
+            // 分龄时长、护眼、宵禁在设备上瞬间全部消失。
+            // 表现为：家长端明明亮着"已开启"，平板上却毫无管控，且重启也不会恢复。
+            // 同理适用于 eyeCare / kiosk / security：它们也没有子表落点。
+            "minorMode" to (latestMinorMode(deviceId) ?: mapOf(
+                "enabled" to false,
+                "ageBand" to (device.ageBand ?: "BAND_8_12"),
+                "curfewEnabled" to true,
+                "curfewStart" to "22:00",
+                "curfewEnd" to "06:00",
+                "dailyLimitMinutes" to 0,
+                "weekendLimitMinutes" to 0,
+                "continuousMinutes" to 0,
+                "restMinutes" to 0,
+                "parentExemptUntil" to 0L,
+                "requireParentAuthToExit" to true,
+                "parentOverridden" to false
+            ))
         )
+        // 同样没有子表落点的 eyeCare / kiosk / security 一并继承，避免被重建清空
+        latestPackageFields(deviceId, "eyeCare", "kiosk", "security").forEach { (k, v) -> pkg.putIfAbsent(k, v) }
         return objectMapper.writeValueAsString(pkg)
+    }
+
+    /** 从当前最新策略包里取未成年人模式配置；没有则返回 null */
+    private fun latestMinorMode(deviceId: String): Map<String, Any?>? =
+        latestPackageFields(deviceId, "minorMode")["minorMode"] as? Map<String, Any?>
+
+    /**
+     * 从当前最新策略包里挑出指定字段，供重建时继承。
+     *
+     * 只做浅拷贝且不解析成强类型对象：这些字段的结构由孩子端模型定义，
+     * 服务端不做解释，原样搬运最不容易出错。
+     */
+    private fun latestPackageFields(deviceId: String, vararg keys: String): Map<String, Any?> {
+        val json = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)?.packageJson
+            ?: return emptyMap()
+        val map = runCatching { objectMapper.readValue(json, Map::class.java) as Map<*, *> }
+            .getOrElse { return emptyMap() }
+        val out = linkedMapOf<String, Any?>()
+        keys.forEach { k ->
+            if (map.containsKey(k)) out[k] = map[k]
+        }
+        return out
     }
 
     private fun deviceSettingOf(deviceId: String): DeviceSetting =

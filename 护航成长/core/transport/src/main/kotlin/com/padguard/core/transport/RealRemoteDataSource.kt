@@ -203,14 +203,44 @@ class RealRemoteDataSource @Inject constructor(
 
     // ==================== 上行 ====================
 
+    /**
+     * MQTT 心跳计数，用于周期性强制走一次 HTTPS。
+     *
+     * 见下方 [sendHeartbeat] 对"空 ack 破坏版本对账"的说明。
+     */
+    private var heartbeatSeq = 0
+
     override suspend fun sendHeartbeat(heartbeat: Heartbeat): ApiResult<HeartbeatAck> {
+        heartbeatSeq++
+
+        // 每 N 次心跳强制走 HTTPS，拿回带 policyVersion 的真实回执。
+        //
+        // ## 为什么必须有这条"对账心跳"
+        // MQTT 心跳是单向 publish（QoS0），**没有响应体**，只能返回空 [HeartbeatAck]，
+        // 其中 `policyVersion = 0`。而 GuardService 的版本对账条件是
+        // `ack.policyVersion > 0 && != local`，0 会被直接跳过。
+        // 后果链非常隐蔽且致命：
+        //   1. MQTT 服务端关闭 / 未连接时，`mqtt.publish` 仍可能返回 true（写入本地会话），
+        //      心跳"看起来成功"、在线状态也靠 markAlive 维持；
+        //   2. 但 ack.policyVersion 恒为 0 → 漂移检测永不触发；
+        //   3. 策略推送又走 MQTT（同样丢失）→ **家长改的任何策略都不会下发到设备**，
+        //      家长端显示"已开启"、平板上纹丝不动，且永远不会自愈。
+        //
+        // 因此不能只依赖 MQTT：必须周期性用 HTTPS 心跳把服务端真实版本号取回来。
+        // 频率取 4 次（约 1 分钟一次 @15s 心跳），兼顾流量与纠偏延迟。
+        val forceHttps = heartbeatSeq % HTTPS_RECONCILE_EVERY == 0
+        if (forceHttps) {
+            Logger.v(TAG) { "heartbeat #$heartbeatSeq routed to HTTPS for policy version reconciliation" }
+            return caller.call("heartbeat") { api.heartbeat(heartbeat) }
+        }
+
         // MQTT 模式：心跳走 QoS0 —— 心跳天然幂等且高频，丢一两个由下一个补上，
         // 用 QoS1 只会在弱网下堆积重传，反而拖慢真正重要的指令回执。
         if (settings.mode.value == TransportMode.MQTT && mqtt.connected.value) {
             val topic = MqttTopics.upHeartbeat(credentials.tenantId, credentials.deviceId)
             val payload = json.encodeToString(Heartbeat.serializer(), heartbeat)
             if (mqtt.publish(topic, payload, MqttTopics.QOS_HEARTBEAT)) {
-                // MQTT 心跳无响应体，返回空 ack；策略版本对账由 policy 通知或轮询兜底
+                // MQTT 心跳无响应体，返回空 ack —— 版本对账交给上面的对账心跳。
                 return ApiResult.Success(HeartbeatAck(), timeProvider.now())
             }
             Logger.w(TAG) { "mqtt heartbeat publish failed, falling back to HTTPS" }
@@ -497,6 +527,15 @@ class RealRemoteDataSource @Inject constructor(
     companion object {
         private const val TAG = "RealRemoteDataSource"
         private const val ACK_RETRY_BATCH = 50
+
+        /**
+         * 每多少次心跳强制走一次 HTTPS 做策略版本对账。
+         *
+         * 4 次 ≈ 1 分钟（心跳间隔 15s）：既不会明显增加流量，
+         * 又能保证家长改完策略后最坏 1 分钟内设备自动纠偏。
+         * 取 1 会导致 MQTT 形同虚设（每条心跳都回落 HTTPS），不可取。
+         */
+        private const val HTTPS_RECONCILE_EVERY = 4
 
         /**
          * 长轮询挂起时长。

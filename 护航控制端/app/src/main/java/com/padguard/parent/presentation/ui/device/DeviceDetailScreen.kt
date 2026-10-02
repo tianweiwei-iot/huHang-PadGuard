@@ -116,6 +116,17 @@ fun DeviceDetailScreen(
                 }
             )
 
+            // 未成年人模式（分龄合规底座）：一键开启即套用分龄时长 / 护眼 / 宵禁基线
+            MinorModeCard(
+                minorMode = uiState.minorMode,
+                ageBandDefaults = uiState.ageBandDefaults,
+                busy = uiState.minorModeBusy,
+                onToggle = viewModel::setMinorModeEnabled,
+                onSelectBand = viewModel::selectAgeBand,
+                onToggleCurfew = viewModel::setCurfewEnabled,
+                onGrantExemption = viewModel::grantExemption
+            )
+
             TodayUsageDetailCard(uiState.todayUsage?.totalUsageMinutes ?: 0)
 
             val detailLocation = uiState.location

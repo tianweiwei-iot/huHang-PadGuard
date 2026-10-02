@@ -30,11 +30,46 @@ data class DeviceDto(
     /** 孩子端自定义资料：昵称 */
     val childNickname: String? = null,
     /** 孩子端自定义资料：头像 URL */
-    val childAvatar: String? = null
+    val childAvatar: String? = null,
+    /**
+     * 未成年人模式分龄档位（UNDER_3 / BAND_3_8 / BAND_8_12 / BAND_12_16 / BAND_16_18）。
+     * null = 家长尚未选择，端上按 8–12 岁档回落。
+     */
+    val ageBand: String? = null
 )
 
 data class LockRequest(val reason: String? = null)
 data class ModeRequest(val mode: String)
+
+/**
+ * 未成年人模式设置（一键启动 / 切换龄档 / 家长豁免）。
+ *
+ * 除了 [enabled] 与 [ageBand]，其余字段全部可空 = "沿用该档位的合规默认值"。
+ * 这样"一键开启"只需要 `{"enabled": true, "ageBand": "BAND_8_12"}` 两个字段，
+ * 家长端无需先算出时长/宵禁再下发，也避免各家客户端各自实现一套默认值导致口径漂移。
+ */
+data class MinorModeRequest(
+    val enabled: Boolean = true,
+    /** UNDER_3 / BAND_3_8 / BAND_8_12 / BAND_12_16 / BAND_16_18 */
+    val ageBand: String? = null,
+    val curfewEnabled: Boolean? = null,
+    /** "HH:mm" */
+    val curfewStart: String? = null,
+    /** "HH:mm" */
+    val curfewEnd: String? = null,
+    /** 每日总时长（分钟）；null = 沿用分龄默认 */
+    val dailyLimitMinutes: Int? = null,
+    /** 周末每日总时长（分钟）；null = 与工作日相同 */
+    val weekendLimitMinutes: Int? = null,
+    val continuousMinutes: Int? = null,
+    val restMinutes: Int? = null,
+    /**
+     * 家长临时豁免分钟数（>0 时按当前时间累加写入 parentExemptUntil）。
+     * 显式传 0 表示**取消豁免**（立刻收回，不必等到期）。
+     * 豁免只压过宵禁与护眼，**不解除**每日总时长 —— 时长是合规硬约束。
+     */
+    val exemptMinutes: Int? = null
+)
 
 /** 限时解锁：durationMinutes 到点后自动恢复管控；packageName 留空表示整机放行 */
 data class TempUnlockRequest(

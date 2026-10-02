@@ -29,7 +29,15 @@ data class PolicyPackage(
     @SerialName("eyeCare") val eyeCare: EyeCarePolicy = EyeCarePolicy(),
     @SerialName("kiosk") val kiosk: KioskPolicy = KioskPolicy(),
     @SerialName("monitoring") val monitoring: MonitoringPolicy = MonitoringPolicy(),
-    @SerialName("security") val security: SecurityPolicy = SecurityPolicy()
+    @SerialName("security") val security: SecurityPolicy = SecurityPolicy(),
+    /**
+     * 未成年人模式（分龄合规底座）。
+     *
+     * 开启后由 [com.padguard.core.engine.enforcer.MinorModeEnforcer]
+     * 把分龄基线派生到 [appLimit] / [eyeCare] / [schedule] 上，并承担夜间宵禁判定。
+     * 关闭时这些对象回归家长自行配置的值。
+     */
+    @SerialName("minorMode") val minorMode: MinorModePolicy = MinorModePolicy()
 ) {
 
     /**
@@ -57,7 +65,8 @@ data class PolicyPackage(
             eyeCare = incoming.eyeCare,
             kiosk = incoming.kiosk,
             monitoring = incoming.monitoring,
-            security = incoming.security
+            security = incoming.security,
+            minorMode = incoming.minorMode
         )
     }
 

@@ -405,6 +405,79 @@ interface PolicyRepository {
      * @return 同步后的设置对象
      */
     suspend fun updateTabletUsageSettings(settings: TabletUsageSettings): Result<TabletUsageSettings>
+
+    // === 未成年人模式（P1 合规底座） ===
+    /** 读取未成年人模式当前配置 */
+    suspend fun getMinorMode(deviceId: String): Result<MinorMode>
+
+    /**
+     * 一键开启 / 关闭 / 切档。
+     * @param exemptMinutes >0 时为"家长临时豁免"，只压过宵禁与护眼，不突破每日总额度
+     */
+    suspend fun setMinorMode(mode: MinorMode, exemptMinutes: Int? = null): Result<Unit>
+
+    /** 各龄档的合规默认值，供选档界面在下发前展示后果 */
+    suspend fun getAgeBandDefaults(): Result<Map<AgeBand, AgeBandDefault>>
+}
+
+/**
+ * 分龄档位，对齐《移动互联网未成年人模式建设指南》的五档划分。
+ *
+ * [label] 用于选档界面文案，[key] 与服务端 / 孩子端 `AgeBand` 枚举名严格一致 ——
+ * 三端共用同一套字符串，避免"家长端显示 8–12 岁、设备实际按 12–16 岁执行"的错位。
+ */
+enum class AgeBand(val key: String, val label: String, val hint: String) {
+    UNDER_3("UNDER_3", "不满3岁", "以儿歌、启蒙内容为主，不提供游戏与短视频"),
+    BAND_3_8("BAND_3_8", "3–8岁", "启蒙教育与兴趣培养，不提供直播与充值"),
+    BAND_8_12("BAND_8_12", "8–12岁", "通识教育与知识科普，限制短视频，不提供直播"),
+    BAND_12_16("BAND_12_16", "12–16岁", "每日不超过1小时，不提供直播，充值需限额"),
+    BAND_16_18("BAND_16_18", "16–18岁", "每日不超过2小时，按成年边界过渡");
+
+    companion object {
+        /** 未知值回落 8–12 岁档（覆盖大多数在管设备），与服务端口径一致 */
+        fun fromKey(key: String?): AgeBand =
+            entries.firstOrNull { it.key.equals(key?.trim(), ignoreCase = true) } ?: BAND_8_12
+
+        fun fromAge(age: Int): AgeBand = when {
+            age < 3 -> UNDER_3
+            age < 8 -> BAND_3_8
+            age < 12 -> BAND_8_12
+            age < 16 -> BAND_12_16
+            else -> BAND_16_18
+        }
+    }
+}
+
+/** 某一龄档的合规默认值 */
+data class AgeBandDefault(
+    val dailyLimitMinutes: Int = 60,
+    val continuousMinutes: Int = 30,
+    val restMinutes: Int = 10,
+    val curfewStart: String = "22:00",
+    val curfewEnd: String = "06:00"
+)
+
+/**
+ * 未成年人模式配置。
+ *
+ * 时长类字段为 0 表示"沿用档位默认值"，展示层要用 [AgeBandDefault] 补齐；
+ * 只有家长显式设置过的值才是非 0，这也是合规审计区分"产品默认"与"家长自定义"的依据。
+ */
+data class MinorMode(
+    val deviceId: String = "",
+    val enabled: Boolean = false,
+    val ageBand: AgeBand = AgeBand.BAND_8_12,
+    val curfewEnabled: Boolean = true,
+    val curfewStart: String = "22:00",
+    val curfewEnd: String = "06:00",
+    val dailyLimitMinutes: Int = 0,
+    val weekendLimitMinutes: Int = 0,
+    val continuousMinutes: Int = 0,
+    val restMinutes: Int = 0,
+    /** 家长临时豁免到期时间戳；0 = 无豁免 */
+    val parentExemptUntil: Long = 0L
+) {
+    val exemptActive: Boolean get() = parentExemptUntil > System.currentTimeMillis()
 }
 
 data class PolicyTemplate(

@@ -13,6 +13,7 @@ import com.padguard.server.dto.DeviceProfileRequest
 import com.padguard.server.dto.HeartbeatDto
 import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.DeviceRepository
+import com.padguard.server.repository.PolicyRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.Passwords
 import com.padguard.server.ws.WebSocketPushService
@@ -29,6 +30,7 @@ class DeviceService(
     private val webSocketPush: WebSocketPushService,
     private val mqttGateway: MqttGateway,
     private val userRepository: UserRepository,
+    private val policyRepository: PolicyRepository,
     @Value("\${padguard.device.token-ttl-days:30}") private val tokenTtlDays: Long
 ) {
 
@@ -197,9 +199,20 @@ class DeviceService(
      *
      * 心跳是孩子端唯一"必定周期性到达服务端"的通道，把策略版本搭在回执里，
      * 终端就能在漏掉策略推送时立刻自我纠偏，不必等下一次自检轮询。
+     *
+     * ## 为什么这里查 policies 表而不是读 `devices.policy_version`
+     * `devices.policy_version` 这一列**从来没有写入点** —— 策略保存分散在
+     * [PolicyService]（创建默认 / 改模式 / 未成年人模式）与 [PolicyExtensionService]
+     * （应用模板 / 子表重建）共五处，没有任何一处同步更新过这一列，它恒为 0。
+     * 而孩子端对账逻辑是 `ack.policyVersion > 0 && != local`，
+     * 0 会被直接跳过 —— 后果是：**MQTT 关闭时家长改的任何策略都不会下发到设备**，
+     * 表现为家长端显示"已开启未成年人模式"、平板上纹丝不动，且永不自愈。
+     *
+     * 修在读取侧而不是给五个写入点各补一行，是因为补写入点必然再次漏掉未来的新路径；
+     * 直接以 policies 表的最新版本号为唯一事实源，任何写入路径都自动生效。
      */
     fun policyVersionOf(deviceId: String): Int =
-        deviceRepository.findById(deviceId).map { it.policyVersion }.orElse(0)
+        policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)?.version ?: 0
 
     fun setOffline(deviceId: String) {
         deviceRepository.findById(deviceId).ifPresent { dev ->
@@ -328,7 +341,8 @@ class DeviceService(
         remoteLocked = remoteLocked ?: false,
         childName = childName,
         childNickname = childNickname,
-        childAvatar = childAvatar
+        childAvatar = childAvatar,
+        ageBand = ageBand
     )
 
     /**

@@ -403,6 +403,55 @@ data class TabletUsageSettingsDto(
     val syncToDevice: Boolean
 )
 
+// ==================== 未成年人模式（P1 合规底座） ====================
+
+/**
+ * 未成年人模式当前配置。
+ *
+ * 服务端返回的对象里，时长类字段 `0` 表示"沿用该档位的合规默认值"，
+ * 端上展示时要用 [AgeBandDefaultDto] 补齐，不能直接把 0 显示成"0 分钟"。
+ */
+@JsonClass(generateAdapter = true)
+data class MinorModeDto(
+    val enabled: Boolean = false,
+    val ageBand: String? = null,
+    val curfewEnabled: Boolean = true,
+    val curfewStart: String? = null,
+    val curfewEnd: String? = null,
+    val dailyLimitMinutes: Int = 0,
+    val weekendLimitMinutes: Int = 0,
+    val continuousMinutes: Int = 0,
+    val restMinutes: Int = 0,
+    val parentExemptUntil: Long = 0L,
+    val requireParentAuthToExit: Boolean = true
+)
+
+/** 一键设置未成年人模式。除 enabled / ageBand 外全部可空 = 沿用档位默认值。 */
+@JsonClass(generateAdapter = true)
+data class MinorModeRequestDto(
+    val enabled: Boolean = true,
+    val ageBand: String? = null,
+    val curfewEnabled: Boolean? = null,
+    val curfewStart: String? = null,
+    val curfewEnd: String? = null,
+    val dailyLimitMinutes: Int? = null,
+    val weekendLimitMinutes: Int? = null,
+    val continuousMinutes: Int? = null,
+    val restMinutes: Int? = null,
+    /** >0 时按当前时间累加写入豁免到期时间；只压过宵禁与护眼，不动每日总额度 */
+    val exemptMinutes: Int? = null
+)
+
+/** 某一龄档的合规默认值，家长端在选档界面直接展示"开启后会发生什么" */
+@JsonClass(generateAdapter = true)
+data class AgeBandDefaultDto(
+    val dailyLimitMinutes: Int = 60,
+    val continuousMinutes: Int = 30,
+    val restMinutes: Int = 10,
+    val curfewStart: String = "22:00",
+    val curfewEnd: String = "06:00"
+)
+
 // ==================== 统计相关 DTO ====================
 
 @JsonClass(generateAdapter = true)
