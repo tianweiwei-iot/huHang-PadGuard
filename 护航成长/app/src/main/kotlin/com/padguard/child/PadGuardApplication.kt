@@ -1,6 +1,7 @@
 package com.padguard.child
 
 import android.app.Application
+import com.padguard.core.engine.enforcer.setInstalledPackagesProvider
 import dagger.hilt.android.HiltAndroidApp
 
 /**
@@ -17,6 +18,27 @@ class PadGuardApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         AppForeground.install(this)
+        installAppCategoryProvider()
+    }
+
+    /**
+     * 给内容分类管控注入"已安装应用清单"。
+     *
+     * 未成年人模式要按龄档禁掉游戏 / 短视频 / 直播 / 陌生人社交，
+     * 规则落到设备上最终必须是**包名**。分类目录只收录了常见应用，
+     * 孩子新装的一个冷门游戏不在目录里，就得靠这里实时查到的清单补上。
+     *
+     * 每次调用现查而不是启动时缓存一份：孩子随时可能装新应用，
+     * 缓存会让"刚装的游戏"在下次重启前一直不受管控。
+     * 查询走 `MATCH_UNINSTALLED_PACKAGES` 之外的默认集合即可 ——
+     * 已卸载的应用本来也不需要管控。
+     */
+    private fun installAppCategoryProvider() {
+        setInstalledPackagesProvider {
+            runCatching {
+                packageManager.getInstalledPackages(0).map { it.packageName }.toSet()
+            }.getOrDefault(emptySet())
+        }
     }
 }
 

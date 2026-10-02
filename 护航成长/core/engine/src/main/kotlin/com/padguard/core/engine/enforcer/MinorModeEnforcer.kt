@@ -31,6 +31,21 @@ import javax.inject.Singleton
  * 因此宵禁由本类独立判定，与家长时段规则互不干扰；
  * 需要展示时由 [curfewRuleOf] 现算一条规则，不落进策略包。
  */
+/**
+ * 已安装应用清单的提供者。
+ *
+ * 内容分类管控要把"禁游戏"这条规则落成具体的包名，就得知道设备上装了什么。
+ * 但 [MinorModeEnforcer] 在 core/engine，拿不到 PackageManager，
+ * 也不该为了一个查询把 Android 依赖拖进引擎层。
+ * 因此由 app 层在启动时注入一个提供者；没注入时退化为只用分类目录内的已知包名
+ * （仍能拦住常见应用，只是拦不住目录没收录的新应用）。
+ */
+private var installedPackagesProvider: (() -> Set<String>)? = null
+
+fun setInstalledPackagesProvider(provider: (() -> Set<String>)?) {
+    installedPackagesProvider = provider
+}
+
 @Singleton
 class MinorModeEnforcer @Inject constructor(
     private val timeProvider: TimeProvider
@@ -54,22 +69,12 @@ class MinorModeEnforcer @Inject constructor(
 
         val now = LocalDateTime.ofInstant(Instant.ofEpochMilli(atMillis), ZoneId.systemDefault())
         val nowMinutes = now.hour * 60 + now.minute
+        // 区间判定复用 [MinorModePolicy.isCurfewAt]：首页与锁机判定共用同一份口径，
+        // 避免"首页显示可用、设备却锁着"这种自相矛盾。
+        if (!minorMode.isCurfewAt(nowMinutes)) return MinorModeVerdict.Active
+
         val start = ScheduleRule.toMinutes(minorMode.effectiveCurfewStart())
         val end = ScheduleRule.toMinutes(minorMode.effectiveCurfewEnd())
-
-        val inCurfew = if (start == end) {
-            // 起止相同视为全天宵禁（异常配置，按最严格处理）
-            true
-        } else if (end <= start) {
-            // 跨零点：22:00–06:00 → 今夜段 [22:00,24:00) 或 凌晨段 [00:00,06:00)
-            nowMinutes >= start || nowMinutes < end
-        } else {
-            // 同一天内的区间（如 01:00–05:00），按普通区间处理
-            nowMinutes >= start && nowMinutes < end
-        }
-
-        if (!inCurfew) return MinorModeVerdict.Active
-
         val endDateTime = if (end <= start && nowMinutes >= start) {
             now.toLocalDate().plusDays(1).atTime(end / 60, end % 60)
         } else {
@@ -91,20 +96,26 @@ class MinorModeEnforcer @Inject constructor(
      * 只在 [MinorModePolicy.enabled] 为真时改写；关闭时原样返回，
      * 保证"退出未成年人模式"能干净地回到家长自定义配置，不留残留限制。
      */
-    fun deriveBaseline(policy: PolicyPackage): PolicyPackage {
+    fun deriveBaseline(
+        policy: PolicyPackage,
+        installedPackages: Set<String> = installedPackagesProvider?.invoke().orEmpty()
+    ): PolicyPackage {
         val minor = policy.minorMode
         if (!minor.enabled) return policy
 
         val appLimit = minor.coerceAppLimit(policy.appLimit)
         val eyeCare = minor.coerceEyeCare(policy.eyeCare)
+        val app = minor.coerceAppPolicy(policy.app, installedPackages)
+        val categories = minor.blockedCategories()
 
         Logger.i(TAG) {
             "minor mode ON: band=${minor.ageBand.label}, " +
                 "daily=${appLimit.quotaFor(false)}min, weekend=${appLimit.quotaFor(true)}min, " +
                 "continuous=${eyeCare.continuousMinutes}min/rest=${eyeCare.restMinutes}min, " +
-                "curfew=${minor.effectiveCurfewStart()}-${minor.effectiveCurfewEnd()}"
+                "curfew=${minor.effectiveCurfewStart()}-${minor.effectiveCurfewEnd()}, " +
+                "blockedCategories=${categories.joinToString(",") { it.label }.ifEmpty { "无" }}"
         }
-        return policy.copy(appLimit = appLimit, eyeCare = eyeCare)
+        return policy.copy(appLimit = appLimit, eyeCare = eyeCare, app = app)
     }
 
     /**

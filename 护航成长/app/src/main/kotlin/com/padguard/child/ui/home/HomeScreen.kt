@@ -20,8 +20,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.ChildCare
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -92,6 +96,9 @@ private fun HomeContent(
                 statusLabel = state.statusLabel,
                 isOnline = state.isOnline
             )
+            // 放在「今日使用」正上方：额度是按分龄档位算出来的，
+            // 先看到"为什么是这个额度"，再看额度本身，孩子才不会觉得数字是随机的。
+            MinorModeBanner(state.minorMode)
             TodayUsageCard(
                 usedMinutes = state.usedMinutes,
                 quotaMinutes = state.quotaMinutes,
@@ -184,6 +191,67 @@ private fun StatusPill(label: String, isOnline: Boolean) {
             style = MaterialTheme.typography.labelMedium,
             color = Color.White
         )
+    }
+}
+
+/**
+ * 未成年人模式提示条。
+ *
+ * 只在模式开启时出现（未开启时整个组件不占位，避免首页多一条"未开启"的噪音）。
+ * 文案刻意说清三件事：档位、宵禁区间、现在是不是在宵禁里 ——
+ * 孩子被锁屏时如果首页什么都没提示，第一反应是"应用坏了"而不是"到睡觉时间了"。
+ */
+@Composable
+private fun MinorModeBanner(minorMode: MinorModeUi) {
+    val enabled = minorMode as? MinorModeUi.Enabled ?: return
+    val inCurfew = enabled.inCurfew && enabled.exemptRemainingMinutes <= 0
+    val containerColor = when {
+        inCurfew -> MaterialTheme.colorScheme.errorContainer
+        enabled.exemptRemainingMinutes > 0 -> MaterialTheme.colorScheme.tertiaryContainer
+        else -> MaterialTheme.colorScheme.secondaryContainer
+    }
+    val contentColor = when {
+        inCurfew -> MaterialTheme.colorScheme.onErrorContainer
+        enabled.exemptRemainingMinutes > 0 -> MaterialTheme.colorScheme.onTertiaryContainer
+        else -> MaterialTheme.colorScheme.onSecondaryContainer
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = containerColor)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = if (inCurfew) Icons.Default.Bedtime else Icons.Default.ChildCare,
+                contentDescription = null,
+                tint = contentColor,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "未成年人模式 · ${enabled.ageBandLabel}",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = contentColor
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = when {
+                        enabled.exemptRemainingMinutes > 0 ->
+                            "家长已临时放行，剩余约 ${enabled.exemptRemainingMinutes} 分钟（今日额度仍照常计算）"
+                        inCurfew -> "夜间休息时段 ${enabled.curfewRange}，暂不提供服务"
+                        else -> "夜间休息时段 ${enabled.curfewRange}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = contentColor.copy(alpha = 0.85f)
+                )
+            }
+        }
     }
 }
 

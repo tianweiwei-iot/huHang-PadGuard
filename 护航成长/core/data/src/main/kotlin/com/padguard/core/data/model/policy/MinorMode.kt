@@ -233,9 +233,52 @@ data class MinorModePolicy(
     /** 退出保护：服务端下发 false 也按 true 处理，避免配置错误开后门 */
     fun effectiveRequireParentAuth(): Boolean = true
 
+    /**
+     * 本档位应当被管控的内容类别。
+     *
+     * 取值来自 [AgeBand] 的 `allow*` 开关：不允许的类别即被管控。
+     * 只覆盖 [com.padguard.core.data.model.policy.AppCategory.sensitive] 的类别 ——
+     * 教育、工具这类永远不因"分龄"被禁，否则"开启未成年人模式"会等同于"只留网课"，
+     * 那是家长自己配白名单时才该发生的事。
+     */
+    fun blockedCategories(): Set<AppCategory> {
+        if (!enabled) return emptySet()
+        val out = mutableSetOf<AppCategory>()
+        if (!ageBand.allowGame) out += AppCategory.GAME
+        if (!ageBand.allowShortVideo) out += AppCategory.SHORT_VIDEO
+        if (!ageBand.allowLive) out += AppCategory.LIVE
+        if (!ageBand.allowSocial) out += AppCategory.SOCIAL
+        return out
+    }
+
     /** 当前是否处于家长豁免期（墙钟判定，豁免是"今晚"这类墙钟语义） */
     fun isExempt(nowMillis: Long): Boolean =
         parentExemptUntil > 0 && nowMillis < parentExemptUntil
+
+    /**
+     * 给定"当日分钟数"（0..1439）是否落在宵禁区间内。
+     *
+     * 抽成纯函数是为了让**首页与锁机判定共用同一份口径**：
+     * 首页如果另写一遍区间判断，一旦与 [com.padguard.core.engine.enforcer.MinorModeEnforcer]
+     * 的边界处理不一致（跨零点、起止相等），就会出现
+     * "首页显示可用、设备却锁着"这种自相矛盾的界面。
+     */
+    fun isCurfewAt(minutesOfDay: Int): Boolean {
+        if (!enabled || !curfewEnabled) return false
+        val start = ScheduleRule.toMinutes(effectiveCurfewStart())
+        val end = ScheduleRule.toMinutes(effectiveCurfewEnd())
+        return when {
+            start == end -> true // 起止相同视为全天宵禁（异常配置，按最严格处理）
+            end <= start -> minutesOfDay >= start || minutesOfDay < end // 跨零点
+            else -> minutesOfDay >= start && minutesOfDay < end
+        }
+    }
+
+    /** 综合豁免后的最终判定：首页与执行器都走这里，口径必然一致 */
+    fun curfewActiveAt(minutesOfDay: Int, nowMillis: Long): Boolean {
+        if (isExempt(nowMillis)) return false
+        return isCurfewAt(minutesOfDay)
+    }
 
     /**
      * 把分龄基线压到既有策略对象上。
@@ -264,6 +307,54 @@ data class MinorModePolicy(
             continuousMinutes = tighten(current.continuousMinutes, continuous),
             restMinutes = current.restMinutes.takeIf { it > 0 } ?: effectiveRestMinutes()
         )
+    }
+
+    /**
+     * 把本档位应管控的内容类别落成包名黑名单，并入家长已有的应用策略。
+     *
+     * ## 为什么是"并集"而不是"替换"
+     * 家长手工拉黑的某个应用（比如孩子沉迷的某一款特定游戏）必须保留：
+     * 若按类别整体替换，切一次档位就把家长的历史设置冲掉了，
+     * 表现为"我明明禁了这个应用，换个年龄段它又回来了"。
+     *
+     * ## 为什么同时动白名单
+     * 白名单模式的语义是"不在名单里的一律不可用"。若只加黑名单不动白名单，
+     * 白名单里那个游戏条目依然让孩子能打开它 —— 分类管控形同虚设。
+     * 因此白名单模式下改为**剔除**命中条目。
+     *
+     * @param installedPackages 设备上已安装的包名；用于把"类别"落成具体包名。
+     *   传入空集合时退化为只使用分类目录内的已知包名（仍能拦住常见应用）。
+     */
+    fun coerceAppPolicy(current: AppPolicy, installedPackages: Set<String> = emptySet()): AppPolicy {
+        if (!enabled) return current
+        val categories = blockedCategories()
+        if (categories.isEmpty()) return current
+
+        // 候选包名：目录内的已知包名 + 设备上已安装且命中类别的（覆盖目录没收录的新应用）
+        val candidates = (AppCategoryCatalog.packagesOf(AppCategory.GAME) +
+            AppCategoryCatalog.packagesOf(AppCategory.SHORT_VIDEO) +
+            AppCategoryCatalog.packagesOf(AppCategory.LIVE) +
+            AppCategoryCatalog.packagesOf(AppCategory.SOCIAL) +
+            installedPackages).toSet()
+
+        val blocked = candidates.filter { pkg ->
+            AppCategoryCatalog.categoryOf(pkg) in categories
+        }.toSet()
+
+        if (blocked.isEmpty()) return current
+
+        return when (current.mode) {
+            AppListMode.BLACKLIST -> current.copy(
+                blacklist = (current.blacklist + blocked).distinct(),
+                // 白名单同时清掉：否则黑名单模式下虽然用不到白名单，
+                // 但家长哪天切成白名单模式，这些应用又会立刻放行。
+                whitelist = current.whitelist.filterNot { it in blocked }
+            )
+            AppListMode.WHITELIST -> current.copy(
+                whitelist = current.whitelist.filterNot { it in blocked },
+                blacklist = (current.blacklist + blocked).distinct()
+            )
+        }
     }
 
     /** 取值：已有值且更严则保留，否则用基线；0 视为"未设置" */

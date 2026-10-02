@@ -79,7 +79,7 @@ class AppPolicyEnforcer @Inject constructor(
         // 家长刚同意放行、应用几分钟后又被管控 —— 与"单应用拦截页不认放行"
         // 是同一类"同意了却没生效"。到期后 isTempUnlockActive 转 false，下一轮自动纳回。
         val installedTarget = target
-            .filter { isInstalled(it) }
+            .filter { isPresentOnDevice(it) }
             .filterNot { lockController.isTempUnlockActive(it) }
             .toSet()
 
@@ -317,6 +317,28 @@ class AppPolicyEnforcer @Inject constructor(
         }
 
         return set
+    }
+
+    /**
+     * 该包是否存在于设备上（**含"被本应用隐藏"的情况**）。
+     *
+     * ## 为什么不能只用 [isInstalled]
+     * Device Owner 隐藏应用后，`getApplicationInfo` 会抛 NameNotFoundException，
+     * [isInstalled] 返回 false。于是每一轮自检都会上演同一个循环：
+     *   本轮隐藏成功 → 下一轮判定"未安装" → 被排除出 `installedTarget`
+     *   → 落到 `toUnhide` 被取消隐藏 → 再下一轮又能查到 → 又被隐藏。
+     * 现场表现是**桌面图标时隐时现**，家长端看起来就是
+     * "应用管控时好时坏 / 明明禁了却还能打开" —— 这正是"应用管控没生效"投诉的一条真实成因。
+     *
+     * 因此这里额外认"被我们自己隐藏且当前确实处于隐藏态"的包：它只是被管控藏起来了，
+     * 不是没装，必须继续留在管控目标里，否则隐藏态永远稳不下来。
+     *
+     * 判定顺序刻意让 [isInstalled] 在前：绝大多数包（未隐藏的）一次命中就返回，
+     * 只有少数被隐藏的包才需要多查一次 DPM 记账。
+     */
+    private fun isPresentOnDevice(packageName: String): Boolean {
+        if (isInstalled(packageName)) return true
+        return packageName in admin.hiddenPackages() && admin.isApplicationHidden(packageName)
     }
 
     private fun isInstalled(packageName: String): Boolean = runCatching {

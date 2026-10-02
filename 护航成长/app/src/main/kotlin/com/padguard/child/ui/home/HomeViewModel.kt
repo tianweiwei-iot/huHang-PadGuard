@@ -8,6 +8,7 @@ import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.data.repository.UsageRepository
 import com.padguard.core.data.model.policy.AppLimitRule
 import com.padguard.core.data.model.policy.AppLimitPolicy
+import com.padguard.core.data.model.policy.MinorModePolicy
 import com.padguard.core.data.model.policy.SchedulePolicy
 import com.padguard.core.data.model.policy.ScheduleRule
 import com.padguard.core.data.model.policy.ScheduleAction
@@ -58,15 +59,26 @@ class HomeViewModel @Inject constructor(
                 policyRepository.observePolicy(),
                 usageRepository.observeTodayUsageMinutes(),
                 logRepository.observeRecentBlocks(limit = 5)
-            ) { studentName, policy, usedMinutes, blocks ->
+            ) { studentName, rawPolicy, usedMinutes, blocks ->
                 val nowMillis = timeProvider.now()
-                // 额度必须与锁机判定取同一档位（工作日 / 周末），
-                // 否则首页显示的"剩余时长"和实际锁屏时机对不上。
-                val dailyQuota = policy.appLimit.quotaFor(isWeekend(nowMillis, policyZone(policy.schedule)))
-                val remaining = (dailyQuota - usedMinutes).coerceAtLeast(0)
                 // 时间轴是「策略时区」的一天：游标、读数、时段判定必须同一时区，
                 // 否则会出现“图例说进行中、游标却停在别处”的自相矛盾
-                val zone = policyZone(policy.schedule)
+                val zone = policyZone(rawPolicy.schedule)
+                val nowMinutes = minutesOfDay(nowMillis, zone)
+
+                // 未成年人模式开启时，首页显示的额度**必须走分龄派生后的值**。
+                // 直接用 policy.appLimit 会显示家长旧配置（如 120 分钟），
+                // 而实际锁机按分龄基线（60 分钟）执行 ——
+                // 表现为"首页还剩 80 分钟，设备却已经锁了"。
+                val policy = rawPolicy.copy(
+                    appLimit = rawPolicy.minorMode.coerceAppLimit(rawPolicy.appLimit)
+                )
+
+                // 额度必须与锁机判定取同一档位（工作日 / 周末），
+                // 否则首页显示的"剩余时长"和实际锁屏时机对不上。
+                val dailyQuota = policy.appLimit.quotaFor(isWeekend(nowMillis, zone))
+                val remaining = (dailyQuota - usedMinutes).coerceAtLeast(0)
+
                 HomeUiState(
                     studentName = studentName,
                     statusLabel = "在线",
@@ -75,8 +87,9 @@ class HomeViewModel @Inject constructor(
                     quotaMinutes = dailyQuota,
                     remainingMinutes = remaining,
                     nowLabel = formatNow(nowMillis, zone),
-                    nowMinutes = minutesOfDay(nowMillis, zone),
+                    nowMinutes = nowMinutes,
                     scheduleItems = buildScheduleSlots(policy.schedule, nowMillis, zone),
+                    minorMode = buildMinorModeUi(policy.minorMode, nowMinutes, nowMillis),
                     recentBlocks = blocks.map {
                         RecentBlockUi(
                             appName = it.summary,
@@ -128,6 +141,32 @@ class HomeViewModel @Inject constructor(
             }
     }
 
+    /**
+     * 未成年人模式在首页的展示态。
+     *
+     * 这里刻意**不**只显示"已开启"，而是把三件孩子真正需要知道的事说清楚：
+     * 档位（为什么是这个额度）、宵禁区间、以及现在是不是就在宵禁里。
+     * 只给一个开关态的话，孩子被锁屏时看到的锁屏页文案和首页对不上，
+     * 第一反应是"应用坏了"而不是"到睡觉时间了"。
+     */
+    private fun buildMinorModeUi(
+        minorMode: MinorModePolicy,
+        nowMinutes: Int,
+        nowMillis: Long
+    ): MinorModeUi {
+        if (!minorMode.enabled) return MinorModeUi.Disabled
+        val inCurfew = minorMode.curfewActiveAt(nowMinutes, nowMillis)
+        return MinorModeUi.Enabled(
+            ageBandLabel = minorMode.ageBand.label,
+            curfewRange = "${minorMode.effectiveCurfewStart()} – ${minorMode.effectiveCurfewEnd()}",
+            inCurfew = inCurfew,
+            // 豁免期是家长临时给的，孩子应该看得到还剩多久，
+            // 否则"明明在宵禁里却能玩"会让他以为管控失效、下次继续硬闯。
+            exemptRemainingMinutes = minorMode.parentExemptUntil.takeIf { it > nowMillis }
+                ?.let { ((it - nowMillis) / 60_000L).toInt() + 1 } ?: 0
+        )
+    }
+
     private fun isCurrentSlot(rule: ScheduleRule, nowMinutes: Int): Boolean {
         val start = rule.startMinutes()
         val end = rule.endMinutes()
@@ -174,8 +213,25 @@ data class HomeUiState(
     /** 当前时刻的当天分钟数（0..1439），供时间轴游标定位；-1 表示未知 */
     val nowMinutes: Int = -1,
     val scheduleItems: List<ScheduleSlotUi> = emptyList(),
+    /** 未成年人模式展示态；未开启时为 [MinorModeUi.Disabled] */
+    val minorMode: MinorModeUi = MinorModeUi.Disabled,
     val recentBlocks: List<RecentBlockUi> = emptyList()
 )
+
+/** 未成年人模式在首页的展示态 */
+sealed interface MinorModeUi {
+    data object Disabled : MinorModeUi
+
+    data class Enabled(
+        val ageBandLabel: String,
+        /** 宵禁区间文案，如 "22:00 – 06:00" */
+        val curfewRange: String,
+        /** 当前是否正处于宵禁 */
+        val inCurfew: Boolean,
+        /** 家长豁免剩余分钟数；0 表示无豁免 */
+        val exemptRemainingMinutes: Int = 0
+    ) : MinorModeUi
+}
 
 data class ScheduleSlotUi(
     val timeRange: String,
