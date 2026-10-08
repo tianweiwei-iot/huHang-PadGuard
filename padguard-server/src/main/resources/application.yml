@@ -41,15 +41,50 @@ spring:
     multipart:
       max-file-size: 200MB
       max-request-size: 200MB
+  mvc:
+    async:
+      # 实时看屏 /v1/stream/{deviceId}/live 是长时间挂起、持续推帧的流。
+      # Spring MVC 异步请求默认 30s 超时，会在画面正常推送时把连接掐断，
+      # 表现为家长端每 30 秒闪一次"连接中"、观感就是"实时屏幕总断开"。
+      # 调大到 10 分钟；流本身另有"设备 30s 无帧即收流"的自保护（见 ParentStreamController
+      # 的 MAX_IDLE_MS），因此不会导致连接永久悬挂。
+      request-timeout: 600000
 
 padguard:
   jwt:
-    # 生产环境务必替换为 >=32 字节的强密钥，并通过环境变量注入
-    secret: "padguard-dev-secret-key-please-change-in-production-32b"
+    # 留空 = 首次启动自动生成随机密钥并写入 config/jwt-secret.txt（不进安装包，每次部署不同）。
+    # 多实例部署时必须显式指定（建议用环境变量 PADGUARD_JWT_SECRET 注入），
+    # 否则每个实例各自生成，token 无法跨实例校验。
+    secret: ""
     access-ttl-minutes: 120
     refresh-ttl-days: 30
+  auth:
+    # 短信登录未接入短信服务商（发码是假的、验证码也不校验），开启等于留一条免密入口。
+    # 真正接入服务商后才可置为 true。
+    sms-login-enabled: false
   device:
     token-ttl-days: 30
+  billing:
+    # ---- 免费试用 ----
+    # 新用户（及升级前已存在的存量账号）自动获得试用，避免一升级就被锁死。
+    trial-days: 1
+    trial-devices: 3
+    # ---- 价格（单位：分；运营调价改这里即可，不需要改代码发版）----
+    # 定价参考国内同类 C 端家长管控（年卡 198~368 元）；
+    # 年卡折合 ¥24.8/月，约为月卡 65%，与主流年付折扣区间一致。
+    price:
+      monthly: 3800      # ¥38
+      quarterly: 9800    # ¥98（折合 ¥32.7/月）
+      yearly: 29800      # ¥298（折合 ¥24.8/月）
+    # ---- 各套餐可绑定设备数 ----
+    devices:
+      monthly: 3
+      quarterly: 3
+      yearly: 5
+    # ---- 下单后支付超时（分钟），超时订单自动关闭 ----
+    pay-timeout-minutes: 30
+    # ---- 模拟支付：仅开发/联调用，生产必须 false，否则任何人可免费续费 ----
+    mock-pay-enabled: false
   mqtt:
     # 本地免 Docker 运行时设为 false（见 local profile），避免强连 EMQX 导致启动失败
     enabled: true
@@ -88,7 +123,9 @@ spring:
     activate:
       on-profile: local
   datasource:
-    url: "jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE"
+    # 不要加 AUTO_SERVER=TRUE：发布包内置的 H2 缺少 NetworkConnectionInfo 类，
+    # 启用该模式会在启动阶段直接中止（表现为服务端起不来且日志停在 H2 初始化）。
+    url: "jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE"
     username: "sa"
     password: ""
     driver-class-name: org.h2.Driver
@@ -122,7 +159,7 @@ spring:
     activate:
       on-profile: home
   datasource:
-    url: "jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE"
+    url: "jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE"
     username: "sa"
     password: ""
     driver-class-name: org.h2.Driver
@@ -141,8 +178,9 @@ spring:
 
 padguard:
   jwt:
-    # 家庭局域网部署密钥；联网正式使用时请更换
-    secret: "padguard-home-deploy-secret-key-2026-please-change-32b"
+    # 留空 = 首次启动自动生成随机密钥并写入 config/jwt-secret.txt。
+    # 绝不在这里写死：密钥随安装包分发的话，任何人都能自己签发 token 冒充家长登录。
+    secret: ""
   mqtt:
     # 家庭部署包内置 Mosquitto Broker（随服务端启动脚本拉起，监听 0.0.0.0:1883）。
     # 服务端本机回环连接；孩子端平板通过局域网 IP:1883 连接。

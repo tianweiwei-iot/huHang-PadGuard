@@ -148,6 +148,14 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
                     Spacer(modifier = Modifier.height(4.dp))
                     var minutes by remember(uiState.dailyLimitMinutes) { mutableIntStateOf(uiState.dailyLimitMinutes) }
                     Text("${TimeFormat.formatDurationFromMinutes(minutes)} / 天", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                    if (uiState.minorMode?.enabled == true) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "未成年人模式开启时，仍以你在此设置的使用时长为准（家长可自由设置，含高于分龄上限）；仅当你未设置时回落分龄合规基线作为兜底。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
                     Slider(
                         value = minutes.toFloat(),
                         onValueChange = { minutes = it.toInt() },

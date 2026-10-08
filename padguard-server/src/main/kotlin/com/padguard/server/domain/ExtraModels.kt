@@ -19,11 +19,29 @@ class UploadedFile(
     @Column(name = "content_type") var contentType: String = "",
     @Column(name = "stored_path") var storedPath: String = "",
     var size: Long = 0,
-    @Column(name = "created_at") var createdAt: Long = 0
+    @Column(name = "created_at") var createdAt: Long = 0,
+    /**
+     * 归属：家长上传者的 userId（媒体上传、APK 分发、统计导出）。
+     *
+     * 文件下载路径为了让**孩子端**能取到家长发布的素材而整体放开了鉴权，
+     * 于是这段路径上的儿童截图、录屏、家长导出的报表变成"拿到 id 即可下载"。
+     * 记下归属后，带凭证的请求就能精确校验：别人的文件即使拿到 id 也打不开。
+     * 可空：历史数据没有归属，仍按"能力 URL"放行（见 FilesController 的判定）。
+     */
+    @Column(name = "owner_user_id") var ownerUserId: String? = null,
+    /** 归属：孩子端上报文件所属的设备（截图 / 录音 / 录屏 / 头像）。同理用于下载校验。 */
+    @Column(name = "device_id") var deviceId: String? = null
 )
 
 @Entity
-@Table(name = "screenshots")
+// 远程截图回执按 (device_id, shot_id) 精确回查，是截图链路每次都要走的点查。
+@Table(
+    name = "screenshots",
+    indexes = [
+        Index(name = "idx_screenshots_device_id", columnList = "device_id, captured_at"),
+        Index(name = "idx_screenshots_device_shot", columnList = "device_id, shot_id")
+    ]
+)
 class Screenshot(
     @Id var id: String = "",
     @Column(name = "device_id") var deviceId: String = "",
@@ -52,7 +70,16 @@ class LocationTrack(
 )
 
 @Entity
-@Table(name = "alerts")
+// 家长端告警列表按「用户 + 设备 + 状态」过滤。缺复合索引时只能在内存里
+// 先捞出该用户全部告警再 filter deviceId，数据一多就是全表扫描。
+@Table(
+    name = "alerts",
+    indexes = [
+        Index(name = "idx_alerts_device_id", columnList = "device_id"),
+        Index(name = "idx_alerts_user_status", columnList = "user_id, status"),
+        Index(name = "idx_alerts_user_device_status", columnList = "user_id, device_id, status")
+    ]
+)
 class Alert(
     @Id var id: String = "",
     @Column(name = "device_id") var deviceId: String = "",
@@ -147,7 +174,47 @@ class DeviceSetting(
     @Column(name = "smart_shutdown_start") var smartShutdownStart: String? = null,
     @Column(name = "smart_shutdown_end") var smartShutdownEnd: String? = null,
     @Column(name = "daily_limit_minutes") var dailyLimitMinutes: Int = 120,
+    /**
+     * 护眼模式：是否启用。
+     *
+     * 孩子端以悬浮滤镜的方式实现（一层暖色半透明遮罩），不依赖任何 Device Owner 能力 ——
+     * 本项目绝大多数设备跑在没有 DO 的降级态，只能走这条路。
+     */
+    @Column(name = "eye_protection_enabled") var eyeProtectionEnabled: Boolean = false,
+    /** 滤镜强度 1~5：1 近乎无感，5 最暖最暗。越界值由服务层夹到范围内。 */
+    @Column(name = "eye_protection_level") var eyeProtectionLevel: Int = 3,
+    /**
+     * 应用名单模式：BLACKLIST（只管名单内的）/ WHITELIST（只放行名单内的）。
+     *
+     * 之前 [PolicyExtensionService.rebuildPolicy] 把 mode 硬编码成 BLACKLIST，
+     * 家长端即使选了白名单也下发不出去 —— 白名单模式形同虚设。
+     * 可空 + null 视为 BLACKLIST：存量行为 NULL 时保持原有黑名单语义，不改变既有行为。
+     */
+    @Column(name = "app_list_mode") var appListMode: String? = "BLACKLIST",
+    /**
+     * 非 DO 设备上，打开受管控应用是否要求输入管理密码。
+     *
+     * 只在**无 Device Owner** 时有意义：有 DO 时管控由系统完成（隐藏/挂起），
+     * 根本走不到"打开"这一步；无 DO 时由无障碍服务在启动受管控应用时要求密码。
+     * 默认 false —— 白名单模式下每开一个应用都输密码对多数家庭过重，是否开启由家长决定。
+     */
+    @Column(name = "require_password_on_launch") var requirePasswordOnLaunch: Boolean? = false,
     @Column(name = "web_blocked_urls", columnDefinition = "text") var webBlockedUrls: String? = null,
+    /**
+     * 内容管控：搜索引擎强制安全搜索（P2）。
+     * 开启后策略包下发 `web.safeSearch=true`，孩子端对主流搜索引擎注入 safe 参数。
+     * 默认值 false（不强制），由家长在「上网管控」页开启。
+     */
+    // 可空 Boolean?：存量行（迁移/加列前创建）该列不存在或为 NULL，Hibernate 会把缺失列读成 NULL，
+    // 若声明成原始类型 boolean 会在读取时直接抛
+    // "Null value was assigned to a property of primitive type" —— 所有依赖 deviceSettingOf 的接口（时间管控、
+    // 上网管控、策略包重建）全部 500，孩子端因此拿不到策略包。写法与同类 systemLockRelaxed 保持一致。
+    @Column(name = "web_safe_search") var webSafeSearch: Boolean? = false,
+    /**
+     * 内容管控：按分类屏蔽（P2）。逗号分隔的 url_categories.id 列表。
+     * 命中这些分类的网址在设备端被拦截。空表示不按分类屏蔽。
+     */
+    @Column(name = "web_blocked_categories", columnDefinition = "text") var webBlockedCategories: String? = null,
     // ---- 平板使用时间设置（家长端「时间管控」页，GET/PUT policies/{deviceId}/tablet-usage-settings）----
     /** 启用时间管控总开关：false 时孩子端不按时长/时段执行管控。缺省为 true（存量行迁移后默认开启）。 */
     @Column(name = "time_control_enabled") var timeControlEnabled: Boolean = true,
@@ -174,7 +241,18 @@ class DeviceSetting(
     // 可空 Boolean?：存量行在加列前不存在该列，Hibernate 把缺失列读成 NULL，
     // 声明成原始类型 boolean 会在读取时直接抛
     // "Null value was assigned to a property of primitive type" —— 整个策略接口 500。
-    @Column(name = "system_lock_relaxed") var systemLockRelaxed: Boolean? = false
+    @Column(name = "system_lock_relaxed") var systemLockRelaxed: Boolean? = false,
+    /**
+     * 非 DO 设备：安装 / 卸载确认页是否要求管理密码（无障碍软拦截）。
+     *
+     * 只在**无 Device Owner** 时有意义：有 DO 时安装/卸载由系统限制（DISALLOW_INSTALL_APPS 等）管控，
+     * 根本走不到「确认页」这一步；无 DO 时由无障碍服务在检测到进入 packageinstaller 确认页时弹密码框并顶回。
+     * 默认 true —— 安装/卸载默认需要密码（核心安全能力），家长可在「应用管理」页关闭。
+     * 注意：与同表的 [requirePasswordOnLaunch] 一样，仅当家长已设置「设备操作密码」时该闸门才会真正生效
+     * （孩子端 [GuardPasswordManager.isEnabledNow] 为 false 时一律放行）。
+     */
+    @Column(name = "require_password_on_install") var requirePasswordOnInstall: Boolean? = true,
+    @Column(name = "require_password_on_uninstall") var requirePasswordOnUninstall: Boolean? = true
 )
 
 @Entity
@@ -202,7 +280,8 @@ class PolicyTemplate(
 @Entity
 @Table(
     name = "installed_apps",
-    uniqueConstraints = [UniqueConstraint(columnNames = ["device_id", "package_name"])]
+    uniqueConstraints = [UniqueConstraint(columnNames = ["device_id", "package_name"])],
+    indexes = [Index(name = "idx_installed_apps_device", columnList = "device_id, installed")]
 )
 class InstalledApp(
     @Id var id: String = "",
@@ -253,4 +332,62 @@ class MediaTask(
     @Column(name = "duration_seconds") var durationSeconds: Int? = null,
     @Column(name = "started_at") var startedAt: Long = 0,
     @Column(name = "finished_at") var finishedAt: Long? = null
+)
+
+/**
+ * 审计日志（P4-5）：记录"谁在何时对哪台设备做了什么"。
+ *
+ * 触发点覆盖绑定/解绑、策略变更、解锁审批、指令下发等关键操作，作为合规追溯与责任界定的底座。
+ * 写入采用独立事务（REQUIRES_NEW），且记录失败不影响主业务流程（由 [com.padguard.server.service.AuditService] 兜底）。
+ */
+@Entity
+// 审计日志只增不删，是增长最快的表之一；家长端按「用户/设备 + 时间倒序」分页查询，
+// 必须走 (device_id, created_at) / (user_id, created_at) 索引，否则每次翻页都全表捞。
+@Table(
+    name = "audit_logs",
+    indexes = [
+        Index(name = "idx_audit_logs_user", columnList = "user_id, created_at"),
+        Index(name = "idx_audit_logs_device", columnList = "device_id, created_at")
+    ]
+)
+class AuditLog(
+    @Id var id: String = "",
+    @Column(name = "user_id") var userId: String? = null,
+    @Column(name = "device_id") var deviceId: String? = null,
+    @Column(name = "action") var action: String = "",
+    @Column(name = "target_type") var targetType: String? = null,
+    @Column(name = "target_id") var targetId: String? = null,
+    @Column(name = "detail", columnDefinition = "text") var detail: String? = null,
+    @Column(name = "result") var result: String = "SUCCESS",
+    @Column(name = "ip") var ip: String? = null,
+    @Column(name = "created_at") var createdAt: Long = 0
+)
+
+/**
+ * 网址分类库（P2）。本地库 + 云端分类 API 的落库缓存。
+ * 风险等级 risk_level：LOW / MEDIUM / HIGH；blocked_by_default 表示命中即默认拦截（如黄赌毒）。
+ */
+@Entity
+@Table(name = "url_categories")
+class UrlCategory(
+    @Id var id: String = "",
+    var name: String = "",
+    @Column(name = "description", columnDefinition = "text") var description: String? = null,
+    @Column(name = "risk_level") var riskLevel: String = "MEDIUM",
+    @Column(name = "blocked_by_default") var blockedByDefault: Boolean = false,
+    @Column(name = "created_at") var createdAt: Long = 0
+)
+
+/**
+ * 敏感词库（P2）。文本鉴黄/涉赌/暴力/诈骗等的本地词典，作为云端 AI 识别的本地兜底。
+ * 命中后生成告警（涉密内容只告警、不全文展示）。
+ */
+@Entity
+@Table(name = "sensitive_words")
+class SensitiveWord(
+    @Id var id: String = "",
+    @Column(name = "word") var word: String = "",
+    @Column(name = "category") var category: String = "PORN",
+    @Column(name = "level") var level: String = "HIGH",
+    @Column(name = "created_at") var createdAt: Long = 0
 )

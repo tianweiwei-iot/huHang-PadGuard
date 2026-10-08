@@ -43,6 +43,17 @@ class ServerPrefs @Inject constructor(
         _baseUrl.value = normalized
     }
 
+    /**
+     * 恢复编译期默认地址（[BuildConfig.BASE_URL]）。
+     *
+     * 手动填写的地址一旦写错（把端口填进地址栏、IP 少一位等），App 会彻底连不上，
+     * 而"连不上"时又没有任何界面能引导修正——所以必须给用户一个不依赖网络的回退路径。
+     */
+    fun resetToDefault() {
+        prefs.edit().remove(KEY_BASE_URL).apply()
+        _baseUrl.value = BuildConfig.BASE_URL
+    }
+
     companion object {
         private const val KEY_BASE_URL = "base_url"
     }

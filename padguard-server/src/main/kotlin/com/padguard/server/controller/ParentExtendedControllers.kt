@@ -25,6 +25,16 @@ class ParentMonitorController(
     fun location(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
         ApiResponse.ok(geofenceService.currentLocation(deviceId))
 
+    /**
+     * 家长点"立即定位"：下发 LOCATE 指令，让端上马上补采一次位置。
+     *
+     * 只下发指令、不返回结果 —— 定位是异步的，家长端随后用上面的 GET 拉最新位置。
+     * （端上若此刻在后台，会回执"等孩子使用时补传"，家长端据此展示提示。）
+     */
+    @PostMapping("/{deviceId}/locate")
+    fun locate(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+        ApiResponse.ok(monitorService.requestLocate(userId, deviceId))
+
     @PostMapping("/{deviceId}/photo")
     fun photo(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
         ApiResponse.ok(monitorService.requestPhoto(userId, deviceId))
@@ -121,6 +131,17 @@ class ParentPolicyExtendedController(private val policyExtensionService: PolicyE
     fun addTimeRestriction(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: TimeRestrictionDto) =
         ApiResponse.ok(policyExtensionService.addTimeRestriction(userId, deviceId, req))
 
+    /**
+     * 保存时段限制。家长端「时间管控」保存走的是 PUT，服务端原先只有 POST（新增）/ DELETE，
+     * 于是每次保存都打到不存在的端点上 —— 保存静默失败，页面看着像存上了其实没写库。
+     */
+    @PutMapping("/{deviceId}/time-restrictions")
+    fun setTimeRestriction(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: TimeRestrictionDto
+    ) = ApiResponse.ok(policyExtensionService.setTimeRestriction(userId, deviceId, req))
+
     @DeleteMapping("/time-restrictions/{id}")
     fun deleteTimeRestriction(@RequestAttribute("userId") userId: String, @RequestParam deviceId: String, @PathVariable id: String) =
         ApiResponse.ok<Any?>(run { policyExtensionService.deleteTimeRestriction(userId, deviceId, id); null })
@@ -132,6 +153,38 @@ class ParentPolicyExtendedController(private val policyExtensionService: PolicyE
     @PutMapping("/{deviceId}/apps/blacklist")
     fun appBlacklist(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: UpdateBlacklistRequest) =
         ApiResponse.ok<Any?>(run { policyExtensionService.setAppBlacklist(userId, deviceId, req); null })
+
+    /**
+     * 应用管控模式（白名单 / 黑名单）+ 启动拦截开关。
+     *
+     * 与 [appBlacklist] 分开而不是合并：名单内容频繁增删（点一下开关），
+     * 而模式是低频设置（切换一次影响所有应用的判定口径），分开后审计日志也更好读。
+     */
+    @PutMapping("/{deviceId}/apps/list-policy")
+    fun appListPolicy(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: AppListPolicyRequest) =
+        ApiResponse.ok<Any?>(run { policyExtensionService.setAppListPolicy(userId, deviceId, req); null })
+
+    @GetMapping("/{deviceId}/apps/list-policy")
+    fun getAppListPolicy(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+        ApiResponse.ok(policyExtensionService.getAppListPolicy(userId, deviceId))
+
+    /**
+     * 护眼模式。
+     *
+     * 此前家长端的护眼开关必定失败：服务端既无存储也无通道，只有一句 failure 占位。
+     * 现在落到 device_settings 并随策略包下发，孩子端以悬浮滤镜生效（无需 DO）。
+     * 用 PUT：这是"这台设备当前的护眼状态"的整体覆盖，不是追加一条记录。
+     */
+    @PutMapping("/{deviceId}/eye-protection")
+    fun setEyeProtection(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: com.padguard.server.dto.EyeProtectionRequest
+    ) = ApiResponse.ok(policyExtensionService.setEyeProtection(userId, deviceId, req))
+
+    @GetMapping("/{deviceId}/eye-protection")
+    fun getEyeProtection(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+        ApiResponse.ok(policyExtensionService.getEyeProtection(userId, deviceId))
 
     @PutMapping("/{deviceId}/apps/limit")
     fun appLimit(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: DailyLimitRequest) =
@@ -289,6 +342,20 @@ class ParentStatisticsController(private val statisticsService: StatisticsServic
     @GetMapping("/{deviceId}/export")
     fun export(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestParam(required = false, defaultValue = "monthly") period: String) =
         ApiResponse.ok(statisticsService.export(userId, deviceId, period))
+
+    /**
+     * 单应用使用历史（应用详情二级页）。
+     *
+     * 此前家长端点进"使用历史"必然报错：接口从未实现，只有一条 `Result.failure` 占位。
+     * 数据来自已有的用量日志，无需孩子端新增上报。
+     */
+    @GetMapping("/{deviceId}/app-usage/history")
+    fun appUsageHistory(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestParam packageName: String,
+        @RequestParam(required = false, defaultValue = "weekly") period: String
+    ) = ApiResponse.ok(statisticsService.appUsageHistory(userId, deviceId, packageName, period))
 }
 
 // ==================== 风险预警 ====================

@@ -41,12 +41,18 @@ import org.springframework.web.multipart.MultipartFile
  */
 @RestController
 @RequestMapping("/v1/files")
-class FilesController(private val fileStorageService: FileStorageService) {
+class FilesController(
+    private val fileStorageService: FileStorageService,
+    private val uploadedFileRepository: com.padguard.server.repository.UploadedFileRepository
+) {
 
     private val log = LoggerFactory.getLogger(FilesController::class.java)
 
     @GetMapping("/{id}")
-    fun get(@PathVariable id: String): ResponseEntity<Any> {
+    fun get(request: jakarta.servlet.http.HttpServletRequest, @PathVariable id: String): ResponseEntity<Any> {
+        val denied = ownershipDenied(request, id)
+        if (denied != null) return denied
+
         val resolved = fileStorageService.resolve(id)
         if (resolved == null) {
             log.warn("file not found: id=$id")
@@ -66,6 +72,40 @@ class FilesController(private val fileStorageService: FileStorageService) {
             .contentType(type)
             .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"${file.name}\"")
             .body(FileSystemResource(file))
+    }
+
+    /**
+     * 归属校验：凭证认得出身份时才拦，认不出则不拦（见 [com.padguard.server.security.FileAccessInterceptor]）。
+     *
+     * 三条放行规则，缺一都会造成回归：
+     * 1. 文件没有归属记录（本次改造之前上传的历史数据）→ 放行，否则老截图会集体打不开；
+     * 2. 请求没带任何可识别凭证（孩子端图片库加载 URL）→ 放行，否则素材图全 404；
+     * 3. 归属匹配 → 放行。
+     * 除此之外一律 403：家长不能下载别人家设备的截图，别的设备也不能拿走本机的录音录屏。
+     */
+    private fun ownershipDenied(
+        request: jakarta.servlet.http.HttpServletRequest,
+        fileId: String
+    ): ResponseEntity<Any>? {
+        val viewerUserId = request.getAttribute("fileViewerUserId") as? String
+        val viewerDeviceId = request.getAttribute("fileViewerDeviceId") as? String
+        if (viewerUserId == null && viewerDeviceId == null) return null
+
+        val owner = uploadedFileRepository.findById(fileId).orElse(null) ?: return null
+        val ownerUserId = owner.ownerUserId
+        val ownerDeviceId = owner.deviceId
+
+        val allow = when {
+            ownerUserId.isNullOrBlank() && ownerDeviceId.isNullOrBlank() -> true
+            viewerUserId != null && ownerUserId == viewerUserId -> true
+            viewerDeviceId != null && ownerDeviceId == viewerDeviceId -> true
+            else -> false
+        }
+        if (allow) return null
+        log.warn("file access denied: fileId={} viewerUser={} viewerDevice={}", fileId, viewerUserId, viewerDeviceId)
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+            .contentType(MediaType.APPLICATION_JSON)
+            .body(ApiResponse.fail<Any>(ParentErr.FORBIDDEN, "无权访问该文件"))
     }
 
     /**
@@ -113,7 +153,7 @@ class ParentMediaUploadController(private val fileStorageService: FileStorageSer
         }
         val mime = file.contentType?.takeIf { it.isNotBlank() && it != "*/*" }
             ?: guessContentType(file.originalFilename)
-        val stored = fileStorageService.storeDetailed(mime, file.bytes, file.originalFilename)
+        val stored = fileStorageService.storeDetailed(mime, file.bytes, file.originalFilename, ownerUserId = userId)
         // 上传是唯一能往磁盘写任意内容的入口，出问题时（磁盘打满、传错文件）需要能追到是谁传的
         log.info("parent upload: userId={} fileId={} name={} size={} type={}", userId, stored.id, stored.name, file.size, mime)
         return ApiResponse.ok(

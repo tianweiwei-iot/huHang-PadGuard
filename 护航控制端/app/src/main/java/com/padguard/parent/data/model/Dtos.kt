@@ -21,6 +21,23 @@ data class LoginPasswordRequest(
     val password: String
 )
 
+/**
+ * 手机号注册请求，对应服务端 `POST /v1/auth/register`。
+ *
+ * 字段必须与服务端 `RegisterRequest` 严格一致（phone / password / nickname），
+ * 否则会出现"端上注册成功但昵称丢失"这类不报错的静默降级。
+ * nickname 可空：留空时服务端用「家长+手机后 4 位」兜底。
+ *
+ * 注册成功后服务端直接返回与登录相同的 [LoginResponse]（含 token），
+ * 因此注册与登录共用同一个响应模型，端上无需二次登录。
+ */
+@JsonClass(generateAdapter = true)
+data class RegisterRequest(
+    val phone: String,
+    val password: String,
+    val nickname: String? = null
+)
+
 @JsonClass(generateAdapter = true)
 data class LoginSmsRequest(
     val phone: String,
@@ -82,13 +99,32 @@ data class DeviceDto(
     /** 孩子端自定义资料：昵称 */
     val childNickname: String? = null,
     /** 孩子端自定义资料：头像 URL */
-    val childAvatar: String? = null
+    val childAvatar: String? = null,
+    /**
+     * 设备操作密码是否已设置（由服务端 [guardPasswordSet] 派生下发）。
+     * 应用管理页据此决定是否置灰「打开应用也要密码」开关；缺省 false 以兼容旧服务端。
+     */
+    val guardPasswordSet: Boolean? = null
 )
 
 /** 家长端生成 6 位一次性绑定码响应 */
 @JsonClass(generateAdapter = true)
 data class BindCodeResponse(
     val bindCode: String,
+    val expiresAt: Long
+)
+
+/**
+ * 绑定码状态：家长端轮询用。
+ *
+ * [state] 三态：`PENDING` 孩子端尚未完成、`BOUND` 已绑定、`EXPIRED` 码已失效。
+ * 区分三态才能给出准确提示 —— 否则"孩子还没扫"和"码已过期"都只能报一句"等待超时"，
+ * 家长会对着一个已经失效的码反复重试。
+ */
+@JsonClass(generateAdapter = true)
+data class BindCodeStatusResponse(
+    val state: String,
+    val deviceId: String?,
     val expiresAt: Long
 )
 
@@ -310,6 +346,33 @@ data class UpdateBlacklistRequest(
     val blockedPackages: List<String>
 )
 
+/**
+ * 应用管控模式设置请求。
+ *
+ * @param mode BLACKLIST = 只管控名单内；WHITELIST = 只放行名单内（其余拦截）
+ * @param requirePasswordOnLaunch 无 DO 设备上，打开受管控应用是否要求输入管理密码
+ * @param requirePasswordOnInstall 无 DO 设备上，安装确认页是否要求输入管理密码（默认 true）
+ * @param requirePasswordOnUninstall 无 DO 设备上，卸载确认页是否要求输入管理密码（默认 true）
+ */
+@JsonClass(generateAdapter = true)
+data class AppListPolicyRequest(
+    val mode: String = "BLACKLIST",
+    val requirePasswordOnLaunch: Boolean = false,
+    val requirePasswordOnInstall: Boolean = true,
+    val requirePasswordOnUninstall: Boolean = true
+)
+
+/** 应用管控模式查询结果（供页面回显） */
+@JsonClass(generateAdapter = true)
+data class AppListPolicyDto(
+    val mode: String = "BLACKLIST",
+    val requirePasswordOnLaunch: Boolean = false,
+    val requirePasswordOnInstall: Boolean = true,
+    val requirePasswordOnUninstall: Boolean = true,
+    val whitelist: List<String> = emptyList(),
+    val blacklist: List<String> = emptyList()
+)
+
 @JsonClass(generateAdapter = true)
 data class WebPolicyDto(
     val id: String?,
@@ -401,6 +464,48 @@ data class TabletUsageSettingsDto(
     val restDurationMinutes: Int,
     val timeUpMessage: String,
     val syncToDevice: Boolean
+)
+
+// ==================== 指令回执（P0-5 可观测性） ====================
+
+/**
+ * 下发指令时服务端返回的对象。
+ *
+ * 之前家长端把锁屏/解锁接口的响应体当成"不用看的空响应"丢掉（用 ResponseBody 接收），
+ * 于是只有"指令发出去了"这件事是确定的，**到底生效没有完全靠猜** ——
+ * 这正是"点了锁屏但孩子端没反应，也不知道卡在哪一步"的根因。
+ * 拿到 [msgId] 才能去查指令状态，把链路从"发后不理"变成"可追踪"。
+ */
+/** 锁屏 / 解锁时附带的说明，会展示在孩子端锁屏页上 */
+@JsonClass(generateAdapter = true)
+data class LockReasonRequest(val reason: String? = null)
+
+/** 水印开关请求；content 留空时孩子端用默认文案 */
+@JsonClass(generateAdapter = true)
+data class WatermarkRequestDto(
+    val enabled: Boolean = true,
+    val content: String? = null
+)
+
+/** 操作密码闸门：家长端设置 / 清除设备操作密码（密码由服务端哈希，明文不出服务端） */
+@JsonClass(generateAdapter = true)
+data class GuardPasswordRequestDto(
+    val password: String? = null,
+    val clear: Boolean = false
+)
+
+@JsonClass(generateAdapter = true)
+data class CommandResultDto(
+    val msgId: String = "",
+    val type: String = "",
+    /** PENDING / SUCCESS / FAILED / EXPIRED / UNSUPPORTED / REJECTED */
+    val status: String = "",
+    val payload: Map<String, Any?>? = null,
+    val createdAt: Long = 0,
+    val executedAt: Long? = null,
+    /** P0-5：指令回执的错误码 / 描述，说明"为什么没生效" */
+    val errorCode: String? = null,
+    val errorMessage: String? = null
 )
 
 // ==================== 未成年人模式（P1 合规底座） ====================
@@ -508,6 +613,68 @@ data class DomainVisitDto(
     val visitCount: Int,
     val lastVisitTime: Long
 )
+
+/**
+ * 单应用一次使用时段的传输对象。
+ *
+ * 服务端返回的是**已按服务端时区格式化好的字符串**（date / startTime / endTime），
+ * 端上不做二次解析——避免端上再套一层时区导致与服务端口径不一致。
+ */
+@JsonClass(generateAdapter = true)
+data class AppUsageHistoryEntryDto(
+    val date: String,
+    val startTime: String,
+    val endTime: String,
+    val usageSeconds: Int
+) {
+    fun toDomain() = com.padguard.domain.model.AppUsageHistoryEntry(
+        date = date, startTime = startTime, endTime = endTime, usageSeconds = usageSeconds
+    )
+}
+
+/**
+ * 未读告警数的传输对象。
+ *
+ * 服务端 `/v1/alerts/unread-count` 返回的是 `{"count": N}` **对象**而不是裸数字。
+ * 此前这里声明成 `ApiResponse<Int>`，Moshi 反序列化时拿到 OBJECT 却要写成 INT，
+ * 直接抛 JsonDataException —— 属典型的"契约错配在解析阶段就炸"。
+ */
+@JsonClass(generateAdapter = true)
+data class UnreadCountDto(
+    val count: Int
+)
+
+// ==================== 批量导入设备台账 ====================
+
+@JsonClass(generateAdapter = true)
+data class DeviceImportRowDto(
+    val hardwareId: String = "",
+    val alias: String? = null,
+    val model: String? = null,
+    val groupName: String? = null
+) {
+    fun toDomain() = com.padguard.domain.model.DeviceImportRow(
+        hardwareId = hardwareId, alias = alias, model = model, groupName = groupName
+    )
+}
+
+@JsonClass(generateAdapter = true)
+data class DeviceImportRequestDto(val rows: List<DeviceImportRowDto> = emptyList())
+
+@JsonClass(generateAdapter = true)
+data class DeviceImportResultDto(
+    val totalCount: Int,
+    val successCount: Int,
+    val skippedCount: Int,
+    val failedRows: List<String> = emptyList()
+) {
+    fun toDomain() = com.padguard.domain.model.DeviceImportResult(
+        totalCount = totalCount,
+        successCount = successCount,
+        skippedCount = skippedCount,
+        failedRows = failedRows
+    )
+}
 
 @JsonClass(generateAdapter = true)
 data class ViolationStatsDto(
@@ -622,3 +789,134 @@ data class AppHiddenBatchRequest(
 
 /** 设置单个应用的每日使用时长上限（分钟，0 = 不限制）。 */
 data class AppLimitRequest(val minutes: Int = 0)
+
+// ---------------------------------------------------------------------------
+// 订阅与计费
+// ---------------------------------------------------------------------------
+
+/** 可购买套餐。金额一律用「分」的整数传递，避免浮点对不齐账。 */
+@JsonClass(generateAdapter = true)
+data class PlanDto(
+    val key: String,
+    val label: String,
+    val months: Int,
+    val amountFen: Int,
+    /** 展示用价格文本，如 "¥298" */
+    val priceText: String,
+    val deviceLimit: Int
+)
+
+/**
+ * 当前订阅状态。
+ *
+ * [active] 决定"能不能用"，[paid] 决定"是不是已付费用户"——两者不等价：
+ * 试用期内 active=true 但 paid=false，UI 要据此分别展示"试用剩余 N 天"与"有效期至 X"。
+ */
+@JsonClass(generateAdapter = true)
+data class SubscriptionDto(
+    val status: String,
+    val plan: String,
+    val planLabel: String,
+    val deviceLimit: Int,
+    val deviceUsed: Int,
+    val startedAt: Long,
+    val expiredAt: Long,
+    /** 剩余天数（向下取整）；已过期为 0 */
+    val remainDays: Int,
+    val paid: Boolean,
+    val active: Boolean,
+    val autoRenew: Boolean
+) {
+    companion object {
+        const val STATUS_TRIAL = "TRIAL"
+        const val STATUS_ACTIVE = "ACTIVE"
+        const val STATUS_EXPIRED = "EXPIRED"
+        const val STATUS_REVOKED = "REVOKED"
+    }
+}
+
+@JsonClass(generateAdapter = true)
+data class CreateOrderRequest(
+    val plan: String,
+    /** 支付渠道；目前仅 MANUAL（后台开通）可用 */
+    val channel: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class CreateOrderResponse(
+    val orderNo: String,
+    val amountFen: Int,
+    val channel: String,
+    val payDeadline: Long,
+    /** 拉起支付所需的参数；渠道未接入时为 null */
+    val payParams: Map<String, Any?>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class OrderDto(
+    val orderNo: String,
+    val plan: String,
+    val planLabel: String,
+    val amountFen: Int,
+    val priceText: String,
+    val channel: String,
+    val status: String,
+    val createdAt: Long,
+    val paidAt: Long?
+)
+
+/**
+ * 收银台上的一个支付渠道。
+ *
+ * [mock] 显式告诉 UI 这是示例支付（不会产生真实扣款），避免家长误以为已经付款。
+ * 接入真实渠道后该位由服务端置 false，前端无需改动。
+ */
+@JsonClass(generateAdapter = true)
+data class PayChannelDto(
+    val key: String,
+    val label: String,
+    /** 是否可选：false 时置灰（生产环境尚未接入） */
+    val enabled: Boolean,
+    /** 是否为示例支付 */
+    val mock: Boolean,
+    val note: String? = null
+)
+
+// ==================== 局域网发现 ====================
+
+/**
+ * 局域网里发现的一台待接入平板。
+ *
+ * `deviceId` 是**硬件编号**（deviceSn）而非服务端台账 id：接入时服务端靠它定位那条无主记录。
+ */
+@JsonClass(generateAdapter = true)
+data class LanDeviceDto(
+    val deviceId: String,
+    val model: String?,
+    val ipAddress: String,
+    val osVersion: String?
+) {
+    fun toDomain() = com.padguard.domain.model.LanDevice(
+        deviceId = deviceId, model = model, ipAddress = ipAddress, osVersion = osVersion
+    )
+}
+
+@JsonClass(generateAdapter = true)
+data class LanBindRequestDto(
+    val hardwareId: String = "",
+    val alias: String? = null
+)
+
+// ==================== 护眼（蓝光滤镜） ====================
+
+@JsonClass(generateAdapter = true)
+data class EyeProtectionRequest(
+    val enabled: Boolean = false,
+    val filterLevel: Int = 3
+)
+
+@JsonClass(generateAdapter = true)
+data class EyeProtectionDto(
+    val enabled: Boolean,
+    val level: Int
+)

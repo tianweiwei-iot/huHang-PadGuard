@@ -74,6 +74,28 @@ class ChildReportController(
     ) = DeviceApiResponse.ok(mapOf("accepted" to ingestService.saveLocations(body.copy(deviceId = deviceId))))
 
     /**
+     * 风险事件上报（HTTP 降级通道）。
+     *
+     * 为什么必须有这条通路：孩子端刻意让"设备正在被卸载""检测到 root"这类高危告警
+     * **不走 MQTT**（broker 缺失时 `publish` 返回 true 也会全部静默丢失），
+     * 只走 HTTPS。服务端原先没有这个端点，孩子端每次上报都是 500 ——
+     * 等于家长"最后一道感知能力"一直是断的，且孩子端只记一条 warn，界面上毫无反馈。
+     *
+     * `deviceId` 一律取鉴权注入的值而非报文里的：否则孩子端可以伪造 deviceId，
+     * 往别人的设备台账里塞事件、给别人的家长推告警。
+     */
+    @PostMapping("/events")
+    fun events(
+        @RequestAttribute("deviceId") deviceId: String,
+        @RequestBody body: EventsRequest
+    ): DeviceApiResponse<*> {
+        val (accepted, duplicated) = childUplinkHandler.handleEventPackets(
+            deviceId, body.events.map { it.copy(deviceId = deviceId) }
+        )
+        return DeviceApiResponse.ok(mapOf("accepted" to accepted, "duplicated" to duplicated))
+    }
+
+    /**
      * 心跳。
      *
      * 回执**必须携带** `pendingCommandCount` / `policyVersion`：
@@ -116,18 +138,27 @@ class ChildReportController(
         @RequestParam since: Long = 0,
         @RequestParam(defaultValue = "0") waitMs: Long = 0
     ): Any {
+        // 在指令轮询响应里"顺带"告知最新策略版本号：孩子端走 HTTPS 轮询（MQTT 未启用）时，
+        // 这是把"家长改了时间管控→平板上限立即生效"延迟从「等一次心跳(30s)」压到「一个轮询周期(3s)」的关键。
+        // 与心跳回执里的 policyVersion 同源（deviceService.policyVersionOf），两条通道口径一致。
+        val wrap = { list: List<CommandPacket> ->
+            mapOf(
+                "policyVersion" to deviceService.policyVersionOf(deviceId),
+                "commands" to list
+            )
+        }
         if (waitMs <= 0L) {
-            return DeviceApiResponse.ok(commandService.pendingForPolling(deviceId, since))
+            return DeviceApiResponse.ok(wrap(commandService.pendingForPolling(deviceId, since)))
         }
         val capped = waitMs.coerceIn(1L, CommandService.MAX_WAIT_MS)
         val deferred = DeferredResult<Any>(capped)
         val onReady: (List<CommandPacket>) -> Unit = { list ->
-            runCatching { deferred.setResult(DeviceApiResponse.ok(list)) }
+            runCatching { deferred.setResult(DeviceApiResponse.ok(wrap(list))) }
         }
         // 超时回空列表而不是报错：对终端而言与「这一轮没有指令」等价，不会触发错误退避
         deferred.onTimeout {
             commandService.removeWaiter(deviceId, onReady)
-            runCatching { deferred.setResult(DeviceApiResponse.ok(emptyList<CommandPacket>())) }
+            runCatching { deferred.setResult(DeviceApiResponse.ok(wrap(emptyList()))) }
         }
         // 正常完成 / 超时 / 客户端断开都必须摘除回调，否则队列随断连无限增长
         deferred.onCompletion { commandService.removeWaiter(deviceId, onReady) }
@@ -159,7 +190,8 @@ class ChildReportController(
         val url = fileStorageService.store(
             file.contentType ?: "image/jpeg",
             file.bytes,
-            file.originalFilename ?: "avatar.jpg"
+            file.originalFilename ?: "avatar.jpg",
+            deviceId = deviceId
         )
         deviceService.updateChildProfile(deviceId, DeviceProfileRequest(childAvatar = url))
         return DeviceApiResponse.ok(mapOf("url" to url))
@@ -184,7 +216,10 @@ class ChildReportController(
         @RequestParam(required = false) triggerType: String?,
         @RequestParam("file") file: MultipartFile
     ): DeviceApiResponse<*> {
-        val url = fileStorageService.store(file.contentType ?: "image/jpeg", file.bytes, file.originalFilename ?: "shot.jpg")
+        val url = fileStorageService.store(
+            file.contentType ?: "image/jpeg", file.bytes, file.originalFilename ?: "shot.jpg",
+            deviceId = deviceId
+        )
         monitorService.storeScreenshot(shotId, deviceId, url, null, null, capturedAt)
         return DeviceApiResponse.ok(UploadAckDto(accepted = true, url = url))
     }
@@ -198,7 +233,7 @@ class ChildReportController(
         @RequestParam("file") file: MultipartFile
     ): DeviceApiResponse<*> {
         val mime = file.contentType ?: "application/octet-stream"
-        val url = fileStorageService.store(mime, file.bytes, file.originalFilename ?: "media.bin")
+        val url = fileStorageService.store(mime, file.bytes, file.originalFilename ?: "media.bin", deviceId = deviceId)
         monitorService.finishMediaTask(taskId, url, mime, file.size, durationSeconds ?: 0)
         return DeviceApiResponse.ok(UploadAckDto(accepted = true, url = url))
     }

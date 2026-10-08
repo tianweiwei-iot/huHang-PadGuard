@@ -13,8 +13,14 @@ import android.os.StatFs
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.core.data.repository.AuthRepository
+import com.padguard.core.data.repository.PolicyRepository
+import com.padguard.core.data.model.policy.AppListMode
 import com.padguard.core.data.model.policy.ControlMode
+import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.child.guard.GuardA11y
+import com.padguard.child.guard.GuardGate
+import com.padguard.child.guard.GuardPasswordManager
 import com.padguard.core.common.Logger
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
@@ -42,7 +48,9 @@ class ProfileViewModel @Inject constructor(
     private val authRepository: AuthRepository,
     private val transportSettings: TransportSettings,
     private val remote: RemoteDataSource,
-    private val admin: DeviceAdminBridge
+    private val admin: DeviceAdminBridge,
+    private val policyRepository: PolicyRepository,
+    private val guardPassword: GuardPasswordManager
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ProfileUiState())
@@ -68,13 +76,21 @@ class ProfileViewModel @Inject constructor(
             ) { name, sn, bound, deviceName, creds ->
                 ProfileBase(name, sn, bound, deviceName, creds)
             }
-            combine(base, authRepository.childNickname, authRepository.childAvatar) { b, nickname, avatar ->
+            combine(
+                base,
+                authRepository.childNickname,
+                authRepository.childAvatar,
+                policyRepository.observePolicy(),
+                authRepository.isChildLoggedIn
+            ) { b, nickname, avatar, policy, childLoggedIn ->
                 val (name, sn, bound, deviceName, creds) = b
                 val adminState = detectAdminState()
+                val appPolicy = policy.app
                 ProfileUiState(
                     studentName = name,
                     childNickname = nickname,
                     childAvatar = avatar,
+                    isChildLoggedIn = childLoggedIn,
                     deviceSn = sn.ifBlank { Build.SERIAL ?: "未识别" },
                     deviceName = deviceName,
                     isBound = bound,
@@ -87,7 +103,33 @@ class ProfileViewModel @Inject constructor(
                     adminState = adminState,
                     deviceAdminActive = adminState != AdminState.NONE,
                     isDeviceOwner = adminState == AdminState.OWNER,
-                    usageStatsGranted = isUsageStatsGranted()
+                    usageStatsGranted = isUsageStatsGranted(),
+                    // ---------- 应用管控自检 ----------
+                    // 家长最常问的是"我禁了应用，孩子还是能打开"。答案其实由三件事共同决定，
+                    // 缺一件就静默失效，而界面上原本一点提示都没有：
+                    //   1. 名单有没有真的收到（下发了 0 条 = 家长端根本没配置成功）；
+                    //   2. 拿不拿得到前台包名（没开"使用情况访问"就永远探不到）；
+                    //   3. 有没有 DO/PO（隐藏/挂起应用只有 DO/PO 能做，设备管理员做不到）。
+                    // 把三项摊开显示，家长不用猜就能知道该补哪一项。
+                    appListModeLabel = when (appPolicy.mode) {
+                        AppListMode.BLACKLIST -> "黑名单"
+                        AppListMode.WHITELIST -> "白名单"
+                    },
+                    appListCount = if (appPolicy.mode == AppListMode.BLACKLIST) {
+                        appPolicy.blacklist.size
+                    } else {
+                        appPolicy.whitelist.size
+                    },
+                    appSystemRuleCount = appPolicy.systemAppRules.size,
+                    canHideApps = admin.can(Capability.HIDE_PACKAGES),
+                    canSuspendApps = admin.can(Capability.SUSPEND_PACKAGES),
+                    // ---------- 设备所有者(DO/PO)专属能力矩阵 ----------
+                    // 这些能力在存量 C 端平板（无 DO）下由 engine 层逐条回执 UNSUPPORTED 降级，
+                    // 这里把它们逐项摊开，让家长/孩子一眼看出"哪些管控在本机根本不生效"，
+                    // 而不是误以为策略已下发就一定能落地。can() 是单一事实来源。
+                    ownerCapabilities = buildOwnerCapabilityMatrix(admin),
+                    // 操作闸门基础设施告警：密码已启用，但操作闸门无障碍服务未开 → 系统级拦截失效
+                    guardInfraWarning = guardPassword.isEnabledNow() && !GuardA11y.isEnabled(context)
                 )
             }
                 .flowOn(Dispatchers.IO)
@@ -144,6 +186,22 @@ class ProfileViewModel @Inject constructor(
             if (deviceId.isNotBlank()) {
                 remote.updateChildProfile(childNickname = trimmed)
             }
+        }
+    }
+
+    /**
+     * 退出家庭账号登录。
+     *
+     * 只清"家庭账号登录态"（[AuthRepository.childLogout]），**保留设备绑定**：
+     * 设备绑定是家长扫码建立的受控关系，登出家庭账号不等于解除管控；
+     * 真正解除管控要走家长端「解绑设备」，那里会同时清掉凭据与管控策略。
+     *
+     * 登出后 [authRepository.isChildLoggedIn] 变 false，界面自动回到未登录态。
+     */
+    fun logout() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { authRepository.childLogout() }
+                .onFailure { Logger.w(TAG) { "退出登录失败：${it.message}" } }
         }
     }
 
@@ -219,6 +277,29 @@ class ProfileViewModel @Inject constructor(
             ) == AppOpsManager.MODE_ALLOWED
         }.getOrDefault(false)
     }
+
+    /**
+     * 操作密码闸门检查：供「我的」页中需要改动系统设置（如开启操作闸门无障碍服务）的入口调用。
+     *
+     * 返回 `true` 表示可继续（未启用密码 / 处于解锁窗口）；`false` 表示已拉起解锁界面、
+     * 原动作应中止。与 [com.padguard.child.guard.GuardGate] 全 App 统一口径。
+     */
+    fun ensureGuardUnlocked(ctx: Context): Boolean = GuardGate.ensureUnlocked(ctx, guardPassword)
+
+    /**
+     * 构建设备所有者(DO/PO)专属能力矩阵，供「我的」页如实标注本机可用能力。
+     *
+     * 判定全部走 [DeviceAdminBridge.can]，与 engine 层降级逻辑同源，避免 UI 与运行时口径脱节。
+     * 存量 C 端平板无 DO，绝大多数项会落到"需设备所有者"，这正是要如实告知家长的事实。
+     */
+    private fun buildOwnerCapabilityMatrix(admin: DeviceAdminBridge): List<CapabilityStatus> = listOf(
+        CapabilityStatus("防卸载自身", admin.can(Capability.BLOCK_UNINSTALL), "需设备所有者(DO/PO)"),
+        CapabilityStatus("静默安装应用", admin.can(Capability.SILENT_INSTALL), "需 DO/PO"),
+        CapabilityStatus("静默卸载应用", admin.can(Capability.SILENT_UNINSTALL), "需 DO/PO"),
+        CapabilityStatus("禁止截屏 / 录屏", admin.can(Capability.DISABLE_SCREEN_CAPTURE), "需 DO/PO"),
+        CapabilityStatus("Kiosk 纯净桌面", admin.can(Capability.LOCK_TASK), "需设备所有者(DO)"),
+        CapabilityStatus("禁用 USB 调试 / 数据", admin.can(Capability.GLOBAL_SETTINGS), "需 DO（仅生产构建生效）")
+    )
 }
 
 data class ProfileUiState(
@@ -228,6 +309,8 @@ data class ProfileUiState(
     val deviceSn: String = "未识别",
     val deviceName: String = "",
     val isBound: Boolean = false,
+    /** 是否已登录家庭账号（孩子端独立于设备绑定的一套登录态） */
+    val isChildLoggedIn: Boolean = false,
     /** 已记录的家长端账号（空串表示未记录） */
     val account: String = "",
     /** 已记录的家长端密码（空串表示未记录；UI 默认掩码展示） */
@@ -239,7 +322,37 @@ data class ProfileUiState(
     val adminState: AdminState = AdminState.NONE,
     val deviceAdminActive: Boolean = false,
     val isDeviceOwner: Boolean = false,
-    val usageStatsGranted: Boolean = false
+    val usageStatsGranted: Boolean = false,
+    /** 当前生效的应用名单模式（黑名单 / 白名单） */
+    val appListModeLabel: String = "黑名单",
+    /** 名单条数；0 表示家长端还没有下发任何应用管控配置 */
+    val appListCount: Int = 0,
+    /** 系统应用的显式规则条数（BLOCK / ALLOW 覆盖） */
+    val appSystemRuleCount: Int = 0,
+    /** 能否隐藏应用（图标消失）—— 仅 DO/PO */
+    val canHideApps: Boolean = false,
+    /** 能否挂起应用（图标变灰）—— 仅 DO/PO */
+    val canSuspendApps: Boolean = false,
+    /**
+     * 设备所有者(DO/PO)专属能力矩阵：逐项标出本机是否可用。
+     * 存量 C 端平板通常没有 DO，这些项会如实显示"需设备所有者(DO)"。
+     */
+    val ownerCapabilities: List<CapabilityStatus> = emptyList(),
+    /**
+     * 操作闸门基础设施告警：家长已启用操作密码，但「操作闸门无障碍服务」未在系统设置开启，
+     * 此时系统级拦截失效，孩子可从设置/通知栏绕过密码。需在「我的」页弹出引导横幅。
+     */
+    val guardInfraWarning: Boolean = false
+)
+
+/** 设备所有者(DO/PO)专属能力的可用性状态，供「我的」页能力矩阵逐项如实展示 */
+data class CapabilityStatus(
+    /** 能力名称，如「防卸载自身」「Kiosk 纯净桌面」 */
+    val name: String,
+    /** 当前设备是否具备该能力（true = 可用；false = 需设备所有者，本机降级不可用） */
+    val supported: Boolean,
+    /** 不可用时展示的原因，如「需设备所有者(DO)」 */
+    val note: String
 )
 
 /** 设备管控权限真实状态（P7）：区别于"仅设备管理员"与"设备所有者" */

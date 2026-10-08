@@ -27,8 +27,8 @@ android {
         // 曾在此填写虚构公网域名 api.padguard.cn：DNS 根本解析不了，
         // 客户端只会得到"无法连接"，且用户完全无法判断是地址问题还是网络问题。
         // 真实部署请在 App 内「高级设置」改成家长电脑的实际 IP（或由打包脚本注入）。
-        buildConfigField("String", "DEFAULT_BASE_URL", "\"http://192.168.1.10:8090/api/v1/\"")
-        buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://192.168.1.10:1883\"")
+        buildConfigField("String", "DEFAULT_BASE_URL", "\"http://192.168.1.12:8090/api/v1/\"")
+        buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://192.168.1.12:1883\"")
     }
 
     signingConfigs {
@@ -48,8 +48,8 @@ android {
         debug {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
-            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://192.168.1.10:8090/api/v1/\"")
-            buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://192.168.1.10:1883\"")
+            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://192.168.1.12:8090/api/v1/\"")
+            buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://192.168.1.12:1883\"")
         }
     }
 
@@ -78,6 +78,9 @@ dependencies {
     implementation(project(":core:data"))
     implementation(project(":core:engine"))
     implementation(project(":core:transport"))
+
+    // DataStore（操作密码闸门 GuardPasswordManager 直接持久化哈希，需本模块可见）
+    implementation(libs.datastore.preferences)
 
     // Compose
     val composeBom = platform(libs.compose.bom)

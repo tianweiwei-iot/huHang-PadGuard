@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -18,8 +17,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -27,15 +30,22 @@ import java.util.Locale
 /**
  * 消息详情。
  *
- * P0 阶段内容从拦截 / 告警日志查回来，结构上保留"标题 / 时间 / 正文 / 处置建议"四段。
- * P1 阶段若接入家长推送，原文 / 富文本能力在此扩展即可。
+ * 家长发布的信息（文字 / 图片 / 视频 / 语音）都从这里查看：
+ * - 视频默认全屏播放（[ResizableVideo] 的 [defaultFullscreen]=true），并支持窗口缩放；
+ * - 图片 / 语音复用弹窗同一套渲染（[RemoteImage] / [RemoteAudio]）；
+ * - 进入即标记已读（由 [MessageDetailViewModel.load] 调用 [com.padguard.core.data.repository.MessageRepository.markRead]）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MessageDetailScreen(
     messageId: String,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    viewModel: MessageDetailViewModel = hiltViewModel()
 ) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+
+    LaunchedEffect(messageId) { viewModel.load(messageId) }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -54,6 +64,24 @@ fun MessageDetailScreen(
                 .padding(padding),
             color = MaterialTheme.colorScheme.background
         ) {
+            val s = state
+            if (s == null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .systemBarsPadding()
+                        .padding(20.dp),
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "消息不存在或已删除",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                    )
+                }
+                return@Surface
+            }
+
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -61,58 +89,53 @@ fun MessageDetailScreen(
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                if (s.title.isNotBlank() && !isSourceLabel(s.title)) {
+                    Text(
+                        text = s.title,
+                        style = MaterialTheme.typography.headlineSmall
+                    )
+                } else {
+                    Text(
+                        text = "来自家长的信息",
+                        style = MaterialTheme.typography.headlineSmall
+                    )
+                }
                 Text(
-                    text = decodeId(messageId),
-                    style = MaterialTheme.typography.headlineSmall
-                )
-                Text(
-                    text = "事件 ID：$messageId",
+                    text = formatTime(s.timestamp),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
                 )
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "如果想使用被限制的应用，可以在首页发起「申请临时解锁」",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        Text(
-                            text = "申请会发送给家长审批，审批通过后该应用可在一段时间内使用。",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+
+                // ---------- 媒体区 ----------
+                when (s.contentType) {
+                    "IMAGE" -> if (s.mediaUrl.isNotBlank()) {
+                        RemoteImage(url = s.mediaUrl, modifier = Modifier.fillMaxWidth())
+                    }
+                    "VIDEO" -> if (s.mediaUrl.isNotBlank()) {
+                        ResizableVideo(
+                            url = s.mediaUrl,
+                            modifier = Modifier.fillMaxWidth(),
+                            defaultFullscreen = true,
+                            showControls = true
                         )
                     }
+                    "AUDIO" -> if (s.mediaUrl.isNotBlank()) {
+                        RemoteAudio(url = s.mediaUrl, name = s.mediaName, autoPlay = true)
+                    }
                 }
-                Text(
-                    text = "查看时间：${formatNow()}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                )
+
+                // ---------- 正文 ----------
+                if (s.body.isNotBlank()) {
+                    Text(
+                        text = s.body,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
             }
         }
     }
 }
 
-/**
- * P0 阶段 ID 形如 "RISK-1700000000000"，从中抽出时间戳做展示。
- * 真实实现应从持久化层按 ID 取详情。
- */
-private fun decodeId(id: String): String {
-    val parts = id.split('-')
-    if (parts.size >= 2) {
-        val ts = parts.last().toLongOrNull()
-        if (ts != null) {
-            val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(ts))
-            return "事件时间 $time"
-        }
-    }
-    return "事件详情"
-}
-
-private fun formatNow(): String =
-    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
+private fun formatTime(millis: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(millis))

@@ -39,4 +39,17 @@ interface StatisticsApi {
         @Path("deviceId") deviceId: String,
         @Query("period") period: String
     ): Response<ApiResponse<ExportResultDto>>
+
+    /**
+     * 单应用使用历史（"使用历史"二级页）。
+     *
+     * 服务端从已有的 APP_USAGE 用量日志里还原每一次"打开→关闭"的时段，
+     * 孩子端无需额外上报。此前该接口缺失，页面只能落在错误态。
+     */
+    @GET("statistics/{deviceId}/app-usage/history")
+    suspend fun getAppUsageHistory(
+        @Path("deviceId") deviceId: String,
+        @Query("packageName") packageName: String,
+        @Query("period") period: String
+    ): Response<ApiResponse<List<AppUsageHistoryEntryDto>>>
 }

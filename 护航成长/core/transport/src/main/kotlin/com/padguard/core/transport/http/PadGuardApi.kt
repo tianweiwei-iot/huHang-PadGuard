@@ -1,7 +1,6 @@
 package com.padguard.core.transport.http
 
 import com.padguard.core.data.model.BindResult
-import com.padguard.core.data.model.Command
 import com.padguard.core.data.model.Heartbeat
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -118,7 +117,7 @@ interface PadGuardApi {
     suspend fun commands(
         @Query("since") since: Long,
         @Query("waitMs") waitMs: Long
-    ): Response<ApiEnvelope<List<Command>>>
+    ): Response<ApiEnvelope<JsonElement>>
 
     /** §5.8 心跳降级上报（仅 MQTT 不可用时使用） */
     @POST("device/heartbeat")

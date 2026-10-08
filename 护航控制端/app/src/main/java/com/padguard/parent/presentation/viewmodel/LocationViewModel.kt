@@ -9,6 +9,7 @@ import com.padguard.domain.model.MapProvider
 import com.padguard.domain.model.MapViewMode
 import com.padguard.domain.repository.LocationRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,6 +40,8 @@ data class LocationUiState(
     /** 当前位置到围栏中心的直线距离（米）。 */
     val distanceMeters: Int = 0,
     val isLoading: Boolean = false,
+    /** 是否已下发「立即定位」指令、正在等待孩子端回传新坐标。 */
+    val isLocating: Boolean = false,
     val toast: String? = null,
     val error: String? = null
 )
@@ -69,7 +72,7 @@ class LocationViewModel @Inject constructor(
                 .onFailure { _uiState.value = _uiState.value.copy(error = it.message) }
             locationRepository.getTrackHistory(deviceId)
                 .onSuccess { _uiState.value = _uiState.value.copy(track = it) }
-            refreshLocation()
+            refreshLocationInternal()
             _uiState.value = _uiState.value.copy(isLoading = false)
         }
     }
@@ -77,13 +80,45 @@ class LocationViewModel @Inject constructor(
     /** 刷新设备实时位置，并重算越界状态。 */
     fun refreshLocation() {
         if (deviceId.isBlank()) return
+        viewModelScope.launch { refreshLocationInternal() }
+    }
+
+    /**
+     * 立即定位：向被管控平板下发 LOCATE 指令，由孩子端当场采集一次新坐标并上报。
+     *
+     * 指令下发后延时回拉两次（约 3 秒、再 5 秒），覆盖端侧 GPS / 网络定位与上报耗时，
+     * 避免立刻回拉读到上一次的旧坐标。孩子此刻未使用平板时，端侧受 Android 10+ 后台
+     * 定位限制无法采集，会在孩子解锁平板后自动补传，此时家长端看到的是补传后的位置。
+     */
+    fun locateNow() {
+        if (deviceId.isBlank()) return
+        if (_uiState.value.isLocating) return
         viewModelScope.launch {
-            locationRepository.getDeviceLocation(deviceId)
-                .onSuccess { location ->
-                    _uiState.value = applyGeofenceStatus(_uiState.value.copy(location = location))
+            _uiState.value = _uiState.value.copy(isLocating = true, error = null)
+            locationRepository.requestLocate(deviceId)
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(toast = "定位指令已下发，正在获取最新位置")
+                    delay(LOCATE_FIRST_PULL_DELAY_MS)
+                    refreshLocationInternal()
+                    delay(LOCATE_SECOND_PULL_DELAY_MS)
+                    refreshLocationInternal()
+                    _uiState.value = _uiState.value.copy(isLocating = false, toast = "位置已更新")
                 }
-                .onFailure { _uiState.value = _uiState.value.copy(error = it.message) }
+                .onFailure {
+                    _uiState.value = _uiState.value.copy(
+                        isLocating = false,
+                        toast = "定位指令下发失败：${it.message}"
+                    )
+                }
         }
+    }
+
+    private suspend fun refreshLocationInternal() {
+        locationRepository.getDeviceLocation(deviceId)
+            .onSuccess { location ->
+                _uiState.value = applyGeofenceStatus(_uiState.value.copy(location = location))
+            }
+            .onFailure { _uiState.value = _uiState.value.copy(error = it.message) }
     }
 
     fun selectProvider(provider: MapProvider) {
@@ -159,5 +194,9 @@ class LocationViewModel @Inject constructor(
 
     private companion object {
         const val EARTH_RADIUS_METERS = 6_371_000.0
+        /** 下发定位指令后首次回拉位置的延时（毫秒）。 */
+        const val LOCATE_FIRST_PULL_DELAY_MS = 3_000L
+        /** 首次回拉后再次补拉一次的延时（毫秒）。 */
+        const val LOCATE_SECOND_PULL_DELAY_MS = 5_000L
     }
 }

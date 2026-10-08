@@ -125,13 +125,45 @@ data class AppPolicyDto(
 )
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class UpdateBlacklistRequest(val blockedPackages: List<String> = emptyList())
+
+/**
+ * 应用管控模式设置（家长端「应用管理」页顶部）。
+ *
+ * @param mode BLACKLIST = 只管控名单内的应用；WHITELIST = 只放行名单内的（其余一律拦截）
+ * @param requirePasswordOnLaunch 无 DO 设备上，打开受管控应用是否要求输入管理密码。
+ *   仅在设备**没有** Device Owner 时生效：有 DO 时管控由系统完成，不走这条路。
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class AppListPolicyRequest(
+    val mode: String = "BLACKLIST",
+    val requirePasswordOnLaunch: Boolean = false,
+    /** 非 DO 设备：安装确认页是否要求管理密码（默认 true） */
+    val requirePasswordOnInstall: Boolean = true,
+    /** 非 DO 设备：卸载确认页是否要求管理密码（默认 true） */
+    val requirePasswordOnUninstall: Boolean = true
+)
+
+/** 应用管控模式查询结果 */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class AppListPolicyDto(
+    val mode: String = "BLACKLIST",
+    val requirePasswordOnLaunch: Boolean = false,
+    val requirePasswordOnInstall: Boolean = true,
+    val requirePasswordOnUninstall: Boolean = true,
+    val whitelist: List<String> = emptyList(),
+    val blacklist: List<String> = emptyList()
+)
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class WebPolicyDto(
     val blockedUrls: List<String> = emptyList(),
     val browserDisabled: Boolean = false,
     val smartShutdownEnabled: Boolean = false,
     val smartShutdownStartTime: String? = null,
-    val smartShutdownEndTime: String? = null
+    val smartShutdownEndTime: String? = null,
+    /** P2 内容管控：搜索引擎强制安全搜索开关 */
+    val safeSearch: Boolean = false,
+    /** P2 内容管控：按分类屏蔽的 url_categories.id 列表（已含默认屏蔽项） */
+    val blockedCategories: List<String> = emptyList()
 )
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class UrlBlacklistRequest(val urls: List<String> = emptyList())
@@ -191,6 +223,20 @@ data class AppUsageDto(
 data class UsageStatsDto(
     val deviceId: String, val date: String, val totalUsageMinutes: Int,
     val appUsages: List<AppUsageDto>? = null
+)
+
+/**
+ * 单个应用的一次"打开 → 关闭"时段（应用历史子页用）。
+ *
+ * 字段刻意用**本地时区的字符串**而非时间戳：这一页要展示的是
+ * "5 月 3 日晚上 21:04 打开了某应用，用了 37 分钟"，家长消费的是可读日期，
+ * 把时区换算放在服务端做，避免端上各自解释产生偏差。
+ */
+data class AppUsageHistoryEntryDto(
+    val date: String,
+    val startTime: String,
+    val endTime: String,
+    val usageSeconds: Int
 )
 data class DailyUsageDto(val date: String, val usageMinutes: Int, val violationCount: Int)
 data class DomainVisitDto(val domain: String, val visitCount: Int, val lastVisitTime: Long)
@@ -314,3 +360,32 @@ data class AppLimitRequest(val minutes: Int = 0)
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class BatchSuspendRequest(val packages: List<String> = emptyList(), val suspended: Boolean = true)
+
+// ============ 内容管控（P2） ============
+/** 安全搜索开关请求 */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class SafeSearchRequest(val enabled: Boolean = false)
+
+/** 按分类屏蔽请求：url_categories.id 列表（服务端会自动合并默认屏蔽项） */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class CategoryBlockRequest(val categories: List<String> = emptyList())
+
+/** 网址分类定义 */
+data class ContentCategoryDto(
+    val id: String, val name: String, val description: String?,
+    val riskLevel: String, val blockedByDefault: Boolean
+)
+
+/** 文本敏感内容扫描请求 */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class TextScanRequest(val text: String)
+
+/** 单条敏感词命中（命中词做掩码，不在服务端落明文，避免二次传播） */
+data class SensitiveHitDto(
+    val category: String, val level: String, val maskedWord: String
+)
+
+/** 文本扫描结果：是否命中 + 命中详情（涉密内容只告警、不全文展示） */
+data class TextScanResultDto(
+    val hit: Boolean, val hitCount: Int, val hits: List<SensitiveHitDto> = emptyList()
+)

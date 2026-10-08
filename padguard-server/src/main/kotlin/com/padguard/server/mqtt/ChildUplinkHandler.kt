@@ -98,6 +98,12 @@ class ChildUplinkHandler(
         val cmd = commandRepository.findByMsgId(ack.msgId) ?: return
         cmd.status = ack.status
         cmd.executedAt = ack.executedAt
+        // P0-5：回执里的错误码 / 描述一并落库，家长端才能看到"指令为什么没生效"。
+        // 仅当回执确实带错误时才覆盖，避免把历史 SUCCESS 回执的 errorCode 清掉。
+        if (!ack.errorCode.isNullOrBlank() || !ack.errorMessage.isNullOrBlank()) {
+            cmd.errorCode = ack.errorCode
+            cmd.errorMessage = ack.errorMessage
+        }
         commandRepository.save(cmd)
         deviceService.getUserId(deviceId)?.let { userId ->
             webSocketPush.pushToUser(userId, mapOf(
@@ -114,23 +120,49 @@ class ChildUplinkHandler(
 
     private fun handleEvent(deviceId: String, json: String) {
         val ev = objectMapper.readValue(json, EventPacket::class.java)
-        if (!deviceEventRepository.existsByEventId(ev.eventId)) {
-            deviceEventRepository.save(
-                DeviceEvent(
-                    id = UUID.randomUUID().toString(), deviceId = deviceId, eventId = ev.eventId,
-                    type = ev.type, level = ev.level, timestamp = ev.timestamp,
-                    detailJson = objectMapper.writeValueAsString(ev.detail ?: emptyMap<String, Any?>())
-                )
+        handleEventPackets(deviceId, listOf(ev))
+    }
+
+    /**
+     * 风险事件入库 + 告警 + WS 推送 —— **MQTT 与 HTTP 两条通路共用的唯一实现**。
+     *
+     * 为什么必须共用而不是各写一份：HTTP 是 MQTT 不可用时的**降级**通道。
+     * 两边各写一份的话语义迟早漂移（一边落库一边不落、一边告警一边不告警），
+     * 真出问题时根本说不清"告警到底为什么丢"。
+     *
+     * @return (accepted, duplicated)
+     */
+    fun handleEventPackets(deviceId: String, events: List<EventPacket>): Pair<Int, Int> {
+        if (events.isEmpty()) return 0 to 0
+
+        // 批内先去重，再一次性查库：避免同一条事件在同批里被处理两次、
+        // 也避免逐条 exists 造成的上百次 DB 往返。
+        val candidates = events.distinctBy { it.eventId }
+        val existing = deviceEventRepository.findExistingEventIds(candidates.map { it.eventId })
+        val fresh = candidates.filter { it.eventId !in existing }
+        if (fresh.isEmpty()) return 0 to events.size
+
+        deviceEventRepository.saveAll(fresh.map { ev ->
+            DeviceEvent(
+                id = UUID.randomUUID().toString(), deviceId = deviceId, eventId = ev.eventId,
+                type = ev.type, level = ev.level, timestamp = ev.timestamp,
+                detailJson = objectMapper.writeValueAsString(ev.detail ?: emptyMap<String, Any?>())
             )
+        })
+
+        // 高危事件落告警并推 WS。
+        // 去重作用在**整条链路**上，而不是只挡住落库：MQTT QoS1 与 HTTP 重试都会让同一条
+        // 事件重复到达，只挡落库却照常告警的话，一次重传就给家长推一条重复告警。
+        fresh.forEach { ev ->
+            alertService.createFromEvent(deviceId, ev.type, ev.level, ev.detail)
+            deviceService.getUserId(deviceId)?.let { userId ->
+                webSocketPush.pushToUser(userId, mapOf(
+                    "type" to "alert.new", "deviceId" to deviceId,
+                    "eventType" to ev.type, "level" to ev.level
+                ))
+            }
         }
-        // 高危事件落告警并推 WS
-        alertService.createFromEvent(deviceId, ev.type, ev.level, ev.detail)
-        deviceService.getUserId(deviceId)?.let { userId ->
-            webSocketPush.pushToUser(userId, mapOf(
-                "type" to "alert.new", "deviceId" to deviceId,
-                "eventType" to ev.type, "level" to ev.level
-            ))
-        }
+        return fresh.size to (events.size - fresh.size)
     }
 
     private fun handleStatus(deviceId: String, json: String) {

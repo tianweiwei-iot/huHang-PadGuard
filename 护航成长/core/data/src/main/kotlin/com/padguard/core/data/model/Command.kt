@@ -112,6 +112,18 @@ enum class CommandType {
      */
     SET_APP_HIDDEN,
 
+    /**
+     * 权限管理：授予 / 收回某包名的运行时权限（DO/PO 才能改别人的权限）。
+     * payload { packageName, permission, grant }。grant=true 一次性授予，false 收回（回归系统默认）。
+     */
+    SET_RUNTIME_PERMISSION,
+
+    /**
+     * 功能管理：整包下发设备功能开关，孩子端逐项映射成 DPM 用户限制 / 相机截屏开关等并应用。
+     * payload 为扁平的 featureKey -> "true"/"false"（featureKey 见 DeviceAdminBridge.applyFeaturePolicy）。
+     */
+    SET_FEATURE_POLICY,
+
     /** 屏幕水印启停：payload { enabled, content } */
     SET_WATERMARK,
 

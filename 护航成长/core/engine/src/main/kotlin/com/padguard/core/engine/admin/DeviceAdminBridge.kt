@@ -225,20 +225,36 @@ class DeviceAdminBridge @Inject constructor(
      * 普通设备管理员（无 DO/PO）会返回 [OpResult.Unsupported]——这是预期的降级，
      * 上层据此在 UI 上引导走系统授权流程。
      */
-    fun grantRuntimePermission(permission: String): OpResult = guarded("grant:$permission") {
-        require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            "setPermissionGrantState requires API 23+"
+    fun grantRuntimePermission(permission: String): OpResult = setRuntimePermission(context.packageName, permission, grant = true)
+
+    /**
+     * 经 Device Owner / Profile Owner 特权设置某包名的运行时权限授予状态。
+     *
+     * 这是「权限管理」模块的能力落地点：家长在管控台把某个运行时权限（如相机、定位、麦克风）
+     * 拨到"授予"，孩子端据此一次性到位，免得逐台平板弹授权框。
+     *
+     * - grant=true → [DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED]（一次性授予）；
+     * - grant=false → [DevicePolicyManager.PERMISSION_GRANT_STATE_DEFAULT]（收回我们之前的强制授予，
+     *   回归系统默认——不强行拒绝，避免把正常功能打挂）。
+     *
+     * 普通设备管理员（无 DO/PO）会返回 [OpResult.Unsupported]，上层据此在 UI 上引导走系统授权。
+     */
+    fun setRuntimePermission(packageName: String, permission: String, grant: Boolean): OpResult =
+        guarded("setPermission:$packageName:$permission=$grant") {
+            require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                "setPermissionGrantState requires API 23+"
+            }
+            require(hasOwnerPrivileges()) { "setRuntimePermission requires Device/Profile Owner" }
+            val admin = requireAdmin()
+            val target = packageName.takeIf { it.isNotBlank() } ?: context.packageName
+            val state = if (grant) {
+                DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+            } else {
+                DevicePolicyManager.PERMISSION_GRANT_STATE_DEFAULT
+            }
+            val ok = dpm.setPermissionGrantState(admin, target, permission, state)
+            require(ok) { "setPermissionGrantState returned false for $permission on $target" }
         }
-        require(hasOwnerPrivileges()) { "grantRuntimePermission requires Device/Profile Owner" }
-        val admin = requireAdmin()
-        val granted = dpm.setPermissionGrantState(
-            admin,
-            context.packageName,
-            permission,
-            DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
-        )
-        require(granted) { "setPermissionGrantState returned false for $permission" }
-    }
 
     /**
      * 协议同意后应用的「常开加固基线」（说明书 §11 防绕过）。
@@ -265,6 +281,42 @@ class DeviceAdminBridge @Inject constructor(
             results += "usbDataSignaling" to setUsbDataSignaling(enabled = false)
         }
 
+        return results
+    }
+
+    /**
+     * 功能管理：把孩子端从服务端收到的"功能开关"整包应用为 DPM 限制 / 系统开关。
+     *
+     * [features] 为 featureKey -> 是否启用（启用 = 施加该限制 / 关闭该能力）。
+     * featureKey 必须与对端 [com.padguard.server.service.CommandKey] 的 FEATURE_* 常量逐字符一致。
+     * 逐项返回成功/失败，便于上层汇总成"哪些功能未生效"上报服务端，避免静默失效。
+     *
+     * 注意方向：`*_disabled` 类开关值为 true 表示"禁用"（施加限制）；
+     * `auto_time_enforced` 值为 true 表示"强制自动对时"；`usb_data_disabled` 为 true 表示关闭 USB 数据传输。
+     */
+    fun applyFeaturePolicy(features: Map<String, Boolean>): List<Pair<String, OpResult>> {
+        val results = mutableListOf<Pair<String, OpResult>>()
+        for ((key, enabled) in features) {
+            if (key !in FeatureKey.ALL) continue
+            results += key to when (key) {
+                FeatureKey.CAMERA_DISABLED -> setCameraDisabled(enabled)
+                FeatureKey.SCREENSHOT_DISABLED -> setScreenCaptureDisabled(enabled)
+                FeatureKey.FACTORY_RESET_DISABLED ->
+                    setUserRestriction(UserManager.DISALLOW_FACTORY_RESET, enabled)
+                FeatureKey.SAFE_BOOT_DISABLED ->
+                    setUserRestriction(UserManager.DISALLOW_SAFE_BOOT, enabled)
+                FeatureKey.UNKNOWN_SOURCES_DISABLED ->
+                    setUserRestriction(UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES, enabled)
+                FeatureKey.CONFIG_DATETIME_DISABLED ->
+                    setUserRestriction(UserManager.DISALLOW_CONFIG_DATE_TIME, enabled)
+                FeatureKey.USB_DEBUG_DISABLED ->
+                    setUserRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, enabled)
+                FeatureKey.USB_DATA_DISABLED -> setUsbDataSignaling(enabled = !enabled)
+                FeatureKey.STATUS_BAR_DISABLED -> setStatusBarDisabled(enabled)
+                FeatureKey.AUTO_TIME_ENFORCED -> setAutoTimeEnforced(enabled)
+                else -> OpResult.Unsupported(key, "unknown feature key")
+            }
+        }
         return results
     }
 
@@ -676,6 +728,25 @@ class DeviceAdminBridge @Inject constructor(
 
     companion object {
         private const val TAG = "DeviceAdminBridge"
+
+        /** 功能管理 featureKey，与服务端 CommandKey.FEATURE_* 逐字符一致 */
+        object FeatureKey {
+            const val CAMERA_DISABLED = "camera_disabled"
+            const val SCREENSHOT_DISABLED = "screenshot_disabled"
+            const val FACTORY_RESET_DISABLED = "factory_reset_disabled"
+            const val SAFE_BOOT_DISABLED = "safe_boot_disabled"
+            const val UNKNOWN_SOURCES_DISABLED = "unknown_sources_disabled"
+            const val CONFIG_DATETIME_DISABLED = "config_datetime_disabled"
+            const val USB_DEBUG_DISABLED = "usb_debug_disabled"
+            const val USB_DATA_DISABLED = "usb_data_disabled"
+            const val STATUS_BAR_DISABLED = "status_bar_disabled"
+            const val AUTO_TIME_ENFORCED = "auto_time_enforced"
+            val ALL = setOf(
+                CAMERA_DISABLED, SCREENSHOT_DISABLED, FACTORY_RESET_DISABLED, SAFE_BOOT_DISABLED,
+                UNKNOWN_SOURCES_DISABLED, CONFIG_DATETIME_DISABLED, USB_DEBUG_DISABLED,
+                USB_DATA_DISABLED, STATUS_BAR_DISABLED, AUTO_TIME_ENFORCED
+            )
+        }
     }
 }
 

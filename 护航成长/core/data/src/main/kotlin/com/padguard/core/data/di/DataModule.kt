@@ -5,6 +5,8 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.room.Room
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.padguard.core.data.db.AppUsageDao
 import com.padguard.core.data.db.BehaviorLogDao
 import com.padguard.core.data.db.CommandRecordDao
@@ -14,6 +16,8 @@ import com.padguard.core.data.db.PolicyDao
 import com.padguard.core.data.db.RiskEventDao
 import com.padguard.core.data.db.UnlockRequestDao
 import com.padguard.core.data.db.AgreementDao
+import com.padguard.core.data.db.ParentMessageDao
+import com.padguard.core.data.repository.MessageRepository
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -36,6 +40,35 @@ private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
     }
 }
 
+/**
+ * v4 -> v5：新增 parent_message 表（家长发布信息的本地持久化）。
+ *
+ * 仅建表 + 索引，不动任何既有表，因此不会触发 destructiveMigration 清空策略/日志缓存。
+ */
+private val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS parent_message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                serverMsgId TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                contentType TEXT NOT NULL,
+                mediaUrl TEXT NOT NULL,
+                mediaName TEXT NOT NULL,
+                durationSec INTEGER NOT NULL,
+                blocking INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
+                isRead INTEGER NOT NULL DEFAULT 0
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_parent_message_serverMsgId ON parent_message(serverMsgId)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_parent_message_timestamp ON parent_message(timestamp)")
+    }
+}
+
 private val Context.authDataStore: DataStore<Preferences> by preferencesDataStore(name = "padguard_auth")
 private val Context.configDataStore: DataStore<Preferences> by preferencesDataStore(name = "padguard_config")
 
@@ -50,7 +83,7 @@ object DatabaseModule {
             // v3 -> v4：app_usage 增加首次/末次使用时间两列。
             // 必须显式迁移而不能依赖 destructive：老库里存着当日累计时长，
             // 一旦重建，孩子已用的时长归零，等于白送一段绕过限额的使用时间。
-            .addMigrations(MIGRATION_3_4)
+            .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
             // 离线管控场景下数据库损坏会导致管控失效，这里允许重建
             // （策略可从服务端重新拉取，日志丢失可接受，优先保证可用性）
             .fallbackToDestructiveMigration()
@@ -87,6 +120,14 @@ object DatabaseModule {
     @Provides
     @Singleton
     fun provideAgreementDao(db: PadGuardDatabase): AgreementDao = db.agreementDao()
+
+    @Provides
+    @Singleton
+    fun provideParentMessageDao(db: PadGuardDatabase): ParentMessageDao = db.parentMessageDao()
+
+    @Provides
+    @Singleton
+    fun provideMessageRepository(dao: ParentMessageDao): MessageRepository = MessageRepository(dao)
 }
 
 @Module

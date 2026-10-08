@@ -6,36 +6,49 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.padguard.child.MainActivity
 import com.padguard.child.R
 import com.padguard.child.capture.CaptureConsentPrompter
 import com.padguard.child.capture.PhotoCapture
 import com.padguard.child.capture.ScreenCaptureService
+import com.padguard.child.time.TimeOffsetPrefs
 import com.padguard.child.capture.ScreenCaptureSession
+import com.padguard.child.guard.AppGuardPolicyStore
+import com.padguard.child.guard.EyeProtectionOverlay
+import com.padguard.child.guard.GuardA11y
+import com.padguard.child.guard.GuardPasswordManager
 import com.padguard.child.maintain.AppInstaller
 import com.padguard.child.monitor.AppInventoryCollector
 import com.padguard.child.monitor.DeviceSnapshotCollector
 import com.padguard.child.monitor.ForegroundAppMonitor
 import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.monitor.LocationCollector
+import com.padguard.child.monitor.LocationOutcome
+import com.padguard.child.monitor.LocationAutoReporter
 import com.padguard.child.ui.block.AppBlockActivity
 import com.padguard.child.ui.lock.LockScreenActivity
+import com.padguard.child.ui.lock.LockScreenPresenter
 import com.padguard.child.ui.message.MessageActivity
 import com.padguard.child.ui.overlay.WatermarkOverlay
 import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.model.Heartbeat
 import com.padguard.core.data.model.LogType
+import com.padguard.core.data.db.ParentMessageEntity
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.repository.LogRepository
+import com.padguard.core.data.repository.MessageRepository
 import com.padguard.core.data.repository.PolicyRepository
 import com.padguard.core.data.repository.UnlockRequestRepository
 import com.padguard.core.data.repository.UsageRepository
@@ -49,6 +62,7 @@ import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
 import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
+import com.padguard.core.transport.http.CommandsResponse
 import com.padguard.core.transport.http.CredentialStore
 import com.padguard.core.transport.http.PolicyFetchResult
 import dagger.hilt.android.AndroidEntryPoint
@@ -115,12 +129,25 @@ class GuardService : Service() {
     @Inject lateinit var timeProvider: TimeProvider
     @Inject lateinit var unlockRequestRepository: UnlockRequestRepository
     @Inject lateinit var locationCollector: LocationCollector
+
+    @Inject lateinit var locationAutoReporter: LocationAutoReporter
     @Inject lateinit var appInventory: AppInventoryCollector
+    /** 应用管控策略的本地镜像，供无障碍服务在非 DO 设备上做降级拦截 */
+    @Inject lateinit var appGuardStore: AppGuardPolicyStore
+    /** 锁屏呈现统一入口：前台走 Activity、后台走悬浮层（后台启动 Activity 会被系统拦截） */
+    @Inject lateinit var lockScreenPresenter: LockScreenPresenter
+    /** 护眼滤镜；与水印同为悬浮层，但互不相关（一个护眼、一个署名），分开管理 */
+    @Inject lateinit var eyeProtectionOverlay: EyeProtectionOverlay
+
+    /** 策略 → 镜像的同步协程；随服务生命周期终止 */
+    private var appPolicyMirrorJob: Job? = null
     @Inject lateinit var usageRepository: UsageRepository
+    @Inject lateinit var messageRepository: MessageRepository
     @Inject lateinit var photoCapture: PhotoCapture
     @Inject lateinit var appInstaller: AppInstaller
     @Inject lateinit var watermark: WatermarkOverlay
     @Inject lateinit var credentials: CredentialStore
+    @Inject lateinit var guardPassword: GuardPasswordManager
 
     /**
      * 当前是否"已绑定"（由 [observeBinding] 维护）。
@@ -150,25 +177,19 @@ class GuardService : Service() {
     private val bootstrapped = AtomicBoolean(false)
     /** 安装/卸载完成后请求立即同步一次应用台账 */
     private val appSyncRequested = AtomicBoolean(false)
-
-    /** 已上报过的应用用量（包名 -> 累计毫秒），用于计算增量，避免服务端重复累加 */
-    private val reportedAppUsage = ConcurrentHashMap<String, Long>()
+    /** 动态注册的装机/卸机监听；命中即置 [appSyncRequested]，由主循环在数秒内全量上报 */
+    private var appChangeReceiver: BroadcastReceiver? = null
 
     /**
-     * 每个应用上一次上报的时刻（包名 -> 墙钟毫秒）。
+     * 上次已上报的「累计值」节流记忆（仅用于减少冗余日志，不参与正确性计算）。
      *
-     * 用于给增量段补"起点"：本次上报代表 [上次时刻, 现在] 这段使用，
-     * 服务端按天取 min/max 才能还原真实的开始/停止时间。
-     * 不记这个的话，每段增量的起点都会退化成"当日首次使用"，
-     * 家长看到的是所有应用都在同一时刻开始，时间点失去意义。
+     * 孩子端上报的是「当天累计值」，服务端按「当天最大值」聚合，天然幂等：
+     * 即使本进程重启丢了这份记忆、多报几条相同值的日志，服务端取到的仍是真实累计值，绝不会高估。
+     * 这与旧版"增量 + 已上报量基准台账"有本质区别——旧台账一旦丢失就会把全量当成增量重复累加。
      */
-    private val reportedAppUsageAt = ConcurrentHashMap<String, Long>()
-    @Volatile private var reportedAppUsageDay = ""
-
-    /** 已上报过的全局总时长（毫秒），与 [reportedAppUsage] 同理只报增量 */
-    @Volatile private var reportedTotalUsage = 0L
-    /** 全局总时长上一次上报的时刻，给增量段补起点 */
-    @Volatile private var reportedTotalAt = 0L
+    @Volatile private var lastReportedTotalMs = 0L
+    @Volatile private var lastReportedDay = ""
+    private val lastReportedAppMs = ConcurrentHashMap<String, Long>()
 
     /** 锁屏页当前是否已被拉起，避免每轮 tick 重复 startActivity 造成闪屏 */
     private var lockScreenShown = false
@@ -190,7 +211,16 @@ class GuardService : Service() {
         // 超时直接 ForegroundServiceDidNotStartInTimeException 崩溃。
         // 所以先挂一个"启动中"的通知，真实状态等拿到数据后再刷。
         enterForeground()
+        // 监听本机应用装卸：孩子手动安装/卸载是即时管理动作，命中即触发台账同步，
+        // 避免家长端在 30 分钟周期内看到"幽灵应用"且对其授权无效。
+        registerAppChangeReceiver()
         Logger.i(TAG) { "GuardService created, controlMode=${admin.refreshControlMode()}" }
+        isRunning = true
+        // 注册看门狗：进程被系统/清理工具杀掉后由系统侧周期拉起（START_STICKY 并不保证重建）。
+        // 放在 onCreate 而不是绑定流程里：即便这台设备还没绑定，守护也要在，
+        // 否则"家长扫码绑定后立刻下发指令"会因为没有宿主而丢失。
+        runCatching { GuardWatchdogService.schedule(this) }
+            .onFailure { Logger.w(TAG) { "watchdog schedule failed: ${it.message}" } }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -219,10 +249,38 @@ class GuardService : Service() {
         return START_STICKY
     }
 
+    /**
+     * 孩子从最近任务里把 App 划掉时触发。
+     *
+     * ## 为什么要主动重启
+     * "划掉任务"在很多 ROM 上会连同进程一起杀掉守护服务（不只是 Activity）。
+     * 一旦服务没了，命令轮询与 MQTT 全部停摆：家长端看到的设备还"在线"，
+     * 但锁屏/截屏/看屏指令全部石沉大海 —— 这正是"装了管控却管不住"的典型成因。
+     *
+     * ## 为什么要延后一秒
+     * 系统清理任务栈与我们重启服务存在竞态：立刻 startForegroundService 时，
+     * 进程往往正在被回收，启动会被拒或刚起又被收。稍作延迟让清理先完成，成功率明显更高。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Logger.w(TAG) { "task removed, restarting guard service" }
+        android.os.Handler(mainLooper).postDelayed({
+            runCatching { start(applicationContext, REASON_TASK_REMOVED) }
+                .onFailure { Logger.e(TAG, it) { "restart after task removed failed" } }
+        }, RESTART_DELAY_MS)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        isRunning = false
         Logger.w(TAG) { "GuardService destroyed" }
+        // 周期定位必须跟着守护服务一起停：服务停掉通常意味着解绑 / 退出管控，
+        // 此时继续采集位置既没有上报对象，也越过"家长未授权即采集"的边界。
+        locationAutoReporter.stop()
+        // 滤镜必须跟着服务一起撤：服务销毁意味着退出管控，
+        // 留一层黄蒙蒙的遮罩在孩子屏幕上，家长会以为平板坏了。
+        eyeProtectionOverlay.remove()
         scope.cancel()
         super.onDestroy()
     }
@@ -239,6 +297,10 @@ class GuardService : Service() {
         // 自愈补授必须放在最前：通知权限一旦缺失，屏幕采集的引导通知孩子收不到，
         // 实时看屏就会永久卡在"连接中"，且平板上毫无提示。
         scope.launch { runSafely("ensurePermissions") { permissionGranter.ensureGranted() } }
+        // 周期性位置上报：策略里 locationIntervalSec 的落地执行者（策略为 0 时自动不采）。
+        // 放在这里而不是某个界面：守护服务是唯一长期存活的宿主，
+        // 放在界面里孩子一按 Home 就断，轨迹数据会大面积缺失。
+        scope.launch { runSafely("startLocationReporter") { locationAutoReporter.start() } }
         scope.launch {
             runSafely("applyCachedPolicy") {
                 // 未绑定时不落地本地缓存策略：没有家长就没有管控依据，
@@ -262,6 +324,7 @@ class GuardService : Service() {
         observeEffects()
         observeDownlink()
         observeBinding()
+        observeAppPolicyMirror()
         // 必须先等凭据内存快照从 DataStore 加载完成，再启动会发起鉴权请求的循环。
         // 否则首帧心跳 / 指令拉取会在 CredentialStore 尚未填充 deviceToken 时就发出，
         // 服务端判 TOKEN_INVALID(40101)，进而触发自愈解绑把有效凭据清掉（启动竞态自残）。
@@ -455,6 +518,40 @@ class GuardService : Service() {
     }
 
     /**
+     * 动态注册本机应用装卸监听（规避 Android 12+ 禁止后台 BroadcastReceiver 启动前台服务的限制）。
+     *
+     * 孩子手动安装 / 卸载应用是高频且即时的管理动作，若只依赖 30 分钟周期同步，
+     * 家长端会长时间显示"已卸载却仍在列表"的幽灵应用，且对其点授权会因台账与设备不符而无效。
+     * 这里只置 [appSyncRequested]，由主循环在数秒内完成全量上报，
+     * 卸载的应用随即被服务端标 `installed=false` 并从家长端列表消失。
+     *
+     * 之所以在 [onCreate] 里运行时注册而非清单静态注册：Android 12+ 禁止后台 Receiver
+     * 启动前台服务，而我们的服务正是前台服务；动态注册则不受此限，且能直接落到内存中的标志位。
+     */
+    private fun registerAppChangeReceiver() {
+        if (appChangeReceiver != null) return
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            // 包变化广播携带的是 `package:xxx` 形式的数据，必须声明 scheme 才能收到
+            addDataScheme("package")
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val action = intent?.action ?: return
+                // 自身被替换（更新）时也会收到 REPLACED，排除自身避免无谓同步
+                val pkg = intent.data?.schemeSpecificPart.orEmpty()
+                if (pkg == packageName) return
+                Logger.i(TAG) { "package change detected: $action pkg=$pkg -> request appSync" }
+                appSyncRequested.set(true)
+            }
+        }
+        appChangeReceiver = receiver
+        ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+    }
+
+    /**
      * 上报已安装应用台账。
      *
      * 频率刻意压到 30 分钟：清单上百条、单次请求几十 KB，
@@ -513,10 +610,10 @@ class GuardService : Service() {
     private fun reconcileLockScreen(shouldLock: Boolean, detail: String) {
         if (shouldLock && !lockScreenShown) {
             lockScreenShown = true
-            LockScreenActivity.show(this, detail)
+            lockScreenPresenter.show(detail)
         } else if (!shouldLock && lockScreenShown) {
             lockScreenShown = false
-            LockScreenActivity.dismiss(this)
+            lockScreenPresenter.dismiss()
         }
     }
 
@@ -575,6 +672,10 @@ class GuardService : Service() {
                 lastHeartbeatOk = true
                 online = true
                 val ack = result.value
+
+                // 落盘当前 offset：进程被杀后重启能立刻拿到接近正确的时间基准，
+                // 不必等第一个网络样本（详见 TimeOffsetPrefs 的说明）。
+                TimeOffsetPrefs.saveIfChanged(this, timeProvider.currentOffsetMs())
 
                 // 服务端说它那边的版本更高，说明我们漏了一次策略推送（MQTT 抖动很常见），
                 // 心跳兼作策略版本对账通道，这条兜底比重试推送更可靠。
@@ -655,18 +756,6 @@ class GuardService : Service() {
     }
 
     /**
-     * 把本地累计的应用用量落成 APP_USAGE 日志。
-     *
-     * ## 为什么报"增量"而不是"累计值"
-     * 累计值会让服务端把同一段时长重复累加：每次上报都是"截至当前的全部用量"，
-     * 服务端按 durationSec 求和后，一天结束时的总时长会是真实值的 N 倍（N = 上报次数）。
-     * 这里用 [reportedAppUsage] 记住"已经报过多少"，只上报两次之间的增量，服务端直接求和即可。
-     *
-     * ## 为什么在日切时清空
-     * UsageRepository 的累计值本来就是按 dayKey 分表的，跨日会自然归零；
-     * 若这里不清空记录表，新一天的首次上报会算出"负数增量"并被阈值过滤掉，当天数据就丢了。
-     */
-    /**
      * 使用情况实时同步：把本地累计的用量落成日志并立即上行。
      *
      * 与 [uploadPending] 的区别：后者受服务端 logUploadIntervalMs 节制（可能很长），
@@ -680,40 +769,61 @@ class GuardService : Service() {
         runSafely("uploadPending") { uploadPending() }
     }
 
+    /**
+     * 把本地累计用量落成日志上行。
+     *
+     * ## 上报「累计值」而非「增量」
+     * 每条 USAGE_TOTAL / APP_USAGE 携带的是"截至当前的当天累计时长"（秒），并带 `cumulative=true` 标记。
+     * 服务端聚合时按「当天取最大值」还原真实累计——无论本进程重启多少次、同一份数据重复上报多少次、
+     * 到达顺序如何，取到的都是当天真实累计值，天然幂等。
+     *
+     * 这彻底取代了旧的「增量 + 已上报量基准台账」模型：旧模型在重启/日切时若基准未落盘
+     * （SharedPreferences 的 apply() 是异步的，进程被杀即丢失），会把全量累计当成增量重复累加，
+     * 导致家长端"今日已用"被高估数倍（现场表现：孩子端 3 分钟，家长端 1 小时 40 分）。
+     *
+     * ## 节流
+     * [lastReportedTotalMs] / [lastReportedAppMs] 只用于控制"累计变化达到阈值才落一条新日志"，
+     * 减少冗余日志与上行流量；它们不参与正确性计算，丢失也不影响结果（最多多一条相同值的日志）。
+     *
+     * ## 跨天
+     * 累计值本就按 dayKey 分表，跨天自然归零；这里在 dayKey 变化时清空节流记忆，
+     * 让新一天的首条日志正常发出（否则会拿昨天的累计值当基准，算出负数被跳过）。
+     */
     private suspend fun reportAppUsage() {
         val key = usageRepository.dayKey()
-        if (key != reportedAppUsageDay) {
-            reportedAppUsage.clear()
-            reportedAppUsageAt.clear()
-            reportedTotalUsage = 0L
-            reportedTotalAt = 0L
-            reportedAppUsageDay = key
-        }
         val now = System.currentTimeMillis()
+
+        // 跨天：累计值本就按 dayKey 分表，新的一天从 0 开始；
+        // 清空节流记忆让新一天首条日志正常发出（否则拿昨天累计值当基准会算出负数被跳过）。
+        if (key != lastReportedDay) {
+            lastReportedTotalMs = 0L
+            lastReportedAppMs.clear()
+            lastReportedDay = key
+        }
 
         // ---------- 全局总时长（不依赖使用情况访问权限，必须无条件上报） ----------
         // 只报 APP_USAGE（按应用）的话，未授予 UsageStats 权限的设备一条都发不出，
         // 服务端"今日总时长"就永远是 0。daily_usage 的累计只依赖亮屏，任何设备都有。
         var emitted = 0
         val totalMs = usageRepository.getTotalUsage(key)
-        val totalDelta = totalMs - reportedTotalUsage
-        if (totalDelta >= USAGE_REPORT_MIN_DELTA_MS) {
-            reportedTotalUsage = totalMs
-            val startAt = if (reportedTotalAt > 0L) reportedTotalAt else now
-            reportedTotalAt = now
+        if (totalMs - lastReportedTotalMs >= USAGE_REPORT_MIN_DELTA_MS) {
+            lastReportedTotalMs = totalMs
             logRepository.append(
                 type = LogType.USAGE_TOTAL,
                 payload = mapOf(
-                    "durationSec" to (totalDelta / 1000).toString(),
+                    // 上报「累计值」而非「增量」：服务端按"当天最大值"聚合，天然幂等，
+                    // 彻底杜绝旧增量模型"重启一次多一次"的高估（详见类注释）。
+                    "durationSec" to (totalMs / 1000).toString(),
                     "dayKey" to key,
-                    "startAt" to startAt.toString(),
-                    "endAt" to now.toString()
+                    "startAt" to now.toString(),
+                    "endAt" to now.toString(),
+                    "cumulative" to "true"
                 )
             )
             emitted++
         }
 
-        // ---------- 按应用增量（前台探测可用时才有数据） ----------
+        // ---------- 按应用累计值（前台探测可用时才有数据） ----------
         val snapshot = usageRepository.snapshotAppUsage(key)
         if (snapshot.isEmpty()) {
             if (emitted > 0) Logger.d(TAG) { "app usage reported: $emitted item(s) for day=$key" }
@@ -721,27 +831,21 @@ class GuardService : Service() {
         }
 
         for (stat in snapshot) {
-            val reported = reportedAppUsage[stat.packageName] ?: 0L
-            val delta = stat.usedMs - reported
-            if (delta < USAGE_REPORT_MIN_DELTA_MS) continue
-            reportedAppUsage[stat.packageName] = stat.usedMs
-            val startAt = reportedAppUsageAt[stat.packageName] ?: stat.firstUsedAt
-            reportedAppUsageAt[stat.packageName] = now
+            val last = lastReportedAppMs[stat.packageName] ?: 0L
+            if (stat.usedMs - last < USAGE_REPORT_MIN_DELTA_MS) continue
+            lastReportedAppMs[stat.packageName] = stat.usedMs
             logRepository.append(
                 type = LogType.APP_USAGE,
                 payload = mapOf(
                     "packageName" to stat.packageName,
                     "appName" to appLabel(stat.packageName),
-                    // LogRepository.append 的契约是 Map<String, String>（整包 JSON 序列化后上报），
-                    // 所以这里只能以字符串形式传；服务端 StatisticsService.durationSecOf
-                    // 同时兼容 Number 与 String（toIntOrNull），不会再把时长算成 0。
-                    "durationSec" to (delta / 1000).toString(),
+                    // 报「累计值」(stat.usedMs/1000) 而非增量，与服务端 MAX 聚合配合，幂等防高估。
+                    "durationSec" to (stat.usedMs / 1000).toString(),
                     "dayKey" to key,
-                    // 起止时间：家长端"今日使用情况"要展示每个应用的开始/停止时间。
-                    // 报的是增量段，所以起点取"上次已报到的时刻"（没有就用当日首次），
-                    // 终点是当下 —— 服务端按天聚合时取 min(起点)/max(终点) 即还原出全天区间。
-                    "startAt" to startAt.toString(),
-                    "endAt" to now.toString()
+                    // 起点取当日首次使用时刻，终点取当下；服务端按天取 min/max 还原全天区间。
+                    "startAt" to stat.firstUsedAt.toString(),
+                    "endAt" to now.toString(),
+                    "cumulative" to "true"
                 )
             )
             emitted++
@@ -768,9 +872,57 @@ class GuardService : Service() {
                     val saved = policyRepository.save(body.policy, body.rawJson)
                     val report = policyEngine.applyAll(saved, force = true)
                     Logger.i(TAG) { "policy v${saved.version} applied: ${report.summary()}" }
+                    // 操作密码闸门：把服务端下发的密码哈希落到本地（明文永不出网）。
+                    // 约定：clear 为真 → 清密码；passwordHash 非空 → 启用并落库；
+                    // 两者皆空 → 不改动（避免策略合并时误清空）。
+                    applyGuardPassword(saved.guard)
                 }
             }
             else -> Logger.w(TAG) { "fetch policy failed: $r" }
+        }
+    }
+
+    /**
+     * 把策略包里的操作密码配置落到本地 [GuardPasswordManager]。
+     *
+     * 三种情况：
+     * - [com.padguard.core.data.model.policy.GuardPolicy.clear] 为真 → 清除密码（解绑 / 家长关闭）；
+     * - `passwordHash` 非空 → 启用密码并落库哈希（明文只在本机算了一次 SHA-256，不出网）；
+     * - 两者皆空 → 不改动，避免策略合并（旧客户端/局部更新）时把已设密码误清空。
+     */
+    private fun applyGuardPassword(guard: com.padguard.core.data.model.policy.GuardPolicy) {
+        scope.launch {
+            runCatching {
+                when {
+                    guard.clear -> {
+                        guardPassword.clear()
+                        Logger.i(TAG) { "guard password cleared via policy" }
+                    }
+                    guard.passwordHash.isNotBlank() -> {
+                        guardPassword.setPasswordHash(guard.passwordHash)
+                        Logger.i(TAG) { "guard password enabled via policy (hash cached locally)" }
+                    }
+                    else -> Logger.v(TAG) { "guard policy present but empty, keep current state" }
+                }
+                ensureGuardInfra()
+            }.onFailure { Logger.e(TAG, it) { "applyGuardPassword failed" } }
+        }
+    }
+
+    /**
+     * 操作密码启用后，无障碍服务是拦截的硬依赖：未开启则闸门形同虚设。
+     *
+     * 此处只做检测与日志（无法用代码开启，必须用户去「设置 → 无障碍」手动开）。
+     * 引导 UI 由「我的」页的状态横幅承载：[com.padguard.child.ui.profile.ProfileViewModel]
+     * 直接复用 [com.padguard.child.guard.GuardA11y.isEnabled] 派生 [guardInfraWarning]，
+     * 与服务端解耦、UI 进程重启后依然能正确显示，无需本服务持久化标记。
+     */
+    private fun ensureGuardInfra() {
+        if (!guardPassword.isEnabledNow()) return
+        if (!GuardA11y.isEnabled(this)) {
+            Logger.w(TAG) { "guard password enabled but accessibility service NOT enabled; prompt via 我的 page banner" }
+        } else {
+            Logger.i(TAG) { "guard infra ok: accessibility service enabled" }
         }
     }
 
@@ -826,6 +978,7 @@ class GuardService : Service() {
                             // 表现为"家长端解绑了，孩子端却还在受控 / 再也绑不上别的账号"。
                             if (event.values["unbind"] == "1") {
                                 Logger.w(TAG) { "unbind command received, clearing local credentials" }
+                                runSafely("clearGuardPassword") { guardPassword.clear() }
                                 runSafely("handleRemoteUnbind") { handleRemoteUnbind() }
                             }
                         }
@@ -838,6 +991,30 @@ class GuardService : Service() {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * 把应用管控策略镜像到 [AppGuardPolicyStore]，供无障碍服务同步读取。
+     *
+     * ## 为什么需要这一层
+     * [com.padguard.core.engine.enforcer.AppPolicyEnforcer] 在非 DO 设备上只能把
+     * "隐藏/挂起"上报为 UNSUPPORTED —— 家长配的名单在设备上不起作用。
+     * 真正能落地的是无障碍服务，但无障碍回调在主线程、不能挂起读 Room，
+     * 所以这里把同一份 [com.padguard.core.data.model.policy.AppPolicy] 同步一份到 DataStore。
+     *
+     * 监听 Room 而不是只在 refreshPolicy 里写：策略可能来自首屏拉取、指令下发、周期自愈等
+     * 任意一条路径，监听数据源能保证"只要策略变了，镜像就跟着变"，不会漏。
+     */
+    private fun observeAppPolicyMirror() {
+        appPolicyMirrorJob?.cancel()
+        appPolicyMirrorJob = scope.launch {
+            policyRepository.observePolicy().collect { pkg ->
+                runSafely("mirrorAppPolicy") { appGuardStore.mirror(pkg.app) }
+                // 护眼滤镜走同一条数据源：策略可能来自首屏拉取 / 指令下发 / 周期自愈任意一条路径，
+                // 监听保证"策略变了 → 滤镜跟着变"，不会出现"家长关了开关但平板还在发黄"。
+                runSafely("applyEyeProtection") { eyeProtectionOverlay.apply(pkg.eyeProtection) }
             }
         }
     }
@@ -857,12 +1034,12 @@ class GuardService : Service() {
         when (effect) {
             is EngineEffect.ShowLockScreen -> {
                 lockScreenShown = true
-                LockScreenActivity.show(this, effect.reason)
+                lockScreenPresenter.show(effect.reason)
             }
 
             EngineEffect.DismissLockScreen -> {
                 lockScreenShown = false
-                LockScreenActivity.dismiss(this)
+                lockScreenPresenter.dismiss()
                 // 家长放行最常发生在"孩子从拦截页提交申请"的场景，
                 // 这里必须同步收掉拦截页，否则要等下一轮自检（最长 15s）才关，
                 // 孩子会认为家长同意了却没生效。
@@ -870,16 +1047,37 @@ class GuardService : Service() {
                 lastBlockedPackage = null
             }
 
-            is EngineEffect.ShowMessage -> MessageActivity.show(
-                context = this,
-                title = effect.title,
-                body = effect.body,
-                durationSec = effect.durationSec,
-                blocking = effect.blocking,
-                contentType = effect.contentType,
-                mediaUrl = effect.mediaUrl,
-                mediaName = effect.mediaName
-            )
+            is EngineEffect.ShowMessage -> {
+                // 落地到本地消息页：家长发布的信息进入「消息」持久存储，孩子随时可查看。
+                // msgId 为空（理论上不会发生，指令必带）时退化为时间戳，保证唯一约束不冲突。
+                runSafely("persistParentMessage") {
+                    val key = effect.msgId.ifBlank { System.currentTimeMillis().toString() }
+                    messageRepository.upsert(
+                        ParentMessageEntity(
+                            serverMsgId = key,
+                            title = effect.title,
+                            body = effect.body,
+                            contentType = effect.contentType,
+                            mediaUrl = effect.mediaUrl,
+                            mediaName = effect.mediaName,
+                            durationSec = effect.durationSec,
+                            blocking = effect.blocking,
+                            timestamp = timeProvider.now(),
+                            isRead = false
+                        )
+                    )
+                }
+                MessageActivity.show(
+                    context = this,
+                    title = effect.title,
+                    body = effect.body,
+                    durationSec = effect.durationSec,
+                    blocking = effect.blocking,
+                    contentType = effect.contentType,
+                    mediaUrl = effect.mediaUrl,
+                    mediaName = effect.mediaName
+                )
+            }
 
             EngineEffect.FlushLogs, EngineEffect.FlushBeforeShutdown -> uploadPending()
 
@@ -908,11 +1106,22 @@ class GuardService : Service() {
             }
 
             is EngineEffect.RequestLocation -> {
-                val ok = locationCollector.collectAndUpload()
-                reportEffectResult(
-                    effect.msgId, "locate", ok,
-                    if (ok) "已上报" else "定位失败（未授权定位权限或设备当前无任何位置缓存）"
-                )
+                // 失败原因必须区分：过去统一回一句"未授权定位权限或无位置缓存"，
+                // 而真实失败绝大多数是"App 在后台，Android 10+ 禁止后台读位置"，
+                // 文案指向错误，家长只会反复去系统里开权限，永远修不好。
+                when (val outcome = locationCollector.collectAndUpload(
+                    // 家长点了"立即定位"就是要新鲜的：缓存点超过 15 秒就主动向系统要一个新的，
+                    // 最长等 12 秒（室内 GPS 冷启动常常更久，超时后降级为缓存点并如实带回时间戳）。
+                    freshnessMs = 15_000L,
+                    requestTimeoutMs = 12_000L
+                )) {
+                    LocationOutcome.Success ->
+                        reportEffectResult(effect.msgId, "locate", true, "已上报")
+                    LocationOutcome.Skipped ->
+                        reportEffectResult(effect.msgId, "locate", true, "位置未变化，沿用上次上报")
+                    is LocationOutcome.Failure ->
+                        reportEffectResult(effect.msgId, "locate", false, outcome.kind.hint)
+                }
             }
 
             is EngineEffect.StartScreenRecord -> {
@@ -1115,8 +1324,19 @@ class GuardService : Service() {
         if (deviceId.isBlank()) return
         when (val r = remote.pullCommands(lastCommandPullAtMs)) {
             is ApiResult.Success -> {
-                val list = r.value
+                val resp = r.value
                 lastCommandPullAtMs = System.currentTimeMillis()
+                // 指令轮询响应顺带回传最新策略版本号：这是家长改策略后最坏 3s 内生效的关键。
+                // 即便 MQTT 未启用、policy 推送必然丢失，3s 高频轮询也能立刻感知版本漂移并全量拉新，
+                // 不必苦等 30s 心跳（且长轮询挂起时本地往往拿不到心跳真实版本，对账会退化）。
+                val localVersion = policyRepository.currentVersion()
+                if (resp.policyVersion > 0 && resp.policyVersion != localVersion) {
+                    Logger.i(TAG) {
+                        "policy version drift via command poll: local=$localVersion, server=${resp.policyVersion}"
+                    }
+                    runSafely("policyRefreshOnDrift") { refreshPolicy() }
+                }
+                val list = resp.commands
                 if (list.isEmpty()) return
                 Logger.w(TAG) {
                     "fallback pull: ${list.size} command(s) missed by push -> ${list.map { it.type.name }}"
@@ -1245,9 +1465,28 @@ class GuardService : Service() {
         const val REASON_BOOT = "boot"
         /** 立即上报一次本地待发数据（解锁申请等时效性交互使用） */
         const val REASON_FLUSH = "flush"
+        /** 任务被划掉后的自启（见 onTaskRemoved） */
+        const val REASON_TASK_REMOVED = "taskRemoved"
+        /** 看门狗发现服务不在时拉起（见 GuardWatchdogService） */
+        const val REASON_WATCHDOG = "watchdog"
+
+        /**
+         * 守护服务是否在运行。
+         *
+         * 供 [GuardWatchdogService] 判断是否需要拉起。用静态标志而不是
+         * `ActivityManager.getRunningServices`：后者从 Android 8 起只能查到自己进程、
+         * 且部分 ROM 干脆返回空，判定会失真。
+         * 进程被杀时静态变量随之消失（读回来就是 false），正好是我们要的语义。
+         */
+        @Volatile
+        var isRunning: Boolean = false
+            private set
 
         /** 采样基准间隔。15s 是权衡结果：更短会明显增加耗电，更长会让"时段锁"生效延迟到肉眼可见 */
         private const val MIN_TICK_MS = 15_000L
+
+        /** 任务被划掉后重启服务的延迟（见 onTaskRemoved）：避开系统清理任务栈的竞态 */
+        private const val RESTART_DELAY_MS = 1_000L
 
         /**
          * 指令兜底拉取间隔。
@@ -1284,10 +1523,11 @@ class GuardService : Service() {
         /**
          * 使用情况实时同步间隔：**独立于**日志上报节奏（logUploadIntervalMs 可能远大于此值）。
          * 家长端"今日使用情况"依赖 APP_USAGE / USAGE_TOTAL 日志上行，
-         * 单独用 30s 节奏刷新，避免服务端把日志间隔配大后用量数据要等几分钟才更新一次。
+         * 原本 30s 节奏会让两端差异最多累积到 30s+；压到 10s 让服务端聚合值与孩子端本地实时值
+         * 基本对齐，看板不再"越攒越偏"（用户反馈看板已用时与孩子端不一致的根因之一）。
          */
-        private const val USAGE_SYNC_INTERVAL_MS = 30_000L
-        private const val USAGE_SYNC_FIRST_DELAY_MS = 10_000L
+        private const val USAGE_SYNC_INTERVAL_MS = 10_000L
+        private const val USAGE_SYNC_FIRST_DELAY_MS = 5_000L
 
         /** 应用台账全量同步间隔：装卸是低频事件，没必要跟着 15s 的采样节奏跑 */
         private const val APP_SYNC_INTERVAL_MS = 30 * 60_000L
@@ -1307,11 +1547,11 @@ class GuardService : Service() {
 
         /**
          * 应用用量上报的最小增量。
-         * 低于 30 秒的增量不值得单独发一条日志：家长看到的统计精度是分钟级，
-         * 而每 15 秒采样一次若不加阈值，一天会产生上万条 APP_USAGE 日志，
-         * 白白占用上行带宽与服务端存储。
+         * 与 [USAGE_SYNC_INTERVAL_MS] 对齐为 10s：每 10s 同步一次、增量满 10s 才落一条日志，
+         * 既保证服务端聚合值近实时刷新（看板与孩子端一致），又把每天日志条数压在合理量级
+         * （2 小时重度使用约 720 条/应用，远小于不设阈值的上万条）。
          */
-        private const val USAGE_REPORT_MIN_DELTA_MS = 30_000L
+        private const val USAGE_REPORT_MIN_DELTA_MS = 10_000L
 
         /**
          * 启动守护服务。

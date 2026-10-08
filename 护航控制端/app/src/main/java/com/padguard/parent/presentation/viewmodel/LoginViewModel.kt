@@ -60,6 +60,18 @@ data class LoginUiState(
     val countdown: Int = 0,
     val isLoggedIn: Boolean = false,
     val error: String? = null,
+    /**
+     * 是否处于注册模式。
+     *
+     * 做成登录页内的模式切换，而不是单独开一个注册页：
+     * 注册与登录共用手机号、服务器地址、历史账号这些状态，
+     * 拆成两个页面就得在它们之间来回传参，且服务地址配置会出现两份（改一处漏一处）。
+     */
+    val isRegisterMode: Boolean = false,
+    /** 注册时的确认密码，仅用于在端上拦截"两次输入不一致"，不上传服务端 */
+    val confirmPassword: String = "",
+    /** 注册时的可选昵称；留空由服务端生成默认昵称 */
+    val nickname: String = "",
     /** 历史登录账号（最近使用在前），供账号框下拉选择 */
     val history: List<AccountPrefs.SavedAccount> = emptyList(),
     /** 是否"记住密码"；勾选后下次进入自动回填该账号密码 */
@@ -98,6 +110,11 @@ class LoginViewModel @Inject constructor(
         if (!u.startsWith("http://") && !u.startsWith("https://")) return false
         serverPrefs.setBaseUrl(u)
         return true
+    }
+
+    /** 恢复出厂默认服务器地址：用户填错导致彻底连不上时的兜底回退。 */
+    fun resetServerUrl() {
+        serverPrefs.resetToDefault()
     }
 
     fun toggleLoginMode() {
@@ -154,6 +171,67 @@ class LoginViewModel @Inject constructor(
 
     fun updateSmsCode(code: String) {
         _uiState.value = _uiState.value.copy(smsCode = code, error = null)
+    }
+
+    /** 登录 / 注册模式切换；切换时清空错误与仅属于另一模式的输入，避免串味 */
+    fun toggleRegisterMode() {
+        _uiState.value = _uiState.value.copy(
+            isRegisterMode = !_uiState.value.isRegisterMode,
+            confirmPassword = "",
+            error = null
+        )
+    }
+
+    fun updateConfirmPassword(v: String) {
+        _uiState.value = _uiState.value.copy(confirmPassword = v, error = null)
+    }
+
+    fun updateNickname(v: String) {
+        _uiState.value = _uiState.value.copy(nickname = v, error = null)
+    }
+
+    /**
+     * 手机号注册并直接进入主界面。
+     *
+     * 端上只做"必须本地才能判"的校验（两次密码一致、长度），
+     * 手机号格式与重复注册这类判断交给服务端 —— 端上重复一份正则，
+     * 将来运营商放开新号段就要同时改两端，属于典型的规则双写漂移。
+     *
+     * 注册成功后服务端已签发 token，因此这里与登录成功走同一条收尾路径
+     * （落盘账号 → isLoggedIn），不再要求用户重新登录一次。
+     */
+    fun register() {
+        val state = _uiState.value
+        val phone = state.phone.trim()
+        val pwd = state.password
+        when {
+            phone.isBlank() -> {
+                _uiState.value = state.copy(error = "请输入手机号")
+                return
+            }
+            pwd.length < 6 -> {
+                _uiState.value = state.copy(error = "密码至少 6 位")
+                return
+            }
+            pwd != state.confirmPassword -> {
+                _uiState.value = state.copy(error = "两次输入的密码不一致")
+                return
+            }
+        }
+        viewModelScope.launch {
+            _uiState.value = state.copy(isLoading = true, error = null)
+            val result = authRepository.register(phone, pwd, state.nickname.trim().ifBlank { null })
+            result.onSuccess {
+                accountPrefs.save(phone, pwd, remember = true)
+                _uiState.value = _uiState.value.copy(
+                    isLoading = true,
+                    isLoggedIn = true,
+                    history = accountPrefs.history()
+                )
+            }.onFailure { e ->
+                _uiState.value = _uiState.value.copy(isLoading = false, error = e.message ?: "注册失败")
+            }
+        }
     }
 
     fun sendSmsCode(phone: String) {

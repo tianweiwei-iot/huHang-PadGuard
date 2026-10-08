@@ -111,7 +111,9 @@ fun LocationScreen(
                 viewMode = uiState.viewMode,
                 onProviderChange = viewModel::selectProvider,
                 onViewModeChange = viewModel::selectViewMode,
-                onRefresh = viewModel::refreshLocation
+                onRefresh = viewModel::refreshLocation,
+                onLocate = viewModel::locateNow,
+                isLocating = uiState.isLocating
             )
 
             GeofenceStatusBanner(
@@ -143,7 +145,9 @@ private fun DeviceLocationCard(
     viewMode: MapViewMode,
     onProviderChange: (MapProvider) -> Unit,
     onViewModeChange: (MapViewMode) -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onLocate: () -> Unit,
+    isLocating: Boolean
 ) {
     RealtimeCard(
         title = "设备位置",
@@ -235,6 +239,28 @@ private fun DeviceLocationCard(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
             )
         }
+
+        Spacer(modifier = Modifier.height(12.dp))
+        Button(
+            onClick = onLocate,
+            enabled = !isLocating,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(
+                imageVector = Icons.Default.MyLocation,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(if (isLocating) "定位中…" else "立即定位")
+        }
+        Text(
+            text = "点击后平板会当场采集一次坐标并上报。孩子此刻未使用平板时受系统后台定位限制，" +
+                "将在孩子解锁平板后自动补传。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            modifier = Modifier.padding(top = 6.dp)
+        )
     }
 }
 

@@ -18,6 +18,7 @@ import com.padguard.core.transport.http.ApiCaller
 import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
 import com.padguard.core.transport.http.BindRequest
+import com.padguard.core.transport.http.CommandsResponse
 import com.padguard.core.transport.http.CredentialStore
 import com.padguard.core.transport.http.DeviceNameRequest
 import com.padguard.core.transport.http.EventUploadRequest
@@ -46,7 +47,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -248,12 +252,22 @@ class RealRemoteDataSource @Inject constructor(
         return caller.call("heartbeat") { api.heartbeat(heartbeat) }
     }
 
+    /**
+     * 指令回执。
+     *
+     * ## 这里**刻意不走 MQTT**
+     * 老实现是"MQTT 已连接就发 MQTT，publish 返回 true 即算成功"，
+     * 但 `publish` 返回 true 只代表**写进了本地会话**，不代表服务端收到了。
+     * 当服务端没有 broker（local profile `mqtt.enabled=false`）或 broker 地址不可达时，
+     * 客户端仍可能报告 connected，于是回执全部投进黑洞：
+     *   - 服务端 `commands.status` 永远停在 PENDING、`executed_at` 永远为 null；
+     *   - 家长端只看到"指令发送中"，不知道设备其实早就锁上了；
+     *   - 更糟的是孩子端已把 msgId 记进去重表，重发也执行不了 —— 指令永久"假失败"。
+     *
+     * 回执是**低频且必须可靠**的（每条指令一次），省下的那点开销远不抵闭环断裂的代价，
+     * 因此统一走 HTTPS；失败时入 [ackRetryQueue] 由后续重发兜底。
+     */
     override suspend fun sendAck(ack: CommandAck): Boolean {
-        if (settings.mode.value == TransportMode.MQTT && mqtt.connected.value) {
-            val topic = MqttTopics.upAck(credentials.tenantId, credentials.deviceId)
-            val payload = json.encodeToString(CommandAck.serializer(), ack)
-            if (mqtt.publish(topic, payload, MqttTopics.QOS_RELIABLE)) return true
-        }
         val result = caller.callIgnoringData("ack") {
             api.ack(AckUploadRequest(credentials.deviceId, listOf(ack)))
         }
@@ -273,21 +287,12 @@ class RealRemoteDataSource @Inject constructor(
     override suspend fun uploadEvents(deviceId: String, events: List<RiskEvent>): ApiResult<LogUploadResponse> {
         if (events.isEmpty()) return ApiResult.Success(LogUploadResponse(), timeProvider.now())
 
-        // 高危告警首选 MQTT QoS1：比 HTTPS 少一次 TLS 握手，
-        // "正在被卸载"这类事件必须在进程被杀之前发出去，毫秒级差异有意义。
-        if (settings.mode.value == TransportMode.MQTT && mqtt.connected.value) {
-            val topic = MqttTopics.upEvent(credentials.tenantId, credentials.deviceId)
-            val allPublished = events.all { event ->
-                mqtt.publish(
-                    topic,
-                    json.encodeToString(RiskEvent.serializer(), event.copy(deviceId = deviceId)),
-                    MqttTopics.QOS_RELIABLE
-                )
-            }
-            if (allPublished) {
-                return ApiResult.Success(LogUploadResponse(accepted = events.size), timeProvider.now())
-            }
-        }
+        // 高危告警同样**不走 MQTT**，原因与 [sendAck] 一致：
+        // `mqtt.publish` 返回 true 不代表服务端收到，broker 缺失时告警会全部静默丢失 ——
+        // 而"设备正在被卸载""检测到 root"这类告警恰恰是家长最需要知道的，
+        // 丢一条就让管控失去最后一道感知能力。低频高价值，宁可多一次 TLS 握手。
+        // （原注释说"比 HTTPS 少一次握手、毫秒级差异有意义" —— 那是建立在
+        //   broker 确实存在的假设上；假设不成立时，快没有任何意义。）
         return caller.call("events") {
             api.uploadEvents(EventUploadRequest(deviceId, events.map { it.copy(deviceId = deviceId) }))
         }
@@ -375,10 +380,38 @@ class RealRemoteDataSource @Inject constructor(
         return caller.call("apps") { api.uploadApps(AppInventoryRequest(apps)) }
     }
 
-    override suspend fun pullCommands(since: Long): ApiResult<List<Command>> =
-        // 带长轮询参数：有指令时服务端立即返回，没有则挂起到超时，
-        // 指令延迟因此不再受轮询周期限制。
-        caller.call("commands") { api.commands(since, LONG_POLL_WAIT_MS) }
+    override suspend fun pullCommands(since: Long): ApiResult<CommandsResponse> {
+        // 长轮询参数：有指令时服务端立即返回，没有则挂起到超时，指令延迟因此不再受轮询周期限制。
+        // 响应做兼容解析：
+        //  - 新服务端返回 { policyVersion, commands }（指令轮询顺带回传最新策略版本，支持 3s 级对账）；
+        //  - 旧服务端（本端升级但服务端未升级时）直接返回 [...] 数组，无 policyVersion —— 此时
+        //    回退到心跳对账路径（旧服务端心跳已带 policyVersion），避免指令轮询整体解析失败导致远程指令全断。
+        return when (val r = caller.callEnvelope("commands") { api.commands(since, LONG_POLL_WAIT_MS) }) {
+            is ApiResult.Success -> runCatching { parseCommandsResponse(r.value.data) }
+                .fold(
+                    onSuccess = { ApiResult.Success(it, r.value.serverTime) },
+                    onFailure = { ApiResult.Failure(ApiCode.LOCAL_PARSE_ERROR, "commands parse failed: ${it.message}", it) }
+                )
+            is ApiResult.BizError -> r
+            is ApiResult.Failure -> r
+        }
+    }
+
+    /**
+     * 兼容解析指令轮询响应（见 [pullCommands]）。
+     * 旧服务端返回裸数组 → 视作 policyVersion=-1（交给心跳对账）；
+     * 新服务端返回对象 → 直接反序列化；其它形态 → 空响应（不阻断主循环）。
+     */
+    private fun parseCommandsResponse(element: JsonElement?): CommandsResponse {
+        if (element == null) return CommandsResponse()
+        return when {
+            element is JsonArray ->
+                CommandsResponse(policyVersion = -1, commands = json.decodeFromJsonElement(ListSerializer(Command.serializer()), element))
+            element is JsonObject ->
+                json.decodeFromJsonElement(CommandsResponse.serializer(), element)
+            else -> CommandsResponse()
+        }
+    }
 
     // ==================== 下行处理 ====================
 
@@ -482,7 +515,10 @@ class RealRemoteDataSource @Inject constructor(
                 pollingHealthy = true
                 lastPollAt = timeProvider.now()
                 _downlink.tryEmit(Downlink.ConnectivityChanged(true, TransportMode.POLLING))
-                r.value.forEach { dispatchCommand(it) }
+                // 策略版本对账不在这里做：3s 一次的 [drainPendingCommands]（所有模式在线时都跑）
+                // 已经在响应里读到 policyVersion 并只在真正漂移时才全量拉新，
+                // 这里若无条件上抛 PolicyChanged 会每轮空拉一次策略包，纯属浪费。
+                r.value.commands.forEach { dispatchCommand(it) }
             }
             is ApiResult.BizError -> {
                 pollingHealthy = !r.isFatal()

@@ -11,6 +11,19 @@ import org.springframework.stereotype.Service
 import java.util.UUID
 
 /**
+ * 策略 `monitoring` 段的默认**定位上报间隔**（秒）。
+ *
+ * 为什么要显式下发而不是让孩子端自己取默认值：`locationIntervalSec` 的语义是
+ * "0 = 关闭定时定位上报"，若服务端不写这个字段，孩子端按 0 处理，
+ * 结果就是**周期上报永远不启动**——家长端的最新位置、历史轨迹、电子围栏全部为空，
+ * 表现上像"定位功能坏了"，实际只是没人来调度它。
+ * 这里给一个兼顾精度与耗电的默认值：5 分钟。
+ *
+ * 单位与取值区间须与孩子端 `MonitoringEnforcer` 的收敛逻辑（60~7200 秒）一致。
+ */
+const val DEFAULT_LOCATION_INTERVAL_SEC = 300
+
+/**
  * 分龄档位的合规默认值（服务端侧唯一事实源）。
  *
  * 为什么服务端也要存一份，而不是全交给端上算：
@@ -211,7 +224,15 @@ class PolicyService(
                 "blacklist" to listOf("com.tencent.mm")
             ),
             "schedule" to mapOf("timezone" to "Asia/Shanghai", "rules" to emptyList<Any>()),
-            "monitoring" to mapOf("heartbeatIntervalSec" to 30, "logUploadIntervalSec" to 300),
+            "monitoring" to mapOf(
+                "heartbeatIntervalSec" to 30,
+                "logUploadIntervalSec" to 300,
+                // 必须下发：不写这个字段孩子端按 0 处理 = 关闭周期定位上报
+                "locationIntervalSec" to DEFAULT_LOCATION_INTERVAL_SEC
+            ),
+            // 默认包也要带护眼（默认关闭）：孩子端在拿到重建策略前会先收到默认包，
+            // 缺字段时按"关闭"处理，行为一致；带上它免去"默认包覆盖后被清掉"的解释成本。
+            "eyeProtection" to mapOf("enabled" to false, "level" to 3),
             // 默认**不**开启未成年人模式：分龄涉及到家长对孩子年龄的确认，
             // 由家长在控制端明确选择档位后开启，避免产品替家长做这个决定。
             // 档位先落到 8–12 岁（覆盖大多数在管设备），家长改档后整体覆盖。

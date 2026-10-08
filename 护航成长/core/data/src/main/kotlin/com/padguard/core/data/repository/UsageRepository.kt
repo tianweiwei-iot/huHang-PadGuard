@@ -1,5 +1,6 @@
 package com.padguard.core.data.repository
 
+import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.db.AppUsageDao
 import com.padguard.core.data.db.DailyUsageDao
 import com.padguard.core.data.model.AppUsageStat
@@ -21,28 +22,39 @@ import javax.inject.Singleton
 @Singleton
 class UsageRepository @Inject constructor(
     private val appUsageDao: AppUsageDao,
-    private val dailyUsageDao: DailyUsageDao
+    private val dailyUsageDao: DailyUsageDao,
+    private val timeProvider: TimeProvider
 ) {
 
     private val dayKeyFormat = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
 
     @Synchronized
-    fun dayKey(timestamp: Long = System.currentTimeMillis()): String =
-        dayKeyFormat.format(timestamp)
+    fun dayKey(timestamp: Long): String = dayKeyFormat.format(timestamp)
+
+    /**
+     * 无参版必须走服务端校准时间 [TimeProvider.now]，不能用设备墙钟。
+     *
+     * 写入方（AppLimitEnforcer）与读取方（首页）若用两套时刻算日切，
+     * 零点附近一小时内的用量会"写进昨天、读自今天"（或反之），
+     * 首页"已用 / 剩余"直接归零，而服务端按 Asia/Shanghai 聚合又是另一个值 ——
+     * 这正是"孩子端与家长端时间对不上"的一类成因，必须全程单一口径。
+     */
+    @Synchronized
+    fun dayKey(): String = dayKey(timeProvider.now())
 
     /** 累加某应用当日使用时长 */
-    suspend fun addAppUsage(packageName: String, deltaMs: Long, timestamp: Long = System.currentTimeMillis()) {
+    suspend fun addAppUsage(packageName: String, deltaMs: Long, timestamp: Long = timeProvider.now()) {
         if (deltaMs <= 0) return
         appUsageDao.addUsage(dayKey(timestamp), packageName, deltaMs, System.currentTimeMillis())
     }
 
     /** 累加某应用当日启动次数 */
-    suspend fun addAppLaunch(packageName: String, timestamp: Long = System.currentTimeMillis()) {
+    suspend fun addAppLaunch(packageName: String, timestamp: Long = timeProvider.now()) {
         appUsageDao.addLaunch(dayKey(timestamp), packageName, System.currentTimeMillis())
     }
 
     /** 累加全局当日使用时长 */
-    suspend fun addTotalUsage(deltaMs: Long, timestamp: Long = System.currentTimeMillis()) {
+    suspend fun addTotalUsage(deltaMs: Long, timestamp: Long = timeProvider.now()) {
         if (deltaMs <= 0) return
         dailyUsageDao.addUsage(dayKey(timestamp), deltaMs, System.currentTimeMillis())
     }
@@ -66,7 +78,7 @@ class UsageRepository @Inject constructor(
      * 用 Flow 版本需要长期持有订阅，而上报协程是短命的，订阅会在协程结束时被取消，
      * 反而可能一次数据都拿不到（Room 的 Flow 在首次收集前不发射）。
      */
-    suspend fun snapshotAppUsage(key: String = dayKey()): List<AppUsageStat> =
+    suspend fun snapshotAppUsage(key: String = dayKey(timeProvider.now())): List<AppUsageStat> =
         appUsageDao.snapshotByDay(key).map {
             AppUsageStat(it.packageName, it.dayKey, it.usedMs, it.launchCount, it.lastUpdateAt, it.firstUsedAt, it.lastUsedAt)
         }
@@ -76,9 +88,14 @@ class UsageRepository @Inject constructor(
      *
      * 注意：返回的是**真实采集**的时长（不是策略下发的限额），由 GuardService 周期累加。
      * 当数据为空时返回 0，与策略下发的限额做减法得"剩余时间"。
+     *
+     * **必须与 [addTotalUsage] 写入用同一个日切口径**：写入方用的是校准后的
+     * [TimeProvider.now]（服务端时区），这里读取也必须用同一时刻，否则设备本地墙钟
+     * 与服务端校准时间存在偏移时，"写"进 A 日、"读"出 B 日，首页"已用/剩余"与
+     * 孩子端锁机判定、家长端服务端聚合（Asia/Shanghai）全部错位，表现为"学生端与家长端不同步"。
      */
     fun observeTodayUsageMinutes(): Flow<Int> =
-        dailyUsageDao.observe(dayKey()).map { entity ->
+        dailyUsageDao.observe(dayKey(timeProvider.now())).map { entity ->
             (entity?.totalMs ?: 0L).let { ms -> (ms / 60_000L).toInt() }
         }
 

@@ -38,9 +38,29 @@ object CommandType {
     const val SET_APP_SUSPENDED = "SET_APP_SUSPENDED"
     /** 隐藏/显示应用：家长端"使用权限"开关。与挂起的区别见孩子端 CommandType.SET_APP_HIDDEN */
     const val SET_APP_HIDDEN = "SET_APP_HIDDEN"
+    /**
+     * 权限管理：授予 / 收回某包名的运行时权限（DO/PO 才能改别人的权限）。
+     * payload { packageName, permission, grant }。
+     */
+    const val SET_RUNTIME_PERMISSION = "SET_RUNTIME_PERMISSION"
+    /**
+     * 功能管理：整包下发设备功能开关（相机/截屏/恢复出厂/安全启动/USB/自动对时等）。
+     * payload 为扁平的 featureKey -> "true"/"false"，孩子端逐项映射成 DPM 限制。
+     */
+    const val SET_FEATURE_POLICY = "SET_FEATURE_POLICY"
     const val REFRESH_POLICY = "REFRESH_POLICY"
     const val UPDATE_CONFIG = "UPDATE_CONFIG"
     const val FLUSH_LOGS = "FLUSH_LOGS"
+    /**
+     * 受管控水印开关。
+     *
+     * 用途不是"装饰"，而是替代一个**做不到的诉求**：有家长期望录屏时不要出现
+     * 系统那个红色 REC 指示器。该指示器由系统在 MediaProjection 会话期间绘制，
+     * 属于 Android 的隐私红线，Device Owner / 系统签名都无法关闭。
+     * 于是改为提供本应用自己的水印：家长可自定义文案（如"本机已开启家长监护"），
+     * 至少在管控生效时段给出明确提示。
+     */
+    const val SET_WATERMARK = "SET_WATERMARK"
 }
 
 /** payload 字段名，取值必须与孩子端 CommandExecutor 的 KEY_* 常量一致 */
@@ -68,6 +88,21 @@ object CommandKey {
     const val PACKAGE_NAME = "packageName"
     const val APK_URL = "apkUrl"
     const val VERSION_CODE = "versionCode"
+    /** 权限管理：被操作的权限名（如 android.permission.CAMERA） */
+    const val PERMISSION = "permission"
+    /** 权限管理：true=授予，false=收回 */
+    const val GRANT = "grant"
+    // —— 功能管理：featureKey 常量（取值必须与对端 DeviceAdminBridge.applyFeaturePolicy 一致）——
+    const val FEATURE_CAMERA_DISABLED = "camera_disabled"
+    const val FEATURE_SCREENSHOT_DISABLED = "screenshot_disabled"
+    const val FEATURE_FACTORY_RESET_DISABLED = "factory_reset_disabled"
+    const val FEATURE_SAFE_BOOT_DISABLED = "safe_boot_disabled"
+    const val FEATURE_UNKNOWN_SOURCES_DISABLED = "unknown_sources_disabled"
+    const val FEATURE_CONFIG_DATETIME_DISABLED = "config_datetime_disabled"
+    const val FEATURE_USB_DEBUG_DISABLED = "usb_debug_disabled"
+    const val FEATURE_USB_DATA_DISABLED = "usb_data_disabled"
+    const val FEATURE_STATUS_BAR_DISABLED = "status_bar_disabled"
+    const val FEATURE_AUTO_TIME_ENFORCED = "auto_time_enforced"
     const val SUSPENDED = "suspended"
     const val HIDDEN = "hidden"
     /** 截图任务号，必须携带，否则上传结果无法与本次请求关联 */
@@ -77,4 +112,6 @@ object CommandKey {
     const val TRIGGER_TYPE = "triggerType"
     const val RESOLUTION = "resolution"
     const val WITH_AUDIO = "withAudio"
+    /** 布尔开关，孩子端读取后决定启用还是关闭（水印 / 挂起 / 隐藏等通用开关字段） */
+    const val ENABLED = "enabled"
 }

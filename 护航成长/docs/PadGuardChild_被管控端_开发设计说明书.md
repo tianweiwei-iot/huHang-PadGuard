@@ -18,7 +18,7 @@
   3. `core/data/.../db/*` + `AgreementRepository.kt` — 新增 `AgreementEntity`（Room 合规表，§10.1）。
   4. `app/.../permission/PermissionGranter.kt` — 同意即自动授予 §7 全部运行时权限并落地加固基线（§5.3 + §7）。
   5. `app/.../agreement/AgreementDialog.kt` + `AgreementViewModel.kt` — 不可跳过的授权协议弹窗（§5）。
-  6. `app/.../MainActivity.kt` `EntryRouter` — 绑定后、授权前叠加协议门禁（§5.1）。
+  6. `app/.../MainActivity.kt` `EntryRouter` — 四态分流：**一次性授权页排在绑定之前**，主页不再叠加任何授权 UI（§5.1，2026-10-07 重构）。
   7. `app/.../bind/BindScreen.kt` / `BindActivity.kt` / `QrScanActivity.kt` + `AndroidManifest.xml` + `libs.versions.toml` — 绑定页支持**扫码 / 输码 / NFC 碰一碰**三种方式（§4.2 / §4.3）。
 - **已知缺口（务必在 M2+ 前制定计划）**：§4.3④声波/蓝牙近场未实现；§6.7 远程截屏、§6.8 静默安装/卸载、§6.5 定位采集在 `GuardService` 中按 P0 范围外**有意降级为 UNSUPPORTED**；**绑定码格式与《需求说明书》不一致**（见 §6 一致性问题，建议优先 Reconcile）。
 
@@ -88,15 +88,38 @@
 |---|---|---|
 | `onDismissRequest = { }` | L36 | §5.1 不可后台跳过（点外部不关闭） |
 | `AGREEMENT_TEXT` | L89 | §5.2 授权要点全文（设备信息/位置/应用管控/通信/摄像头麦克风/存储/远程控制/网络通知） |
-| `AgreementDialogHost()` | L74 | 仅"已绑定未同意"时由 `EntryRouter` 挂载 |
-| `AgreementViewModel.agree()` | L36 | 触发 `PermissionGranter.grantAll`，持久化翻转后门禁自动收起 |
+| `AgreementDialogHost()` | L74 | **仅在协议正文升版时**由 `EntryRouter` 挂载；常规装机的同意动作已在一次性授权页里完成，不会重复征求 |
+| `AgreementViewModel.agree()` | L36 | 触发 `PermissionGranter.grantAll`，持久化翻转后弹窗自动收起 |
 | `AgreementViewModel.decline()` | L50 | 暂不同意 → 受限预览模式，不授予任何高敏权限（§5.3） |
 
-## 2.5 入口门禁 — §5.1
+## 2.5 入口分流与一次性授权 — §5.1（2026-10-07 重构）
 
-**文件**：`app/src/main/kotlin/com/padguard/child/MainActivity.kt` `EntryRouter`（L55）
+**文件**：`app/src/main/kotlin/com/padguard/child/MainActivity.kt` `EntryRouter`
 
-- 未绑 → 跳 `BindActivity`；已绑 → 进 `PadGuardApp()` 主页；**已绑但未同意**（`agreed != true`）→ 主页之上叠加 `AgreementDialogHost()`（L70），保证"先明示授权再启用远程能力"。
+启动分流已由"多道门禁"收敛为**四态线性推进**：
+
+| 序 | 条件 | 去向 | 说明 |
+|---|---|---|---|
+| ① | 未登录家庭账号 | `ChildLoginScreen` | 复用家长端账号体系 |
+| ② | 一次性授权未完成（`AuthRepository.consentVersion` < `CONSENT_VERSION_CURRENT`） | `OneTimeConsentScreen` | **装机路径上唯一需要家长做决定的界面** |
+| ③ | 未绑定设备 | `BindActivity` | 扫码 / 绑定码 / NFC |
+| ④ | 全部就绪 | `PadGuardApp()` 主页 | 不再叠加任何授权 UI |
+
+**为什么授权排在绑定之前**：绑定要扫二维码，扫码需要相机权限。授权在后会让家长在最后一步被权限框打断，
+"一次授权"当场作废。授权在前，扫码时权限已就位。
+
+**一次性授权流水线**（`app/.../consent/OneTimeConsentViewModel.kt`）：
+家长点一次「同意并授权」→ 由唯一的推进器 `advance()` 依次处理
+设备管理员 → 运行时权限（DO 静默 / 系统一次弹窗）→ AppOps 与无障碍设置页 → 屏幕采集（MediaProjection）→
+写 `saveConsentDone()` → 自动分流到绑定。**从系统页面返回会自动复检并接下一项**，
+若某项回来仍是缺失态则停止自动跳转、把决定权交回家长（避免无限循环），并有「剩余项不再授权」出口。
+
+原分散在五处的授权已全部并入该流水线：`PermissionOnboardingScreen`、`DeviceOwnerActivationGate`、
+`AgreementDialogHost`（仅协议升版时保留）、`CapturePermissionActivity`（预置时机）、`ProfileScreen` 的无障碍引导。
+
+> **Android 硬边界**：AppOps（使用情况访问 / 悬浮窗 / 安装未知应用）、无障碍服务、MediaProjection、设备管理员
+> 都必须由用户在系统页面确认，**App 与 Device Owner 都无权代开**。"一次确认"指的是在 App 内只按一个按钮，
+> 而非完全没有系统交互。设备所有者(DO) 因需 adb / 开机向导预置，已降级为可选增强（DA 即覆盖主能力）。
 
 ## 2.6 绑定 ≥3 种方式 — §4.2 / §4.3
 
@@ -122,9 +145,9 @@
 | §4.4 | Device Owner QR/NFC 部署激活 | 既有 `PadGuardDeviceAdminReceiver` + 部署配置（不在本端 UI） | ✅ 既有 |
 | §4.5 | 绑定成功后时序（bind → MQTT → GuardService → Kiosk） | 既有 `BindViewModel` + `GuardService` | ✅ 既有 |
 | §4.6 | 绑定状态 DataStore 键 | `AuthRepository`（含 `agreementVersion`） | ✅ 已落地 |
-| §5.1 | 协议弹窗触发时机（绑定后、授权前、不可跳过） | `EntryRouter` + `AgreementDialogHost` + `onDismissRequest={}` | ✅ 已落地 |
+| §5.1 | 协议与授权的合并征求（一次点击即同意并授权） | `EntryRouter` + `OneTimeConsentViewModel`（`PermissionOnboardingScreen` / `DeviceOwnerActivationGate` 已下线）；`AgreementDialogHost` 仅在协议正文升版时出现 | ✅ 已落地（重构） |
 | §5.2 | 协议要点明示 | `AGREEMENT_TEXT` | ✅ 已落地 |
-| §5.3 | 同意→自动授权；暂不同意→受限预览 | `PermissionGranter.grantAll` + `AgreementViewModel` | ✅ 已落地 |
+| §5.3 | 同意→自动授权；暂不同意→受限预览 | `PermissionGranter.grantAll` + `OneTimeConsentViewModel.retryCurrent` / `finishAnyway` | ✅ 已落地 |
 | §5.4 | 协议留存（Room 合规表 + 上报） | `AgreementEntity` + `AgreementRepository.record` | ✅ 已落地 |
 | §7.1 | 运行时权限 DPC 自动授予 | `DeviceAdminBridge.grantRuntimePermission` + `PermissionGranter` | ✅ 已落地 |
 | §7.2 | DPC 特权机制 | `DeviceAdminBridge`（lockNow/reboot/wipe/setLockTaskPackages/…） | ✅ 既有 |

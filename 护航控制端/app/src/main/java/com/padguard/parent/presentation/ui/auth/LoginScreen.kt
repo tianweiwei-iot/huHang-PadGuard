@@ -8,6 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
@@ -68,14 +69,17 @@ fun LoginScreen(
         modifier = Modifier.fillMaxSize(),
         color = Color.Transparent
     ) {
+        // 必须可滚动：登录卡片 + 高级设置 + 协议文字的总高度在小屏机型上会超过一屏，
+        // 之前不可滚动时，"高级设置"被顶到屏幕外且滚不回来，用户会以为"登录页根本没有这个入口"。
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp)
                 .imePadding(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(80.dp))
+            Spacer(modifier = Modifier.height(48.dp))
 
             // Logo / App 名称
             Text(
@@ -92,21 +96,36 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(48.dp))
 
-            // 登录方式切换
-            LoginModeToggle(
-                isSmsMode = uiState.isSmsMode,
-                onToggle = viewModel::toggleLoginMode
-            )
+            // 登录方式切换（注册模式下隐藏：注册只有一种流程，
+            // 保留"密码/短信"切换会让人误以为存在"短信注册"，而服务端并没有这条分支）
+            if (!uiState.isRegisterMode) {
+                LoginModeToggle(
+                    isSmsMode = uiState.isSmsMode,
+                    onToggle = viewModel::toggleLoginMode
+                )
+            }
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // 登录表单卡片
+            // 登录 / 注册表单卡片
             SoftCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(24.dp)
                 ) {
-                    if (uiState.isSmsMode) {
-                        SmsLoginForm(
+                    when {
+                        uiState.isRegisterMode -> RegisterForm(
+                            phone = uiState.phone,
+                            password = uiState.password,
+                            confirmPassword = uiState.confirmPassword,
+                            nickname = uiState.nickname,
+                            onPhoneChange = viewModel::updatePhone,
+                            onPasswordChange = viewModel::updatePassword,
+                            onConfirmChange = viewModel::updateConfirmPassword,
+                            onNicknameChange = viewModel::updateNickname,
+                            onRegister = viewModel::register,
+                            isLoading = uiState.isLoading
+                        )
+                        uiState.isSmsMode -> SmsLoginForm(
                             phone = uiState.phone,
                             code = uiState.smsCode,
                             onPhoneChange = viewModel::updatePhone,
@@ -116,8 +135,7 @@ fun LoginScreen(
                             countdown = uiState.countdown,
                             onLogin = { viewModel.loginWithSms() }
                         )
-                    } else {
-                        PasswordLoginForm(
+                        else -> PasswordLoginForm(
                             phone = uiState.phone,
                             password = uiState.password,
                             history = uiState.history,
@@ -141,41 +159,65 @@ fun LoginScreen(
                         )
                     }
 
-                    // 忘记密码
-                    TextButton(
-                        onClick = { /* TODO */ },
-                        modifier = Modifier.align(Alignment.End)
+                    // 登录 ↔ 注册 互转入口。
+                    // 必须显眼：新装的 App 里没有账号，若只放登录框，
+                    // 用户会以为"要用初始账号登录"，而系统其实已经改为自助注册。
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("忘记密码？", color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            text = if (uiState.isRegisterMode) "已有账号？" else "还没有账号？",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                        TextButton(onClick = viewModel::toggleRegisterMode) {
+                            Text(
+                                text = if (uiState.isRegisterMode) "返回登录" else "立即注册",
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
+                    // 忘记密码（仅登录模式有意义：注册流程里还没有可找回的密码）
+                    if (!uiState.isRegisterMode) {
+                        TextButton(
+                            onClick = { /* TODO */ },
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("忘记密码？", color = MaterialTheme.colorScheme.primary)
+                        }
                     }
                 }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 高级设置入口：设置服务器地址 / 端口（连不上时改为 USB 直连电脑的地址）
-            var showAdvanced by remember { mutableStateOf(false) }
-            OutlinedButton(
-                onClick = { showAdvanced = true },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Text("⚙ 高级设置（服务器地址 / 端口）", style = MaterialTheme.typography.titleSmall)
-            }
+            // 高级设置（下拉展开）：服务器 IP / 端口。
+            //
+            // 为什么必须放在登录页：服务器地址填错时，人根本登不进去，
+            // 若只有「我的」页能改，就形成「连不上 → 登不进 → 改不了」的死循环。
+            // 此前这里是一个"弹窗按钮"，但因为整页不可滚动，它在小屏上被挤出可视区，
+            // 表现就是"登录页没有高级设置"。
+            AdvancedSettingsSection(
+                serverUrl = serverUrl,
+                onSave = { url ->
+                    val ok = viewModel.saveServerUrl(url)
+                    Toast.makeText(
+                        context,
+                        if (ok) "已保存，立即生效" else "地址无效，请检查后重试",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    ok
+                },
+                onReset = {
+                    viewModel.resetServerUrl()
+                    Toast.makeText(context, "已恢复默认地址", Toast.LENGTH_SHORT).show()
+                }
+            )
 
-            if (showAdvanced) {
-                ServerConfigDialog(
-                    initial = serverUrl,
-                    onDismiss = { showAdvanced = false },
-                    onSave = { url ->
-                        viewModel.saveServerUrl(url)
-                        Toast.makeText(context, "已保存，立即生效", Toast.LENGTH_SHORT).show()
-                        showAdvanced = false
-                    }
-                )
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(24.dp))
 
             Text(
                 text = "登录即表示同意《用户协议》和《隐私政策》",
@@ -219,6 +261,118 @@ private fun LoginModeToggle(
                 )
             }
         }
+    }
+}
+
+/**
+ * 注册表单：手机号 + 密码 + 确认密码 + 可选昵称。
+ *
+ * 「确认密码」只做端上校验、不上传服务端：服务端模型里没有这个字段，
+ * 端上拦截掉明显的手误，可以省掉一次往返和"注册成功了但密码不是我想要的"这种困惑。
+ *
+ * 手机号格式与"是否已注册"这类规则交给服务端判定，端上不重复一份正则 ——
+ * 否则将来号段规则调整就要同时改两端，属于典型的规则双写漂移。
+ */
+@Composable
+private fun RegisterForm(
+    phone: String,
+    password: String,
+    confirmPassword: String,
+    nickname: String,
+    onPhoneChange: (String) -> Unit,
+    onPasswordChange: (String) -> Unit,
+    onConfirmChange: (String) -> Unit,
+    onNicknameChange: (String) -> Unit,
+    onRegister: () -> Unit,
+    isLoading: Boolean
+) {
+    var passwordVisible by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+
+    OutlinedTextField(
+        value = phone,
+        onValueChange = onPhoneChange,
+        label = { Text("手机号") },
+        placeholder = { Text("请输入 11 位手机号") },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+        keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp)
+    )
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    OutlinedTextField(
+        value = password,
+        onValueChange = onPasswordChange,
+        label = { Text("密码") },
+        placeholder = { Text("至少 6 位") },
+        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                Icon(
+                    imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                    contentDescription = if (passwordVisible) "隐藏密码" else "显示密码"
+                )
+            }
+        },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+        keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp)
+    )
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    OutlinedTextField(
+        value = confirmPassword,
+        onValueChange = onConfirmChange,
+        label = { Text("确认密码") },
+        placeholder = { Text("请再次输入密码") },
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+        keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp)
+    )
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    OutlinedTextField(
+        value = nickname,
+        onValueChange = onNicknameChange,
+        label = { Text("昵称（可选）") },
+        placeholder = { Text("留空则自动生成") },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { onRegister() }),
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        shape = RoundedCornerShape(12.dp)
+    )
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    // 权益前置：注册前就写明送多久试用，避免用户注册完不知道自己有什么、到期时觉得被"突然收费"
+    Text(
+        text = "注册成功即开通免费试用，到期后可在「我的 → 订阅」中续费",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+    )
+
+    Spacer(modifier = Modifier.height(16.dp))
+
+    Button(
+        onClick = onRegister,
+        enabled = !isLoading,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Text(if (isLoading) "注册中…" else "注册并进入")
     }
 }
 
@@ -456,17 +610,86 @@ private fun SmsLoginForm(
 }
 
 /**
- * 高级设置弹窗：拆分编辑服务器 地址 / 端口 / 接口前缀，保存时拼回完整 baseUrl。
+ * 登录页的「高级设置」下拉区。
  *
- * 完整地址实时预览，降低手填出错概率（USB 直连场景尤其有用）。
- * 仅改 [ServerPrefs] 里的完整 baseUrl，[com.padguard.parent.data.remote.HostSelectionInterceptor]
- * 会在下一次请求时自动套用，无需重启 App。
+ * 折叠时只占一行（标题 + 当前地址 + 箭头），展开后原地铺开服务器配置表单，
+ * 不跳转页面、不弹对话框——登录前唯一能改地址的地方，必须一眼可见、一步可改。
  */
 @Composable
-private fun ServerConfigDialog(
+private fun AdvancedSettingsSection(
+    serverUrl: String,
+    onSave: (String) -> Boolean,
+    onReset: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    OutlinedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "高级设置 · 服务器地址",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Text(
+                        text = serverUrl,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.ArrowDropUp else Icons.Filled.ArrowDropDown,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+
+            if (expanded) {
+                HorizontalDivider()
+                ServerConfigEditor(
+                    initial = serverUrl,
+                    onSave = { url -> if (onSave(url)) expanded = false },
+                    onCancel = null,
+                    onReset = onReset,
+                    modifier = Modifier.padding(16.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 服务器配置表单：拆分编辑 地址 / 端口 / 接口前缀，保存时拼回完整 baseUrl。
+ *
+ * 登录页的下拉区与「我的」页的弹窗共用这一个实现，避免两处各写一套校验与预览逻辑
+ * （历史上两处不一致最典型的后果就是：一处改了规则，另一处还在放行非法地址）。
+ *
+ * 完整地址实时预览，降低手填出错概率（USB 直连场景尤其有用）。
+ * 仅改 [com.padguard.parent.di.ServerPrefs] 里的完整 baseUrl，
+ * [com.padguard.parent.data.remote.HostSelectionInterceptor] 会在下一次请求时自动套用，无需重启 App。
+ */
+@Composable
+fun ServerConfigEditor(
     initial: String,
-    onDismiss: () -> Unit,
-    onSave: (String) -> Unit
+    onSave: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    onCancel: (() -> Unit)? = null,
+    onReset: (() -> Unit)? = null
 ) {
     val cfg = remember(initial) { parseServerConfig(initial) }
     var host by remember { mutableStateOf(cfg.host) }
@@ -474,73 +697,114 @@ private fun ServerConfigDialog(
     var path by remember { mutableStateOf(cfg.path) }
     var error by remember { mutableStateOf<String?>(null) }
 
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedTextField(
+            value = host,
+            onValueChange = { host = it.trim(); error = null },
+            label = { Text("服务器地址") },
+            placeholder = { Text("如 192.168.1.10") },
+            singleLine = true,
+            isError = error != null,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp)
+        )
+        OutlinedTextField(
+            value = port,
+            onValueChange = { port = it.filter { c -> c.isDigit() }; error = null },
+            label = { Text("端口") },
+            placeholder = { Text("如 8090") },
+            singleLine = true,
+            isError = error != null,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp)
+        )
+        OutlinedTextField(
+            value = path,
+            onValueChange = { path = it; error = null },
+            label = { Text("接口前缀（可选）") },
+            placeholder = { Text("如 /v1 或 /api/v1") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(10.dp)
+        )
+
+        val preview = buildServerConfig(host, port, path)
+        Text(
+            text = "完整地址：${preview ?: "（请补全地址与端口）"}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+        if (error != null) {
+            Text(
+                text = error!!,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (onReset != null) {
+                OutlinedButton(onClick = onReset, shape = RoundedCornerShape(10.dp)) {
+                    Text("恢复默认")
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            if (onCancel != null) {
+                TextButton(onClick = onCancel) { Text("取消") }
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            Button(
+                onClick = {
+                    val built = buildServerConfig(host, port, path)
+                    if (built == null) {
+                        error = "请填写有效的服务器地址与端口（1–65535）"
+                    } else {
+                        error = null
+                        onSave(built)
+                    }
+                },
+                shape = RoundedCornerShape(10.dp)
+            ) { Text("保存") }
+        }
+
+        Text(
+            text = "默认已填好当前地址。若连不上，请改为「手机用 USB 线直连电脑」时电脑显示的地址（见安装说明）。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+        )
+    }
+}
+
+/**
+ * 「我的」页用的服务器配置弹窗（登录后也能改，不必退出登录）。
+ * 表单部分复用 [ServerConfigEditor]，本函数只负责弹窗外壳。
+ */
+@Composable
+fun ServerConfigDialog(
+    initial: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        confirmButton = {
-            TextButton(onClick = {
-                val built = buildServerConfig(host, port, path)
-                if (built == null) {
-                    error = "请填写有效的服务器地址与端口（1–65535）"
-                    return@TextButton
-                }
-                onSave(built)
-            }) { Text("保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-        title = { Text("高级设置 · 服务器配置") },
+        // 保存/取消按钮由 ServerConfigEditor 渲染，这里留空避免两套按钮并存
+        confirmButton = { },
+        dismissButton = { },
+        title = { Text("服务器地址") },
         text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = { host = it.trim(); error = null },
-                    label = { Text("服务器地址") },
-                    placeholder = { Text("如 192.168.1.10") },
-                    singleLine = true,
-                    isError = error != null,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
-                )
-                OutlinedTextField(
-                    value = port,
-                    onValueChange = { port = it.filter { c -> c.isDigit() }; error = null },
-                    label = { Text("端口") },
-                    placeholder = { Text("如 8090") },
-                    singleLine = true,
-                    isError = error != null,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
-                )
-                OutlinedTextField(
-                    value = path,
-                    onValueChange = { path = it; error = null },
-                    label = { Text("接口前缀（可选）") },
-                    placeholder = { Text("如 /v1 或 /api/v1") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp)
-                )
-                val preview = buildServerConfig(host, port, path)
-                Text(
-                    text = "完整地址：${preview ?: "（请补全地址与端口）"}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
-                if (error != null) {
-                    Text(
-                        text = error!!,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                Text(
-                    text = "默认已填好当前地址。若连不上，请改为「手机用 USB 线直连电脑」时电脑显示的地址（见安装说明）。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                )
-            }
+            ServerConfigEditor(
+                initial = initial,
+                onSave = { url ->
+                    onSave(url)
+                    onDismiss()
+                },
+                onCancel = onDismiss,
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            )
         }
     )
 }

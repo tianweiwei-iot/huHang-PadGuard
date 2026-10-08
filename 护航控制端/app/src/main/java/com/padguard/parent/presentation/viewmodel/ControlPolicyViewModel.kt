@@ -5,12 +5,16 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.domain.model.AppPolicy
 import com.padguard.domain.model.ControlMode
+import com.padguard.domain.model.TabletUsageSettings
 import com.padguard.domain.model.Device
 import com.padguard.domain.repository.PolicyTemplate
 import com.padguard.domain.model.SceneType
 import com.padguard.domain.model.TimeRestriction
 import com.padguard.domain.model.WebPolicy
+import com.padguard.domain.repository.AgeBand
+import com.padguard.domain.repository.AgeBandDefault
 import com.padguard.domain.repository.DeviceRepository
+import com.padguard.domain.repository.MinorMode
 import com.padguard.domain.repository.PolicyRepository
 import com.padguard.presentation.util.TimeFormat
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -28,6 +32,10 @@ import javax.inject.Inject
 data class ControlPolicyUiState(
     val device: Device? = null,
     val dailyLimitMinutes: Int = 120,
+    val minorMode: MinorMode? = null,
+    val ageBandDefaults: Map<AgeBand, AgeBandDefault> = emptyMap(),
+    /** 孩子端实际生效的每日时长上限（未成年人模式开启时被分龄上限覆盖，可能小于 [dailyLimitMinutes]） */
+    val effectiveDailyLimitMinutes: Int = 120,
     val timeRestrictions: List<TimeRestriction> = emptyList(),
     val installedApps: List<AppPolicy> = emptyList(),
     val webPolicy: WebPolicy? = null,
@@ -93,6 +101,25 @@ class ControlPolicyViewModel @Inject constructor(
                     eyeProtectionLevel = 2
                 )
             }
+            // 家长端「时间管控」页设置（平板使用时间，权威来源：weekday/weekend 额度）
+            val tablet = policyRepository.getTabletUsageSettings(deviceId).getOrNull()
+            // 未成年人模式：仅作合规兜底，不再夹逼家长已设额度；计算孩子端实际生效额度
+            val minor = policyRepository.getMinorMode(deviceId).getOrNull()
+            val defaults = policyRepository.getAgeBandDefaults().getOrNull().orEmpty()
+            val effective = computeEffectiveDailyLimitMinutes(
+                enabled = tablet?.enabled ?: true,
+                weekdayLimitMinutes = tablet?.weekdayLimitMinutes ?: 60,
+                weekendLimitMinutes = tablet?.weekendLimitMinutes ?: 60,
+                minorMode = minor,
+                ageBandDefaults = defaults,
+                isWeekend = isWeekendToday()
+            )
+            _uiState.value = _uiState.value.copy(
+                dailyLimitMinutes = tablet?.weekdayLimitMinutes ?: 60,
+                minorMode = minor,
+                ageBandDefaults = defaults,
+                effectiveDailyLimitMinutes = effective
+            )
             // 仅取家庭场景模板（过滤校园考试模式）
             policyRepository.getPolicyTemplates(SceneType.FAMILY).onSuccess { list ->
                 _uiState.value = _uiState.value.copy(
@@ -103,12 +130,31 @@ class ControlPolicyViewModel @Inject constructor(
         }
     }
 
+    /** 今天是否周末（与服务端默认 Asia/Shanghai 时区、孩子端时段判定一致） */
+    private fun isWeekendToday(): Boolean {
+        val zone = java.time.ZoneId.of("Asia/Shanghai")
+        val dow = java.time.LocalDate.now(zone).dayOfWeek
+        return dow == java.time.DayOfWeek.SATURDAY || dow == java.time.DayOfWeek.SUNDAY
+    }
+
     // ===== 时长 =====
 
     fun setDailyLimit(minutes: Int) {
         viewModelScope.launch {
-            policyRepository.setGlobalDailyLimit(deviceId, minutes).onSuccess {
+            // 改走「时间管控」权威来源（tablet-usage-settings），与服务端 buildPolicyPackage 下发的 appLimit 一致；
+            // 旧 setGlobalDailyLimit 写入的 DeviceSetting.dailyLimitMinutes 服务端根本不读，是无效写入。
+            val current = policyRepository.getTabletUsageSettings(deviceId).getOrNull()
+                ?: TabletUsageSettings(deviceId = deviceId)
+            policyRepository.updateTabletUsageSettings(
+                current.copy(
+                    weekdayLimitMinutes = minutes,
+                    weekendLimitMinutes = minutes,
+                    syncToDevice = true
+                )
+            ).onSuccess {
                 _uiState.value = _uiState.value.copy(dailyLimitMinutes = minutes, toast = "已保存每日时长限制")
+            }.onFailure { e ->
+                _uiState.value = _uiState.value.copy(error = e.message)
             }
         }
     }
@@ -130,7 +176,16 @@ class ControlPolicyViewModel @Inject constructor(
             policyRepository.setControlMode(deviceId, preset.controlMode)
             val limitMinutes = preset.dailyLimitMinutes
             if (limitMinutes != null) {
-                policyRepository.setGlobalDailyLimit(deviceId, limitMinutes)
+                // 同样走「时间管控」权威来源，避免写入服务端不读的旧字段
+                val current = policyRepository.getTabletUsageSettings(deviceId).getOrNull()
+                    ?: TabletUsageSettings(deviceId = deviceId)
+                policyRepository.updateTabletUsageSettings(
+                    current.copy(
+                        weekdayLimitMinutes = limitMinutes,
+                        weekendLimitMinutes = limitMinutes,
+                        syncToDevice = true
+                    )
+                )
             }
             val limitLabel = limitMinutes
                 ?.let { " · ${TimeFormat.formatDurationFromMinutes(it)}" }

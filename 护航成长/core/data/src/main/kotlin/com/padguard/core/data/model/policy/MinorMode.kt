@@ -16,9 +16,19 @@ import kotlinx.serialization.Serializable
  * 2. **合规审计无法回答**：监管/客户问"这台设备当前是不是未成年人模式、几岁档"，
  *    没有一个字段能直接回答，只能反推。
  *
- * 因此这里用一个 [MinorModePolicy] 作为**唯一事实源**，
+ * 因此这里用一个 [MinorModePolicy] 作为**合规基线事实源**，
  * 由 [com.padguard.core.engine.enforcer.MinorModeEnforcer] 在每次生效时把分龄基线
- * 派生（并压严）到 appLimit / eyeCare / schedule 上。家长仍可在分龄上限内自行收紧。
+ * 派生到 eyeCare / schedule / 内容分类上。
+ *
+ * ## 时长口径（重要修正）
+ * **每日总时长的权威来源是家长在「时间管控」页设置的值（服务端下发的 `appLimit`），
+ * 未成年人模式不再把家长已设的额度夹逼到分龄上限。** 理由：
+ * 1. 产品要求"以管控策略设置的时间为准，家长可自由设置"，家长上调额度也是合规允许的
+ *    （指南约束的是默认与推荐，不是禁止家长放宽）；
+ * 2. 若未成年人模式把额度压回分龄 cap，家长在「时间管控」页设的时长将永远落不到设备上，
+ *    表现为"改了没反应、孩子端始终显示分龄上限"。
+ * 仅当家长在「时间管控」页完全未设置（额度为 0）时，才回落到分龄合规基线，作为合规兜底。
+ * 护眼连续时长（continuousMinutes）仍按分龄基线收敛（更保守属合规方向）。
  *
  * ## 时长口径（严格对齐指南）
  * - 不满 16 周岁：每日总时长不超过 1 小时（60 分钟）
@@ -281,11 +291,14 @@ data class MinorModePolicy(
     }
 
     /**
-     * 把分龄基线压到既有策略对象上。
+     * 把分龄基线应用到既有的 appLimit 时长上（仅时长维度）。
      *
-     * 规则是**只压严、不放宽**：家长已经设得更严（额度更小、护眼更短）的保留家长值；
-     * 未设置或比基线松的，一律收敛到基线。这样"一键开启"不会把家长精心配的
-     * 更严规则冲掉，同时保证任何情况下都不低于合规底线。
+     * 口径（与产品要求一致）：**家长在「时间管控」页设置的时间额度是权威来源**，
+     * 未成年人模式不再把家长已设的额度夹逼到分龄上限——家长上调额度是合规允许的，
+     * 且产品明确要求"以管控策略设置的时间为准，家长可自由设置"。
+     *
+     * 仅当家长完全未设置（额度为 0）时，才回落到分龄合规基线，作为合规兜底；
+     * 此时若未成年人模式也未开，整体额度由家长端 appLimit 决定（见 [AppLimitPolicy]）。
      */
     fun coerceAppLimit(current: AppLimitPolicy): AppLimitPolicy {
         if (!enabled) return current
@@ -293,9 +306,9 @@ data class MinorModePolicy(
         val weekendCap = effectiveWeekendLimit()
         return current.copy(
             enabled = true,
-            weekdayTotalMinutes = tighten(current.weekdayTotalMinutes, weekdayCap),
-            weekendTotalMinutes = tighten(current.weekendTotalMinutes, weekendCap),
-            dailyTotalMinutes = tighten(current.dailyTotalMinutes, weekdayCap)
+            weekdayTotalMinutes = fallbackIfUnset(current.weekdayTotalMinutes, weekdayCap),
+            weekendTotalMinutes = fallbackIfUnset(current.weekendTotalMinutes, weekendCap),
+            dailyTotalMinutes = fallbackIfUnset(current.dailyTotalMinutes, weekdayCap)
         )
     }
 
@@ -357,7 +370,14 @@ data class MinorModePolicy(
         }
     }
 
-    /** 取值：已有值且更严则保留，否则用基线；0 视为"未设置" */
+    /**
+     * 时长取值：已设置（>0）则保留家长值（权威，含高于分龄上限），未设置（0）则回落到合规基线。
+     * 与 [tighten] 的区别：不再把家长已设的高额度压回分龄 cap，符合"以管控策略设置为准"。
+     */
+    private fun fallbackIfUnset(current: Int, fallback: Int): Int =
+        if (current > 0) current else fallback
+
+    /** 护眼/连续时长取值：已有值且更严则保留，否则用基线；0 视为"未设置"（更保守属合规方向） */
     private fun tighten(current: Int, cap: Int): Int =
         if (current > 0 && current <= cap) current else cap
 }

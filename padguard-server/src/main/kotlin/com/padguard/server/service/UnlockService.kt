@@ -9,6 +9,8 @@ import com.padguard.server.dto.UnlockRejectRequest
 import com.padguard.server.dto.UnlockTicketDto
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UnlockTicketRepository
+import com.padguard.server.service.AuditAction
+import com.padguard.server.service.AuditService
 import org.springframework.stereotype.Service
 import java.util.UUID
 
@@ -16,7 +18,8 @@ import java.util.UUID
 class UnlockService(
     private val deviceRepository: DeviceRepository,
     private val unlockTicketRepository: UnlockTicketRepository,
-    private val commandService: CommandService
+    private val commandService: CommandService,
+    private val auditService: AuditService
 ) {
     /** 孩子端 UNLOCK_REQUEST 日志 -> 工单（工单 ID = requestId，便于回执对齐） */
     fun createFromRequest(deviceId: String, payload: Map<String, Any?>?) {
@@ -67,6 +70,7 @@ class UnlockService(
         t.status = "IGNORED"
         t.resolvedAt = System.currentTimeMillis()
         unlockTicketRepository.save(t)
+        auditService.record(userId, deviceId, AuditAction.UNLOCK_DISMISS, targetType = "ticket", targetId = ticketId)
     }
 
     /** 家长同意 -> 下发 TEMP_UNLOCK（带 packageName / durationMinutes） */
@@ -76,6 +80,8 @@ class UnlockService(
         t.durationMinutes = req.durationMinutes ?: t.durationMinutes
         t.resolvedAt = System.currentTimeMillis()
         unlockTicketRepository.save(t)
+        auditService.record(userId, deviceId, AuditAction.UNLOCK_APPROVE, targetType = "ticket", targetId = ticketId,
+            detail = "package=${req.packageName ?: t.packageName ?: ""} duration=${t.durationMinutes}")
         commandService.issueCommand(
             deviceId, CommandType.TEMP_UNLOCK,
             mapOf(
@@ -92,6 +98,8 @@ class UnlockService(
         t.status = "REJECTED"
         t.resolvedAt = System.currentTimeMillis()
         unlockTicketRepository.save(t)
+        auditService.record(userId, deviceId, AuditAction.UNLOCK_REJECT, targetType = "ticket", targetId = ticketId,
+            detail = "reason=${req.reason ?: "申请未通过"}")
         commandService.issueCommand(
             deviceId, CommandType.SHOW_MESSAGE,
             mapOf(

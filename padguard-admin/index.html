@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="AqznbAPKHKzq5o0JtODEhU">
+<head data-page-node-id="DXp4Mh0md1SxJ9f1zyXznr">
+  <meta charset="UTF-8" data-page-node-id="igEhoE9r5rRuxPGBp6LjtL" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="P8YKNV56i7aqTp2cFuxuGq" />
+  <title>PadGuard 平板管控 · 运营管理后台</title>
+  <link rel="stylesheet" href="assets/css/theme.css" data-page-node-id="Fhsr4rgXJrseEu04pt7A1h" />
+  <link rel="stylesheet" href="assets/css/app.css" data-page-node-id="s2XiZPm402KHSveX7B5HAx" />
+</head>
+<body class="theme-dark" data-page-node-id="7Yl6aUv7rUF33k93QoTeFn">
+  <!-- 登录层 -->
+  <div id="login-screen" class="login-screen" data-page-node-id="0pD9TrZduOQoMBAUJhwHaa">
+    <div class="login-card" data-page-node-id="vi1wG5bRoKdBga9p72y7k6">
+      <div class="login-brand" data-page-node-id="PesWEa17J41hRFSBUCPdDw">
+        <div class="brand-mark" data-page-node-id="JdHXZup0AONcGIxJTmcsHv">PG</div>
+        <div data-page-node-id="6dEuzx1pSgjgwMQdmUGW4c">
+          <h1 data-page-node-id="e4ZOFi6pugV1fIshK2JhGG">PadGuard 管控后台</h1>
+          <p data-page-node-id="ZDQ9CKly8WFQK9ombVtVlR">平板使用管控系统 · 运营管理平台</p>
+        </div>
+      </div>
+      <form id="login-form" class="login-form" autocomplete="off" data-page-node-id="l0rAmNvmEhCkdOxP63XHDC">
+        <label data-page-node-id="pltR6m9VnFMLaSvLhGszWm">管理员账号
+          <input type="text" id="login-username" placeholder="请输入管理员账号" value="admin" data-page-node-id="ZGJDnupwhkUw0TRrxEN3rr" />
+        </label>
+        <label data-page-node-id="8bPhZFFgqpevxaWBXKLLlj">密码
+          <input type="password" id="login-password" placeholder="请输入密码" value="admin123" data-page-node-id="yuNcnONK1W08ZndL5342GL" />
+        </label>
+        <div class="login-hint" data-page-node-id="KEQhOb1ttQhLK7NyHvG0gd">请使用服务端初始化的管理员账号登录（默认 admin）。若提示“无法连接服务端”，请改用 <b>http://服务器地址:8090/admin/</b> 打开本后台。</div>
+        <button type="submit" class="btn btn-primary btn-block" data-page-node-id="utnfW46CQFECvZmiDMpUtl">登 录</button>
+      </form>
+      <div class="login-foot" data-page-node-id="fQpkEd2mQVFwtpEBN6fJw6">© 2026 PadGuard · 守护孩子数字成长</div>
+    </div>
+  </div>
+
+  <!-- 主应用 -->
+  <div id="app-shell" class="app-shell hidden" data-page-node-id="CJdyX4zyw8jVyR2f6rKsjW">
+    <aside class="sidebar" data-page-node-id="abfeAEQpaTPEa3G46G2RMN">
+      <div class="sidebar-brand" data-page-node-id="LnlIxBKHlXgHG4fHHfYCTf">
+        <div class="brand-mark sm" data-page-node-id="UFCs7WB8gDcrc4L0CAF53Y">PG</div>
+        <span class="sidebar-title" data-page-node-id="Ce0OAvo0X56A2O06XH19hO">PadGuard 后台</span>
+      </div>
+      <nav id="sidebar-nav" class="sidebar-nav" data-page-node-id="bFH8Yh7MheFwafDH6nRLY9"></nav>
+      <div class="sidebar-foot" data-page-node-id="BavQ9UAs6OomcqNl39m7e6">
+        <div class="env-toggle" data-page-node-id="bmeFCUeF55qWdKIVCP0nnN">
+          <span data-page-node-id="Xf3YsHEwPe9g9iehUeFvux">数据源</span>
+          <button id="env-switch" class="switch" data-on="false" data-page-node-id="Ca91PJSjR1zAYfnBGrYrlj"><i data-page-node-id="iJopzrygROMtlnQn7ZdsDf"></i><em data-page-node-id="9FECWYiVN0GGOmNwnBv0qg">Live</em></button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="main" data-page-node-id="3HrgOeO1Y5auad0Trq3XPk">
+      <header class="topbar" data-page-node-id="6HG8tuVPxCFhtQlPN37L5A">
+        <div class="topbar-left" data-page-node-id="WCGMaGHXR9uoowREZfHMNL">
+          <button id="nav-toggle" class="icon-btn" title="折叠菜单" data-page-node-id="mVXRAbLt8O117DbIdC17R8">☰</button>
+          <div class="crumb" data-page-node-id="4EUXBwKwUXvZ54aa5HPUZz"><span id="crumb-mod" data-page-node-id="c1G5p1CCIjWCfvIHwQBc2Y">仪表盘</span></div>
+        </div>
+        <div class="topbar-right" data-page-node-id="gRCXpAHENP0HKW9QQwrSLR">
+          <div class="search-box" data-page-node-id="PSYf2OJKFYzSBCNKpCGsEU">
+            <input type="text" id="global-search" placeholder="搜索家长 / 设备 / 订单…" data-page-node-id="h4reDSIILTaIu4P0y4FNRW" />
+          </div>
+          <button class="icon-btn" id="bell-btn" title="告警" data-page-node-id="mGXztX9GMDKBIOACvfzFhR">🔔<span class="badge-dot" id="bell-count" data-page-node-id="mg5RJc2GDgYenytLyez9R7">0</span></button>
+          <button class="icon-btn" id="theme-btn" title="切换主题" data-page-node-id="34DI4r7MgAiPvWhzONxJEy">🌓</button>
+          <div class="user-chip" id="user-chip" data-page-node-id="Y42chvJCkTLKdFj4SrGBry">
+            <div class="avatar" id="user-avatar" data-page-node-id="CgesOuyPNsQiGdEMwU0xbw">A</div>
+            <div class="user-meta" data-page-node-id="HBMRUYqrOscHmPQf3F4SDK">
+              <strong id="user-name" data-page-node-id="WTV1lswTaM6ToXuovdpRxY">Admin</strong>
+              <small id="user-role" data-page-node-id="UesRjC0g8F9cXcQDRuVHd8">超级管理员</small>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main id="view" class="view" data-page-node-id="oA7ApgJVqfb7kWYVPVEN6o"></main>
+    </div>
+  </div>
+
+  <!-- 弹层与提示容器 -->
+  <div id="modal-root" data-page-node-id="siEiRQjHtUChZChJ1C0mkB"></div>
+  <div id="toast-root" class="toast-root" data-page-node-id="ApFC7zpJEiySVQsDHJvxjz"></div>
+
+  <!-- 按依赖顺序加载（经典脚本，规避 file:// 下的模块跨域限制） -->
+  <script src="assets/js/mock.js"></script>
+  <script src="assets/js/api.js"></script>
+  <script src="assets/js/components.js"></script>
+  <script src="assets/js/views/dashboard.js"></script>
+  <script src="assets/js/views/parents.js"></script>
+  <script src="assets/js/views/devices.js"></script>
+  <script src="assets/js/views/billing.js"></script>
+  <script src="assets/js/views/rbac.js"></script>
+    <script src="assets/js/views/server.js"></script>
+    <script src="assets/js/views/server-profile.js"></script>
+    <script src="assets/js/views/audit.js"></script>
+  <script src="assets/js/views/settings.js"></script>
+  <script src="assets/js/router.js"></script>
+  <script src="assets/js/app.js"></script>
+</body>
+</html>

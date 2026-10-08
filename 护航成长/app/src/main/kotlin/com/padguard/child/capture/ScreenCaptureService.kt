@@ -1241,8 +1241,15 @@ class ScreenCaptureService : Service() {
         private const val DRAIN_END_TIMEOUT_MS = 3000L
 
         // ---- 实时看屏推流参数 ----
-        /** 目标帧率 5fps：足够"看着是实时的"，又不至于把上行带宽吃满 */
-        private const val LIVE_FRAME_INTERVAL_MS = 200L
+        // 这三个数直接决定服务端的中转带宽（上行 1 份 + 下行 1 份 = 2 份），
+        // 而看屏是"低频突发"而非持续占用，因此这里按"能看清就够"取值，不按"越清晰越好"。
+        // 调整依据：看屏的目的是确认"孩子此刻在干什么"，不是看高清视频；
+        // 文字与图块在 640 宽下仍可辨认，而带宽比 720 宽省掉约 20%。
+        //
+        // 若要再压带宽，优先降帧率而不是降分辨率：帧率决定"动作的连续感"，
+        // 分辨率决定"看不看得清"。家长滑动屏幕时 4fps 尚可，降到 2fps 就明显是幻灯片了。
+        /** 目标帧率 4fps：滑动时仍连贯，且比 5fps 省 20% */
+        private const val LIVE_FRAME_INTERVAL_MS = 250L
 
         /**
          * 超过这个时间没写出任何帧（含心跳）就判定推流已死，下次 start 必须重建。
@@ -1273,8 +1280,13 @@ class ScreenCaptureService : Service() {
          * 若沿用 1s 就会退化成"一秒换一张图"，被当成"在刷新图片而不是看实时画面"。
          */
         private const val LIVE_FRAME_TIMEOUT_MS = 250L
-        private const val LIVE_FRAME_MAX_WIDTH = 720
-        private const val LIVE_JPEG_QUALITY = 60
+        /** 推流宽度：640。1920 宽屏缩到 640 约 33%，文字仍可辨认，单帧体积比 720 宽小约 20% */
+        private const val LIVE_FRAME_MAX_WIDTH = 640
+        /**
+         * JPEG 质量 50。60 以上对"看清文字"没有明显增益，却要多付 20%~30% 体积；
+         * 50 是肉眼可接受的质量下限，再往下文字边缘会出现明显块状噪点。
+         */
+        private const val LIVE_JPEG_QUALITY = 50
         /**
          * 单次推流的最长时长。
          * 家长端观看期间会周期性续期（重新下发 start），一旦家长关掉页面或掉线，

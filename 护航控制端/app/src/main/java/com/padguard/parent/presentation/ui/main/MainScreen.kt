@@ -103,6 +103,7 @@ fun MainScreen(
                     onSelectDevice = homeVm::selectDevice,
                     onDeviceClick = { rootNavController.navigate(Screen.DeviceDetail.create(it)) },
                     onNavigateToControl = { rootNavController.navigate(Screen.Control.create(it)) },
+                    onNavigateToAppManage = { rootNavController.navigate(Screen.AppManage.create(it)) },
                     onNavigateToScreenMonitor = { rootNavController.navigate(Screen.ScreenMonitor.create(it)) },
                     onNavigateToMessagePublish = { rootNavController.navigate(Screen.MessagePublish.create(it)) },
                     onNavigateToLocation = { rootNavController.navigate(Screen.Location.create(it)) },
@@ -126,6 +127,7 @@ fun MainScreen(
             composable("profile") {
                 val profileVm: ProfileViewModel = hiltViewModel()
                 val profileState by profileVm.uiState.collectAsState()
+                val serverUrl by profileVm.serverUrl.collectAsState()
                 LaunchedEffect(profileState.loggedOut) {
                     if (profileState.loggedOut) {
                         rootNavController.navigate(Screen.Login.route) {
@@ -135,8 +137,12 @@ fun MainScreen(
                 }
                 ProfileScreen(
                     onLogout = profileVm::logout,
+                    serverUrl = serverUrl,
+                    onSaveServerUrl = profileVm::saveServerUrl,
                     onAction = { action ->
                         when (action) {
+                            ProfileAction.Subscription ->
+                                rootNavController.navigate(Screen.Subscription.route)
                             ProfileAction.Children -> navController.navigate("devices") {
                                 popUpTo(navController.graph.findStartDestination().id) {
                                     saveState = true
@@ -148,6 +154,9 @@ fun MainScreen(
                                 val id = homeUiState.selectedDevice?.id
                                     ?: homeUiState.devices.firstOrNull()?.id
                                 if (id != null) rootNavController.navigate(Screen.Control.create(id))
+                            }
+                            ProfileAction.ServerAddress -> {
+                                // 服务器地址弹窗由 ProfileScreen 本地处理，无需在此导航
                             }
                             ProfileAction.Members,
                             ProfileAction.Settings,

@@ -65,6 +65,30 @@ class MonitorService(
         return t
     }
 
+    /**
+     * 家长请求立即定位：下发 LOCATE 指令。
+     *
+     * 与截屏/拍照不同，定位**不落"等待回传的记录"**：
+     * 位置由孩子端的周期上报持续写入 `location_tracks`，
+     * 这条指令只是让端上"现在就补采一次并上报"，家长端随后 GET 最新位置即可看到。
+     * 若在此处造一条 PENDING 记录，反而会出现一条永远不会被回填的悬空记录。
+     *
+     * ⚠️ 端上只会在**孩子正在使用平板**时才能采到位置（Android 10+ 禁止后台读位置，
+     * 而儿童向 App 不能申请后台位置权限）。孩子没在用平板时，指令仍会下发，
+     * 端上会登记待办、等界面回到前台自动补传，并向家长回执说明原因。
+     */
+    fun requestLocate(userId: String, deviceId: String): TaskAcceptedDto {
+        requireOwned(userId, deviceId)
+        commandService.issueCommand(
+            deviceId, CommandType.LOCATE,
+            mapOf(CommandKey.REASON to "家长请求立即定位"),
+            priority = "HIGH"
+        )
+        return TaskAcceptedDto(
+            taskId = "LOCATE", kind = "LOCATE", status = "SENT", requestedAt = System.currentTimeMillis()
+        )
+    }
+
     fun startRecording(userId: String, deviceId: String): TaskAcceptedDto {
         requireOwned(userId, deviceId)
         val t = createMediaTask(deviceId, "RECORD", "audio/mp4")

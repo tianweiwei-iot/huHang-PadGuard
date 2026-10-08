@@ -25,16 +25,24 @@ class FileStorageService(
      * 而这种失效往往在很久之后才被发现，数据已经无法重建。
      * 只存文件名、运行时基于当前配置的 [storageDir] 解析，目录搬家就不会失效。
      */
-    fun store(contentType: String, bytes: ByteArray, originalName: String? = null): String =
-        storeDetailed(contentType, bytes, originalName).url
+    fun store(
+        contentType: String, bytes: ByteArray, originalName: String? = null,
+        ownerUserId: String? = null, deviceId: String? = null
+    ): String = storeDetailed(contentType, bytes, originalName, ownerUserId, deviceId).url
 
     /**
      * 同 [store]，但一并返回 id。
      *
      * 家长端上传需要 id：信息发布页要能"撤掉刚选错的素材"，远程安装要按 id 回显文件名。
      * 只有 url 的话客户端得自己去解析路径取 id —— 一旦 URL 拼接规则变化就会静默失效。
+     *
+     * [ownerUserId] / [deviceId] 是文件归属，用于下载时校验（见 FilesController）：
+     * 文件下载路径整体放开了鉴权，不记归属就无从判断"谁有权下载这个文件"。
      */
-    fun storeDetailed(contentType: String, bytes: ByteArray, originalName: String? = null): StoredFile {
+    fun storeDetailed(
+        contentType: String, bytes: ByteArray, originalName: String? = null,
+        ownerUserId: String? = null, deviceId: String? = null
+    ): StoredFile {
         val id = UUID.randomUUID().toString()
         val safeName = sanitize(originalName)
         val fileName = "${id}_$safeName"
@@ -43,7 +51,8 @@ class FileStorageService(
         uploadedFileRepository.save(
             UploadedFile(
                 id = id, contentType = contentType, storedPath = fileName,
-                size = bytes.size.toLong(), createdAt = System.currentTimeMillis()
+                size = bytes.size.toLong(), createdAt = System.currentTimeMillis(),
+                ownerUserId = ownerUserId, deviceId = deviceId
             )
         )
         return StoredFile(id, url(id), safeName)

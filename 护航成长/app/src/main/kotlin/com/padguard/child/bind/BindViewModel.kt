@@ -248,6 +248,10 @@ class BindViewModel @Inject constructor(
                 "绑定码无效、已过期或已使用，请在家长端重新生成"
             ApiCode.BIND_CONFLICT ->
                 "该设备已绑定其他账号，请先解绑或更换账号"
+            ApiCode.SUBSCRIPTION_REQUIRED ->
+                "家长账号的订阅已到期，请在家长端完成续费后重试"
+            ApiCode.DEVICE_LIMIT_EXCEEDED ->
+                "家长账号可绑定设备数已达套餐上限，请在家长端升级套餐"
             ApiCode.DEVICE_UNBOUND ->
                 "设备未绑定，请重试"
             ApiCode.CLOCK_SKEW ->

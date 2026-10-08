@@ -10,7 +10,9 @@ import com.padguard.server.service.CommandService
 import com.padguard.server.service.CommandType
 import com.padguard.server.service.DeviceService
 import com.padguard.server.service.GroupService
+import com.padguard.server.service.PolicyExtensionService
 import com.padguard.server.service.PolicyService
+import com.padguard.server.security.GuardPasswords
 import org.slf4j.LoggerFactory
 import org.springframework.web.bind.annotation.*
 
@@ -20,6 +22,9 @@ class AuthController(private val authService: AuthService) {
 
     @PostMapping("/login/password")
     fun loginPassword(@RequestBody req: LoginPasswordRequest) = ApiResponse.ok(authService.loginWithPassword(req))
+
+    @PostMapping("/register")
+    fun register(@RequestBody req: RegisterRequest) = ApiResponse.ok(authService.register(req))
 
     @PostMapping("/login/sms")
     fun loginSms(@RequestBody req: LoginSmsRequest) = ApiResponse.ok(authService.loginWithSms(req))
@@ -45,6 +50,51 @@ class ParentDeviceController(
     @PostMapping("/bind-code")
     fun bindCode(@RequestAttribute("userId") userId: String) =
         ApiResponse.ok(deviceService.generateBindCode(userId))
+
+    /**
+     * 批量导入设备台账（Excel / CSV 解析后的行）。
+     *
+     * 逐个 устройства 独立处理，失败行回传原因，家长能直接对着表格改。
+     * 与绑定共用同一套"按 deviceSn 复用台账"的口径，导入进来的设备和扫码绑定来的没有区别。
+     */
+    @PostMapping("/import")
+    fun importDevices(
+        @RequestAttribute("userId") userId: String,
+        @RequestBody req: com.padguard.server.dto.DeviceImportRequest
+    ) = ApiResponse.ok(deviceService.importDevices(userId, req))
+
+    // ==================== 局域网发现 ====================
+
+    /**
+     * 发现同一局域网内可以接入的平板。
+     *
+     * 传入 [ServletRequest] 只为取调用者 IP 做同网段判定：这个功能本身就是"我这张网里有什么"，
+     * 拿不到调用者网络位置就无法回答。
+     */
+    @GetMapping("/lan/discover")
+    fun discoverLan(
+        @RequestAttribute("userId") userId: String,
+        request: jakarta.servlet.http.HttpServletRequest
+    ) = ApiResponse.ok(deviceService.discoverLanDevices(userId, com.padguard.server.common.ClientIps.of(request)))
+
+    /** 接入一台局域网发现的平板 */
+    @PostMapping("/lan/bind")
+    fun bindLan(
+        @RequestAttribute("userId") userId: String,
+        @RequestBody req: com.padguard.server.dto.LanBindRequest
+    ) = ApiResponse.ok(deviceService.bindLanDevice(userId, req))
+
+    /**
+     * 家长端轮询绑定码状态，判定孩子端是否已完成绑定。
+     *
+     * 不能直接让家长端"等设备列表里出现新 deviceId"：重绑同一台平板时
+     * 服务端按硬件指纹复用台账，deviceId 不变，那样判定必然超时。
+     */
+    @GetMapping("/bind-code/{code}/status")
+    fun bindCodeStatus(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable code: String
+    ) = ApiResponse.ok(deviceService.bindCodeStatus(code, userId))
 
     @GetMapping
     fun list(@RequestAttribute("userId") userId: String, @RequestParam groupId: String? = null) =
@@ -94,7 +144,8 @@ class PolicyController(
     private val commandService: CommandService,
     private val policyService: PolicyService,
     private val deviceService: DeviceService,
-    private val deviceRepository: DeviceRepository
+    private val deviceRepository: DeviceRepository,
+    private val policyExtensionService: PolicyExtensionService
 ) {
     @PostMapping("/policies/{deviceId}/lock")
     fun lock(
@@ -131,6 +182,79 @@ class PolicyController(
         return ApiResponse.ok(
             commandService.issueCommand(
                 deviceId, CommandType.UNLOCK, mapOf(CommandKey.REASON to req?.reason)
+            )
+        )
+    }
+
+    /**
+     * 操作密码闸门：家长端设置 / 清除「设备操作密码」。
+     *
+     * ## 数据流（必须和服务端下发、孩子端落库口径一致）
+     * 1. 家长在家长端输入明文密码，经 TLS 发到本接口；
+     * 2. 服务端按 `SHA-256(明文)` 的 Base64 哈希落库（无盐，保证跨设备一致），**明文永不出服务端**；
+     * 3. [com.padguard.server.service.PolicyExtensionService.buildPolicyPackage] 把哈希写进策略包 `guard.passwordHash`；
+     * 4. 孩子端 [com.padguard.child.guard.GuardPasswordManager] 只存哈希，校验时本地重算 SHA-256 比对，
+     *    明文永不出机；解锁窗口内，系统设置 / 卸载 / 未知来源安装被放行。
+     *
+     * [req.clear] 为真 → 清除密码（空串非 null 语义，孩子端收到后清本地密码）；
+     * 否则 [req.password] 非空且长度达标 → 设置；两者皆空 → 无操作。
+     */
+    @PostMapping("/policies/{deviceId}/guard-password")
+    fun setGuardPassword(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody req: GuardPasswordRequest
+    ): ApiResponse<*> {
+        deviceService.getDevice(userId, deviceId) // 校验设备归属
+        val dev = deviceRepository.findById(deviceId).orElse(null)
+            ?: return ApiResponse.fail<Any?>(400, "设备不存在")
+        when {
+            req.clear -> dev.guardPasswordHash = "" // 显式清除：空串(非 null) 语义
+            !req.password.isNullOrBlank() -> {
+                if (req.password.length < GuardPasswords.MIN_LENGTH)
+                    return ApiResponse.fail<Any?>(400, "密码长度至少 ${GuardPasswords.MIN_LENGTH} 位")
+                dev.guardPasswordHash = GuardPasswords.hash(req.password)
+            }
+            else -> { /* 既不清也不设：保持原值，无操作 */ }
+        }
+        deviceRepository.save(dev)
+        // 重建策略包并推送：设备下次拉取（或 MQTT 通知后立即拉取）即生效。
+        runCatching { policyExtensionService.rebuildPolicy(deviceId) }
+            .onFailure { log.warn("rebuild policy after guard-password failed: ${it.message}") }
+        return ApiResponse.ok<Any?>(null)
+    }
+
+    /**
+     * 受管控水印开关。
+     *
+     * ## 为什么需要它（能力边界必须说清楚）
+     * Android 从 12 起在 MediaProjection 会话期间由**系统**绘制一个红色录制指示器，
+     * 它画在系统层、不进入应用画面，Device Owner / 系统签名都无法关闭 ——
+     * 这是 Android 的隐私红线，任何"录屏时不显示红点"的诉求都无法实现。
+     *
+     * 能做的是什么：本应用自己叠加一个半透明水印（走悬浮窗），
+     * 明确告知"这台设备处于受控状态"。它同样不是"去掉红点"，
+     * 而是给家长一个**可自定义、可关闭**的替代提示手段。
+     * 关闭时下发 `enabled=false`，孩子端收起悬浮窗。
+     */
+    @PostMapping("/policies/{deviceId}/watermark")
+    fun watermark(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody(required = false) req: WatermarkRequest?
+    ): ApiResponse<*> {
+        deviceService.getDevice(userId, deviceId)
+        val content = req?.content
+            ?.trim()
+            ?.take(WatermarkRequest.MAX_CONTENT_LENGTH)
+            .orEmpty()
+        return ApiResponse.ok(
+            commandService.issueCommand(
+                deviceId, CommandType.SET_WATERMARK,
+                mapOf(
+                    CommandKey.ENABLED to (req?.enabled ?: true),
+                    CommandKey.CONTENT to content
+                )
             )
         )
     }

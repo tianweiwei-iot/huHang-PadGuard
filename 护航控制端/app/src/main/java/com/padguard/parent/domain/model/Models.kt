@@ -114,7 +114,13 @@ data class Device(
     /** 孩子端自定义资料：昵称 */
     val childNickname: String? = null,
     /** 孩子端自定义资料：头像 URL */
-    val childAvatar: String? = null
+    val childAvatar: String? = null,
+    /**
+     * 设备操作密码是否已设置（由服务端 [guardPasswordSet] 派生下发）。
+     * 「应用管理」页据此决定是否置灰「打开应用也要密码」开关，
+     * 「设备详情」页据此决定是否展示「去开启启动密码」引导。
+     */
+    val guardPasswordSet: Boolean = false
 )
 
 /**
@@ -326,8 +332,8 @@ data class TabletUsageSettings(
     val deviceId: String,
     val enabled: Boolean = true,
     val enabledTimeRanges: List<TimeRange> = listOf(TimeRange("08:00", "18:00")),
-    val weekdayLimitMinutes: Int = 120,
-    val weekendLimitMinutes: Int = 180,
+    val weekdayLimitMinutes: Int = 60,
+    val weekendLimitMinutes: Int = 60,
     val restAfterMinutes: Int = 60,
     val restDurationMinutes: Int = 15,
     val timeUpMessage: String = "观看时间已达上限，请休息一会儿再回来！",
@@ -506,61 +512,74 @@ data class DeviceImportResult(
 )
 
 /**
- * 设备权限配置（对标 MDM 设备限制策略）
+ * 设备权限配置（对标 MDM 运行时权限授予）。
+ *
+ * 服务端以"已授予的运行时权限集合"表达；家长端 UI 以一组友好的开关呈现，
+ * 每个开关映射到 Android 危险权限全称（见 [com.padguard.presentation.ui.device.PERMISSION_ITEMS]）。
+ * 下发时整包替换：开启=授予，关闭=收回（由孩子端 DPM setPermissionGrantState 执行）。
  */
 data class DevicePermissionConfig(
     val deviceId: String,
-    val cameraAllowed: Boolean = false,         // 允许使用摄像头
-    val microphoneAllowed: Boolean = false,     // 允许使用麦克风
-    val locationAllowed: Boolean = true,        // 允许定位
-    val usbAllowed: Boolean = false,            // 允许 USB / 外接存储
-    val unknownSourceInstallAllowed: Boolean = false, // 允许安装未知来源应用
-    val screenshotAllowed: Boolean = true       // 允许截屏（关闭则禁止被控端截屏）
+    /** 已授予的运行时权限全称集合（如 android.permission.CAMERA） */
+    val permissions: Set<String> = emptySet()
 )
 
 /**
- * 设备功能开关配置（对标 MDM 功能管控 / Kiosk 能力）
+ * 设备功能开关配置（对标 MDM 设备能力管控 / DPM 用户限制）。
+ *
+ * 与服务端 [features] 逐字符一致：key 为 DPM 功能键（见 CommandKey.FEATURE_*），
+ * value=true 表示"施加该限制 / 关闭该能力"。UI 以 [com.padguard.presentation.ui.device.FUNCTION_ITEMS] 呈现中文开关。
  */
 data class DeviceFunctionConfig(
     val deviceId: String,
-    val learningModeEnabled: Boolean = false,   // 学习模式（仅可用学习类应用）
-    val messagePushEnabled: Boolean = true,     // 允许家长端消息推送
-    val screenTimeLimitEnabled: Boolean = true, // 启用使用时长限制
-    val eyeProtectionEnabled: Boolean = true,   // 护眼模式
-    val remoteLockEnabled: Boolean = true       // 允许远程锁屏
+    /** featureKey -> 是否启用（施加限制） */
+    val features: Map<String, Boolean> = emptyMap()
 )
 
 /**
- * 应用分发动作
- */
-enum class AppDispatchAction(val label: String) {
-    INSTALL("下发安装"),
-    UNINSTALL("远程卸载"),
-    WHITELIST("加入白名单"),
-    BLACKLIST("加入黑名单")
-}
-
-/**
- * 可分发的应用（企业应用库）
+ * 企业应用库中的应用（应用分发 / 远程升级的源头）。
+ *
+ * 对应服务端 AppCatalog：家长上传 APK 后落入目录库，按 id 静默分发 / 升级到被控平板。
  */
 data class DistributableApp(
+    val id: String,
     val packageName: String,
     val appName: String,
+    val versionCode: Long,
     val versionName: String,
-    val iconUrl: String?,
-    val apkUrl: String
+    val apkUrl: String,
+    val sizeBytes: Long = 0,
+    val iconUrl: String? = null,
+    val description: String? = null
 )
 
 /**
- * 设备升级信息（远程升级维护）
+ * 单个应用的远程升级检查结果（远程升级维护）。
+ *
+ * 对应服务端 UpgradeCheckItem：目录库最新版本 vs 设备已装版本，upgradeAvailable=需升级。
  */
-data class DeviceUpgradeInfo(
-    val deviceId: String,
-    val currentAppVersion: String,
-    val latestAppVersion: String,
-    val hasUpdate: Boolean = currentAppVersion != latestAppVersion,
-    val releaseNote: String? = null,
-    val lastCheckTime: Long = System.currentTimeMillis()
+data class AppUpgradeItem(
+    val catalogId: String,
+    val packageName: String,
+    val appName: String,
+    val catalogVersionCode: Long,
+    val catalogVersionName: String?,
+    val installedVersionCode: Long,
+    val installedVersionName: String?,
+    val upgradeAvailable: Boolean
+)
+
+/**
+ * 上传 APK 到应用库时携带的元信息（由家长端解析 APK 得到）。
+ *
+ * deviceId 由调用方提供，这里只承载 APK 自描述字段；
+ * 上传成功后服务端落入 AppCatalog，返回的 [DistributableApp.id] 即后续分发 / 升级的主键。
+ */
+data class AppUploadMeta(
+    val packageName: String,
+    val versionCode: Long,
+    val versionName: String,
+    val appName: String
 )
 
 /**

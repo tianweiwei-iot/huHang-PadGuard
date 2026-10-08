@@ -65,6 +65,7 @@ fun HomeScreen(
     onSelectDevice: (String) -> Unit,
     onDeviceClick: (String) -> Unit,
     onNavigateToControl: (String) -> Unit,
+    onNavigateToAppManage: (String) -> Unit = {},
     onNavigateToScreenMonitor: (String) -> Unit,
     onNavigateToMessagePublish: (String) -> Unit,
                     onNavigateToLocation: (String) -> Unit,
@@ -132,7 +133,7 @@ fun HomeScreen(
                 item {
                     TodayUsageModule(
                         usedMinutes = uiState.todayUsage?.totalUsageMinutes ?: 0,
-                        dailyLimitMinutes = uiState.dailyLimitMinutes,
+                        dailyLimitMinutes = uiState.effectiveDailyLimitMinutes,
                         appUsages = uiState.todayUsage?.appUsages ?: emptyList(),
                         childName = uiState.childName,
                         onModuleClick = { if (deviceId.isNotEmpty()) onNavigateToUsageDetail(deviceId) },
@@ -158,6 +159,7 @@ fun HomeScreen(
                     ControlCategoryGrid(
                         modifier = Modifier.padding(horizontal = 16.dp),
                         onTimeControlClick = { if (deviceId.isNotEmpty()) onNavigateToUsageSettings(deviceId) },
+                        onAppManageClick = { if (deviceId.isNotEmpty()) onNavigateToAppManage(deviceId) },
                         onOtherCategoryClick = { if (deviceId.isNotEmpty()) onNavigateToControl(deviceId) }
                     )
                 }
@@ -597,7 +599,8 @@ private fun AppUsageLineRow(app: com.padguard.domain.model.AppUsage) {
 
 /**
  * 四大管控卡：第一个是「时间管控」，点击进入平板使用时间设置页（与首页"每日限额"标签同源）。
- * 其余三类仍进入 ControlPolicyScreen。
+ * 第二个「应用管控」直接进入应用管理页（已安装/挂起/卸载），与二级入口完全一致。
+ * 其余两类（上网管控、系统护眼）仍进入 ControlPolicyScreen。
  */
 private val controlCategories = listOf(
     ControlCategory("时间管控", "每日时长与时段", Icons.Default.Schedule),
@@ -612,6 +615,7 @@ private data class ControlCategory(val title: String, val subtitle: String, val 
 private fun ControlCategoryGrid(
     modifier: Modifier = Modifier,
     onTimeControlClick: () -> Unit,
+    onAppManageClick: () -> Unit = {},
     onOtherCategoryClick: () -> Unit
 ) {
     LazyVerticalGrid(
@@ -624,9 +628,14 @@ private fun ControlCategoryGrid(
         userScrollEnabled = false
     ) {
         items(controlCategories) { cat ->
-            // 索引 0 = 时间管控，跳设置页；其他跳管控策略页；图标圆底按索引三色轮换
+            // 索引 0 = 时间管控 → 设置页；索引 1 = 应用管控 → 应用管理页；
+            // 其余（上网管控、系统护眼）→ 管控策略页；图标圆底按索引三色轮换
             val index = controlCategories.indexOf(cat)
-            val onClick = if (index == 0) onTimeControlClick else onOtherCategoryClick
+            val onClick = when (index) {
+                0 -> onTimeControlClick
+                1 -> onAppManageClick
+                else -> onOtherCategoryClick
+            }
             ControlCategoryCard(cat = cat, tintIndex = index, onClick = onClick)
         }
     }

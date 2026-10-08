@@ -138,7 +138,11 @@ class ParentStreamController(
             throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
         }
 
-        val sub = hub.subscribe(deviceId)
+        val sub = hub.subscribe(deviceId) ?: throw BizException(
+            ParentErr.LIVE_VIEWERS_FULL,
+            "该设备的观看人数已达上限，请稍后再试",
+            Audience.PARENT
+        )
         val body = StreamingResponseBody { out: OutputStream ->
             try {
                 var idle = 0L

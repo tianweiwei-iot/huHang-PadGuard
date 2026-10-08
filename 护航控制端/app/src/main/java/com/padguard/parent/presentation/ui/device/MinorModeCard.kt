@@ -61,6 +61,7 @@ import com.padguard.presentation.ui.theme.PadGuardColors
 fun MinorModeCard(
     minorMode: MinorMode?,
     ageBandDefaults: Map<AgeBand, AgeBandDefault>,
+    effectiveDailyLimitMinutes: Int,
     busy: Boolean,
     onToggle: (Boolean) -> Unit,
     onSelectBand: (AgeBand) -> Unit,
@@ -100,7 +101,9 @@ fun MinorModeCard(
         )
     }
 
-    val dailyMinutes = mode.dailyLimitMinutes.takeIf { it > 0 } ?: def?.dailyLimitMinutes ?: 60
+    // 每天可用时长：以家长「时间管控」页设置为准（与首页看板 / 孩子端锁机同一口径），
+    // 未成年人模式仅作合规兜底；不再取 minors 模式自身的分龄基线（那只是兜底值）。
+    val dailyMinutes = effectiveDailyLimitMinutes
     val continuousMinutes = mode.continuousMinutes.takeIf { it > 0 } ?: def?.continuousMinutes ?: 30
     val curfewStart = def?.curfewStart ?: mode.curfewStart
     val curfewEnd = def?.curfewEnd ?: mode.curfewEnd

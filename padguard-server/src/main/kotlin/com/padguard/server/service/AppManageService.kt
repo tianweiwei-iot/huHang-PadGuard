@@ -10,6 +10,7 @@ import com.padguard.server.dto.AppHiddenRequest
 import com.padguard.server.dto.AppInstallRequest
 import com.padguard.server.dto.AppInventoryRequest
 import com.padguard.server.dto.AppLimitRequest
+import com.padguard.server.dto.CommandDto
 import com.padguard.server.dto.InstalledAppDto
 import com.padguard.server.repository.AppPolicyRepository
 import com.padguard.server.repository.DeviceRepository
@@ -66,8 +67,13 @@ class AppManageService(
             .associateBy { it.packageName }
             .toMutableMap()
 
+        val toInsert = mutableListOf<InstalledApp>()
+        val toUpdate = mutableListOf<InstalledApp>()
+        val toRemove = mutableListOf<InstalledApp>()
+        val newHiddenPackages = mutableListOf<String>()
         var inserted = 0
         var updated = 0
+        var removed = 0
         val seen = HashSet<String>()
 
         for (item in req.apps) {
@@ -75,7 +81,7 @@ class AppManageService(
             seen.add(pkg)
             val current = existing[pkg]
             if (current == null) {
-                installedAppRepository.save(
+                toInsert.add(
                     InstalledApp(
                         id = UUID.randomUUID().toString(),
                         deviceId = deviceId,
@@ -96,12 +102,8 @@ class AppManageService(
                         hidden = true
                     )
                 )
-                // 新应用默认隐藏：下发隐藏指令让孩子端真正不显示该应用。
-                // 家长在管控端「授权」后会收到 SET_APP_HIDDEN(false) 取消隐藏。
-                commandService.issueCommand(
-                    deviceId, CommandType.SET_APP_HIDDEN,
-                    mapOf(CommandKey.PACKAGE_NAME to pkg, CommandKey.HIDDEN to true)
-                )
+                // 新应用默认隐藏：稍后统一下发隐藏指令让孩子端真正不显示该应用。
+                newHiddenPackages.add(pkg)
                 inserted++
             } else {
                 // 图标只在内容真的变了时才重新落盘（见 [storeIcon] 说明）
@@ -141,22 +143,36 @@ class AppManageService(
                         current.iconHash = hash
                     }
                     if (hiddenChanged) current.hidden = item.hidden ?: current.hidden
-                    installedAppRepository.save(current)
+                    toUpdate.add(current)
                     updated++
                 }
             }
         }
 
+        // 批量落库：把原本逐条 save 的 N 次往返合并为至多 3 次 saveAll（插入 / 更新 / 卸载），
+        // 配合 hibernate.jdbc.batch_size 进一步把 INSERT/UPDATE 攒批下发，显著降低 DB 往返。
+        if (toInsert.isNotEmpty()) installedAppRepository.saveAll(toInsert)
+        if (toUpdate.isNotEmpty()) installedAppRepository.saveAll(toUpdate)
+
+        // 新应用默认隐藏：各下发一条 SET_APP_HIDDEN 指令（语义必要，无法合并）。
+        newHiddenPackages.forEach { pkg ->
+            commandService.issueCommand(
+                deviceId, CommandType.SET_APP_HIDDEN,
+                mapOf(CommandKey.PACKAGE_NAME to pkg, CommandKey.HIDDEN to true)
+            )
+        }
+
         // 本次没出现的包 = 已被卸载，置 installed=false（保留审计痕迹，不删除）
-        var removed = 0
         for ((pkg, entity) in existing) {
             if (pkg in seen) continue
             if (entity.installed) {
                 entity.installed = false
-                installedAppRepository.save(entity)
+                toRemove.add(entity)
                 removed++
             }
         }
+        if (toRemove.isNotEmpty()) installedAppRepository.saveAll(toRemove)
+
         return mapOf("inserted" to inserted, "updated" to updated, "removed" to removed)
     }
 
@@ -240,8 +256,12 @@ class AppManageService(
      * 服务端不中转文件。原因很实际 —— 平板端下载走的是家庭/学校网络，
      * 而服务端在公网，由服务端代理下载再转发只会白白多一跳且拖慢大文件。
      */
-    fun installApp(userId: String, deviceId: String, req: AppInstallRequest) =
-        commandService.issueCommand(
+    fun installApp(userId: String, deviceId: String, req: AppInstallRequest): CommandDto {
+        // 必须校验归属：本接口会向指定设备下发"安装应用"指令，且 apkUrl 由请求方任意提供。
+        // 少了这一步，任何已登录家长都能往**别人的**孩子平板上装任意 APK ——
+        // 这是越权里后果最严重的一类（远程静默安装）。同类方法均已校验，此前唯独这里漏了。
+        requireOwned(userId, deviceId)
+        return commandService.issueCommand(
             deviceId, CommandType.INSTALL_APP,
             mapOf(
                 CommandKey.APK_URL to req.apkUrl,
@@ -263,6 +283,7 @@ class AppManageService(
             entity.lastSeenAt = now
             installedAppRepository.save(entity)
         }
+    }
 
     /**
      * 隐藏 / 显示应用（家长端「使用权限」开关）。
@@ -333,12 +354,10 @@ class AppManageService(
      */
     fun setAppLimit(userId: String, deviceId: String, packageName: String, minutes: Int) {
         requireOwned(userId, deviceId)
-        var policy = appPolicyRepository.findByDeviceIdAndPackageName(deviceId, packageName)
-        if (policy == null) {
-            policy = AppPolicy(deviceId = deviceId, packageName = packageName)
-            appPolicyRepository.save(policy)
-            policy = appPolicyRepository.findByDeviceIdAndPackageName(deviceId, packageName)!!
-        }
+        // save() 本身就返回已保存的实体，不必再回查一次；
+        // 回查还带来一个隐藏风险：查不到时 `!!` 直接 NPE，把一次正常的限额设置变成 500。
+        val policy = appPolicyRepository.findByDeviceIdAndPackageName(deviceId, packageName)
+            ?: appPolicyRepository.save(AppPolicy(deviceId = deviceId, packageName = packageName))
         policy.dailyLimitMinutes = if (minutes > 0) minutes else null
         appPolicyRepository.save(policy)
         policyExtensionService.rebuildPolicy(deviceId)

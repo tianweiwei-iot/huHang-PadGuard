@@ -1,5 +1,19 @@
 package com.padguard.parent.data.remote
 
+import com.padguard.data.api.BillingApi
+import com.padguard.domain.repository.BillingRepository
+import com.padguard.data.model.CreateOrderRequest
+import com.padguard.data.model.CreateOrderResponse
+import com.padguard.data.model.AppListPolicyDto
+import com.padguard.data.model.AppListPolicyRequest
+import com.padguard.data.model.DeviceImportRequestDto
+import com.padguard.data.model.DeviceImportRowDto
+import com.padguard.data.model.EyeProtectionRequest
+import com.padguard.data.model.LanBindRequestDto
+import com.padguard.data.model.OrderDto
+import com.padguard.data.model.PayChannelDto
+import com.padguard.data.model.PlanDto
+import com.padguard.data.model.SubscriptionDto
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -14,6 +28,12 @@ import com.padguard.data.api.MessageApi
 import com.padguard.data.api.MonitorApi
 import com.padguard.data.api.PolicyApi
 import com.padguard.data.api.StatisticsApi
+import com.padguard.data.api.AppCatalogItemDto
+import com.padguard.data.api.AppDistributionItemDto
+import com.padguard.data.api.DistributeAppDto
+import com.padguard.data.api.FeaturePolicyDto
+import com.padguard.data.api.PermissionPolicyDto
+import com.padguard.data.api.UpgradeCheckItemDto
 import com.padguard.parent.data.auth.TokenManager
 import com.padguard.data.model.AlertDto
 import com.padguard.data.model.ApiResponse
@@ -43,6 +63,7 @@ import com.padguard.data.model.LocationDto
 import com.padguard.data.model.LocationTrackPointDto
 import com.padguard.data.model.LoginPasswordRequest
 import com.padguard.data.model.LoginResponse
+import com.padguard.data.model.RegisterRequest
 import com.padguard.data.model.LoginSmsRequest
 import com.padguard.data.model.MessagePublishRequestDto
 import com.padguard.data.model.PolicyTemplateDto
@@ -65,6 +86,9 @@ import com.padguard.data.model.TimeRangeDto
 import com.padguard.data.model.MinorModeDto
 import com.padguard.data.model.MinorModeRequestDto
 import com.padguard.data.model.AgeBandDefaultDto
+import com.padguard.data.model.CommandResultDto
+import com.padguard.data.model.WatermarkRequestDto
+import com.padguard.data.model.GuardPasswordRequestDto
 import com.padguard.domain.model.Alert
 import com.padguard.domain.model.AlertCategory
 import com.padguard.domain.model.AlertLevel
@@ -79,6 +103,8 @@ import com.padguard.domain.model.DeviceOnlineStatus
 import com.padguard.domain.model.DevicePermissionConfig
 import com.padguard.domain.model.DeviceFunctionConfig
 import com.padguard.domain.model.DistributableApp
+import com.padguard.domain.model.AppUpgradeItem
+import com.padguard.domain.model.AppUploadMeta
 import com.padguard.domain.model.GeofenceConfig
 import com.padguard.domain.model.InstalledApp
 import com.padguard.domain.model.LocationInfo
@@ -102,6 +128,7 @@ import com.padguard.domain.repository.WebActivityStats
 import com.padguard.domain.repository.AgeBand
 import com.padguard.domain.repository.AgeBandDefault
 import com.padguard.domain.repository.MinorMode
+import com.padguard.domain.repository.CommandResult
 import com.padguard.domain.repository.AlertRepository
 import com.padguard.domain.repository.AuthRepository
 import com.padguard.domain.repository.DeviceRepository
@@ -117,6 +144,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
@@ -158,12 +186,15 @@ class ApiDataSource @Inject constructor(
     private val alertApi: AlertApi,
     private val appManageApi: AppManageApi,
     private val fileApi: FileApi,
+    private val billingApi: BillingApi,
     private val tokenManager: TokenManager,
     private val authenticatedClient: OkHttpClient,
     private val retrofit: Retrofit,
-    private val serverPrefs: com.padguard.parent.di.ServerPrefs
+    private val serverPrefs: com.padguard.parent.di.ServerPrefs,
+    private val staticConfigCache: StaticConfigCache
 ) : AuthRepository, DeviceRepository, MonitorRepository, PolicyRepository,
-    StatisticsRepository, AlertRepository, MessageRepository, LocationRepository {
+    StatisticsRepository, AlertRepository, MessageRepository, LocationRepository,
+    BillingRepository {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -206,6 +237,18 @@ class ApiDataSource @Inject constructor(
     override suspend fun loginWithPassword(phone: String, password: String): Result<User> {
         return exec { authApi.loginWithPassword(LoginPasswordRequest(phone, password)) }.map { resp ->
             val lr = resp.data ?: throw Exception("登录响应缺少数据")
+            tokenManager.saveLogin(
+                userId = lr.user.id, phone = lr.user.phone, nickname = lr.user.nickname,
+                avatar = lr.user.avatar, role = lr.user.role, sceneType = lr.user.sceneType,
+                accessToken = lr.token, refreshToken = lr.refreshToken
+            )
+            lr.toDomainUser()
+        }
+    }
+
+    override suspend fun register(phone: String, password: String, nickname: String?): Result<User> {
+        return exec { authApi.register(RegisterRequest(phone, password, nickname)) }.map { resp ->
+            val lr = resp.data ?: throw Exception("注册响应缺少数据")
             tokenManager.saveLogin(
                 userId = lr.user.id, phone = lr.user.phone, nickname = lr.user.nickname,
                 avatar = lr.user.avatar, role = lr.user.role, sceneType = lr.user.sceneType,
@@ -336,63 +379,135 @@ class ApiDataSource @Inject constructor(
         if (!code.matches(Regex("\\d{6}"))) {
             return Result.failure(IllegalArgumentException("配对码为 6 位数字，请重新输入"))
         }
-        // 真实绑定由孩子端拿 code 调 /api/v1/device/bind 完成；此处轮询设备列表等待新设备出现
-        val before = exec { deviceApi.getDeviceList() }
-            .getOrElse { return Result.failure(it) }
-            .data.orEmpty().mapNotNull { it.deviceId }.toSet()
-
+        // 真实绑定由孩子端拿 code 调 /api/v1/device/bind 完成。
+        //
+        // 判定方式必须是"轮询这个码的状态"，而不是"等设备列表里出现新 deviceId"：
+        // 孩子端重装 / 重新扫码时，服务端按硬件指纹复用同一条台账，deviceId 根本不变，
+        // 只看列表就永远等不到新设备 —— 表现为孩子端已经绑上并开始上报心跳，
+        // 家长端却一直提示绑定未成功。绑定结果由服务端回写到码上，这里问码最准。
         repeat(BIND_POLL_ATTEMPTS) {
             delay(BIND_POLL_INTERVAL_MS)
-            val current = exec { deviceApi.getDeviceList() }.getOrNull()?.data ?: return@repeat
-            val fresh = current.firstOrNull { d -> d.deviceId !in before }
-            if (fresh != null) return Result.success(fresh.toDomain())
+            val st = exec { deviceApi.getBindCodeStatus(code) }.getOrNull()?.data ?: return@repeat
+            when (st.state) {
+                STATE_BOUND -> {
+                    val boundId = st.deviceId ?: return@repeat
+                    // 台账可能还没落定，拉一次列表确认；取不到就下一轮再试
+                    val dev = exec { deviceApi.getDeviceList() }.getOrNull()?.data
+                        ?.firstOrNull { d -> d.deviceId == boundId }
+                    if (dev != null) return Result.success(dev.toDomain())
+                }
+                STATE_EXPIRED ->
+                    return Result.failure(Exception("配对码已失效，请重新生成后再让孩子端扫一次"))
+            }
         }
-        return Result.failure(Exception("等待孩子端完成绑定超时，请确认孩子端已输入配对码"))
+        return Result.failure(Exception("等待孩子端完成绑定超时，请确认孩子端已输入该配对码"))
     }
 
     override suspend fun discoverLanDevices(): Result<List<com.padguard.domain.model.LanDevice>> =
-        Result.failure(
-            Exception("局域网发现需在真机网络环境下通过 mDNS 扫描实现，当前版本后台未提供该能力。")
-        )
+        exec { deviceApi.discoverLanDevices() }.map { it.data.orEmpty().map { d -> d.toDomain() } }
 
     override suspend fun bindLanDevice(
         lanDevice: com.padguard.domain.model.LanDevice,
         alias: String?
-    ): Result<Device> = Result.failure(Exception("局域网绑定需被控平板联网被发现后接入，当前版本未对接。"))
+    ): Result<Device> =
+        exec { deviceApi.bindLanDevice(LanBindRequestDto(lanDevice.deviceId, alias)) }
+            .map { it.data?.toDomain() ?: throw Exception("接入设备失败：服务端未返回设备信息") }
 
     override suspend fun importDevices(
         rows: List<com.padguard.domain.model.DeviceImportRow>
     ): Result<com.padguard.domain.model.DeviceImportResult> =
-        Result.failure(Exception("批量导入设备台账需服务端支持，当前版本未对接。"))
+        exec { deviceApi.importDevices(DeviceImportRequestDto(rows.map { DeviceImportRowDto(it.hardwareId, it.alias, it.model, it.groupName) })) }
+            .map { it.data?.toDomain() ?: throw Exception("批量导入失败：服务端未返回结果") }
 
-    // ----- 设备权限 / 功能 / 分发 / 升级（后端暂未提供接口，返回安全默认 / 明确失败） -----
+    // ----- 设备权限 / 功能 / 分发 / 升级（对接服务端 /v1/devices/{deviceId}/mgmt） -----
 
     override suspend fun getDevicePermissions(deviceId: String): Result<DevicePermissionConfig> =
-        Result.success(DevicePermissionConfig(deviceId = deviceId))
+        exec { deviceApi.getDevicePermissions(deviceId) }
+            .map { resp -> resp.data?.let { DevicePermissionConfig(deviceId, it.permissions.toSet()) }
+                ?: DevicePermissionConfig(deviceId) }
 
     override suspend fun updateDevicePermissions(config: DevicePermissionConfig): Result<DevicePermissionConfig> =
-        Result.failure(Exception("服务端未提供设备权限配置接口，暂不支持下发。"))
+        exec { deviceApi.setDevicePermissions(config.deviceId, PermissionPolicyDto(permissions = config.permissions.toList())) }
+            .map { resp -> resp.data?.let { DevicePermissionConfig(config.deviceId, it.permissions.toSet()) } ?: config }
 
     override suspend fun getDeviceFunctionConfig(deviceId: String): Result<DeviceFunctionConfig> =
-        Result.success(DeviceFunctionConfig(deviceId = deviceId))
+        exec { deviceApi.getDeviceFeatures(deviceId) }
+            .map { resp -> resp.data?.let { DeviceFunctionConfig(deviceId, it.features) } ?: DeviceFunctionConfig(deviceId) }
 
     override suspend fun updateDeviceFunctionConfig(config: DeviceFunctionConfig): Result<DeviceFunctionConfig> =
-        Result.failure(Exception("服务端未提供设备功能开关配置接口，暂不支持下发。"))
+        exec { deviceApi.setDeviceFeatures(config.deviceId, FeaturePolicyDto(features = config.features)) }
+            .map { resp -> resp.data?.let { DeviceFunctionConfig(config.deviceId, it.features) } ?: config }
 
-    override suspend fun getDistributableApps(deviceId: String): Result<List<com.padguard.domain.model.DistributableApp>> =
-        Result.success(emptyList())
+    override suspend fun getDistributableApps(deviceId: String): Result<List<DistributableApp>> =
+        exec { deviceApi.getAppCatalog(deviceId) }
+            .map { resp -> resp.data.orEmpty().map { d ->
+                DistributableApp(
+                    id = d.id,
+                    packageName = d.packageName,
+                    appName = d.appName ?: d.packageName,
+                    versionCode = d.versionCode,
+                    versionName = d.versionName ?: "",
+                    apkUrl = absoluteUrl(d.apkUrl) ?: d.apkUrl,
+                    sizeBytes = d.sizeBytes,
+                    iconUrl = absoluteUrl(d.iconUrl),
+                    description = d.description
+                )
+            } }
 
-    override suspend fun dispatchApp(
+    override suspend fun dispatchApp(deviceId: String, catalogId: String, force: Boolean): Result<Unit> =
+        exec { deviceApi.distributeApp(deviceId, catalogId, DistributeAppDto(catalogId = catalogId, force = force)) }
+            .map { Unit }
+
+    override suspend fun getDeviceUpgradeInfo(deviceId: String): Result<List<AppUpgradeItem>> =
+        exec { deviceApi.upgradeCheck(deviceId) }
+            .map { resp -> resp.data.orEmpty().map { d ->
+                AppUpgradeItem(
+                    catalogId = d.catalogId,
+                    packageName = d.packageName,
+                    appName = d.appName ?: d.packageName,
+                    catalogVersionCode = d.catalogVersionCode,
+                    catalogVersionName = d.catalogVersionName,
+                    installedVersionCode = d.installedVersionCode,
+                    installedVersionName = d.installedVersionName,
+                    upgradeAvailable = d.upgradeAvailable
+                )
+            } }
+
+    override suspend fun upgradeDevice(deviceId: String, catalogId: String): Result<Unit> =
+        exec { deviceApi.upgradeApp(deviceId, catalogId) }.map { Unit }
+
+    override suspend fun uploadAppCatalog(
         deviceId: String,
-        packageName: String,
-        action: com.padguard.domain.model.AppDispatchAction
-    ): Result<Unit> = Result.failure(Exception("服务端未提供应用分发接口，暂不支持。"))
+        bytes: ByteArray,
+        meta: AppUploadMeta,
+        fileName: String
+    ): Result<DistributableApp> {
+        val filePart = okhttp3.MultipartBody.Part.createFormData(
+            "file", fileName, bytes.toRequestBody("application/octet-stream".toMediaTypeOrNull())
+        )
+        val packageNameBody = meta.packageName.toRequestBody("text/plain".toMediaTypeOrNull())
+        val versionCodeBody = meta.versionCode.toString().toRequestBody("text/plain".toMediaTypeOrNull())
+        val versionNameBody = meta.versionName.takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
+        val appNameBody = meta.appName.takeIf { it.isNotBlank() }?.toRequestBody("text/plain".toMediaTypeOrNull())
+        return exec { deviceApi.uploadAppCatalog(deviceId, filePart, packageNameBody, versionCodeBody, versionNameBody, appNameBody) }
+            .map { resp ->
+                val d = resp.data ?: throw Exception("上传失败：服务端未返回应用信息")
+                DistributableApp(
+                    id = d.id,
+                    packageName = d.packageName,
+                    appName = d.appName ?: d.packageName,
+                    versionCode = d.versionCode,
+                    versionName = d.versionName ?: "",
+                    apkUrl = absoluteUrl(d.apkUrl) ?: d.apkUrl,
+                    sizeBytes = d.sizeBytes,
+                    iconUrl = absoluteUrl(d.iconUrl),
+                    description = d.description
+                )
+            }
+    }
 
-    override suspend fun getDeviceUpgradeInfo(deviceId: String): Result<com.padguard.domain.model.DeviceUpgradeInfo> =
-        Result.failure(Exception("服务端未提供远程升级信息接口，暂不支持。"))
-
-    override suspend fun upgradeDevice(deviceId: String): Result<Unit> =
-        Result.failure(Exception("服务端未提供远程升级接口，暂不支持。"))
+    override suspend fun deleteAppCatalog(deviceId: String, catalogId: String): Result<Unit> =
+        execRaw { deviceApi.deleteAppCatalog(deviceId, catalogId) }
 
     // ==================== MonitorRepository ====================
 
@@ -534,7 +649,13 @@ class ApiDataSource @Inject constructor(
         } finally {
             runCatching { call.cancel() }
         }
-    }.flowOn(Dispatchers.IO)
+    }
+        // conflate = 背压保护：孩子端按 4fps 推帧，家长端一旦解码或渲染跟不上
+        // （低端机、界面切换、整图缩放），无背压的 Flow 会把 Bitmap 一帧不落地全缓存，
+        // 表现为内存持续上涨甚至 OOM，且画面越来越延迟（"看到的总是几十秒前"）。
+        // conflate 只保留最新一帧：丢帧可以接受，延迟累积不可接受。
+        .conflate()
+        .flowOn(Dispatchers.IO)
 
     override suspend fun getScreenMonitorSettings(deviceId: String): Result<ScreenMonitorSettings> =
         exec { monitorApi.getScreenMonitorSettings(deviceId) }.map { it.data?.toDomain() ?: throw Exception("读取监控设置失败") }
@@ -580,6 +701,11 @@ class ApiDataSource @Inject constructor(
 
     override suspend fun getTrackHistory(deviceId: String): Result<List<LocationInfo>> =
         exec { locationApi.getTrackHistory(deviceId) }.map { it.data.orEmpty().map { p -> p.toDomain() } }
+
+    // 只回"指令已受理"，位置要等孩子端上报后由 getDeviceLocation 拉取。
+    // 端点挂在 monitor 前缀下（与服务端 /v1/monitor/{deviceId}/locate 对齐），故走 monitorApi 而非 locationApi。
+    override suspend fun requestLocate(deviceId: String): Result<Unit> =
+        exec { monitorApi.requestLocate(deviceId) }.map { Unit }
 
     // ==================== PolicyRepository ====================
 
@@ -645,6 +771,28 @@ class ApiDataSource @Inject constructor(
     override suspend fun setAppHidden(deviceId: String, packageName: String, hidden: Boolean): Result<Unit> =
         execRaw { appManageApi.setAppHidden(deviceId, AppHiddenRequest(packageName, hidden)) }
 
+    override suspend fun setAppListPolicy(
+        deviceId: String,
+        mode: String,
+        requirePasswordOnLaunch: Boolean,
+        requirePasswordOnInstall: Boolean,
+        requirePasswordOnUninstall: Boolean
+    ): Result<Unit> = exec {
+        policyApi.updateAppListPolicy(
+            deviceId,
+            AppListPolicyRequest(
+                mode,
+                requirePasswordOnLaunch,
+                requirePasswordOnInstall,
+                requirePasswordOnUninstall
+            )
+        )
+    }.map { Unit }
+
+    override suspend fun getAppListPolicy(deviceId: String): Result<AppListPolicyDto> =
+        exec { policyApi.getAppListPolicy(deviceId) }
+            .map { it.data ?: throw Exception("读取应用管控模式失败") }
+
     override suspend fun setAppsHiddenBatch(
         deviceId: String,
         packages: List<String>,
@@ -705,14 +853,51 @@ class ApiDataSource @Inject constructor(
     override suspend fun setBrowserDisabled(deviceId: String, disabled: Boolean): Result<Unit> =
         exec { policyApi.setBrowserDisabled(deviceId, BrowserDisableRequest(disabled)) }.map { Unit }
 
-    override suspend fun lockScreen(deviceId: String): Result<Unit> =
-        execRaw { policyApi.lockScreen(deviceId) }
+    override suspend fun lockScreen(deviceId: String): Result<CommandResult> =
+        exec { policyApi.lockScreen(deviceId) }
+            .map { it.data?.toDomain() ?: throw Exception("锁屏指令未返回指令号，无法追踪执行结果") }
 
-    override suspend fun unlockScreen(deviceId: String): Result<Unit> =
-        execRaw { policyApi.unlockScreen(deviceId) }
+    override suspend fun unlockScreen(deviceId: String): Result<CommandResult> =
+        exec { policyApi.unlockScreen(deviceId) }
+            .map { it.data?.toDomain() ?: throw Exception("解锁指令未返回指令号，无法追踪执行结果") }
+
+    override suspend fun getCommand(msgId: String): Result<CommandResult> =
+        exec { policyApi.getCommand(msgId) }
+            .map { it.data?.toDomain() ?: throw Exception("查询指令结果失败") }
+
+    /**
+     * 水印开关。
+     *
+     * ## 这里必须说清一件事：我们关不掉那个红点
+     * 家长常提的诉求是"录屏时别让孩子看到红点"。那个红色 REC 指示器由
+     * **Android 系统**在 MediaProjection 会话期间直接绘制（Android 12+ 起是常驻胶囊，
+     * 更早是状态栏红点），它不进入应用画面、也不受应用窗口层级影响。
+     * 这是 Android 的隐私设计红线：任何应用 —— 包括 Device Owner、系统签名应用 ——
+     * 都没有关闭它的接口。市面上声称能去掉的方案，要么需要 root 改框架，
+     * 要么只能隐藏自己应用内的提示，对系统指示器一律无效。
+     *
+     * 因此这里提供的是**本应用自己的水印**：叠加一个半透明悬浮文字，
+     * 家长可自定义文案、可随时关闭。它不"去掉红点"，
+     * 但给了家长一个可控、且孩子能看见的受管控提示。
+     */
+    override suspend fun setWatermark(
+        deviceId: String,
+        enabled: Boolean,
+        content: String?
+    ): Result<CommandResult> =
+        exec { policyApi.setWatermark(deviceId, WatermarkRequestDto(enabled, content)) }
+            .map { it.data?.toDomain() ?: throw Exception("水印指令未返回指令号，无法追踪执行结果") }
+
+    override suspend fun setGuardPassword(
+        deviceId: String,
+        password: String?,
+        clear: Boolean
+    ): Result<Unit> =
+        exec { policyApi.setGuardPassword(deviceId, GuardPasswordRequestDto(password, clear)) }
+            .map { }
 
     override suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit> =
-        Result.failure(Exception("服务端未提供护眼参数接口，暂不支持。"))
+        exec { policyApi.setEyeProtection(deviceId, EyeProtectionRequest(enabled, filterLevel)) }.map { Unit }
 
     override suspend fun unlock(deviceId: String): Result<Unit> =
         execRaw { policyApi.unlock(deviceId) }
@@ -780,15 +965,23 @@ class ApiDataSource @Inject constructor(
     override suspend fun setMinorMode(mode: MinorMode, exemptMinutes: Int?): Result<Unit> =
         execRaw { policyApi.setMinorMode(mode.deviceId, mode.toRequest(exemptMinutes)) }
 
+    /**
+     * 分龄合规默认值。
+     *
+     * 走 [StaticConfigCache]：这是服务端常量级配置，却被首页 10 秒一次的轮询反复拉取，
+     * 是家长端"请求风暴"的主要来源。缓存后该接口在 App 生命周期内基本只发一次。
+     */
     override suspend fun getAgeBandDefaults(): Result<Map<AgeBand, AgeBandDefault>> =
-        exec { policyApi.getAgeBandDefaults() }.map { resp ->
-            resp.data.orEmpty().mapNotNull { (key, v) ->
-                // 未知档位直接丢弃而不是回落：默认值要如实反映服务端能力，
-                // 回落会让家长看到"某个档位每天 60 分钟"但服务端其实没这个档。
-                val band = AgeBand.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }
-                    ?: return@mapNotNull null
-                band to v.toDomain()
-            }.toMap()
+        staticConfigCache.ageBandDefaults {
+            exec { policyApi.getAgeBandDefaults() }.map { resp ->
+                resp.data.orEmpty().mapNotNull { (key, v) ->
+                    // 未知档位直接丢弃而不是回落：默认值要如实反映服务端能力，
+                    // 回落会让家长看到"某个档位每天 60 分钟"但服务端其实没这个档。
+                    val band = AgeBand.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }
+                        ?: return@mapNotNull null
+                    band to v.toDomain()
+                }.toMap()
+            }
         }
 
     // ==================== StatisticsRepository ====================
@@ -810,7 +1003,8 @@ class ApiDataSource @Inject constructor(
         packageName: String,
         period: ReportPeriod
     ): Result<List<com.padguard.domain.model.AppUsageHistoryEntry>> =
-        Result.failure(Exception("服务端未提供单应用使用历史接口，暂不支持。"))
+        exec { statisticsApi.getAppUsageHistory(deviceId, packageName, period.name.lowercase()) }
+            .map { it.data.orEmpty().map { e -> e.toDomain() } }
 
     override suspend fun getWebActivityStats(deviceId: String, period: ReportPeriod): Result<WebActivityStats> =
         exec { statisticsApi.getWebActivity(deviceId, period.name.lowercase()) }
@@ -834,7 +1028,7 @@ class ApiDataSource @Inject constructor(
             .map { it.data.orEmpty().map { a -> a.toDomain() } }
 
     override suspend fun getUnreadAlertCount(): Result<Int> =
-        exec { alertApi.getUnreadCount() }.map { it.data ?: 0 }
+        exec { alertApi.getUnreadCount() }.map { it.data?.count ?: 0 }
 
     override suspend fun acknowledgeAlert(alertId: String): Result<Unit> =
         exec { alertApi.acknowledgeAlert(alertId) }.map { Unit }
@@ -889,7 +1083,29 @@ class ApiDataSource @Inject constructor(
         val p = path?.takeIf { it.isNotBlank() } ?: return null
         if (p.startsWith("http://", ignoreCase = true) || p.startsWith("https://", ignoreCase = true)) return p
         val base = serverPrefs.getBaseUrl().trim().trimEnd('/')
-        return base + if (p.startsWith("/")) p else "/$p"
+        return withoutOverlap(base, p) + if (p.startsWith("/")) p else "/$p"
+    }
+
+    /**
+     * 去掉服务器地址末尾与资源路径开头重复的路径段。
+     *
+     * 服务端返回的文件地址（`/v1/files/{id}`）已经是**服务端根路径**，
+     * 而家长端填的服务器地址往往同样带着 `/v1` 这层接口前缀。
+     * 直接拼接会得到 `/v1/v1/files/{id}` → 500，
+     * 表现为"图标 / 截图明明上传成功了，家长端却永远加载不出来"。
+     * 这里按段去重，服务器地址带不带接口前缀都能拼对。
+     */
+    private fun withoutOverlap(base: String, path: String): String {
+        var b = base.trimEnd('/')
+        val normalized = if (path.startsWith("/")) path else "/$path"
+        val firstSeg = normalized.trimStart('/').substringBefore('/')
+        if (firstSeg.isEmpty()) return b
+        val suffix = "/$firstSeg"
+        // 保护条件：削完之后必须仍是合法 URL，避免把 "http://v1" 这类地址削坏
+        while (b.endsWith(suffix) && b.removeSuffix(suffix).contains("://")) {
+            b = b.removeSuffix(suffix)
+        }
+        return b
     }
 
     companion object {
@@ -897,10 +1113,46 @@ class ApiDataSource @Inject constructor(
         private const val MAX_FRAME_BYTES = 5 * 1024 * 1024
 
         private const val POLL_INTERVAL_MS = 10_000L
-        private const val BIND_POLL_ATTEMPTS = 20
+        /**
+         * 绑定等待窗口 = 45 × 2s = 90 秒。
+         * 原来只有 20 × 2s = 40 秒：家长生成码后，孩子要经历"切到孩子端 → 扫码/输入 → 绑定"，
+         * 40 秒经常不够，家长就会在孩子还没扫完时先超时。绑定码本身 10 分钟有效，
+         * 90 秒足够覆盖正常操作，又不至于让界面像卡死。
+         */
+        private const val BIND_POLL_ATTEMPTS = 45
         private const val BIND_POLL_INTERVAL_MS = 2_000L
         private const val ALERT_POLL_INTERVAL_MS = 15_000L
+
+        // 绑定码状态，与服务端 BindCodeService 保持一致
+        private const val STATE_BOUND = "BOUND"
+        private const val STATE_EXPIRED = "EXPIRED"
     }
+
+    // ------------------------------------------------------------------ 订阅与计费
+
+    override suspend fun getPlans(): Result<List<PlanDto>> =
+        exec { billingApi.getPlans() }.mapCatching { it.data.orEmpty() }
+
+    override suspend fun getSubscription(): Result<SubscriptionDto> =
+        exec { billingApi.getSubscription() }.mapCatching {
+            it.data ?: throw Exception("服务端未返回订阅状态")
+        }
+
+    override suspend fun createOrder(plan: String, channel: String): Result<CreateOrderResponse> =
+        exec { billingApi.createOrder(CreateOrderRequest(plan = plan, channel = channel)) }
+            .mapCatching { it.data ?: throw Exception("下单失败：服务端未返回订单") }
+
+    override suspend fun getOrders(limit: Int): Result<List<OrderDto>> =
+        exec { billingApi.getOrders(limit) }.mapCatching { it.data.orEmpty() }
+
+    override suspend fun getChannels(): Result<List<PayChannelDto>> =
+        exec { billingApi.getChannels() }.mapCatching { it.data.orEmpty() }
+
+    override suspend fun mockPay(orderNo: String): Result<SubscriptionDto> =
+        exec { billingApi.mockPay(orderNo) }.mapCatching {
+            it.data ?: throw Exception("支付失败：服务端未返回订阅状态")
+        }
+
 }
 
 // ==================== DTO -> Domain 映射（防御式） ====================
@@ -921,7 +1173,8 @@ private fun DeviceDto.toDomain(): Device = Device(
     remoteLocked = remoteLocked ?: false,
     childName = childName,
     childNickname = childNickname,
-    childAvatar = childAvatar
+    childAvatar = childAvatar,
+    guardPasswordSet = guardPasswordSet ?: false
 )
 
 private fun DeviceGroupDto.toDomain(): DeviceGroup = DeviceGroup(
@@ -986,6 +1239,16 @@ private fun TabletUsageSettingsDto.toDomain(): TabletUsageSettings = TabletUsage
     timeUpMessage = timeUpMessage,
     // 回读时不再带 syncToDevice（那是下发瞬间的动作标志），保持页面状态干净
     syncToDevice = false
+)
+
+private fun CommandResultDto.toDomain(): CommandResult = CommandResult(
+    msgId = msgId,
+    type = type,
+    status = status,
+    createdAt = createdAt,
+    executedAt = executedAt,
+    errorCode = errorCode,
+    errorMessage = errorMessage
 )
 
 private fun MinorModeDto.toDomain(deviceId: String): MinorMode = MinorMode(

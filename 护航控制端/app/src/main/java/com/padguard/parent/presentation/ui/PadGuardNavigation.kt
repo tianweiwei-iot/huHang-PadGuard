@@ -1,5 +1,6 @@
 package com.padguard.presentation.ui
 
+import com.padguard.presentation.ui.profile.SubscriptionScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -56,6 +57,7 @@ import java.net.URLEncoder
  */
 sealed class Screen(val route: String) {
     object Login : Screen("login")
+    object Subscription : Screen("subscription")
     object Home : Screen("home")
     object Main : Screen("main")
     object DeviceList : Screen("device_list")
@@ -168,6 +170,9 @@ fun PadGuardNavHost(
                 onNavigateToAlerts = { navController.navigate(Screen.AlertList.route) }
             )
         }
+        composable(Screen.Subscription.route) {
+            SubscriptionScreen(onBack = { navController.popBackStack() })
+        }
         composable(Screen.AlertList.route) {
             AlertCenterScreen(
                 state = unlockState,
@@ -224,7 +229,8 @@ fun PadGuardNavHost(
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
             com.padguard.presentation.ui.apps.AppManageScreen(
                 deviceId = deviceId,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onNavigateToDeviceDetail = { navController.navigate(Screen.DeviceDetail.create(deviceId)) }
             )
         }
         composable(Screen.AppUsageHistory.route) { backStackEntry ->

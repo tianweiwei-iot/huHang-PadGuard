@@ -9,8 +9,11 @@ import com.padguard.server.dto.CommandPacket
 import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.CommandRepository
 import com.padguard.server.repository.DeviceRepository
+import com.padguard.server.service.AuditAction
+import com.padguard.server.service.AuditService
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
+import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 import java.util.Base64
 import java.util.UUID
@@ -25,7 +28,8 @@ class CommandService(
     private val commandRepository: CommandRepository,
     private val mqttGateway: MqttGateway,
     private val objectMapper: ObjectMapper,
-    private val expiredCommandSweeper: ExpiredCommandSweeper
+    private val expiredCommandSweeper: ExpiredCommandSweeper,
+    private val auditService: AuditService
 ) {
     /**
      * 家长端下发指令：构造指令包(HMAC 签名) -> 落库 -> 经 MQ/M轮询下发。
@@ -65,6 +69,7 @@ class CommandService(
         )
         // MQTT 不可用（家庭/本地部署无 broker）时唤醒正在长轮询的孩子端，
         // 让它不必等下一个轮询周期就能取走这条指令。
+        auditService.record(null, deviceId, AuditAction.COMMAND_ISSUE, targetType = "command", targetId = msgId, detail = "type=$type")
         notifyWaiters(deviceId)
         return CommandDto(msgId, type, "PENDING", strPayload, now, null)
     }
@@ -75,7 +80,8 @@ class CommandService(
         val payloadMap = cmd.payloadJson?.let {
             runCatching { objectMapper.readValue(it, Map::class.java) as Map<String, Any?> }.getOrNull()
         }
-        return CommandDto(cmd.msgId, cmd.type, cmd.status, payloadMap, cmd.createdAt, cmd.executedAt)
+        return CommandDto(cmd.msgId, cmd.type, cmd.status, payloadMap, cmd.createdAt, cmd.executedAt,
+            errorCode = cmd.errorCode, errorMessage = cmd.errorMessage)
     }
 
     /**
@@ -91,7 +97,7 @@ class CommandService(
      */
     fun pendingForPolling(deviceId: String, since: Long): List<CommandPacket> {
         val now = System.currentTimeMillis()
-        expiredCommandSweeper.sweep(deviceId, now)
+        expiredCommandSweeper.sweepIfDue(deviceId, now)
 
         // 游标合法性校验（含**时钟偏移容错**）：
         // 终端时钟略快于服务端时，since 会落在「未来」——此前直接判非法归零，
@@ -110,10 +116,13 @@ class CommandService(
             since > now -> (now - CLOCK_SKEW_GRACE_MS).coerceAtLeast(0L)
             else -> 0L
         }
-        return commandRepository.findByDeviceIdOrderByCreatedAtAsc(deviceId)
-            .filter { it.status == STATUS_PENDING && it.expiresAt > now && it.createdAt >= cursor }
-            .take(MAX_POLLING_BATCH)
-            .map {
+        // 过滤与批次截断全部下沉到 SQL：此前是捞出该设备全部历史指令再内存 filter，
+        // 指令表只增不删，单次查询成本随使用时长线性增长，是全局响应变慢的主因之一。
+        // 注：过期回收走 [ExpiredCommandSweeper.sweepIfDue]（按设备 30s 节流），
+        // 既消除死代码，又把高频轮询路径上的维护成本降到 1/10。
+        return commandRepository.findPendingForPolling(
+            deviceId, STATUS_PENDING, now, cursor, PageRequest.of(0, MAX_POLLING_BATCH)
+        ).map {
                 val payloadMap = it.payloadJson?.let {
                     runCatching { objectMapper.readValue(it, Map::class.java) as Map<String, Any?> }.getOrNull()
                 }
@@ -150,7 +159,22 @@ class CommandService(
             onReady(pending)
             return false
         }
-        waiters.computeIfAbsent(deviceId) { ConcurrentLinkedQueue() }.add(onReady)
+        val queue = waiters.computeIfAbsent(deviceId) { ConcurrentLinkedQueue() }
+        queue.add(onReady)
+        // 二次检查：填补「先查空 -> 入队前指令已入库」的丢失唤醒窗口。
+        // 入队后立刻再查一次；若此刻已有待办指令则立即摘除并同步触发，
+        // 避免新 waiter 白白空等满一个 MAX_WAIT_MS（最坏 20s 指令延迟）。
+        // 若二次检查后仍为空，后续 issueCommand 触发的 notifyWaiters 必能在本队列中找到它。
+        val pending2 = pendingForPolling(deviceId, since)
+        if (pending2.isNotEmpty()) {
+            // remove 返回 true 表示本 waiter 仍在队列中（notifyWaiters 尚未消费它），
+            // 由本次注册方负责触发；返回 false 表示窗口内 issueCommand 已通过 notifyWaiters
+            // 消费并触发了本 waiter（DeferredResult 已被完成），此时绝不再二次触发。
+            if (queue.remove(onReady)) {
+                onReady(pending2)
+            }
+            return false
+        }
         return true
     }
 
@@ -162,9 +186,14 @@ class CommandService(
     /** 唤醒该设备所有挂起的轮询请求。重复下发由终端 CommandGate 按 msgId 去重，安全。 */
     private fun notifyWaiters(deviceId: String) {
         val queue = waiters[deviceId] ?: return
+        if (queue.isEmpty()) return
+        // 只查一次，结果复用给所有等待者。
+        // 原先每个 waiter 各调一次 pendingForPolling，N 个挂起请求就是 N 次数据库往返
+        // （且每次都附带一次回收扫描），家长下发一条指令的开销随挂起连接数线性增长。
+        val pending = pendingForPolling(deviceId, 0)
         while (true) {
             val onReady = queue.poll() ?: break
-            runCatching { onReady(pendingForPolling(deviceId, 0)) }
+            runCatching { onReady(pending) }
                 .onFailure { log.warn("notify long-poll waiter failed: {}", it.message) }
         }
     }

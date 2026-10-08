@@ -64,11 +64,26 @@ class ScreenStreamHub {
         }
     }
 
-    fun subscribe(deviceId: String): Subscriber {
+    /**
+     * 订阅某个设备的实时画面。
+     *
+     * @return null 表示该设备的并发观看数已达 [MAX_SUBSCRIBERS]（异常并发）。
+     * 调用方**必须**把它转成明确的错误响应：返回一个立刻结束的流会让家长端
+     * 以为是"孩子端停推"，从而按既有逻辑自动重连，形成无限重连循环。
+     */
+    fun subscribe(deviceId: String): Subscriber? {
+        val list = subscribers.computeIfAbsent(deviceId) { CopyOnWriteArrayList() }
+        // 每路观看都是一份完整的上行+下行带宽（这是"服务端中转"架构最大的成本项），
+        // 而同一台平板被多人同时看屏在正常业务里不该发生（一个家庭一个家长账号）。
+        // 不限制的话，一旦出现异常（重连未清理、脚本刷接口），带宽会成倍放大且无人察觉。
+        if (list.size >= MAX_SUBSCRIBERS) {
+            log.warn("stream subscriber rejected (device at capacity): device=$deviceId current=${list.size}")
+            return null
+        }
         val sub = Subscriber()
-        subscribers.computeIfAbsent(deviceId) { CopyOnWriteArrayList() }.add(sub)
+        list.add(sub)
         lastFrames[deviceId]?.let { sub.offer(it) }
-        log.info("stream subscriber added: device=$deviceId total=${subscribers[deviceId]?.size ?: 0}")
+        log.info("stream subscriber added: device=$deviceId total=${list.size}")
         return sub
     }
 
@@ -83,6 +98,8 @@ class ScreenStreamHub {
 
     private companion object {
         const val MAX_QUEUE = 3
+        /** 单设备并发观看上限：正常业务远小于此，超过即视为异常并发 */
+        const val MAX_SUBSCRIBERS = 3
         val log = LoggerFactory.getLogger(ScreenStreamHub::class.java)
     }
 }

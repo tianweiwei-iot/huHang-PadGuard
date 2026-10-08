@@ -14,8 +14,13 @@ android {
         applicationId = "com.padguard.parent"
         minSdk = project.findProperty("MIN_SDK")?.toString()?.toInt() ?: 26
         targetSdk = project.findProperty("TARGET_SDK")?.toString()?.toInt() ?: 35
-        versionCode = project.findProperty("VERSION_CODE")?.toString()?.toInt() ?: 1
-        versionName = project.findProperty("VERSION_NAME")?.toString() ?: "1.0.0"
+        // 版本号必须能区分新旧：原先写死为 1 / "1.0.0"，新旧包在系统层面完全同版本，
+        // 无法判断装上去的是哪次构建（表现为"重新 Run 了却还是旧行为"）。
+        // versionCode 单调递增：设备上已装的是 1，改成 2 才会被系统认定为「升级」，
+        // 否则同版本可能被跳过、或被当作降级而装不上。后续每次发版继续手动 +1。
+        versionCode = project.findProperty("VERSION_CODE")?.toString()?.toInt() ?: 2
+        // versionName 同步递增，手机「应用信息」里可直接核对（旧包显示 1.0.0）
+        versionName = project.findProperty("VERSION_NAME")?.toString() ?: "1.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -27,7 +32,7 @@ android {
         // 曾在此填写虚构公网域名 api.padguard.com：DNS 根本解析不了，家长端所有接口
         // 一律"连不上"，且用户完全无法判断是地址问题还是网络问题。改为与 debug 一致的内网地址，
         // 真实部署在登录页「⚙ 高级设置」改成家长电脑的实际 IP 即可（改完立即生效，无需重打包）。
-        buildConfigField("String", "BASE_URL", "\"http://192.168.1.10:8090/v1/\"")
+        buildConfigField("String", "BASE_URL", "\"http://192.168.1.12:8090/v1/\"")
     }
 
     buildTypes {
@@ -42,7 +47,7 @@ android {
         debug {
             isMinifyEnabled = false
             // Debug API endpoint (can be overridden with local server)
-            buildConfigField("String", "BASE_URL", "\"http://192.168.1.10:8090/v1/\"")
+            buildConfigField("String", "BASE_URL", "\"http://192.168.1.12:8090/v1/\"")
         }
     }
 
@@ -114,7 +119,4 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
-    debugImplementation("androidx.compose.ui:ui-tooling")
-    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

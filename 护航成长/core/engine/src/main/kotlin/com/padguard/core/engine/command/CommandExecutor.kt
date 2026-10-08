@@ -113,6 +113,8 @@ class CommandExecutor @Inject constructor(
                 CommandType.UNINSTALL_APP -> uninstallApp(command, deviceId)
                 CommandType.SET_APP_SUSPENDED -> setAppSuspended(command, deviceId)
                 CommandType.SET_APP_HIDDEN -> setAppHidden(command, deviceId)
+                CommandType.SET_RUNTIME_PERMISSION -> setRuntimePermission(command, deviceId)
+                CommandType.SET_FEATURE_POLICY -> setFeaturePolicy(command, deviceId)
                 CommandType.SET_WATERMARK -> setWatermark(command, deviceId)
                 CommandType.PERIPHERAL_OVERRIDE -> peripheralOverride(command, deviceId)
                 CommandType.UPDATE_CONFIG -> updateConfig(command, deviceId)
@@ -260,6 +262,7 @@ class CommandExecutor @Inject constructor(
         }
         _effects.tryEmit(
             EngineEffect.ShowMessage(
+                msgId = command.msgId,
                 title = command.payloadString(KEY_TITLE, "来自家长的消息"),
                 body = body,
                 durationSec = command.payloadInt(KEY_DURATION_SEC, 0),
@@ -494,6 +497,55 @@ class CommandExecutor @Inject constructor(
         }
     }
 
+    // ==================== 权限管理 ====================
+
+    /**
+     * 权限管理：授予 / 收回某包名的运行时权限。
+     *
+     * 只有 Device Owner / Profile Owner 能改"别人"的权限；普通设备管理员会回执 UNSUPPORTED，
+     * 上层据此引导家长让孩子端走系统授权流程。grant=true 一次性授予，false 收回（回归系统默认）。
+     */
+    private fun setRuntimePermission(command: Command, deviceId: String): CommandAck {
+        val perm = command.payloadString(KEY_PERMISSION)
+        if (perm.isBlank()) {
+            return ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "permission 不能为空")
+        }
+        val pkg = command.payloadString(KEY_PACKAGE_NAME)
+        val grant = command.payloadBoolean(KEY_GRANT, true)
+        return when (val result = admin.setRuntimePermission(pkg, perm, grant)) {
+            is OpResult.Ok -> ack(command, deviceId, AckStatus.SUCCESS)
+            is OpResult.Unsupported -> ack(command, deviceId, AckStatus.UNSUPPORTED, "NO_DEVICE_OWNER", result.reason)
+            is OpResult.Failed -> ack(command, deviceId, AckStatus.FAILED, "PERMISSION_FAILED", result.reason)
+        }
+    }
+
+    // ==================== 功能管理 ====================
+
+    /**
+     * 功能管理：整包应用设备功能开关（相机/截屏/恢复出厂/安全启动/USB/自动对时等）。
+     *
+     * 逐项映射成 DPM 用户限制 / 系统开关（见 [com.padguard.core.engine.admin.DeviceAdminBridge.applyFeaturePolicy]）。
+     * 即使部分项在当下权限模式/系统版本下不支持（UNSUPPORTED），其余项仍照常生效；
+     * 这里汇总成 PARTIAL 回执，让家长端看到"哪些功能没生效"而不至于误以为全成功。
+     */
+    private fun setFeaturePolicy(command: Command, deviceId: String): CommandAck {
+        if (command.payload.isEmpty()) {
+            return ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "payload 为空")
+        }
+        val features = command.payload.mapValues { (_, v) -> v.toBooleanStrictOrNull() ?: false }
+        val results = admin.applyFeaturePolicy(features)
+        val unsupported = results.filter { it.second is OpResult.Unsupported }
+        val failed = results.filter { it.second is OpResult.Failed }
+        return when {
+            results.isEmpty() -> ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "无可识别的功能开关")
+            failed.isNotEmpty() -> ack(command, deviceId, AckStatus.FAILED, "FEATURE_FAILED",
+                "功能应用失败：${failed.joinToString { it.first }}")
+            unsupported.isNotEmpty() -> ack(command, deviceId, AckStatus.SUCCESS, "PARTIAL",
+                "部分功能当前权限不支持：${unsupported.joinToString { it.first }}")
+            else -> ack(command, deviceId, AckStatus.SUCCESS)
+        }
+    }
+
     // ==================== 外设临时放行 ====================
 
     /**
@@ -588,6 +640,8 @@ class CommandExecutor @Inject constructor(
         const val KEY_REQUEST_ID = "requestId"
         const val KEY_BLOCKING = "blocking"
         const val KEY_PACKAGE_NAME = "packageName"
+        const val KEY_PERMISSION = "permission"
+        const val KEY_GRANT = "grant"
         const val KEY_APK_URL = "apkUrl"
         const val KEY_VERSION_CODE = "versionCode"
         const val KEY_SUSPENDED = "suspended"
@@ -613,6 +667,8 @@ sealed interface EngineEffect {
      * @param mediaUrl 素材地址（服务端文件下载链接），霸屏时在正中间展示
      */
     data class ShowMessage(
+        /** 服务端指令 msgId，作为本地落库去重键（[com.padguard.core.data.db.ParentMessageEntity.serverMsgId]） */
+        val msgId: String = "",
         val title: String,
         val body: String,
         val durationSec: Int,

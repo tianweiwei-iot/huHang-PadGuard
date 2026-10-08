@@ -3,6 +3,8 @@ package com.padguard.presentation.ui.profile
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -10,14 +12,22 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.ui.components.SoftCard
+import com.padguard.presentation.ui.auth.ServerConfigDialog
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 
 /**
  * 我的页（底部导航「我的」Tab）
@@ -26,19 +36,30 @@ import com.padguard.presentation.ui.components.SoftCard
  * 各条目的真实目标（如「我的孩子」→设备 Tab、「护眼设置」→管控策略）由调用方集中处理。
  */
 sealed interface ProfileAction {
+    /** 订阅与续费：放在第一位，因为"到期没续费"会直接导致所有管控失效 */
+    data object Subscription : ProfileAction
     data object Children : ProfileAction
     data object Members : ProfileAction
     data object EyeCare : ProfileAction
     data object Settings : ProfileAction
     data object About : ProfileAction
+    /** 服务器地址：在「我的」页即可修改，不必退出登录 */
+    data object ServerAddress : ProfileAction
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(
     onLogout: () -> Unit,
-    onAction: (ProfileAction) -> Unit
+    onAction: (ProfileAction) -> Unit,
+    /** 当前服务器地址，作为「服务器地址」条目的副标题展示 */
+    serverUrl: String = "",
+    /** 保存服务器地址（改完立即生效） */
+    onSaveServerUrl: (String) -> Unit = {}
 ) {
+    val context = LocalContext.current
+    var showLogoutConfirm by remember { mutableStateOf(false) }
+    var showServerConfig by remember { mutableStateOf(false) }
     Scaffold(
         containerColor = Color.Transparent,
         topBar = { TopAppBar(title = { Text("我的") }) }
@@ -47,6 +68,9 @@ fun ProfileScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                // 必须可滚动：功能项变多后（比如新增"应用管控"入口），
+                // 不可滚动会把底部内容整块裁掉，用户根本看不到「退出登录」。
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -77,23 +101,85 @@ fun ProfileScreen(
             }
 
             val items = listOf(
+                ProfileItem(
+                    "订阅与续费", Icons.Default.CardMembership, "查看套餐与有效期",
+                    ProfileAction.Subscription
+                ),
                 ProfileItem("我的孩子", Icons.Default.ChildCare, "管理被守护设备", ProfileAction.Children),
                 ProfileItem("家庭成员", Icons.Default.People, "多人共管", ProfileAction.Members),
                 ProfileItem("护眼设置", Icons.Default.RemoveRedEye, "蓝光 / 距离 / 姿势", ProfileAction.EyeCare),
                 ProfileItem("设置", Icons.Default.Settings, "通用设置", ProfileAction.Settings),
-                ProfileItem("关于", Icons.Default.Info, "版本 1.0.0", ProfileAction.About)
+                // 版本号取 BuildConfig，避免每次发版都漏改这里的硬编码字符串
+                ProfileItem(
+                    "关于", Icons.Default.Info,
+                    "版本 ${com.padguard.parent.BuildConfig.VERSION_NAME}",
+                    ProfileAction.About
+                ),
+                ProfileItem(
+                    "服务器地址", Icons.Default.Dns,
+                    if (serverUrl.isBlank()) "未设置" else serverUrl,
+                    ProfileAction.ServerAddress
+                )
             )
             items.forEach { item ->
-                ProfileListItem(item = item, onClick = { onAction(item.action) })
+                ProfileListItem(item = item, onClick = {
+                    // 服务器地址走本地弹窗（登录后也能改，不依赖 onAction 导航）
+                    if (item.action == ProfileAction.ServerAddress) showServerConfig = true
+                    else onAction(item.action)
+                })
             }
 
-            Spacer(modifier = Modifier.weight(1f))
-            OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth()) {
+            // 退出登录紧跟功能项，不再用 Spacer(weight(1f)) 把它压到屏幕最底部。
+            // 之前那样做：小屏机型上按钮被挤出可视区完全看不见，而父容器又不可滚动，
+            // 用户会以为"这个 App 根本没有退出功能"。
+            HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+            OutlinedButton(
+                onClick = { showLogoutConfirm = true },
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(Modifier.width(8.dp))
                 Text("退出登录")
             }
+            Text(
+                text = "退出后需重新登录才能查看被控设备",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
         }
+    }
+
+    if (showLogoutConfirm) {
+        // 二次确认：登出后要重新输密码，误点代价不对称。
+        // 同时说清后果，避免家长以为登出=解绑设备。
+        AlertDialog(
+            onDismissRequest = { showLogoutConfirm = false },
+            title = { Text("退出登录？") },
+            text = { Text("退出后需要重新输入账号密码才能查看被控设备。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLogoutConfirm = false
+                    onLogout()
+                }) { Text("退出") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogoutConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+
+    if (showServerConfig) {
+        ServerConfigDialog(
+            initial = serverUrl,
+            onDismiss = { showServerConfig = false },
+            onSave = { url ->
+                onSaveServerUrl(url)
+                Toast.makeText(context, "已保存，立即生效", Toast.LENGTH_SHORT).show()
+                showServerConfig = false
+            }
+        )
     }
 }
 

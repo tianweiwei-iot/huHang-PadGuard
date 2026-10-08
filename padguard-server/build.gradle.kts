@@ -34,6 +34,11 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-reflect")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    // 仅用于 testDirect 任务：提供 ConsoleLauncher 入口。
+    // 之所以需要它：本机项目路径含中文（E:\项目），Gradle 的 Test worker 走
+    // "类路径清单 jar" 时无法解析非 ASCII 路径，导致测试类 ClassNotFoundException。
+    // 详见下方 testDirect 的说明。
+    testRuntimeOnly("org.junit.platform:junit-platform-console-standalone:1.10.2")
 }
 
 kotlin {
@@ -46,4 +51,32 @@ kotlin {
 
 tasks.withType<org.springframework.boot.gradle.tasks.bundling.BootJar> {
     archiveFileName.set("app.jar")
+}
+
+// 不写这段的话 `./gradlew test` 会"成功"但一个用例都不跑（报告里 tests=0）——
+// Spring Boot 3.x 的 Gradle 插件不会自动启用 JUnit 5 平台，而 starter-test 带的正是 JUnit 5。
+// 这种静默通过比报错危险得多：你会以为有测试在把关，实际上什么都没验证。
+tasks.withType<Test> {
+    useJUnitPlatform()
+    testLogging {
+        events("passed", "failed", "skipped")
+        showStandardStreams = false
+    }
+}
+
+// 本机替代入口：`./gradlew testDirect`
+//
+// `./gradlew test` 在这台机器上跑不起来：项目路径含中文（E:\项目），
+// Gradle 的 Test worker 会把长类路径打包成"清单 jar"，其 Class-Path 条目无法正确
+// 解析非 ASCII 路径，于是每个测试类都 ClassNotFoundException（报告里 tests=0 或全失败，
+// 而类文件其实编译得好好的）。这是环境问题，不是测试代码的问题。
+//
+// 本任务绕开 worker，直接在 JVM 里跑 JUnit ConsoleLauncher，可正常执行。
+// 换到纯 ASCII 路径的环境下，`./gradlew test` 本身即可，无需本任务。
+tasks.register<JavaExec>("testDirect") {
+    group = "verification"
+    description = "Runs unit tests directly (workaround for non-ASCII project path breaking the Gradle test worker)."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("org.junit.platform.console.ConsoleLauncher")
+    args("--scan-classpath", "--details=tree", "--disable-banner")
 }

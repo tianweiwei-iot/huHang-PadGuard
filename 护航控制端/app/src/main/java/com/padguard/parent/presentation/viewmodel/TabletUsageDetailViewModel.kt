@@ -95,7 +95,8 @@ class TabletUsageDetailViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, error = null)
 
-            val limitDeferred = async { policyRepository.getGlobalDailyLimit(deviceId) }
+            // 限额参考线改用「时间管控」页设置（权威来源），与首页看板 / 孩子端锁机一致
+            val limitDeferred = async { policyRepository.getTabletUsageSettings(deviceId) }
 
             val todayDeferred = async {
                 if (period == ReportPeriod.DAILY) statisticsRepository.getTodayUsage(deviceId) else null
@@ -115,7 +116,7 @@ class TabletUsageDetailViewModel @Inject constructor(
             _uiState.value = _uiState.value.copy(
                 todayStats = todayResult?.getOrNull(),
                 report = reportResult?.getOrNull(),
-                dailyLimitMinutes = limitResult.getOrNull() ?: 120,
+                dailyLimitMinutes = limitResult.getOrNull()?.weekdayLimitMinutes ?: 60,
                 isLoading = false,
                 error = error
             )

@@ -71,11 +71,13 @@ class AlertService(
     fun list(userId: String, deviceId: String?, status: String?, page: Int, size: Int): List<AlertDto> {
         val pageable = PageRequest.of(page.coerceAtLeast(0), size.coerceAtLeast(1).coerceAtMost(100))
         val alerts = if (deviceId != null) {
+            // 过滤下沉到 SQL：原先"先按 user 分页、再在内存里 filter deviceId"，
+            // 结果是**分页后过滤**——本页里属于该设备的条目可能只剩两三条，
+            // 家长端看到"明明有告警却只显示几条"，且翻页还会漏数据。
             if (status != null) {
-                alertRepository.findByUserIdAndStatus(userId, status, pageable)
-                    .filter { it.deviceId == deviceId }
+                alertRepository.findByUserIdAndDeviceIdAndStatus(userId, deviceId, status, pageable)
             } else {
-                alertRepository.findByUserId(userId, pageable).filter { it.deviceId == deviceId }
+                alertRepository.findByUserIdAndDeviceId(userId, deviceId, pageable)
             }
         } else {
             if (status != null) alertRepository.findByUserIdAndStatus(userId, status, pageable)

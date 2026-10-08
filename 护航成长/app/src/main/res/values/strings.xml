@@ -14,4 +14,7 @@
     <string name="guard_notification_title">护航成长守护中</string>
     <!-- 参数 1：连接状态文案；参数 2：管控模式（FAMILY / CAMPUS 等） -->
     <string name="guard_notification_text">状态：%1$s · 模式：%2$s</string>
+
+    <!-- 操作闸门无障碍服务描述（设置 → 无障碍 列表项展示，必须说清用途） -->
+    <string name="guard_accessibility_description">护航成长「操作密码闸门」需要此服务：当孩子尝试进入系统设置、卸载应用或安装未知来源应用时，服务会弹出家长密码框要求输入密码，未输入正确密码无法继续。本服务仅读取前台应用包名用于判断是否需要拦截，不会读取任何界面内容或隐私数据。</string>
 </resources>

@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.collectLatest
 fun AppManageScreen(
     deviceId: String,
     onBack: () -> Unit,
+    onNavigateToDeviceDetail: () -> Unit = {},
     viewModel: AppManageViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -129,6 +130,19 @@ fun AppManageScreen(
             BatchAllowBar(
                 onGrantAll = { viewModel.setAllAllowed(true) },
                 onRevokeAll = { viewModel.setAllAllowed(false) }
+            )
+
+            AppListModeCard(
+                listMode = uiState.listMode,
+                requirePasswordOnLaunch = uiState.requirePasswordOnLaunch,
+                requirePasswordOnInstall = uiState.requirePasswordOnInstall,
+                requirePasswordOnUninstall = uiState.requirePasswordOnUninstall,
+                guardPasswordSet = uiState.guardPasswordSet,
+                onModeChange = viewModel::setListMode,
+                onRequirePasswordChange = viewModel::setRequirePasswordOnLaunch,
+                onRequireInstallChange = viewModel::setRequirePasswordOnInstall,
+                onRequireUninstallChange = viewModel::setRequirePasswordOnUninstall,
+                onNavigateToDeviceDetail = onNavigateToDeviceDetail
             )
 
             when {
@@ -372,6 +386,146 @@ private fun BatchActionBar(
  * 一键授权全部 / 一键取消全部。
  * 对应需求：开启管控后所有应用默认隐藏，家长可一键把全部应用开放给孩子，或一键全部收回。
  */
+/**
+ * 应用管控模式卡片。
+ *
+ * ## 为什么必须放在列表上方而不是设置页深处
+ * 下面每个应用的开关，其**判定口径**由这里的模式决定：
+ * 黑名单下"关闭 = 受管控"，白名单下"打开 = 可用、其余全拦"。
+ * 口径藏在深处的话，家长会看到"我明明打开了这个应用却打不开"，第一反应是"应用管控有 bug"。
+ *
+ * ## 必须如实说明的两点（写在界面上，不藏着）
+ * 1. 平板**没有设备所有者**时，隐藏/挂起这类系统能力不可用，
+ *    管控由孩子的无障碍服务 + 管理密码兜底拦截（拦安装/卸载确认页，可选拦启动）；
+ * 2. 因此「打开应用也要密码」这一项**只在没有设备所有者时生效**。
+ * 不写清楚，家长在 DO 设备上验证后会直接判定"功能是坏的"。
+ */
+@Composable
+private fun AppListModeCard(
+    listMode: String,
+    requirePasswordOnLaunch: Boolean,
+    requirePasswordOnInstall: Boolean,
+    requirePasswordOnUninstall: Boolean,
+    guardPasswordSet: Boolean,
+    onModeChange: (String) -> Unit,
+    onRequirePasswordChange: (Boolean) -> Unit,
+    onRequireInstallChange: (Boolean) -> Unit,
+    onRequireUninstallChange: (Boolean) -> Unit,
+    onNavigateToDeviceDetail: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("管控模式", style = MaterialTheme.typography.titleSmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = listMode == "BLACKLIST",
+                    onClick = { onModeChange("BLACKLIST") },
+                    label = { Text("黑名单") }
+                )
+                FilterChip(
+                    selected = listMode == "WHITELIST",
+                    onClick = { onModeChange("WHITELIST") },
+                    label = { Text("白名单") }
+                )
+            }
+            Text(
+                text = if (listMode == "WHITELIST") {
+                    "白名单：只有下面「打开」的应用能使用，其余一律拦截。适合给孩子专用平板。"
+                } else {
+                    "黑名单：只有下面「关闭」的应用会被管控，其余正常使用。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+
+            HorizontalDivider()
+
+            // —— 无 DO 降级下的三道密码闸门：仅设备未设为「设备所有者」时生效 ——
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("打开应用也要密码", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = "打开任意应用都需输入管理密码（不仅限于受管控应用）。" +
+                            "仅在平板未设为「设备所有者」时生效（有设备所有者时由系统直接管控）。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                // 未设「设备操作密码」时强制显示关闭态：默认 requirePasswordOnXxx=true 会让禁用开关
+                // 渲染成绿色"开"，家长易误以为已生效。禁用即未生效，如实显示关闭。
+                Switch(
+                    checked = guardPasswordSet && requirePasswordOnLaunch,
+                    onCheckedChange = onRequirePasswordChange,
+                    enabled = guardPasswordSet
+                )
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("安装应用需要密码", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = "孩子每次安装新应用都要在确认页输入管理密码。" +
+                            "默认开启；关闭后安装免密（安装/卸载的确认拦截同样仅在非设备所有者时生效）。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(
+                    checked = guardPasswordSet && requirePasswordOnInstall,
+                    onCheckedChange = onRequireInstallChange,
+                    enabled = guardPasswordSet
+                )
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("卸载应用需要密码", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = "孩子每次卸载应用都要在确认页输入管理密码。" +
+                            "默认开启；关闭后卸载免密。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(
+                    checked = guardPasswordSet && requirePasswordOnUninstall,
+                    onCheckedChange = onRequireUninstallChange,
+                    enabled = guardPasswordSet
+                )
+            }
+
+            // 双向引导：未设「设备操作密码」时，三道闸门开关无意义，置灰并给出明确去向。
+            if (!guardPasswordSet) {
+                OutlinedButton(onClick = onNavigateToDeviceDetail) {
+                    Icon(Icons.Default.Lock, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("先去设备详情设置「设备操作密码」")
+                }
+                Text(
+                    text = "以上密码开关均依赖「设备操作密码」。当前未设置，三道开关显示为「关闭（未生效）」，" +
+                        "并非已开启。请先到设备详情页设置并同步到孩子端，返回本页后开关会按你的配置亮起。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = PadGuardColors.WarningRed
+                )
+            }
+
+            Text(
+                text = "提示：以上密码开关仅在没有「设备所有者」的存量平板上由无障碍服务兜底生效，" +
+                    "且需先在设备详情页设置「设备操作密码」。若管控无效，请确认孩子端已开启本应用的「无障碍服务」。",
+                style = MaterialTheme.typography.bodySmall,
+                color = PadGuardColors.TextSecondary
+            )
+        }
+    }
+}
+
 @Composable
 private fun BatchAllowBar(
     onGrantAll: () -> Unit,

@@ -43,8 +43,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import com.padguard.child.guard.GuardGate
+import com.padguard.child.guard.GuardPasswordManager
 import com.padguard.child.ui.theme.PadGuardTheme
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import java.util.concurrent.Executors
 
 /**
@@ -64,6 +67,9 @@ import java.util.concurrent.Executors
  */
 @AndroidEntryPoint
 class QrScanActivity : ComponentActivity() {
+
+    @Inject
+    lateinit var guardPassword: GuardPasswordManager
 
     /** 已通过 `rememberLauncher` 之外的方式在 Activity 层管理，便于权限回调直接驱动重组 */
     private var cameraGranted by mutableStateOf(false)
@@ -110,6 +116,7 @@ class QrScanActivity : ComponentActivity() {
     }
 
     private fun openAppSettings() {
+        if (!GuardGate.ensureUnlocked(this, guardPassword)) return
         runCatching {
             startActivity(
                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {

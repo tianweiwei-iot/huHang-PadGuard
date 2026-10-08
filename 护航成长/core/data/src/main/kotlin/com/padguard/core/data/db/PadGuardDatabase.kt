@@ -22,10 +22,12 @@ import androidx.room.RoomDatabase
         DailyUsageEntity::class,
         RiskEventEntity::class,
         UnlockRequestEntity::class,
-        AgreementEntity::class
+        AgreementEntity::class,
+        ParentMessageEntity::class
     ],
     // v4：app_usage 增加 firstUsedAt / lastUsedAt（家长端要展示开始/结束时间）
-    version = 4,
+    // v5：新增 parent_message 表（家长发布信息的本地持久化）
+    version = 5,
     exportSchema = true
 )
 abstract class PadGuardDatabase : RoomDatabase() {
@@ -38,6 +40,7 @@ abstract class PadGuardDatabase : RoomDatabase() {
     abstract fun riskEventDao(): RiskEventDao
     abstract fun unlockRequestDao(): UnlockRequestDao
     abstract fun agreementDao(): AgreementDao
+    abstract fun parentMessageDao(): ParentMessageDao
 
     companion object {
         const val NAME = "padguard.db"

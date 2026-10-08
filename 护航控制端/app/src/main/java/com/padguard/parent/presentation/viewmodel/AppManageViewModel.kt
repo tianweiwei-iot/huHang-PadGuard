@@ -1,16 +1,20 @@
 package com.padguard.presentation.viewmodel
 
+import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.domain.model.DistributableApp
 import com.padguard.domain.model.InstalledApp
+import com.padguard.domain.repository.DeviceRepository
 import com.padguard.domain.repository.PolicyRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import javax.inject.Inject
 
 /**
@@ -27,13 +31,38 @@ data class AppManageUiState(
     val distributable: List<DistributableApp> = emptyList(),
     /** 正在上传并安装本地 APK：界面需要这段时间给出明确反馈，否则家长会以为没点上 */
     val installing: Boolean = false,
+    /**
+     * 应用名单模式：BLACKLIST（只管控关掉的）/ WHITELIST（只放行打开的）。
+     * 决定下方每个应用开关的判定口径，缺省 BLACKLIST 与服务端一致。
+     */
+    val listMode: String = "BLACKLIST",
+    /**
+     * 无 Device Owner 时，打开受管控应用是否要求输入管理密码。
+     * 仅在设备拿不到 DO 时由无障碍服务兜底拦截，有 DO 时不生效。
+     */
+    val requirePasswordOnLaunch: Boolean = false,
+    /**
+     * 无 DO 降级：安装确认页是否要求输入管理密码（默认 true = 必须）。
+     * 仅设备没有 DO、且已设置「设备操作密码」时由无障碍服务兜底拦截。
+     */
+    val requirePasswordOnInstall: Boolean = true,
+    /**
+     * 无 DO 降级：卸载确认页是否要求输入管理密码（默认 true = 必须）。
+     */
+    val requirePasswordOnUninstall: Boolean = true,
+    /**
+     * 设备操作密码是否已设置（服务端派生下发）。
+     * 未设时「打开应用也要密码」开关置灰，因为该开关依赖操作密码才生效。
+     */
+    val guardPasswordSet: Boolean = false,
     val toast: String? = null,
     val error: String? = null
 ) {
     /** 按"是否显示系统应用 + 搜索关键字"过滤后的列表 */
     val visibleApps: List<InstalledApp>
         get() = apps
-            .filter { showSystemApps || !it.isSystem }
+            // 已卸载的应用只剩历史台账，不应再出现在可管控列表（避免"看到未安装应用"的幽灵项）
+            .filter { (showSystemApps || !it.isSystem) && it.installed }
             .let { list ->
                 val q = query.trim()
                 if (q.isEmpty()) list else list.filter {
@@ -46,6 +75,7 @@ data class AppManageUiState(
 @HiltViewModel
 class AppManageViewModel @Inject constructor(
     private val policyRepository: PolicyRepository,
+    private val deviceRepository: DeviceRepository,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -54,12 +84,50 @@ class AppManageViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(AppManageUiState())
     val uiState: StateFlow<AppManageUiState> = _uiState.asStateFlow()
 
-    init { load() }
+    init {
+        load()
+        // 轻量自动刷新：孩子端装卸后会在数秒内把台账同步给服务端，
+        // 这里让已打开的管控界面也跟着刷新，避免停留在"看到未安装应用"的陈旧视图。
+        // 仅在非加载 / 非批量选择 / 非安装进行中时刷新，不干扰用户操作与乐观更新。
+        viewModelScope.launch {
+            while (isActive) {
+                delay(15_000L)
+                refreshInventory()
+            }
+        }
+    }
+
+    /**
+     * 静默刷新应用台账（不触发 loading，不打断用户）。
+     * 失败仅记日志，下次再试；绝不覆盖 [AppManageUiState.toast] / [AppManageUiState.error] / 选择态。
+     */
+    private suspend fun refreshInventory() {
+        val cur = _uiState.value
+        if (cur.isLoading || cur.selectionMode || cur.installing) return
+        policyRepository.getAppInventory(deviceId)
+            .onSuccess { list -> _uiState.value = _uiState.value.copy(apps = list) }
+            .onFailure { Log.w("AppManageVM", "refreshInventory failed: ${it.message}") }
+    }
 
     fun load() {
         if (deviceId.isBlank()) return
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+            // 管控模式与列表分开加载：模式读失败不该让整个列表打不开
+            policyRepository.getAppListPolicy(deviceId).onSuccess { p ->
+                _uiState.value = _uiState.value.copy(
+                    listMode = p.mode,
+                    requirePasswordOnLaunch = p.requirePasswordOnLaunch,
+                    requirePasswordOnInstall = p.requirePasswordOnInstall,
+                    requirePasswordOnUninstall = p.requirePasswordOnUninstall
+                )
+            }
+            // 设备操作密码是否已设：应用管理页据此置灰"打开应用也要密码"开关。
+            // 从设备详情派生（服务端 guardPasswordSet），与设备详情页共用同一事实来源，
+            // 无论从设备详情、首页还是 Tab 进入都能拿到真实状态。
+            deviceRepository.getDeviceDetail(deviceId)
+                .onSuccess { dev -> _uiState.value = _uiState.value.copy(guardPasswordSet = dev.guardPasswordSet) }
+                .onFailure { /* 拿不到密码状态不阻塞应用列表，开关按"未设"处理 */ }
             policyRepository.getAppInventory(deviceId)
                 .onSuccess { list ->
                     _uiState.value = _uiState.value.copy(apps = list, isLoading = false)
@@ -69,6 +137,125 @@ class AppManageViewModel @Inject constructor(
                         isLoading = false,
                         error = "读取应用列表失败：${e.message}"
                     )
+                }
+        }
+    }
+
+    // ==================== 管控模式（白名单 / 黑名单）====================
+
+    /**
+     * 切换名单模式。
+     *
+     * 切到白名单前必须提醒一次：白名单下**没打开的应用一律打不开**，
+     * 家长如果只想"挡住游戏"，切错了会变成"除了勾选的都打不开"。
+     * 这里在 UI 层做二次确认，ViewModel 只负责下发。
+     */
+    fun setListMode(mode: String) {
+        if (mode == _uiState.value.listMode) return
+        val normalized = if (mode == "WHITELIST") "WHITELIST" else "BLACKLIST"
+        viewModelScope.launch {
+            policyRepository.setAppListPolicy(
+                deviceId,
+                normalized,
+                _uiState.value.requirePasswordOnLaunch,
+                _uiState.value.requirePasswordOnInstall,
+                _uiState.value.requirePasswordOnUninstall
+            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        listMode = normalized,
+                        toast = if (normalized == "WHITELIST") {
+                            "已切换为白名单：只有打开的应用可以使用"
+                        } else {
+                            "已切换为黑名单：只有关闭的应用会被管控"
+                        }
+                    )
+                }
+                .onFailure { e ->
+                    _uiState.value = _uiState.value.copy(toast = "切换失败：${e.message}")
+                }
+        }
+    }
+
+    /**
+     * 「打开应用也要密码」开关。
+     *
+     * 只在设备**没有** Device Owner 时起作用：有 DO 时管控由系统隐藏/挂起完成，
+     * 根本走不到"打开"这一步。UI 上要如实标注这一点，
+     * 否则家长会以为"开了就一定生效"，在 DO 设备上验证后得出"功能是坏的"结论。
+     */
+    fun setRequirePasswordOnLaunch(enabled: Boolean) {
+        viewModelScope.launch {
+            policyRepository.setAppListPolicy(
+                deviceId,
+                _uiState.value.listMode,
+                enabled,
+                _uiState.value.requirePasswordOnInstall,
+                _uiState.value.requirePasswordOnUninstall
+            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        requirePasswordOnLaunch = enabled,
+                        toast = if (enabled) "打开任意应用都将要求输入管理密码" else "已关闭启动密码校验"
+                    )
+                }
+                .onFailure { e ->
+                    _uiState.value = _uiState.value.copy(toast = "设置失败：${e.message}")
+                }
+        }
+    }
+
+    /**
+     * 「安装应用需要密码」开关。
+     *
+     * 无 DO 降级：孩子每次安装新应用都要在确认页输入管理密码。
+     * 默认开启（核心安全能力）；家长若想允许免密安装可关闭。
+     * 同样依赖「设备操作密码」已设置，否则无障碍软拦截不生效。
+     */
+    fun setRequirePasswordOnInstall(enabled: Boolean) {
+        viewModelScope.launch {
+            policyRepository.setAppListPolicy(
+                deviceId,
+                _uiState.value.listMode,
+                _uiState.value.requirePasswordOnLaunch,
+                enabled,
+                _uiState.value.requirePasswordOnUninstall
+            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        requirePasswordOnInstall = enabled,
+                        toast = if (enabled) "安装应用将要求输入管理密码" else "已关闭安装密码校验"
+                    )
+                }
+                .onFailure { e ->
+                    _uiState.value = _uiState.value.copy(toast = "设置失败：${e.message}")
+                }
+        }
+    }
+
+    /**
+     * 「卸载应用需要密码」开关。
+     *
+     * 无 DO 降级：孩子每次卸载应用都要在确认页输入管理密码。
+     * 默认开启；家长若想允许免密卸载可关闭。
+     */
+    fun setRequirePasswordOnUninstall(enabled: Boolean) {
+        viewModelScope.launch {
+            policyRepository.setAppListPolicy(
+                deviceId,
+                _uiState.value.listMode,
+                _uiState.value.requirePasswordOnLaunch,
+                _uiState.value.requirePasswordOnInstall,
+                enabled
+            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        requirePasswordOnUninstall = enabled,
+                        toast = if (enabled) "卸载应用将要求输入管理密码" else "已关闭卸载密码校验"
+                    )
+                }
+                .onFailure { e ->
+                    _uiState.value = _uiState.value.copy(toast = "设置失败：${e.message}")
                 }
         }
     }
@@ -139,6 +326,14 @@ class AppManageViewModel @Inject constructor(
      * 而卸载不可逆，一旦孩子数据丢了就没法挽回。
      */
     fun setAllowed(app: InstalledApp, allowed: Boolean) {
+        // 已卸载的应用只剩历史台账，不存在"隐藏 / 显示"的意义；
+        // 直接提示而非打服务端接口，否则会收到"设备上没有这个应用"的报错，表现为"无法授权"。
+        if (!app.installed) {
+            _uiState.value = _uiState.value.copy(
+                toast = "「${app.appName}」已不在设备上，无需设置使用权限"
+            )
+            return
+        }
         viewModelScope.launch {
             policyRepository.setAppHidden(deviceId, app.packageName, hidden = !allowed)
                 .onSuccess {
@@ -173,24 +368,44 @@ class AppManageViewModel @Inject constructor(
     }
 
     /**
-     * 一键授权全部 / 一键取消全部。
+     * 一键授权全部 / 一键取消全部（使用权限：显示 / 隐藏）。
      *
-     * 授权（allowed=true）= 全部显示、可用；取消（allowed=false）= 全部隐藏、不可用。
-     * 用 `all=true` 交给服务端一次性下发，避免逐条循环打接口。
+     * 「系统」勾选框（[AppManageUiState.showSystemApps]）决定批量操作的作用范围：
+     * - 勾选系统（true）：作用于全部已安装应用，含系统应用。以 `all=true` 交给服务端一次性下发，避免逐条循环打接口。
+     * - 不勾选系统（false）：仅作用于非系统应用，系统应用保留原有授权状态。
+     *   此时改用显式包名列表 + `all=false`，由服务端只下发给非系统应用。
+     *
      * 本地先乐观更新 `hidden`，与服务端返回数量无关，保证界面即时反馈。
+     * 乐观更新只触及「已安装」应用，与服务端 `all=true` 仅遍历已安装台账的行为一致
+     * （已卸载的应用只有历史记录，无需改动使用权限）。
      */
     fun setAllAllowed(allowed: Boolean) {
+        val includeSystem = _uiState.value.showSystemApps
+        // 显式构造「作用范围内」的完整包名列表，并以 all=false 下发：
+        // 不依赖服务端 all=true 的隐式语义，确保「一次点击」即覆盖范围内全部应用，
+        // 避免「只关了系统应用、要点第二次才全关」的异常。
+        // 范围由「系统」勾选框决定：勾选=全部（含系统），不勾选=仅非系统（系统保留）。
+        val targetPackages = _uiState.value.apps
+            .filter { it.installed && (includeSystem || !it.isSystem) }
+            .map { it.packageName }
+        val scopeLabel = if (includeSystem) "全部" else "非系统"
         viewModelScope.launch {
-            policyRepository.setAppsHiddenBatch(deviceId, emptyList(), hidden = !allowed, all = true)
-                .onSuccess { sent ->
-                    _uiState.value = _uiState.value.copy(
-                        apps = _uiState.value.apps.map { it.copy(hidden = !allowed) },
-                        toast = "已${if (allowed) "授权全部" else "取消全部授权"} ${sent} 个应用"
-                    )
-                }
-                .onFailure { e ->
-                    _uiState.value = _uiState.value.copy(toast = "批量操作失败：${e.message}")
-                }
+            policyRepository.setAppsHiddenBatch(
+                deviceId = deviceId,
+                packages = targetPackages,
+                hidden = !allowed,
+                all = false
+            ).onSuccess { sent ->
+                _uiState.value = _uiState.value.copy(
+                    apps = _uiState.value.apps.map { app ->
+                        val inScope = app.installed && (includeSystem || !app.isSystem)
+                        if (inScope) app.copy(hidden = !allowed) else app
+                    },
+                    toast = "已${if (allowed) "授权" else "取消授权"}$scopeLabel $sent 个应用"
+                )
+            }.onFailure { e ->
+                _uiState.value = _uiState.value.copy(toast = "批量操作失败：${e.message}")
+            }
         }
     }
 

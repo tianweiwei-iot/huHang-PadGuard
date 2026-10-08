@@ -20,8 +20,17 @@ object ParentErr {
     const val DEVICE_NOT_FOUND = 2001
     const val DEVICE_OFFLINE = 2002
     const val DEVICE_NOT_OWNED = 2003
+    /** 同一设备的并发观看数已达上限（每路观看都是一份完整的上行+下行带宽） */
+    const val LIVE_VIEWERS_FULL = 2004
     const val POLICY_NOT_FOUND = 3001
     const val POLICY_CONFLICT = 3002
+    // 订阅：4xxx
+    /** 未订阅 / 订阅已过期，功能不可用 */
+    const val SUBSCRIPTION_REQUIRED = 4001
+    /** 订阅有效但设备数已达上限，不能再绑定 */
+    const val DEVICE_LIMIT_EXCEEDED = 4002
+    const val ORDER_NOT_FOUND = 4003
+    const val ORDER_STATE_INVALID = 4004
     const val SERVER_ERROR = 5001
 }
 
@@ -33,6 +42,10 @@ object ChildErr {
     const val DEVICE_UNBOUND = 40301
     const val BIND_CODE_EXPIRED = 40302
     const val DEVICE_ALREADY_BOUND = 40303
+    /** 家长账号未订阅或已过期 —— 孩子端必须给出这条明确提示，而不是笼统的"绑定失败" */
+    const val SUBSCRIPTION_REQUIRED = 40304
+    /** 可绑定设备数已达套餐上限 */
+    const val DEVICE_LIMIT_EXCEEDED = 40305
     const val TIME_OUT_OF_SYNC = 40901
     const val SERVER_ERROR = 50000
 }
@@ -106,6 +119,11 @@ class GlobalExceptionHandler {
         //   "已绑定"的假象里（例如服务端换库后设备记录已不存在）。
         val status = when {
             e.audience == Audience.PARENT && e.code == ParentErr.UNAUTHORIZED -> HttpStatus.UNAUTHORIZED
+            // 越权（含后台 RBAC 闸门拒绝、家长端"资源不属于当前用户"）必须落到 403：
+            // HTTP 状态码是网关 / 前端拦截器判断成败的首要依据，回 200 会让越权操作被误判为"成功"，
+            // 管理端 http() 在 !res.ok 时直接抛错、家长端 ApiDataSource 在 !isSuccessful 时走错误分支——
+            // 两者都不会静默放行，但只有正确的 403 才能让"被拒绝"这一语义在链路各层一致。
+            e.audience == Audience.PARENT && e.code == ParentErr.FORBIDDEN -> HttpStatus.FORBIDDEN
             e.audience == Audience.CHILD && e.code == ChildErr.TOKEN_INVALID -> HttpStatus.UNAUTHORIZED
             e.audience == Audience.CHILD && e.code == ChildErr.DEVICE_UNBOUND -> HttpStatus.FORBIDDEN
             else -> HttpStatus.OK
@@ -188,5 +206,24 @@ object HashUtil {
         val md = java.security.MessageDigest.getInstance("SHA-256")
         val bytes = md.digest(input.toByteArray(Charsets.UTF_8))
         return bytes.joinToString("") { "%02x".format(it) }
+    }
+}
+
+/**
+ * 客户端真实 IP 的取法（全局唯一定义）。
+ *
+ * 家庭部署常见前置 Nginx / 端口转发，只认 `RemoteAddr` 会一律拿到 127.0.0.1——
+ * 局域网发现会因此永远发现不了任何东西，且这种错很难从现象反推。
+ * 统一在这里处理转发头，任何需要"对方网络位置"的地方都调它，避免每个调用点各写各的、
+ * 出现一处改了另一处没改的漂移。
+ */
+object ClientIps {
+    fun of(request: jakarta.servlet.http.HttpServletRequest): String? {
+        val xff = request.getHeader("X-Forwarded-For")
+            ?.split(',')
+            ?.firstOrNull()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+        return (xff ?: request.remoteAddr)?.trim()?.takeIf { it.isNotBlank() }
     }
 }

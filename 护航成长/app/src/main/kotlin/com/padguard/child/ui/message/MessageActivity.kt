@@ -2,25 +2,19 @@ package com.padguard.child.ui.message
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.media.MediaPlayer
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.MediaController
-import android.widget.VideoView
 import androidx.core.app.NotificationCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -55,8 +49,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -458,19 +450,8 @@ class MessageActivity : ComponentActivity() {
 private const val SOURCE_LABEL = "来自家长的信息"
 
 /**
- * 判断标题是否只是"来源标识"而非真正的消息标题。
- *
- * 家长端下发的 SHOW_MESSAGE 默认带 `title="来自家长的消息"`，与顶部 [SOURCE_LABEL] 语义重复。
- * 需求要求"消息框内不要出现来源提示，只在屏幕顶端显示"——所以这类标题不应在消息框里再渲染一次，
- * 避免孩子看到两处"来自家长"的提示。
+ * 判断标题是否只是"来源标识"而非真正的消息标题，见同包 [MediaHelpers.isSourceLabel]。
  */
-private fun isSourceLabel(title: String): Boolean {
-    val t = title.trim()
-    return t == SOURCE_LABEL ||
-        t == "来自家长的消息" ||
-        t.equals("来自家长的信息", ignoreCase = true) ||
-        t.equals("来自家长的消息", ignoreCase = true)
-}
 
 @Composable
 private fun MessageContent(
@@ -532,10 +513,11 @@ private fun MessageContent(
                             RemoteImage(mediaUrl, Modifier.fillMaxWidth())
 
                         mediaUrl.isNotBlank() && contentType == "VIDEO" ->
-                            RemoteVideo(
+                            ResizableVideo(
                                 url = mediaUrl,
-                                modifier = Modifier.fillMaxWidth().height(240.dp),
-                                // 霸屏期间不给播放控制条：那等于给了孩子一个可点的出口
+                                modifier = Modifier.fillMaxWidth(),
+                                // 发布视频默认全屏播放；非霸屏时给控制条，霸屏期间不给（避免可点出口）
+                                defaultFullscreen = true,
                                 showControls = !blocking,
                                 onDuration = onMediaDuration
                             )
@@ -680,164 +662,8 @@ private fun NoticeBadge(text: String, modifier: Modifier = Modifier) {
     }
 }
 
-@Composable
-private fun RemoteImage(url: String, modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    var bitmap by remember(url) { mutableStateOf<android.graphics.Bitmap?>(null) }
-    var failed by remember(url) { mutableStateOf(false) }
-
-    DisposableEffect(url) {
-        val job = CoroutineScope(Dispatchers.IO).launch {
-            val file = runCatching { downloadToCache(context, url) }.getOrNull()
-            val bmp = file?.let { runCatching { BitmapFactory.decodeFile(it.absolutePath) }.getOrNull() }
-            withContext(Dispatchers.Main) {
-                if (bmp != null) bitmap = bmp else failed = true
-            }
-        }
-        onDispose { job.cancel() }
-    }
-
-    when {
-        bitmap != null -> Image(
-            bitmap = bitmap!!.asImageBitmap(),
-            contentDescription = "信息发布图片",
-            modifier = modifier,
-            contentScale = ContentScale.Fit
-        )
-        failed -> Text("图片加载失败", color = MaterialTheme.colorScheme.error)
-        else -> Box(modifier = modifier.height(200.dp), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(modifier = Modifier.size(32.dp))
-        }
-    }
-}
-
-@Composable
-private fun RemoteVideo(url: String, modifier: Modifier = Modifier, showControls: Boolean = true, onDuration: (Int) -> Unit = {}) {
-    val context = LocalContext.current
-    var localPath by remember(url) { mutableStateOf<String?>(null) }
-
-    DisposableEffect(url) {
-        val job = CoroutineScope(Dispatchers.IO).launch {
-            val file = runCatching { downloadToCache(context, url) }.getOrNull()
-            withContext(Dispatchers.Main) { localPath = file?.absolutePath }
-        }
-        onDispose { job.cancel() }
-    }
-
-    if (localPath == null) {
-        Box(modifier = modifier, contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(modifier = Modifier.size(32.dp))
-        }
-        return
-    }
-
-    AndroidView(
-        factory = { ctx ->
-            VideoView(ctx).apply {
-                setVideoURI(Uri.parse(localPath))
-                // 霸屏时不挂 MediaController：控制条本身就是可点击的交互入口
-                if (showControls) setMediaController(MediaController(ctx))
-                setOnPreparedListener {
-                    it.isLooping = true
-                    // 视频实际时长回填，驱动霸屏时长跟随音视频
-                    val dur = runCatching { it.duration / 1000 }.getOrDefault(0)
-                    if (dur > 0) onDuration(dur)
-                    start()
-                }
-                setOnErrorListener { _, _, _ -> true }
-            }
-        },
-        modifier = modifier
-    )
-}
-
-@Composable
-private fun RemoteAudio(url: String, name: String, autoPlay: Boolean, onDuration: (Int) -> Unit = {}) {
-    val context = LocalContext.current
-    var state by remember(url) { mutableStateOf(if (autoPlay) "播放中…" else "音频素材") }
-
-    DisposableEffect(url) {
-        val player = MediaPlayer()
-        val job = CoroutineScope(Dispatchers.IO).launch {
-            val file = runCatching { downloadToCache(context, url) }.getOrNull()
-            withContext(Dispatchers.Main) {
-                if (file == null) {
-                    state = "音频加载失败"
-                } else {
-                    runCatching {
-                        player.setDataSource(file.absolutePath)
-                        player.prepare()
-                        if (autoPlay) player.start()
-                        else state = "音频素材：${name.ifBlank { "未命名" }}"
-                        // 语音实际时长回填，驱动霸屏时长跟随音视频
-                        val dur = runCatching { player.duration / 1000 }.getOrDefault(0)
-                        if (dur > 0) onDuration(dur)
-                    }.onFailure { state = "音频播放失败" }
-                }
-            }
-        }
-        onDispose {
-            job.cancel()
-            runCatching { if (player.isPlaying) player.stop() }
-            runCatching { player.release() }
-        }
-    }
-
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = "♪",
-            fontSize = 48.sp,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = if (state == "播放中…") "正在播放：${name.ifBlank { "语音通知" }}" else state,
-            style = MaterialTheme.typography.bodyMedium,
-            textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onBackground
-        )
-    }
-}
-
 /**
- * 把远端素材下载到缓存目录；返回本地文件。
- *
- * 服务端 [com.padguard.server.service.FileStorageService] 默认返回**相对路径**
- * （如 `/v1/files/{id}`，因为 `padguard.base-url` 在单机部署下留空）。
- * 直接 `URL("/v1/files/...")` 会抛 `MalformedURLException`、素材静默加载失败，
- * 表现就是"图片/视频/音频发出去孩子端看不到"。这里把相对路径按当前服务器
- * `baseUrl` 的 origin 拼成绝对地址再下载。
+ * 图片 / 语音素材渲染见同包 [MediaHelpers]（[RemoteImage] / [RemoteAudio]），
+ * 与下载、相对路径解析一并复用，避免弹窗与「消息」详情页各写一套。
  */
-private fun downloadToCache(context: Context, rawUrl: String): File {
-    val url = resolveAbsoluteUrl(rawUrl, "")
-    val out = File(context.cacheDir, "msg_" + url.hashCode().toString().replace("-", "n"))
-    if (out.exists() && out.length() > 0) return out
-    val conn = URL(url).openConnection() as HttpURLConnection
-    try {
-        conn.connectTimeout = 10_000
-        conn.readTimeout = 30_000
-        conn.instanceFollowRedirects = true
-        val code = conn.responseCode
-        if (code !in 200..299) {
-            // 把服务端错误（401/403/404/500）显式抛出，交由上层置为"加载失败"，而不是写入一个空文件
-            Logger.w(TAG) { "素材下载失败 HTTP $code: $url" }
-            throw java.io.IOException("HTTP $code")
-        }
-        conn.inputStream.use { input ->
-            out.outputStream().use { output -> input.copyTo(output) }
-        }
-    } finally {
-        conn.disconnect()
-    }
-    return out
-}
 
-/** 相对路径（以 `/` 开头）按 baseUrl 的 origin 拼成绝对地址；已是绝对地址则原样返回。 */
-private fun resolveAbsoluteUrl(raw: String, baseUrl: String): String {
-    if (!raw.startsWith("/")) return raw
-    val schemeSlash = baseUrl.indexOf("://")
-    val start = if (schemeSlash >= 0) schemeSlash + 3 else 0
-    val slash = baseUrl.indexOf('/', start)
-    val origin = if (slash >= 0) baseUrl.substring(0, slash) else baseUrl
-    return origin + raw
-}

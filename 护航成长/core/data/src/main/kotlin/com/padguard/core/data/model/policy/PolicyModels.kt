@@ -27,6 +27,13 @@ data class PolicyPackage(
     @SerialName("web") val web: WebPolicy = WebPolicy(),
     @SerialName("schedule") val schedule: SchedulePolicy = SchedulePolicy(),
     @SerialName("eyeCare") val eyeCare: EyeCarePolicy = EyeCarePolicy(),
+    /**
+     * 护眼滤镜（蓝光过滤）。
+     *
+     * 与 [eyeCare] 是两件事：**eyeCare 管"用多久要休息"（时长），这里管"屏幕暖不暖"（强度）**。
+     * 家长端「护眼」开关对应后者，孩子端以悬浮暖色滤镜实现，不依赖 Device Owner。
+     */
+    @SerialName("eyeProtection") val eyeProtection: EyeProtectionPolicy = EyeProtectionPolicy(),
     @SerialName("kiosk") val kiosk: KioskPolicy = KioskPolicy(),
     @SerialName("monitoring") val monitoring: MonitoringPolicy = MonitoringPolicy(),
     @SerialName("security") val security: SecurityPolicy = SecurityPolicy(),
@@ -37,7 +44,21 @@ data class PolicyPackage(
      * 把分龄基线派生到 [appLimit] / [eyeCare] / [schedule] 上，并承担夜间宵禁判定。
      * 关闭时这些对象回归家长自行配置的值。
      */
-    @SerialName("minorMode") val minorMode: MinorModePolicy = MinorModePolicy()
+    @SerialName("minorMode") val minorMode: MinorModePolicy = MinorModePolicy(),
+    /**
+     * 操作密码闸门配置（C 端软拦截方案）。
+     *
+     * 家长在家长端设置操作密码后，服务端把 `SHA-256(明文)` 的 Base64 哈希随策略包下发，
+     * 孩子端 [com.padguard.child.guard.GuardPasswordManager] 只存哈希、明文永不出网。
+     * 受保护界面（系统设置 / 卸载 / 未知来源安装）的拦截由
+     * [com.padguard.child.guard.OperationGuardAccessibilityService] 实施。
+     *
+     * 约定：
+     * - `passwordHash` 非空 → 启用密码并落库该哈希；
+     * - `clear` 为真 → 清除密码（设备解绑 / 家长主动关闭）；
+     * - 两者皆空/假 → 不改动当前状态（避免策略合并时误清空）。
+     */
+    @SerialName("guard") val guard: GuardPolicy = GuardPolicy()
 ) {
 
     /**
@@ -63,10 +84,12 @@ data class PolicyPackage(
             web = incoming.web,
             schedule = incoming.schedule,
             eyeCare = incoming.eyeCare,
+            eyeProtection = incoming.eyeProtection,
             kiosk = incoming.kiosk,
             monitoring = incoming.monitoring,
             security = incoming.security,
-            minorMode = incoming.minorMode
+            minorMode = incoming.minorMode,
+            guard = incoming.guard
         )
     }
 
@@ -180,14 +203,42 @@ data class AppPolicy(
     @SerialName("blacklistAction") val blacklistAction: BlacklistAction = BlacklistAction.BLOCK_DIALOG,
     /** 系统应用的精细化管控：包名 -> 处置方式（ALLOW / BLOCK） */
     @SerialName("systemAppRules") val systemAppRules: Map<String, String> = emptyMap(),
-    @SerialName("installPolicy") val installPolicy: InstallPolicy = InstallPolicy()
+    @SerialName("installPolicy") val installPolicy: InstallPolicy = InstallPolicy(),
+    /**
+     * 非 DO 降级模式下，打开任意应用是否要求输入管理密码（全量启动闸门，不仅限于受管控应用）。
+     *
+     * ## 为什么单独一个开关
+     * 有 Device Owner 时管控由系统完成（隐藏/挂起），根本碰不到"打开"这一步；
+     * 只有在**没有 DO** 的存量平板上，本产品才退化为"无障碍服务 + 家长密码"来兜底。
+     * 而"拦安装/卸载"与"拦启动"的代价完全不同：
+     * - 拦安装/卸载：只在孩子主动改动系统时触发，拦截面小、几乎不打扰；
+     * - 拦启动：白名单模式下**每开一个不在名单里的应用都要输密码**，
+     *   对是"管控孩子平板"还是"只挡游戏"两种需求差别巨大。
+     *
+     * 因此默认关闭（只拦安装/卸载），由家长按需开启 —— 不能替家长决定使用强度。
+     */
+    @SerialName("requirePasswordOnLaunch") val requirePasswordOnLaunch: Boolean = false
 )
 
 @Serializable
 data class InstallPolicy(
     @SerialName("allowUnknownSource") val allowUnknownSource: Boolean = false,
     @SerialName("allowUserInstall") val allowUserInstall: Boolean = true,
-    @SerialName("allowUserUninstall") val allowUserUninstall: Boolean = true
+    @SerialName("allowUserUninstall") val allowUserUninstall: Boolean = true,
+    /**
+     * 无 DO 降级模式下，安装确认页是否需要管理密码（默认 true = 必须）。
+     *
+     * ## 与 [allowUserInstall] 的关系
+     * 两个字段语义**完全不同**、服务于两条独立路径，切勿混用：
+     * - [allowUserInstall]：设备所有者(DO/PO) 路径，经系统 `DISALLOW_INSTALL_APPS` 硬性限制；
+     * - 本字段：无 DO 存量平板，经「无障碍服务 + 自家密码框」软拦截安装确认页。
+     *
+     * 二者默认都允许管控生效（[allowUserInstall]=true 表示「不禁用安装」，
+     * requirePasswordOnInstall=true 表示「确认页要密码」），但绝不能互相替代。
+     * 服务端已把本字段在 [AppPolicy] 策略包中单独下发，家长端开关也只对它生效。
+     */
+    @SerialName("requirePasswordOnInstall") val requirePasswordOnInstall: Boolean = true,
+    @SerialName("requirePasswordOnUninstall") val requirePasswordOnUninstall: Boolean = true
 )
 
 @Serializable
@@ -245,7 +296,19 @@ data class WebPolicy(
     @SerialName("keywords") val keywords: KeywordPolicy = KeywordPolicy(),
     @SerialName("allowBrowsers") val allowBrowsers: List<String> = emptyList(),
     @SerialName("blockPopup") val blockPopup: Boolean = false,
-    @SerialName("blockDownload") val blockDownload: Boolean = false
+    @SerialName("blockDownload") val blockDownload: Boolean = false,
+    /**
+     * 搜索引擎强制安全搜索（服务端 P2 内容管控下发，对应 `web.safeSearch`）。
+     * 开启后由 URL 重写通道（无障碍读地址栏 / VpnService）对主流搜索引擎注入 safe 参数；
+     * 设备侧无法独立验证命中与否，仅在报告中如实标注，不宣称拦截页面正文。
+     */
+    @SerialName("safeSearch") val safeSearch: Boolean = false,
+    /**
+     * 按分类屏蔽的 url_categories.id 列表（服务端下发，已含默认屏蔽项）。
+     * 设备端据此对命中分类的已知域名做域名级封锁（本地分类→域名映射为兜底，
+     * 与云端分类 API 配合可覆盖更广；实际拦截见 [com.padguard.core.engine.enforcer.WebEnforcer]）。
+     */
+    @SerialName("blockedCategories") val blockedCategories: List<String> = emptyList()
 )
 
 @Serializable
@@ -304,6 +367,33 @@ data class EyeCarePolicy(
     @SerialName("forceLockDuringRest") val forceLockDuringRest: Boolean = true
 )
 
+/**
+ * 护眼滤镜（蓝光过滤）策略。
+ *
+ * 实现方式是孩子端加一层**悬浮暖色遮罩**（见 `EyeProtectionOverlay`）：
+ * - 不需要 Device Owner —— 本项目绝大多数设备跑在无 DO 的降级态；
+ * - 需要 SYSTEM_ALERT_WINDOW（已在一次性授权的 AppOps 清单里收走）；
+ * - 系统级的"护眼模式/色温"在 Android 上没有公开 API 可调，第三方 ROM 各不相同，
+ *   悬浮滤镜是唯一跨机型一致的稳妥做法。
+ *
+ * `level` 1~5 两端同源（服务端 coerceIn(1,5)），越界值会被服务端夹住，
+ * 端上再兜一层是为了兼容老版本服务端 / 本地缓存被改写的极端情况。
+ */
+@Serializable
+data class EyeProtectionPolicy(
+    @SerialName("enabled") val enabled: Boolean = false,
+    @SerialName("level") val level: Int = 3
+) {
+    /**
+     * 滤镜浓度：0f（无）~ 0.5f（最深）。
+     *
+     * 上限刻意停在 0.5 —— 遮罩再深就会明显压暗屏幕、影响正常阅读，
+     * 家长抱怨"开了护眼孩子看不清"多半是这个原因，不是功能没生效。
+     */
+    val tintAlpha: Float
+        get() = if (!enabled) 0f else (level.coerceIn(1, 5) - 1) / 8f + 0.12f
+}
+
 // endregion
 
 // region ====== Kiosk 纯净桌面 ======
@@ -354,6 +444,22 @@ data class SecurityPolicy(
     @SerialName("antiClockTamper") val antiClockTamper: Boolean = true,
     @SerialName("blockRoot") val blockRoot: Boolean = true,
     @SerialName("logRetentionDays") val logRetentionDays: Int = 30
+)
+
+// endregion
+
+// region ====== 操作密码闸门 ======
+
+/**
+ * 操作密码闸门配置（随策略包下发的子对象）。
+ *
+ * 字段语义见 [PolicyPackage.guard] 注释。哈希口径与服务端一致：`SHA-256(明文)` 的 Base64，
+ * 不引入盐（否则跨设备校验不一致）。
+ */
+@Serializable
+data class GuardPolicy(
+    @SerialName("passwordHash") val passwordHash: String = "",
+    @SerialName("clear") val clear: Boolean = false
 )
 
 // endregion

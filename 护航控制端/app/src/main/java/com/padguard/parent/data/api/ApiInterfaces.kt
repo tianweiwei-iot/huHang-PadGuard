@@ -1,6 +1,13 @@
 package com.padguard.data.api
 
+import com.padguard.data.model.CreateOrderRequest
+import com.padguard.data.model.CreateOrderResponse
+import com.padguard.data.model.OrderDto
+import com.padguard.data.model.PlanDto
+import com.padguard.data.model.SubscriptionDto
 import com.padguard.data.model.*
+import okhttp3.MultipartBody
+import okhttp3.RequestBody
 import retrofit2.Response
 import retrofit2.http.*
 
@@ -17,6 +24,18 @@ interface AuthApi {
     @POST("auth/login/password")
     suspend fun loginWithPassword(
         @Body request: LoginPasswordRequest
+    ): Response<ApiResponse<LoginResponse>>
+
+    /**
+     * 手机号注册。
+     *
+     * 注册成功后服务端直接签发 token（响应结构与登录一致），
+     * 因此端上注册完成即可进入主界面，不需要再让用户输一遍账号密码。
+     * 同时服务端会在注册事务内为该账号创建免费试用订阅（默认 1 天）。
+     */
+    @POST("auth/register")
+    suspend fun register(
+        @Body request: RegisterRequest
     ): Response<ApiResponse<LoginResponse>>
 
     /** 手机号+验证码登录 */
@@ -56,6 +75,32 @@ interface DeviceApi {
         @Query("status") status: String? = null
     ): Response<ApiResponse<List<DeviceDto>>>
 
+    /**
+     * 批量导入设备台账（Excel / CSV 解析后的行）。
+     *
+     * 服务端逐行独立处理：失败行会回传具体原因（如"第3行：设备编号为空"）写入 [DeviceImportResultDto]，
+     * 不会让整批失败。返回结果由 ViewModel 直接展示导入统计。
+     */
+    @POST("devices/import")
+    suspend fun importDevices(
+        @Body request: DeviceImportRequestDto
+    ): Response<ApiResponse<DeviceImportResultDto>>
+
+    /**
+     * 局域网发现：同一网段内、可以接入到本账号的平板。
+     *
+     * 服务端只返回**无主**（未被任何有效账号持有）且近几分钟内在同网段露过面的设备，
+     * 既避免了列一堆连不上的僵尸 IP，也不会把别家的平板暴露出来。
+     */
+    @GET("devices/lan/discover")
+    suspend fun discoverLanDevices(): Response<ApiResponse<List<LanDeviceDto>>>
+
+    /** 接入一台局域网发现的平板（按硬件编号定位到那条无主台账并归属到当前账号） */
+    @POST("devices/lan/bind")
+    suspend fun bindLanDevice(
+        @Body request: LanBindRequestDto
+    ): Response<ApiResponse<DeviceDto>>
+
     /** 获取设备详情 */
     @GET("devices/{deviceId}")
     suspend fun getDeviceDetail(
@@ -68,6 +113,18 @@ interface DeviceApi {
      */
     @POST("devices/bind-code")
     suspend fun generateBindCode(): Response<ApiResponse<BindCodeResponse>>
+
+    /**
+     * 查询绑定码状态，供家长端判定孩子端是否已完成绑定。
+     *
+     * 不能直接"等设备列表里出现新 deviceId"来判定：重绑同一台平板时，
+     * 服务端按硬件指纹复用台账、deviceId 不变，那样判定必然超时，
+     * 表现为"孩子端明明绑上了，家长端却提示绑定未成功"。
+     */
+    @GET("devices/bind-code/{code}/status")
+    suspend fun getBindCodeStatus(
+        @Path("code") code: String
+    ): Response<ApiResponse<BindCodeStatusResponse>>
 
     /**
      * 解绑设备。
@@ -109,6 +166,73 @@ interface DeviceApi {
         @Path("deviceId") deviceId: String,
         @Body request: AssignGroupRequest
     ): Response<ApiResponse<Unit>>
+
+    // ==================== 设备管理增强：权限 / 功能 / 应用分发 / 远程升级 ====================
+    // 全部挂在 devices/{deviceId}/mgmt 下；服务端按设备归属鉴权。
+
+    @GET("devices/{deviceId}/mgmt/permissions")
+    suspend fun getDevicePermissions(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<PermissionPolicyDto>>
+
+    @PUT("devices/{deviceId}/mgmt/permissions")
+    suspend fun setDevicePermissions(
+        @Path("deviceId") deviceId: String,
+        @Body req: PermissionPolicyDto
+    ): Response<ApiResponse<PermissionPolicyDto>>
+
+    @GET("devices/{deviceId}/mgmt/features")
+    suspend fun getDeviceFeatures(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<FeaturePolicyDto>>
+
+    @PUT("devices/{deviceId}/mgmt/features")
+    suspend fun setDeviceFeatures(
+        @Path("deviceId") deviceId: String,
+        @Body req: FeaturePolicyDto
+    ): Response<ApiResponse<FeaturePolicyDto>>
+
+    @GET("devices/{deviceId}/mgmt/app-catalog")
+    suspend fun getAppCatalog(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<List<AppCatalogItemDto>>>
+
+    @Multipart
+    @POST("devices/{deviceId}/mgmt/app-catalog")
+    suspend fun uploadAppCatalog(
+        @Path("deviceId") deviceId: String,
+        @Part file: MultipartBody.Part,
+        @Part("packageName") packageName: RequestBody,
+        @Part("versionCode") versionCode: RequestBody,
+        @Part("versionName") versionName: RequestBody? = null,
+        @Part("appName") appName: RequestBody? = null,
+        @Part("description") description: RequestBody? = null,
+        @Part("iconUrl") iconUrl: RequestBody? = null
+    ): Response<ApiResponse<AppCatalogItemDto>>
+
+    @DELETE("devices/{deviceId}/mgmt/app-catalog/{catalogId}")
+    suspend fun deleteAppCatalog(
+        @Path("deviceId") deviceId: String,
+        @Path("catalogId") catalogId: String
+    ): Response<okhttp3.ResponseBody>
+
+    @POST("devices/{deviceId}/mgmt/app-catalog/{catalogId}/distribute")
+    suspend fun distributeApp(
+        @Path("deviceId") deviceId: String,
+        @Path("catalogId") catalogId: String,
+        @Body req: DistributeAppDto? = null
+    ): Response<ApiResponse<AppDistributionItemDto>>
+
+    @POST("devices/{deviceId}/mgmt/app-catalog/{catalogId}/upgrade")
+    suspend fun upgradeApp(
+        @Path("deviceId") deviceId: String,
+        @Path("catalogId") catalogId: String
+    ): Response<ApiResponse<AppDistributionItemDto>>
+
+    @GET("devices/{deviceId}/mgmt/app-catalog/upgrade-check")
+    suspend fun upgradeCheck(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<List<UpgradeCheckItemDto>>>
 }
 
 /**
@@ -148,6 +272,18 @@ interface MonitorApi {
     suspend fun getLocation(
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<LocationDto>>
+
+    /**
+     * 立即定位：下发 LOCATE 指令，让孩子端**现在**采集并上报一次。
+     *
+     * 与截屏/拍照同构：这里只回"指令已受理"，不含位置本身，
+     * 位置要等孩子端上报后从 `location/{id}/current` 拉取 ——
+     * 若直接把响应当位置解析，会拿到一串空字段，表现为"点了定位没反应"。
+     */
+    @POST("monitor/{deviceId}/locate")
+    suspend fun requestLocate(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<TaskAcceptedDto>>
 
     /**
      * 远程拍照。
@@ -389,3 +525,106 @@ interface FileApi {
         @Part file: okhttp3.MultipartBody.Part
     ): Response<ApiResponse<FileUploadDto>>
 }
+
+/**
+ * 订阅与计费。
+ *
+ * 全部接口都需要登录（服务端按家长身份返回其订阅），
+ * 但**不受订阅闸门拦截** —— 否则未付费用户连"查看套餐、下单续费"都做不到，
+ * 系统就成了打不开的死结。
+ */
+interface BillingApi {
+
+    /** 可购买套餐（价格与设备额度由服务端配置决定） */
+    @GET("billing/plans")
+    suspend fun getPlans(): Response<ApiResponse<List<PlanDto>>>
+
+    /** 当前订阅状态 */
+    @GET("billing/subscription")
+    suspend fun getSubscription(): Response<ApiResponse<SubscriptionDto>>
+
+    /** 下单 */
+    @POST("billing/orders")
+    suspend fun createOrder(
+        @Body request: CreateOrderRequest
+    ): Response<ApiResponse<CreateOrderResponse>>
+
+    /** 我的订单 */
+    @GET("billing/orders")
+    suspend fun getOrders(
+        @Query("limit") limit: Int = 20
+    ): Response<ApiResponse<List<OrderDto>>>
+
+    /** 收银台可选支付渠道（含"是否示例支付"标识） */
+    @GET("billing/channels")
+    suspend fun getChannels(): Response<ApiResponse<List<PayChannelDto>>>
+
+    /** 示例支付：仅服务端开启示例支付时可用；真实渠道接入后由回调代替 */
+    @POST("billing/orders/{orderNo}/mock-pay")
+    suspend fun mockPay(
+        @Path("orderNo") orderNo: String
+    ): Response<ApiResponse<SubscriptionDto>>
+}
+
+// ==================== 设备管理增强 DTO（api 层，对应服务端 DeviceMgmt*） ====================
+
+/** 权限策略（输出/输入共用）：已授予的运行时权限集合 */
+data class PermissionPolicyDto(
+    val targetPackage: String? = null,
+    val permissions: List<String> = emptyList()
+)
+
+/** 功能策略（输出/输入共用）：featureKey -> 是否启用(施加限制) */
+data class FeaturePolicyDto(
+    val features: Map<String, Boolean> = emptyMap()
+)
+
+/** 应用目录库条目 */
+data class AppCatalogItemDto(
+    val id: String,
+    val packageName: String,
+    val appName: String?,
+    val versionCode: Long,
+    val versionName: String?,
+    val apkUrl: String,
+    val fileName: String?,
+    val sizeBytes: Long,
+    val iconUrl: String?,
+    val description: String?,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+/** 分发 / 升级任务 */
+data class AppDistributionItemDto(
+    val id: String,
+    val deviceId: String,
+    val catalogId: String?,
+    val packageName: String,
+    val versionCode: Long,
+    val kind: String,
+    val msgId: String?,
+    val status: String,
+    val errorCode: String?,
+    val errorMessage: String?,
+    val createdAt: Long,
+    val finishedAt: Long?
+)
+
+/** 升级检查结果 */
+data class UpgradeCheckItemDto(
+    val catalogId: String,
+    val packageName: String,
+    val appName: String?,
+    val catalogVersionCode: Long,
+    val catalogVersionName: String?,
+    val installedVersionCode: Long,
+    val installedVersionName: String?,
+    val upgradeAvailable: Boolean
+)
+
+/** 分发请求：force=强制下发（即便不是升级也照发） */
+data class DistributeAppDto(
+    val catalogId: String? = null,
+    val force: Boolean = false
+)

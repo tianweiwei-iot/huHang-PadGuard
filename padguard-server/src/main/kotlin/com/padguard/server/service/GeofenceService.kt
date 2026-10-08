@@ -7,6 +7,7 @@ import com.padguard.server.domain.Geofence
 import com.padguard.server.domain.LocationTrack
 import com.padguard.server.dto.GeofenceDto
 import com.padguard.server.dto.LocationDto
+import com.padguard.server.dto.LocationPoint
 import com.padguard.server.dto.TrackPointDto
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.GeofenceRepository
@@ -70,32 +71,44 @@ class GeofenceService(
         return getGeofence(deviceId)
     }
 
-    /** 收到定位点时调用：入库 + 围栏越界检测（离开 -> 进 -> 离开 时才告警，避免刷屏） */
-    fun ingestPoint(deviceId: String, lat: Double?, lng: Double?, accuracy: Double?, provider: String?, ts: Long?) {
-        val point = LocationTrack(
-            id = UUID.randomUUID().toString(), deviceId = deviceId, lat = lat, lng = lng,
-            accuracy = accuracy, provider = provider, ts = ts, receivedAt = System.currentTimeMillis()
-        )
-        locationTrackRepository.save(point)
-
+    /**
+     * 批量围栏越界（离开安全区）检测。
+     *
+     * 原 [ingestPoint] 每点一次 DB 保存 + 一次「查前一点」回查（N 点 = N 次写 + N 次读），
+     * 是定位上行的主要延迟来源。改为：批量保存交给调用方一次性 saveAll，
+     * 这里只在内存里按时间序走一遍「上一点的状态」，仅对**批前最后一点**做一次回查。
+     *
+     * 只告警「进入 -> 离开」的越界（离开安全区），进入安全区不告警，避免孩子一直在区内时反复刷屏。
+     *
+     * @param points 本批上报的定位点（调用方已完成批量落库）
+     * @param prevPoint 本批之前数据库中最新的一个点（调用方在落库前查询得到），
+     *                  用于判断「批次起点」是否刚从区内越出围栏
+     */
+    fun detectGeofenceExits(deviceId: String, points: List<LocationPoint>, prevPoint: LocationTrack?) {
         val g = geofenceRepository.findById(deviceId).orElse(null)
-        if (g != null && g.enabled && lat != null && lng != null &&
-            g.centerLat != null && g.centerLng != null && g.radiusMeters != null
-        ) {
-            val outside = haversine(lat, lng, g.centerLat!!, g.centerLng!!) > g.radiusMeters!!
-            if (outside && g.alertOnExit) {
-                val prev = locationTrackRepository
-                    .findByDeviceIdOrderByTsDesc(deviceId, PageRequest.of(0, 2))
-                    .getOrNull(1)
-                val prevInside = prev?.lat != null && prev.lng != null &&
-                    haversine(prev.lat!!, prev.lng!!, g.centerLat!!, g.centerLng!!) <= g.radiusMeters!!
-                if (prevInside) {
-                    alertService.create(
-                        deviceId, "WARNING", "离开电子围栏",
-                        "设备已离开设定安全区域", "GEOFENCE_EXIT"
-                    )
-                }
+        if (g == null || !g.enabled || !g.alertOnExit) return
+        if (g.centerLat == null || g.centerLng == null || g.radiusMeters == null) return
+
+        val centerLat = g.centerLat!!
+        val centerLng = g.centerLng!!
+        val radius = g.radiusMeters!!
+
+        val ordered = points.filter { it.lat != null && it.lng != null }
+            .sortedBy { it.ts ?: 0L }
+        if (ordered.isEmpty()) return
+
+        var prevInside = prevPoint?.lat != null && prevPoint.lng != null &&
+            haversine(prevPoint.lat!!, prevPoint.lng!!, centerLat, centerLng) <= radius
+
+        for (p in ordered) {
+            val inside = haversine(p.lat!!, p.lng!!, centerLat, centerLng) <= radius
+            if (!inside && prevInside) {
+                alertService.create(
+                    deviceId, "WARNING", "离开电子围栏",
+                    "设备已离开设定安全区域", "GEOFENCE_EXIT"
+                )
             }
+            prevInside = inside
         }
     }
 

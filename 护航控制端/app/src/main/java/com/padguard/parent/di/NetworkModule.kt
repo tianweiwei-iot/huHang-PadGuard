@@ -1,6 +1,8 @@
 package com.padguard.parent.di
 
+import com.padguard.data.api.BillingApi
 import android.app.Application
+import com.padguard.parent.BuildConfig
 import com.padguard.data.api.AlertApi
 import com.padguard.data.api.AppManageApi
 import com.padguard.data.api.AuthApi
@@ -22,6 +24,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import okhttp3.logging.HttpLoggingInterceptor
+import okhttp3.Dispatcher
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
@@ -95,11 +98,23 @@ object NetworkModule {
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
+            // 日志级别**必须**降级为 BASIC（且仅 debug 开启）：
+            // BODY 会把整个响应体读进内存再格式化输出。实时看屏 `/v1/stream/{deviceId}/live`
+            // 是**不会结束的无限流**，BODY 日志会一直缓冲它 —— 疯狂刷日志、吃掉大量内存，
+            // 是看屏卡顿/内存上涨的隐藏元凶。BASIC 只打印请求行与响应行，无此问题。
             .addInterceptor(
                 HttpLoggingInterceptor().apply {
-                    level = HttpLoggingInterceptor.Level.BODY
+                    level = if (BuildConfig.DEBUG) {
+                        HttpLoggingInterceptor.Level.BASIC
+                    } else {
+                        HttpLoggingInterceptor.Level.NONE
+                    }
                 }
             )
+            // 同主机并发上限：OkHttp 默认 5。首页轮询（3 个接口）与设备详情页刷新（3 个接口）
+            // 同时发生就会超过 5，多出来的请求只能排队，家长端观感是"点哪里都转圈"。
+            // 本项目是**单主机**场景（服务端就是家长自己的电脑），放宽不会压垮服务端。
+            .dispatcher(Dispatcher().apply { maxRequestsPerHost = 8 })
             .build()
 
     /** 无鉴权 Retrofit：供 AuthApi（登录/短信/刷新）使用。@Named 区分，避免与带鉴权 Retrofit 绑定冲突/成环 */
@@ -185,4 +200,23 @@ object NetworkModule {
     @Singleton
     fun provideFileApi(retrofit: Retrofit): FileApi =
         retrofit.create(FileApi::class.java)
+
+    @Provides
+    @Singleton
+    fun provideBillingApi(retrofit: Retrofit): BillingApi =
+        retrofit.create(BillingApi::class.java)
+
+    /**
+     * 实时推送专用 WS 客户端（不挂鉴权拦截器：令牌走 `?token=<JWT>` 查询参数；
+     * 长连接 read 超时必须为 0，否则 OkHttp 会在空闲时被关掉）。
+     */
+    @Provides
+    @Singleton
+    @Named("ws")
+    fun provideWebSocketClient(): OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .dispatcher(Dispatcher().apply { maxRequestsPerHost = 8 })
+        .build()
 }

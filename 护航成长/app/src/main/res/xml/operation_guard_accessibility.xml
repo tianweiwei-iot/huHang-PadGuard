@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  操作闸门无障碍服务配置。
+
+  - android:accessibilityFeedbackType：服务本身不发声音/震动，仅监听窗口事件，
+    用 "feedbackGeneric" 占位以满足系统最小要求。
+  - android:accessibilityEventTypes="typeWindowStateChanged"：只关心「前台窗口切换」，
+    这是检测进入设置/卸载/安装界面的唯一可靠信号；不监听内容变化，避免隐私与性能问题。
+  - android:packageNames 留空（监听全部应用）：因为我们要拦截的「系统设置」「PackageInstaller」
+    本身就是不同包名，无法在静态声明里穷举，只能运行时按包名白名单判断。
+  - canRetrieveWindowContent=false：我们只在事件回调里拿 packageName，不需要遍历节点树。
+  - android:settingsActivity：给用户一个「去设置里开无障碍」的直达入口（Android 9+ 支持）。
+-->
+<accessibility-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="false"
+    android:description="@string/guard_accessibility_description"
+    android:notificationTimeout="100"
+    android:packageNames="@null" />

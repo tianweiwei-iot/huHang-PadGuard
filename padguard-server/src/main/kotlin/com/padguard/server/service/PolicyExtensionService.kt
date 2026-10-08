@@ -30,7 +30,9 @@ class PolicyExtensionService(
     private val policyTemplateRepository: PolicyTemplateRepository,
     private val installedAppRepository: InstalledAppRepository,
     private val mqttGateway: MqttGateway,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    private val contentFilterService: ContentFilterService,
+    private val auditService: AuditService
 ) {
     private val log = LoggerFactory.getLogger(PolicyExtensionService::class.java)
     // ---------- 时段限制 ----------
@@ -50,6 +52,37 @@ class PolicyExtensionService(
                 maxMinutes = req.maxMinutes, isEnabled = req.isEnabled
             )
         )
+        rebuildPolicy(deviceId)
+        return TimeRestrictionDto(e.id, deviceId, e.dayOfWeek, e.startTime, e.endTime, e.maxMinutes, e.isEnabled)
+    }
+
+    /**
+     * 新增或更新一条时段限制（家长端「保存」走 PUT）。
+     *
+     * 必须是 upsert 而不是只有新增：家长端保存时可能带 id（编辑已有条目）也可能不带（新建）。
+     * 若只按新增处理，编辑一次就多出一条规则 ——
+     * 家长看到的是"我改了时间，却变成两条"，而旧的那条仍在生效。
+     */
+    fun setTimeRestriction(userId: String, deviceId: String, req: TimeRestrictionDto): TimeRestrictionDto {
+        requireOwned(userId, deviceId)
+        val existing = req.id?.takeIf { it.isNotBlank() }
+            ?.let { timeRestrictionRepository.findByDeviceIdAndId(deviceId, it).orElse(null) }
+        val e = if (existing != null) {
+            existing.dayOfWeek = req.dayOfWeek
+            existing.startTime = req.startTime
+            existing.endTime = req.endTime
+            existing.maxMinutes = req.maxMinutes
+            existing.isEnabled = req.isEnabled
+            timeRestrictionRepository.save(existing)
+        } else {
+            timeRestrictionRepository.save(
+                TimeRestriction(
+                    id = UUID.randomUUID().toString(), deviceId = deviceId,
+                    dayOfWeek = req.dayOfWeek, startTime = req.startTime, endTime = req.endTime,
+                    maxMinutes = req.maxMinutes, isEnabled = req.isEnabled
+                )
+            )
+        }
         rebuildPolicy(deviceId)
         return TimeRestrictionDto(e.id, deviceId, e.dayOfWeek, e.startTime, e.endTime, e.maxMinutes, e.isEnabled)
     }
@@ -124,11 +157,83 @@ class PolicyExtensionService(
                 appPolicyRepository.save(e)
             }
         }
+        auditService.record(userId, deviceId, AuditAction.POLICY_APP_UPDATE,
+            targetType = "device", targetId = deviceId, detail = "blocked=${req.blockedPackages.size}条")
         rebuildPolicy(deviceId)
     }
 
-    fun setAppLimit(userId: String, deviceId: String, req: DailyLimitRequest) {
+    /**
+     * 设置应用管控模式（白名单 / 黑名单）与「启动也要密码」开关。
+     *
+     * 落库到 [DeviceSetting] 后调 [rebuildPolicy] 重建策略包并下发 ——
+     * 孩子端 [com.padguard.core.data.model.policy.AppPolicy] 会带上这两个字段：
+     * - `mode`：决定孩子端按"只管名单内"还是"只放行名单内"执行；
+     * - `requirePasswordOnLaunch`：无 DO 设备上由无障碍服务在启动受管控应用时要求密码。
+     *
+     * 非法 mode 一律回落 BLACKLIST：不因为一个拼写错误把设备变成"全设备拦截"。
+     */
+    fun setAppListPolicy(userId: String, deviceId: String, req: AppListPolicyRequest) {
         requireOwned(userId, deviceId)
+        val s = deviceSettingOf(deviceId)
+        s.appListMode = if (req.mode.equals("WHITELIST", ignoreCase = true)) "WHITELIST" else "BLACKLIST"
+        s.requirePasswordOnLaunch = req.requirePasswordOnLaunch
+        s.requirePasswordOnInstall = req.requirePasswordOnInstall
+        s.requirePasswordOnUninstall = req.requirePasswordOnUninstall
+        deviceSettingRepository.save(s)
+        auditService.record(
+            userId, deviceId, AuditAction.POLICY_APP_UPDATE,
+            targetType = "device", targetId = deviceId,
+            detail = "mode=${s.appListMode}, requirePasswordOnLaunch=${req.requirePasswordOnLaunch}"
+        )
+        rebuildPolicy(deviceId)
+    }
+
+    /**
+     * 护眼模式读写。
+     *
+     * 落 [DeviceSetting] + [rebuildPolicy] 下发，与其余策略开关同一套路：
+     * 存储、审计、重建下发三步都在一处，不会出现"库里改了但平板没收到"。
+     *
+     * 强度夹到 1~5：孩子端按这个区间映射滤镜透明度，越界值会让可选档位出现
+     * "设了 9 但和 5 一样"这种无法解释的现象。
+     */
+    fun setEyeProtection(userId: String, deviceId: String, req: EyeProtectionRequest): EyeProtectionDto {
+        requireOwned(userId, deviceId)
+        val s = deviceSettingOf(deviceId)
+        s.eyeProtectionEnabled = req.enabled
+        s.eyeProtectionLevel = req.filterLevel.coerceIn(MIN_EYE_LEVEL, MAX_EYE_LEVEL)
+        deviceSettingRepository.save(s)
+        auditService.record(
+            userId, deviceId, AuditAction.POLICY_EYE_PROTECTION_UPDATE,
+            targetType = "device", targetId = deviceId,
+            detail = "eyeProtection=${s.eyeProtectionEnabled}, level=${s.eyeProtectionLevel}"
+        )
+        rebuildPolicy(deviceId)
+        return EyeProtectionDto(s.eyeProtectionEnabled, s.eyeProtectionLevel)
+    }
+
+    fun getEyeProtection(userId: String, deviceId: String): EyeProtectionDto {
+        requireOwned(userId, deviceId)
+        val s = deviceSettingOf(deviceId)
+        return EyeProtectionDto(s.eyeProtectionEnabled, s.eyeProtectionLevel.coerceIn(MIN_EYE_LEVEL, MAX_EYE_LEVEL))
+    }
+
+    /** 读取当前应用管控模式，供家长端回显。 */
+    fun getAppListPolicy(userId: String, deviceId: String): AppListPolicyDto {
+        requireOwned(userId, deviceId)
+        val s = deviceSettingOf(deviceId)
+        val appPolicies = appPolicyRepository.findByDeviceId(deviceId)
+        return AppListPolicyDto(
+            mode = s.appListMode?.takeIf { it == "WHITELIST" } ?: "BLACKLIST",
+            requirePasswordOnLaunch = s.requirePasswordOnLaunch ?: false,
+            requirePasswordOnInstall = s.requirePasswordOnInstall ?: true,
+            requirePasswordOnUninstall = s.requirePasswordOnUninstall ?: true,
+            whitelist = appPolicies.filter { !it.isBlocked }.map { it.packageName },
+            blacklist = appPolicies.filter { it.isBlocked }.map { it.packageName }
+        )
+    }
+
+    fun setAppLimit(userId: String, deviceId: String, req: DailyLimitRequest) {        requireOwned(userId, deviceId)
         val s = deviceSettingOf(deviceId)
         s.dailyLimitMinutes = req.minutes
         deviceSettingRepository.save(s)
@@ -152,7 +257,9 @@ class PolicyExtensionService(
             browserDisabled = s.browserDisabled,
             smartShutdownEnabled = s.smartShutdownEnabled,
             smartShutdownStartTime = s.smartShutdownStart,
-            smartShutdownEndTime = s.smartShutdownEnd
+            smartShutdownEndTime = s.smartShutdownEnd,
+            safeSearch = s.webSafeSearch ?: false,
+            blockedCategories = contentFilterService.blockedCategoriesForDevice(deviceId).toList()
         )
     }
 
@@ -161,6 +268,8 @@ class PolicyExtensionService(
         val s = deviceSettingOf(deviceId)
         s.webBlockedUrls = req.urls.joinToString(",")
         deviceSettingRepository.save(s)
+        auditService.record(userId, deviceId, AuditAction.POLICY_WEB_UPDATE,
+            targetType = "device", targetId = deviceId, detail = "blockedUrls=${req.urls.size}条")
         rebuildPolicy(deviceId)
     }
 
@@ -169,6 +278,8 @@ class PolicyExtensionService(
         val s = deviceSettingOf(deviceId)
         s.browserDisabled = req.disabled
         deviceSettingRepository.save(s)
+        auditService.record(userId, deviceId, AuditAction.POLICY_WEB_UPDATE,
+            targetType = "device", targetId = deviceId, detail = "browserDisabled=${req.disabled}")
         rebuildPolicy(deviceId)
     }
 
@@ -180,8 +291,8 @@ class PolicyExtensionService(
             deviceId = deviceId,
             enabled = s.timeControlEnabled,
             enabledTimeRanges = s.enabledTimeRangesJson?.let(::parseTimeRanges),
-            weekdayLimitMinutes = s.weekdayLimitMinutes ?: 120,
-            weekendLimitMinutes = s.weekendLimitMinutes ?: 180,
+            weekdayLimitMinutes = s.weekdayLimitMinutes ?: 60,
+            weekendLimitMinutes = s.weekendLimitMinutes ?: 60,
             restAfterMinutes = s.restAfterMinutes ?: 60,
             restDurationMinutes = s.restDurationMinutes ?: 15,
             timeUpMessage = s.timeUpMessage ?: "",
@@ -205,6 +316,9 @@ class PolicyExtensionService(
 
         // 家长勾选「同步到设备」时立即重建策略包并推送通知；否则等待下次自然重建
         if (req.syncToDevice) rebuildPolicy(deviceId)
+        auditService.record(userId, deviceId, AuditAction.POLICY_TABLET_USAGE_UPDATE,
+            targetType = "device", targetId = deviceId,
+            detail = "weekday=${s.weekdayLimitMinutes} weekend=${s.weekendLimitMinutes} restAfter=${s.restAfterMinutes} sync=${req.syncToDevice}")
         return getTabletUsageSettings(userId, deviceId)
     }
 
@@ -221,6 +335,8 @@ class PolicyExtensionService(
         val s = deviceSettingOf(deviceId)
         s.systemLockRelaxed = relaxed
         deviceSettingRepository.save(s)
+        auditService.record(userId, deviceId, AuditAction.POLICY_SYSTEM_LOCK_UPDATE,
+            targetType = "device", targetId = deviceId, detail = "relaxed=$relaxed")
         rebuildPolicy(deviceId)
         log.warn("systemLock relaxed={} for device {} by user {}", relaxed, deviceId, userId)
         return relaxed
@@ -263,6 +379,8 @@ class PolicyExtensionService(
                 updatedAt = System.currentTimeMillis()
             )
         )
+        auditService.record(userId, deviceId, AuditAction.POLICY_TEMPLATE_APPLY,
+            targetType = "template", targetId = tpl.id, detail = "template=${tpl.name}")
         mqttGateway.publishPolicyNotify(deviceId, version)
     }
 
@@ -326,6 +444,9 @@ class PolicyExtensionService(
             )
         }
         val webUrls = settings.webBlockedUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+        // 内容管控：安全搜索开关 + 实际应屏蔽的分类集合（默认屏蔽 ∪ 家长自定义）。
+        // 孩子端 WebEnforcer 据此对主流搜索引擎注入 safe 参数、拦截命中分类的网址。
+        val blockedCategories = contentFilterService.blockedCategoriesForDevice(deviceId).toList()
 
         // 单个应用的每日时长上限：以 app_policies.daily_limit_minutes 为准，下发给孩子的 appLimit.rules。
         // 与「设备每日总时长」（device_settings.daily_limit_minutes）是两套独立维度。
@@ -345,6 +466,13 @@ class PolicyExtensionService(
             "scene" to (device.scene ?: "FAMILY"),
             "sceneMode" to (device.sceneMode ?: "NORMAL"),
             "peripheral" to mapOf("wifi" to "ALLOW", "bluetooth" to "DISABLE", "camera" to "DISABLE", "usbFileTransfer" to "DISABLE"),
+            // 护眼：独立顶级段，不塞进 appLimit —— 后者是"应用限时"，两者毫不相干，
+            // 混在一起迟早在"调护眼为什么动了限时"上排查不清。
+            // 孩子端以悬浮暖色滤镜实现（无需 DO），这是 C 端存量设备唯一能生效的做法。
+            "eyeProtection" to mapOf(
+                "enabled" to settings.eyeProtectionEnabled,
+                "level" to settings.eyeProtectionLevel.coerceIn(MIN_EYE_LEVEL, MAX_EYE_LEVEL)
+            ),
             // 救援通道打开时整体解封：开发者选项 / USB 调试 / 未知来源安装。
             // 缺了第三项，"解除限制后还是装不上" —— 因为侧载本身就是被这一项挡住的。
             "systemLock" to if (settings.systemLockRelaxed == true) {
@@ -364,12 +492,32 @@ class PolicyExtensionService(
             // 家长端却什么都没设置过，排查时根本对不上。
             // 更极端的情况是子表为空（新建设备、数据迁移），白名单为空 = 全设备应用被挂起 = 变砖。
             // 家长端现在的操作语义本来就是"禁用某个应用"（黑名单），这里保持一致。
-            "app" to mapOf("mode" to "BLACKLIST", "whitelist" to whitelist, "blacklist" to blacklist),
+            //
+            // mode 不再硬编码：家长选白名单时必须能真正下发，
+            // 否则"白名单模式"在服务端就被吞掉了，孩子端永远按黑名单执行。
+            // 兜底仍用 BLACKLIST：mode 为空或非法值时保持既有语义，不改变存量设备行为。
+            "app" to mapOf(
+                "mode" to (settings.appListMode?.takeIf { it == "WHITELIST" } ?: "BLACKLIST"),
+                "whitelist" to whitelist,
+                "blacklist" to blacklist,
+                // 无 DO 降级：启动受管控应用时是否要密码（仅非 DO 设备生效）
+                "requirePasswordOnLaunch" to (settings.requirePasswordOnLaunch ?: false),
+                // 无 DO 降级：安装 / 卸载确认页是否要密码（仅非 DO 设备生效，默认都要）
+                "installPolicy" to mapOf(
+                    "requirePasswordOnInstall" to (settings.requirePasswordOnInstall ?: true),
+                    "requirePasswordOnUninstall" to (settings.requirePasswordOnUninstall ?: true)
+                )
+            ),
             "appLimit" to mapOf(
                 "enabled" to (settings.timeControlEnabled ?: true),
-                "dailyTotalMinutes" to (settings.dailyLimitMinutes ?: 0),
-                "weekdayTotalMinutes" to (settings.weekdayLimitMinutes ?: 120),
-                "weekendTotalMinutes" to (settings.weekendLimitMinutes ?: 180),
+                // dailyTotalMinutes 是「工作日/周末都不配置时的兜底总时长」。
+                // 它必须跟随家长在「时间管控」页设置的工作日额度，否则老设备缓存的策略包
+                // （早期种子包只含 dailyTotalMinutes、没有 weekday/weekend 字段）在未成年人模式
+                // 派生时会回落到分龄默认值（如 BAND_16_18=120 分钟），表现为"家长改了时长也没反应、平板始终 2 小时"。
+                // 这里与 weekdayTotalMinutes 同源，保证兜底值也是家长真实设置的每日额度。
+                "dailyTotalMinutes" to (settings.weekdayLimitMinutes ?: 0),
+                "weekdayTotalMinutes" to (settings.weekdayLimitMinutes ?: 60),
+                "weekendTotalMinutes" to (settings.weekendLimitMinutes ?: 60),
                 "restAfterMinutes" to (settings.restAfterMinutes ?: 60),
                 "restDurationMinutes" to (settings.restDurationMinutes ?: 15),
                 "timeUpMessage" to settings.timeUpMessage,
@@ -379,8 +527,18 @@ class PolicyExtensionService(
                 "enabled" to (settings.timeControlEnabled ?: true),
                 "timezone" to "Asia/Shanghai", "rules" to scheduleRules + usageRangeRules
             ),
-            "web" to mapOf("mode" to "BLACKLIST", "blacklist" to webUrls, "browserDisabled" to settings.browserDisabled),
-            "monitoring" to mapOf("heartbeatIntervalSec" to settings.autoRefreshSeconds, "logUploadIntervalSec" to 300),
+            "web" to mapOf(
+                "mode" to "BLACKLIST", "blacklist" to webUrls,
+                "browserDisabled" to settings.browserDisabled,
+                "safeSearch" to (settings.webSafeSearch ?: false),
+                "blockedCategories" to blockedCategories
+            ),
+            "monitoring" to mapOf(
+                "heartbeatIntervalSec" to settings.autoRefreshSeconds,
+                "logUploadIntervalSec" to 300,
+                // 与默认策略包保持一致地显式下发，避免重建策略后周期定位被静默关掉
+                "locationIntervalSec" to DEFAULT_LOCATION_INTERVAL_SEC
+            ),
             // 未成年人模式**必须原样继承**：它是合规强制项，不属于"由子表重建"的范畴。
             //
             // 子表（app_policy / time_restriction / device_settings）里根本没有 minorMode 的落点，
@@ -403,6 +561,13 @@ class PolicyExtensionService(
                 "requireParentAuthToExit" to true,
                 "parentOverridden" to false
             ))
+        )
+        // 操作密码闸门：哈希随策略包下发，孩子端只存哈希、明文永不出服务端。
+        // 三态：null=从未设置(忽略)；""非空串=家长已清除(孩子端清除)；非空=已启用。
+        val guardHash = device.guardPasswordHash
+        pkg["guard"] = mapOf(
+            "passwordHash" to (guardHash ?: ""),
+            "clear" to (guardHash != null && guardHash.isBlank())
         )
         // 同样没有子表落点的 eyeCare / kiosk / security 一并继承，避免被重建清空
         latestPackageFields(deviceId, "eyeCare", "kiosk", "security").forEach { (k, v) -> pkg.putIfAbsent(k, v) }
@@ -440,5 +605,11 @@ class PolicyExtensionService(
         if (dev.userId != userId) {
             throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
         }
+    }
+
+    private companion object {
+        /** 护眼滤镜强度的有效区间：孩子端按此映射遮罩透明度，两端必须同源。 */
+        const val MIN_EYE_LEVEL = 1
+        const val MAX_EYE_LEVEL = 5
     }
 }

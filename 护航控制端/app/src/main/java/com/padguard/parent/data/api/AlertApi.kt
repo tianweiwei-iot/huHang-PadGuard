@@ -20,9 +20,15 @@ interface AlertApi {
         @Query("size") size: Int = 20
     ): Response<ApiResponse<List<AlertDto>>>
 
-    /** 获取未读告警数量 */
+    /**
+     * 获取未读告警数量。
+     *
+     * 服务端返回的是 `{"count": N}` 对象。**不能**声明成 `ApiResponse<Int>`——
+     * Moshi 拿到 OBJECT 却要填 Int 字段会在解析阶段抛异常，
+     * 表现为"接口明明 200 了却统一走 failure"。
+     */
     @GET("alerts/unread-count")
-    suspend fun getUnreadCount(): Response<ApiResponse<Int>>
+    suspend fun getUnreadCount(): Response<ApiResponse<UnreadCountDto>>
 
     /** 确认告警 */
     @POST("alerts/{alertId}/acknowledge")

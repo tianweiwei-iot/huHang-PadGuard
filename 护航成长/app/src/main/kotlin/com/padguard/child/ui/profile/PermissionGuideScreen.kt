@@ -37,7 +37,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.padguard.child.permission.PermissionOnboardingViewModel
+import com.padguard.child.permission.PermissionGuideViewModel
 import com.padguard.core.data.model.policy.ControlMode
 
 /**
@@ -64,7 +64,7 @@ fun PermissionGuideScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    val vm: PermissionOnboardingViewModel = hiltViewModel()
+    val vm: PermissionGuideViewModel = hiltViewModel()
     val mode by vm.controlMode.collectAsStateWithLifecycle()
     Scaffold(
         topBar = {
@@ -119,6 +119,7 @@ fun PermissionGuideScreen(
                 if (kind == "usage_stats") {
                     Button(
                         onClick = {
+                            if (!vm.ensureGuardUnlocked()) return@Button
                             val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
                                 data = android.net.Uri.fromParts("package", context.packageName, null)
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -142,12 +143,13 @@ fun PermissionGuideScreen(
 private fun DeviceAdminActions(
     context: Context,
     mode: ControlMode,
-    vm: PermissionOnboardingViewModel
+    vm: PermissionGuideViewModel
 ) {
     when (mode) {
         ControlMode.LEGACY -> {
             Button(
                 onClick = {
+                    if (!vm.ensureGuardUnlocked()) return@Button
                     runCatching { context.startActivity(vm.deviceAdminIntent()) }
                         .onFailure { e ->
                             Toast.makeText(context, "无法打开系统激活页：${e.message}", Toast.LENGTH_LONG).show()
@@ -185,6 +187,7 @@ private fun DeviceAdminActions(
             }
             OutlinedButton(
                 onClick = {
+                    if (!vm.ensureGuardUnlocked()) return@OutlinedButton
                     // 重新拉起激活页：用于确认/重置基础管理员状态
                     runCatching { context.startActivity(vm.deviceAdminIntent()) }
                         .onFailure { e ->

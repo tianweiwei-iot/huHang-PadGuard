@@ -16,6 +16,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -49,6 +51,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.child.ui.components.GlyphKind
 import com.padguard.child.ui.settings.ServerConfigDialog
 import android.graphics.BitmapFactory
+import android.content.Intent
+import android.provider.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import android.net.Uri
@@ -76,6 +80,7 @@ fun ProfileScreen(
     var studentNameInput by remember { mutableStateOf("") }
     var showNicknameDialog by remember { mutableStateOf(false) }
     var nicknameInput by remember { mutableStateOf("") }
+    var showLogoutDialog by remember { mutableStateOf(false) }
 
     val avatarPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -83,9 +88,24 @@ fun ProfileScreen(
         if (uri != null) viewModel.saveAvatar(uri)
     }
 
+    val context = LocalContext.current
+    val openGuardA11ySettings = {
+        // 操作闸门无障碍服务的开启属于"改动系统设置"，必须先过家长密码闸门。
+        // 闸门放行（密码未启用 / 处于解锁窗口）才跳转；否则 Gate 已拉起解锁界面，原动作中止。
+        if (viewModel.ensureGuardUnlocked(context)) {
+            runCatching {
+                context.startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }
+        }
+    }
+
     ProfileContent(
         state = state,
         onPermissionGuide = onPermissionGuide,
+        onOpenGuardA11y = openGuardA11ySettings,
         onSetServer = {
             serverInput = serverUrl
             showServerDialog = true
@@ -103,8 +123,34 @@ fun ProfileScreen(
             showNicknameDialog = true
         },
         onSetAvatar = { avatarPicker.launch("image/*") },
-        onClearCredentials = viewModel::clearRememberedCredentials
+        onClearCredentials = viewModel::clearRememberedCredentials,
+        onLogout = { showLogoutDialog = true }
     )
+
+    if (showLogoutDialog) {
+        // 二次确认：点错一下就登出、又要输一遍密码，代价不对称。
+        // 同时把"会发生什么"讲清楚 —— 尤其说明设备受控不会被解除，避免家长误以为登出=解绑。
+        AlertDialog(
+            onDismissRequest = { showLogoutDialog = false },
+            title = { Text("退出家庭账号？") },
+            text = {
+                Text(
+                    "退出后需要重新输入家长账号密码登录。\n\n" +
+                        "**设备受控关系会保留**：家长仍能看到这台平板，" +
+                        "若要彻底解除管控，请在家长端「我的孩子 → 解绑设备」。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLogoutDialog = false
+                    viewModel.logout()
+                }) { Text("退出登录") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogoutDialog = false }) { Text("取消") }
+            }
+        )
+    }
 
     if (showServerDialog) {
         ServerConfigDialog(
@@ -159,12 +205,15 @@ fun ProfileScreen(
 private fun ProfileContent(
     state: ProfileUiState,
     onPermissionGuide: (String) -> Unit,
+    onOpenGuardA11y: () -> Unit,
     onSetServer: () -> Unit,
     onEditDeviceName: () -> Unit,
     onEditStudentName: () -> Unit,
     onEditNickname: () -> Unit,
     onSetAvatar: () -> Unit,
-    onClearCredentials: () -> Unit
+    onClearCredentials: () -> Unit,
+    /** 退出家庭账号：回调交给 ProfileScreen 弹二次确认，本函数只负责入口 */
+    onLogout: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -182,6 +231,12 @@ private fun ProfileContent(
                     text = "我的",
                     style = MaterialTheme.typography.headlineSmall
                 )
+            }
+            // 操作密码闸门基础设施告警：密码已启用但无障碍服务未开 → 拦截失效，必须引导开启
+            if (state.guardInfraWarning) {
+                item {
+                    GuardInfraWarningBanner(onOpen = onOpenGuardA11y)
+                }
             }
             item {
                 DeviceCard(
@@ -211,6 +266,17 @@ private fun ProfileContent(
                 )
             }
             item {
+                AppControlDiagnosticsCard(
+                    state = state,
+                    onClickUsageStats = { onPermissionGuide("usage_stats") },
+                    onClickDeviceOwner = { onPermissionGuide("device_admin") }
+                )
+            }
+            // 设备所有者(DO/PO)专属能力矩阵：如实标注本机可用 / 需 DO，让家长知道降级边界
+            item {
+                OwnerCapabilityCard(state = state)
+            }
+            item {
                 Text(
                     text = "更多",
                     style = MaterialTheme.typography.titleSmall,
@@ -218,7 +284,11 @@ private fun ProfileContent(
                 )
             }
             item {
-                MoreCard(onSetServer = onSetServer)
+                MoreCard(
+                    onSetServer = onSetServer,
+                    canLogout = state.isChildLoggedIn,
+                    onLogout = onLogout
+                )
             }
         }
     }
@@ -637,8 +707,211 @@ private fun StatusPill(active: Boolean, text: String) {
     }
 }
 
+/**
+ * 应用管控自检。
+ *
+ * ## 为什么必须有这张卡
+ * "家长端禁了应用、孩子端却照常能打开"是本产品最高频的投诉，而它的成因有三条，
+ * **任意一条缺失都会静默失效**：
+ *   1. 名单根本没收到（家长端没配置 / 策略没下发）；
+ *   2. 「使用情况访问」没授权 —— 探不到当前前台是哪个应用，拦截无从谈起，
+ *      而这权限连设备所有者都无权代授，必须手动开；
+ *   3. 不是设备所有者 —— 隐藏 / 挂起应用只有 DO/PO 能做，只激活设备管理员时
+ *      只能做到"打开时弹拦截页"，图标不会消失。
+ *
+ * 把三件事摊开显示 + 给出结论与补救入口，家长不用猜、也不必再来问客服。
+ * 这里刻意**不写"已开启/未开启"这种含糊状态**：每一行的读数是可直接行动的事实。
+ */
 @Composable
-private fun MoreCard(onSetServer: () -> Unit) {
+private fun AppControlDiagnosticsCard(
+    state: ProfileUiState,
+    onClickUsageStats: () -> Unit,
+    onClickDeviceOwner: () -> Unit
+) {
+    val hasList = state.appListCount > 0 || state.appSystemRuleCount > 0
+    val verdict = when {
+        !hasList ->
+            "家长端还没有下发应用名单。请先在家长端「应用管理」勾选要管控的应用并保存，" +
+                "保存后最多 30 秒同步到本机。"
+        !state.usageStatsGranted ->
+            "名单已收到，但「使用情况访问」未授权 —— 本机探不到孩子当前打开的是哪个应用，" +
+                "拦截不会发生。点下方按钮开启即可生效（不需要设备所有者权限）。"
+        state.canHideApps ->
+            "应用管控已完整生效：被管控应用会从桌面隐藏，打开时也会被拦截。"
+        else ->
+            "名单已收到、拦截可用，但本机只是设备管理员 —— 应用图标不会消失，" +
+                "仅在孩子打开时弹出拦截页。若要彻底隐藏，需把平板设为设备所有者（DO）。"
+    }
+    val verdictOk = hasList && state.usageStatsGranted
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("应用管控自检", style = MaterialTheme.typography.titleMedium)
+
+            DiagnosticRow(
+                label = "应用名单",
+                value = if (hasList) {
+                    "${state.appListModeLabel} ${state.appListCount} 条" +
+                        if (state.appSystemRuleCount > 0) " · 系统规则 ${state.appSystemRuleCount} 条" else ""
+                } else {
+                    "未收到（0 条）"
+                },
+                ok = hasList
+            )
+            DiagnosticRow(
+                label = "识别前台应用",
+                value = if (state.usageStatsGranted) "已授权" else "未授权 · 无法拦截",
+                ok = state.usageStatsGranted
+            )
+            DiagnosticRow(
+                label = "隐藏 / 挂起应用",
+                value = when {
+                    state.canHideApps -> "可用（设备所有者）"
+                    state.canSuspendApps -> "仅可挂起"
+                    else -> "不可用 · 需设备所有者(DO)"
+                },
+                ok = state.canHideApps
+            )
+
+            Surface(
+                color = (if (verdictOk) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                    .copy(alpha = 0.08f),
+                shape = MaterialTheme.shapes.small
+            ) {
+                Text(
+                    text = verdict,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                )
+            }
+
+            if (!state.usageStatsGranted || !state.canHideApps) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!state.usageStatsGranted) {
+                        TextButton(onClick = onClickUsageStats) { Text("开启使用情况访问") }
+                    }
+                    if (!state.canHideApps) {
+                        TextButton(onClick = onClickDeviceOwner) { Text("查看 DO 权限说明") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticRow(label: String, value: String, ok: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Icon(
+            imageVector = if (ok) Icons.Filled.CheckCircle else Icons.Filled.Close,
+            contentDescription = null,
+            tint = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+            modifier = Modifier.size(18.dp)
+        )
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+        )
+    }
+}
+
+/**
+ * 操作密码闸门基础设施告警横幅。
+ *
+ * 仅在「家长已启用操作密码，但操作闸门无障碍服务未开启」时出现：
+ * 此时系统级拦截失效，孩子可从设置/通知栏绕过密码。引导家长（经密码闸门校验后）
+ * 跳转无障碍设置开启服务。
+ */
+@Composable
+private fun GuardInfraWarningBanner(onOpen: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "操作密码闸门未完全生效",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            Text(
+                text = "已启用操作密码，但「操作闸门无障碍服务」尚未在系统设置中开启。在此期间孩子可从设置 / 通知栏绕过密码，请尽快开启。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            TextButton(onClick = onOpen) {
+                Text(text = "去开启无障碍服务")
+            }
+        }
+    }
+}
+
+/**
+ * 设备所有者(DO/PO)专属能力矩阵卡。
+ *
+ * 逐项如实标注本机可用 / 不可用（不可用显式标注"需设备所有者(DO)"），
+ * 让存量 C 端平板（无 DO）的家长清楚知道哪些管控在本机只是"降级事后拦截"，
+ * 而不是误以为策略下发即生效。复用 [DiagnosticRow] 保持视觉一致。
+ */
+@Composable
+private fun OwnerCapabilityCard(state: ProfileUiState) {
+    val caps = state.ownerCapabilities
+    if (caps.isEmpty()) return
+    val allOk = caps.all { it.supported }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("设备所有者能力", style = MaterialTheme.typography.titleMedium)
+            Text(
+                text = if (allOk) {
+                    "当前为设备所有者(DO)模式，以下能力全部可用。"
+                } else {
+                    "以下能力需要平板处于「设备所有者(DO)」模式。当前设备未启用 DO，标记项不可用，" +
+                        "相关管控将降级为无障碍服务事后拦截。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+            )
+            caps.forEach { cap ->
+                DiagnosticRow(
+                    label = cap.name,
+                    value = if (cap.supported) "可用" else cap.note,
+                    ok = cap.supported
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MoreCard(
+    onSetServer: () -> Unit,
+    canLogout: Boolean,
+    onLogout: () -> Unit
+) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column {
             SimpleRow(title = "⚙ 高级设置", subtitle = "服务器地址 / 端口等（连不上管控端时修改）", onClick = onSetServer)
@@ -648,6 +921,17 @@ private fun MoreCard(onSetServer: () -> Unit) {
             SimpleRow(title = "帮助与反馈", subtitle = "常见问题 + 提交反馈")
             HorizontalDivider()
             SimpleRow(title = "关于护航成长", subtitle = "版本号 / 开源许可")
+            // 退出登录：装上 App 后唯一能"换个账号 / 退出家庭账号"的地方。
+            // 之前没做，导致装完就退不出去、换手机号只能清数据。
+            if (canLogout) {
+                HorizontalDivider()
+                SimpleRow(
+                    title = "退出家庭账号",
+                    subtitle = "仅退出家长账号登录，设备受控关系保留",
+                    onClick = onLogout,
+                    titleColor = MaterialTheme.colorScheme.error
+                )
+            }
         }
     }
 }
@@ -657,7 +941,12 @@ private fun MoreCard(onSetServer: () -> Unit) {
  * 「我的 → 更多 → 高级设置」与绑定欢迎页共用，避免重复实现。
  */
 @Composable
-private fun SimpleRow(title: String, subtitle: String, onClick: () -> Unit = {}) {
+private fun SimpleRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit = {},
+    titleColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -667,7 +956,7 @@ private fun SimpleRow(title: String, subtitle: String, onClick: () -> Unit = {})
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, style = MaterialTheme.typography.titleSmall)
+            Text(text = title, style = MaterialTheme.typography.titleSmall, color = titleColor)
             Text(
                 text = subtitle,
                 style = MaterialTheme.typography.bodySmall,

@@ -9,6 +9,8 @@ import com.padguard.server.domain.Device
 import com.padguard.server.dto.BindRequest
 import com.padguard.server.dto.BindResult
 import com.padguard.server.dto.DeviceDto
+import com.padguard.server.dto.LanBindRequest
+import com.padguard.server.dto.LanDeviceDto
 import com.padguard.server.dto.DeviceProfileRequest
 import com.padguard.server.dto.HeartbeatDto
 import com.padguard.server.mqtt.MqttGateway
@@ -16,11 +18,15 @@ import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.PolicyRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.Passwords
+import com.padguard.server.service.AuditAction
+import com.padguard.server.service.AuditService
 import com.padguard.server.ws.WebSocketPushService
 import org.slf4j.LoggerFactory
+import org.springframework.transaction.annotation.Transactional
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 @Service
 class DeviceService(
@@ -31,10 +37,26 @@ class DeviceService(
     private val mqttGateway: MqttGateway,
     private val userRepository: UserRepository,
     private val policyRepository: PolicyRepository,
-    @Value("\${padguard.device.token-ttl-days:30}") private val tokenTtlDays: Long
+    private val auditService: AuditService,
+    @Value("\${padguard.device.token-ttl-days:30}") private val tokenTtlDays: Long,
+    /**
+     * 下发给所有孩子端的 MQTT 凭据（家庭部署包由启动脚本注入）。
+     *
+     * 留空时退回"每设备随机密码"（开发/外部 broker 场景的行为，与改造前一致）。
+     * 之所以要共享而不是每设备一套：Windows 版 Mosquitto 无法热加载 password_file，
+     * 绑定时临时写入的密码要等 broker 重启才生效，孩子端会一直认证失败，
+     * 而服务端以为自己已经发下去了凭据 —— 这种"看起来成功、实际连不上"最难排查。
+     */
+    @Value("\${padguard.mqtt.device-username:}") private val mqttDeviceUsername: String,
+    @Value("\${padguard.mqtt.device-password:}") private val mqttDevicePassword: String,
+    private val billingService: BillingService,
+    private val deviceDataPurgeService: DeviceDataPurgeService
 ) {
 
     private val log = LoggerFactory.getLogger(DeviceService::class.java)
+
+    /** deviceId -> 上次因 HTTP 活动刷新在线状态的时刻，用于 [markAlive] 节流 */
+    private val aliveRefreshedAt = ConcurrentHashMap<String, Long>()
     /**
      * 孩子端绑定：消费绑定码 -> **按硬件指纹复用或新建设备** -> 下发令牌/MQTT 凭据/HMAC 密钥 -> 建默认策略
      *
@@ -48,21 +70,57 @@ class DeviceService(
      * 同一次绑定用户下命中已有设备时，沿用原 deviceId 只轮换凭据，
      * 家长端的历史绑定、策略、截图记录全部保留，重装后立刻可用。
      */
+    /**
+     * 必须整体事务：消费绑定码 → 建/复用设备台账 → 回写绑定结果，三步要么全成要么全败。
+     *
+     * 没有任何一步可以容忍"半途成功"：
+     * - 码被消费但台账没建成 → 孩子端拿到凭据却无法上报，家长端停在"等待扫码"直到超时；
+     * - 台账建成但没回写 deviceId → 家长端轮询状态永远是 PENDING，同样判定超时，
+     *   而孩子端其实已经绑上并开始心跳（这正是"绑定未成功"的成因之一）。
+     * 回滚后码仍是未使用状态，家长重新生成即可，不会留下"废码"。
+     */
+    @Transactional
     fun bindChild(req: BindRequest): BindResult {
         val userId = bindCodeService.consume(req.bindCode)
-        return bindChildWithUser(req, userId)
+        val result = bindChildWithUser(req, userId)
+        // 绑定结果回写到绑定码上：家长端靠轮询这个码判定成功。
+        // 重绑已存在设备时 deviceId 不变，只看设备列表是判不出来"这次绑上了"的。
+        bindCodeService.markBound(req.bindCode, result.deviceId)
+        return result
     }
 
-    /** 绑定主流程：确认归属家长后创建/复用设备并下发凭据（配对码与账号密码两种方式共用）。 */
+    /**
+     * 绑定主流程：确认归属家长后创建/复用设备并下发凭据（配对码与账号密码两种方式共用）。
+     *
+     * 付费闸门放在**这里**而不是两个入口各放一次：
+     * 校验分散到调用方，日后新增第三种绑定方式（比如扫码直连）时极易漏掉，
+     * 漏掉就是一种免费后门。共用入口只有一处，不可能漏。
+     */
     fun bindChildWithUser(req: BindRequest, userId: String): BindResult {
+        billingService.ensureCanBindForChild(userId)
         val deviceId = UUID.randomUUID().toString()
         val deviceToken = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "")
         val hmacSecret = "hs_" + UUID.randomUUID().toString().replace("-", "")
-        val mqttPassword = "mk_" + UUID.randomUUID().toString().replace("-", "")
+        // 家庭部署包注入了共享凭据 → 用共享的（broker 用同一份 password_file 校验）；
+        // 没注入 → 退回每设备随机，保持开发/外部 broker 场景与改造前一致。
+        val mqttPassword =
+            if (mqttDevicePassword.isNotBlank()) mqttDevicePassword
+            else "mk_" + UUID.randomUUID().toString().replace("-", "")
         val now = System.currentTimeMillis()
 
         val existing = matchExistingDevice(userId, req)
         if (existing != null) {
+            // 跨账号复用（孤儿回收 / 设备易主）：复用的台账上一任归属人不是当前家长，
+            // 其累积的 usage_logs 对新区划家长应不可见——否则"新账号一绑定就看到上一任的历史使用记录"
+            // （家长端反馈"卸载重装、用新账号登录，哪里来的历史"的根因正是此处）。
+            // 在重新归属前清掉该设备的历史用量，新账号从空白开始。
+            if (existing.userId != userId) {
+                // 清**全部**私有数据，而不只是用量日志：截图/轨迹/告警/指令/已装应用/围栏/设备设置
+                // 都是上任孩子与上任家长的痕迹，留下来就是隐私泄漏（新家长一绑定就能看到
+                // 别人家孩子的截图和行踪）。统一入口保证新增私有表时不会漏清。
+                runCatching { deviceDataPurgeService.purge(existing.id, "TRANSFER") }
+                    .onFailure { log.warn("清理易主设备 {} 的私有数据失败(已忽略): {}", existing.id, it.message) }
+            }
             existing.apply {
                 // 必须重新归属给当前家长。
                 // 复用台账（尤其"孤儿回收"来的历史设备）时若只更新设备信息而不改 userId：
@@ -86,9 +144,11 @@ class DeviceService(
                 this.mqttPassword = mqttPassword
             }
             deviceRepository.save(existing)
+            auditService.record(userId, existing.id, AuditAction.DEVICE_BIND, targetType = "device", targetId = existing.id)
             return BindResult(
                 deviceId = existing.id, deviceToken = deviceToken,
-                mqttUsername = existing.id, mqttPassword = mqttPassword,
+                mqttUsername = if (mqttDeviceUsername.isNotBlank()) mqttDeviceUsername else existing.id,
+                mqttPassword = mqttPassword,
                 hmacSecret = hmacSecret, expiresAt = now + tokenTtlDays * 86_400_000
             )
         }
@@ -105,10 +165,12 @@ class DeviceService(
         )
         deviceRepository.save(device)
         policyService.createDefault(deviceId)
+        auditService.record(userId, deviceId, AuditAction.DEVICE_BIND, targetType = "device", targetId = deviceId)
 
         return BindResult(
             deviceId = deviceId, deviceToken = deviceToken,
-            mqttUsername = deviceId, mqttPassword = mqttPassword,
+            mqttUsername = if (mqttDeviceUsername.isNotBlank()) mqttDeviceUsername else deviceId,
+            mqttPassword = mqttPassword,
             hmacSecret = hmacSecret, expiresAt = now + tokenTtlDays * 86_400_000
         )
     }
@@ -158,10 +220,88 @@ class DeviceService(
         return null
     }
 
+    /**
+     * 批量导入设备台账（Excel / CSV）。
+     *
+     * ## 与绑定流程的关系
+     * 走的是同一套"按 `deviceSn` 复用台账"口径（见 [matchExistingDevice]），只是把来源从绑定码
+     * 换成表格行。刻意复用而不是另写一套：另写一套就等于两条设备台账来源，
+     * 迟早在"导入的设备为什么不能用"上分叉。
+     *
+     * ## 安全边界
+     * 只认当前家长名下 + 孤儿设备（userId 为空或归属账号已不存在）。别人的已绑定设备即使
+     * 硬件编号撞车也不会被抢走，计为 skipped。
+     *
+     * ## 失败隔离
+     * 逐行独立处理并收集失败原因：几十台设备的表不会因为一行格式错误整体失败。
+     */
+    @Transactional
+    fun importDevices(userId: String, req: com.padguard.server.dto.DeviceImportRequest): com.padguard.server.dto.DeviceImportResultDto {
+        val rows = req.rows
+        var success = 0
+        var skipped = 0
+        val failures = mutableListOf<String>()
+
+        rows.forEachIndexed { i, row ->
+            val lineNo = i + 1
+            val hardwareId = row.hardwareId.trim()
+            if (hardwareId.isBlank()) {
+                failures += "第${lineNo}行：设备编号为空"
+                return@forEachIndexed
+            }
+            runCatching {
+                val existing = findImportableDevice(userId, hardwareId)
+                if (existing != null) {
+                    // 已在我的名下，或已被别人占用：都算跳过，不做任何改写（避免抢设备 / 覆盖别名）
+                    skipped++
+                    log.info("批量导入跳过第{}行：设备编号 {} 已存在（deviceId={}）", lineNo, hardwareId, existing.id)
+                } else {
+                    val now = System.currentTimeMillis()
+                    val deviceId = UUID.randomUUID().toString()
+                    deviceRepository.save(
+                        Device(
+                            id = deviceId, userId = userId,
+                            name = row.alias?.takeIf { it.isNotBlank() } ?: "孩子平板",
+                            deviceSn = hardwareId, model = row.model?.takeIf { it.isNotBlank() },
+                            scene = "FAMILY", onlineStatus = "OFFLINE", createdAt = now
+                        )
+                    )
+                    policyService.createDefault(deviceId)
+                    auditService.record(
+                        userId, deviceId, AuditAction.DEVICE_BIND,
+                        targetType = "device", targetId = deviceId
+                    )
+                    success++
+                }
+            }.onFailure {
+                // 单行失败不能中断整批；记录原因让家长知道改哪一行
+                log.warn("批量导入第{}行失败：{}", lineNo, it.message)
+                failures += "第${lineNo}行：${it.message ?: "导入失败"}"
+            }
+        }
+
+        log.info("批量导入完成：userId={} 总行数={} 成功={} 跳过={} 失败={}", userId, rows.size, success, skipped, failures.size)
+        return com.padguard.server.dto.DeviceImportResultDto(
+            totalCount = rows.size, successCount = success, skippedCount = skipped, failedRows = failures
+        )
+    }
+
+    /** 导入场景下的台账查找：优先自己名下的，其次孤儿设备。 */
+    private fun findImportableDevice(userId: String, hardwareId: String): Device? {
+        deviceRepository.findByUserId(userId).firstOrNull { it.deviceSn == hardwareId }?.let { return it }
+        return deviceRepository.findByDeviceSn(hardwareId).firstOrNull { dev ->
+            val owner = dev.userId
+            owner.isNullOrBlank() || !userRepository.existsById(owner)
+        }
+    }
+
     fun listDevices(userId: String): List<DeviceDto> =
         deviceRepository.findByUserId(userId).map { it.toDto() }
 
     fun generateBindCode(userId: String) = bindCodeService.generate(userId)
+
+    /** 家长端轮询"这个绑定码被孩子端用掉了没、绑到了哪台设备" */
+    fun bindCodeStatus(code: String, userId: String) = bindCodeService.statusOf(code, userId)
 
     fun getDevice(userId: String, deviceId: String): DeviceDto {
         val dev = deviceRepository.findById(deviceId).orElse(null)
@@ -248,6 +388,12 @@ class DeviceService(
         dev.groupId = null
         dev.deviceTokenHash = "revoked_" + UUID.randomUUID().toString()
         deviceRepository.save(dev)
+        // 解绑即清理该设备全部私有业务数据：截图、轨迹、用量、指令、告警、已装应用、围栏、
+        // 设备设置等。此前只把 userId 置空，这些行永久残留在库里（且下次有人绑到同一台平板
+        // 时会被新孩子继承）。审计日志刻意保留，供管理员追责。
+        runCatching { deviceDataPurgeService.purge(deviceId, "UNBIND") }
+            .onFailure { log.warn("解绑设备 {} 后清理私有数据失败(已忽略): {}", deviceId, it.message) }
+        auditService.record(userId, deviceId, AuditAction.DEVICE_UNBIND, targetType = "device", targetId = deviceId)
         // 关键：必须通知被控端。否则平板本地仍持有旧令牌、继续上报心跳并处于受控态，
         // 家长端看着"解绑了"，但孩子端其实还挂在管控里 —— 这就是"解绑无效"的体感来源。
         // 复用下行 config 通道下发 unbind=1，孩子端收到后清除本地凭据并回到绑定页。
@@ -330,7 +476,136 @@ class DeviceService(
      * 仅当状态由 OFFLINE→ONLINE 时才推 WS（[applyHeartbeatOnline] 已处理），
      * 持续在线期间不会重复推送，零副作用；离线后由 [effectiveOnlineStatus] 的 2 分钟惰性超时兜底判离线。
      */
-    fun markAlive(deviceId: String) = applyHeartbeatOnline(deviceId)
+    /**
+     * 节流：孩子端在轮询模式下每 3 秒就有一次 HTTP 请求，若每次都写一次 devices 行，
+     * 单是"在线状态维护"就占了高频写入的绝大部分，还会和孩子端日志上报抢写锁。
+     * 而在线状态晚 30 秒刷新对业务零影响 —— 离线判定本身就有 2 分钟惰性超时兜底
+     * （见 [effectiveOnlineStatus]），30 秒的刷新粒度远小于该窗口。
+     */
+    /**
+     * 记录孩子端的一次 HTTP 活动（在线状态刷新 + 来源 IP）。
+     *
+     * @param clientIp 本次请求的来源 IP，写进 `devices.last_ip` 供局域网发现使用。
+     *                 IP 可能为空（拿不到时），此时只刷新在线状态，不强写——
+     *                 把空串写进去会让上一次有效的地址平白丢失。
+     */
+    fun markAlive(deviceId: String, clientIp: String? = null) {
+        val now = System.currentTimeMillis()
+        var due = false
+        aliveRefreshedAt.compute(deviceId) { _, last ->
+            if (last == null || now - last >= ALIVE_REFRESH_INTERVAL_MS) {
+                due = true
+                now
+            } else {
+                last
+            }
+        }
+        if (due) {
+            applyHeartbeatOnline(deviceId)
+            recordLanPresence(deviceId, clientIp, now)
+        }
+    }
+
+    /**
+     * 登记"这台平板最近出现在这张网络里"。
+     *
+     * 单独一个方法而不是并入 [applyHeartbeatOnline]：那边的职责是维护在线状态与阈值，
+     * 混进来会让"为什么在线判定改了会影响局域网发现"这种耦合在半年后无法解释。
+     */
+    private fun recordLanPresence(deviceId: String, clientIp: String?, now: Long) {
+        val ip = clientIp?.takeIf { it.isNotBlank() } ?: return
+        runCatching {
+            deviceRepository.findById(deviceId).orElse(null)?.let { dev ->
+                dev.lastIp = ip
+                dev.lastActiveAt = now
+                deviceRepository.save(dev)
+            }
+        }.onFailure { log.warn("记录设备 {} 的来源 IP 失败(已忽略): {}", deviceId, it.message) }
+    }
+
+    /**
+     * 局域网发现：列出"当前这张网络里、可以接入到本账号"的平板。
+     *
+     * ## 判定口径（刻意收紧）
+     * 1. 同网段：候选设备的 `lastIp` 与**调用者 IP** 处于同一 /24 网段。不同网段说明不是同一张局域网，
+     *    把异地设备列出来只会造成误导（点了也连不上）。
+     * 2. 近期活跃：`lastActiveAt` 在 5 分钟内。过早的地址早已失效（DHCP 重分配后 IP 会变）。
+     * 3. **只列无主设备**：`userId` 为空，或归属账号已不存在。别人的设备即便恰好在同一网段，
+     *    也绝不暴露型号与 IP —— 局域网发现不是"扫邻居"，把第三家庭的平板列给家长看是隐私事故。
+     * 4. 排除已属于本人的：那些已经在设备列表里，不必重复显示。
+     */
+    fun discoverLanDevices(userId: String, callerIp: String?): List<LanDeviceDto> {
+        val subnet = subnetOf(callerIp) ?: return emptyList()
+        val since = System.currentTimeMillis() - LAN_DISCOVERY_WINDOW_MS
+
+        val mine = deviceRepository.findByUserId(userId).map { it.id }.toHashSet()
+        return deviceRepository.findByLastActiveAtGreaterThan(since)
+            .asSequence()
+            .filter { it.id !in mine }
+            .filter { isOrphan(it) }
+            .filter { subnetOf(it.lastIp) == subnet }
+            .map {
+                LanDeviceDto(
+                    deviceId = it.deviceSn ?: it.id,
+                    model = it.model,
+                    ipAddress = it.lastIp ?: "",
+                    osVersion = it.osVersion
+                )
+            }
+            .toList()
+    }
+
+    /**
+     * 接入一台局域网发现的平板（等价于孤儿设备的最后一步归属）。
+     *
+     * 走与"导入 / 复用台账"完全一致的口径：按 deviceSn 找到那条无主记录 → 归属当前家长 →
+     * 重建默认策略。清理私有数据由 [DeviceDataPurgeService] 负责（设备从别人名下过来时必须清）。
+     */
+    @Transactional
+    fun bindLanDevice(userId: String, req: LanBindRequest): DeviceDto {
+        val hardwareId = req.hardwareId.trim()
+        if (hardwareId.isBlank()) {
+            throw BizException(ParentErr.PARAM_ERROR, "设备编号为空", Audience.PARENT)
+        }
+        val dev = deviceRepository.findByDeviceSn(hardwareId).firstOrNull { isOrphan(it) }
+            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "该设备已被其他账号接入或不存在", Audience.PARENT)
+
+        if (!dev.userId.isNullOrBlank() && dev.userId != userId) {
+            throw BizException(ParentErr.DEVICE_NOT_OWNED, "该设备已被其他账号接入", Audience.PARENT)
+        }
+        val previousOwner = dev.userId
+        dev.userId = userId
+        dev.name = req.alias?.takeIf { it.isNotBlank() } ?: dev.name ?: "孩子平板"
+        dev.scene = dev.scene ?: "FAMILY"
+        deviceRepository.save(dev)
+
+        // 从别人名下过来的必须清干净：截图/轨迹/用量/指令，见 DeviceDataPurgeService 的说明。
+        if (!previousOwner.isNullOrBlank() && previousOwner != userId) {
+            runCatching { deviceDataPurgeService.purge(dev.id, "TRANSFER") }
+                .onFailure { log.warn("局域网接入设备 {} 后清理私有数据失败(已忽略): {}", dev.id, it.message) }
+        }
+        policyService.createDefault(dev.id)
+        auditService.record(userId, dev.id, AuditAction.DEVICE_BIND, targetType = "device", targetId = dev.id)
+        return dev.toDto()
+    }
+
+    /** IPv4 /24 网段（前三段）。非 IPv4（含 IPv6）直接返回 null —— 不做半吊子的IPv6 前缀推算。 */
+    private fun subnetOf(ip: String?): String? {
+        val raw = ip?.trim().orEmpty()
+        val v4 = raw.substringBefore('%')
+            .let { if (it.startsWith("::ffff:", ignoreCase = true)) it.substring(7) else it }
+        if (v4.isBlank() || v4 == "127.0.0.1" || v4 == "::1") return null
+        val parts = v4.split('.')
+        if (parts.size != 4) return null
+        if (parts.any { it.toIntOrNull() == null }) return null
+        return parts.take(3).joinToString(".")
+    }
+
+    /** 无人认领的设备：userId 为空，或归属账号已经不存在。 */
+    private fun isOrphan(dev: Device): Boolean {
+        val owner = dev.userId
+        return owner.isNullOrBlank() || !userRepository.existsById(owner)
+    }
 
     private fun Device.toDto() = DeviceDto(
         id = id, name = name, deviceId = id, model = model, osVersion = osVersion,
@@ -342,7 +617,8 @@ class DeviceService(
         childName = childName,
         childNickname = childNickname,
         childAvatar = childAvatar,
-        ageBand = ageBand
+        ageBand = ageBand,
+        guardPasswordSet = guardPasswordHash?.isNotBlank() ?: false
     )
 
     /**
@@ -368,6 +644,16 @@ class DeviceService(
     private companion object {
         /** 在线状态超时阈值：最后一次心跳距今超过该值即判为离线（毫秒，默认 2 分钟）。 */
         const val ONLINE_STALE_MS = 120_000L
+
+        /** 同一设备"HTTP 活动刷新在线状态"的最小间隔（见 [markAlive]） */
+        const val ALIVE_REFRESH_INTERVAL_MS = 30_000L
+
+        /**
+         * 局域网发现的时间窗（毫秒）：只认 5 分钟内露过面的设备。
+         * 家庭 DHCP 租期通常几小時，但 IP 随时可能被分给别人；
+         * 窗口开太长会让列表里出现"已经在用平板、但IP早变了"的僵尸项，点了也连不上。
+         */
+        const val LAN_DISCOVERY_WINDOW_MS = 300_000L
     }
 
     /**

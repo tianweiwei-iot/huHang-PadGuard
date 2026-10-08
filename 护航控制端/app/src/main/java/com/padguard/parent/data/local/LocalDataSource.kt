@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.padguard.domain.model.*
 import com.padguard.domain.repository.*
+import com.padguard.data.model.AppListPolicyDto
 import com.padguard.domain.KnownAppIcons
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
@@ -125,6 +126,22 @@ class LocalDataSource @Inject constructor(
     override suspend fun loginWithPassword(phone: String, password: String): Result<User> {
         // Mock: 任意手机号+密码即可登录
         val user = createMockUser(phone)
+        saveUserToDataStore(user)
+        return Result.success(user)
+    }
+
+    /**
+     * Mock 注册：与登录同口径（任意合法手机号+密码即可），但要保留服务端的两条硬约束，
+     * 否则 Mock 环境与真机的行为不一致，联调时会出现"Mock 能过、真机报错"的假阳性。
+     */
+    override suspend fun register(phone: String, password: String, nickname: String?): Result<User> {
+        if (!phone.matches(Regex("^1[3-9]\\d{9}$"))) {
+            return Result.failure(IllegalArgumentException("手机号格式不正确"))
+        }
+        if (password.length < 6) {
+            return Result.failure(IllegalArgumentException("密码至少 6 位"))
+        }
+        val user = createMockUser(phone).let { if (nickname.isNullOrBlank()) it else it.copy(nickname = nickname) }
         saveUserToDataStore(user)
         return Result.success(user)
     }
@@ -375,39 +392,80 @@ class LocalDataSource @Inject constructor(
     override suspend fun getDistributableApps(deviceId: String): Result<List<DistributableApp>> =
         Result.success(
             listOf(
-                DistributableApp("com.xueersi.classroom", "学而思课堂", "3.2.1", null, "https://mock.padguard.com/apks/xes.apk"),
-                DistributableApp("com.iflytek.listen", "讯飞听听", "2.8.0", null, "https://mock.padguard.com/apks/ifly.apk"),
-                DistributableApp("com.baidu.input.pad", "百度输入法 Pad 版", "9.1.0", null, "https://mock.padguard.com/apks/baidu_input.apk")
+                DistributableApp(
+                    id = "cat_xueersi", packageName = "com.xueersi.classroom", appName = "学而思课堂",
+                    versionCode = 3201, versionName = "3.2.1", apkUrl = "https://mock.padguard.com/apks/xes.apk",
+                    sizeBytes = 48_000_000, iconUrl = null, description = "K12 直播课堂"
+                ),
+                DistributableApp(
+                    id = "cat_iflytek", packageName = "com.iflytek.listen", appName = "讯飞听听",
+                    versionCode = 2800, versionName = "2.8.0", apkUrl = "https://mock.padguard.com/apks/ifly.apk",
+                    sizeBytes = 32_000_000, iconUrl = null, description = "语音听说练习"
+                ),
+                DistributableApp(
+                    id = "cat_baidu_input", packageName = "com.baidu.input.pad", appName = "百度输入法 Pad 版",
+                    versionCode = 9100, versionName = "9.1.0", apkUrl = "https://mock.padguard.com/apks/baidu_input.apk",
+                    sizeBytes = 60_000_000, iconUrl = null, description = "平板输入法"
+                )
             )
         )
 
-    override suspend fun dispatchApp(deviceId: String, packageName: String, action: AppDispatchAction): Result<Unit> {
+    override suspend fun dispatchApp(deviceId: String, catalogId: String, force: Boolean): Result<Unit> {
         if (!deviceStore.containsKey(deviceId)) {
             return Result.failure(Exception("设备不存在"))
         }
         return Result.success(Unit)
     }
 
-    override suspend fun getDeviceUpgradeInfo(deviceId: String): Result<DeviceUpgradeInfo> {
+    override suspend fun getDeviceUpgradeInfo(deviceId: String): Result<List<AppUpgradeItem>> {
         val device = deviceStore[deviceId]
             ?: return Result.failure(Exception("设备不存在"))
         return Result.success(
-            DeviceUpgradeInfo(
-                deviceId = deviceId,
-                currentAppVersion = device.appVersion ?: "1.0.0",
-                latestAppVersion = "1.2.0",
-                releaseNote = "新增学习报告、修复已知问题"
+            listOf(
+                AppUpgradeItem(
+                    catalogId = "cat_xueersi",
+                    packageName = "com.xueersi.classroom",
+                    appName = "学而思课堂",
+                    catalogVersionCode = 3300,
+                    catalogVersionName = "3.3.0",
+                    installedVersionCode = 3201,
+                    installedVersionName = "3.2.1",
+                    upgradeAvailable = true
+                )
             )
         )
     }
 
-    override suspend fun upgradeDevice(deviceId: String): Result<Unit> {
+    override suspend fun upgradeDevice(deviceId: String, catalogId: String): Result<Unit> {
         val device = deviceStore[deviceId]
             ?: return Result.failure(Exception("设备不存在"))
         deviceStore[deviceId] = device.copy(appVersion = "1.2.0")
         refreshDeviceListFlow()
         return Result.success(Unit)
     }
+
+    override suspend fun uploadAppCatalog(
+        deviceId: String,
+        bytes: ByteArray,
+        meta: AppUploadMeta,
+        fileName: String
+    ): Result<DistributableApp> =
+        Result.success(
+            DistributableApp(
+                id = "cat_${meta.packageName}_${meta.versionCode}",
+                packageName = meta.packageName,
+                appName = meta.appName.ifBlank { meta.packageName },
+                versionCode = meta.versionCode,
+                versionName = meta.versionName,
+                apkUrl = "",
+                sizeBytes = bytes.size.toLong(),
+                iconUrl = null,
+                description = null
+            )
+        )
+
+    override suspend fun deleteAppCatalog(deviceId: String, catalogId: String): Result<Unit> =
+        Result.success(Unit)
 
     // ==================== MonitorRepository 实现 (P1 - Mock) ====================
 
@@ -571,6 +629,9 @@ class LocalDataSource @Inject constructor(
         return Result.success(config)
     }
 
+    // Mock：假装指令已下发（位置随后由 getDeviceLocation 的假数据返回）
+    override suspend fun requestLocate(deviceId: String): Result<Unit> = Result.success(Unit)
+
     override suspend fun getTrackHistory(deviceId: String): Result<List<LocationInfo>> {
         val now = System.currentTimeMillis()
         val minute = 60_000L
@@ -649,6 +710,18 @@ class LocalDataSource @Inject constructor(
         hidden: Boolean
     ): Result<Unit> = Result.success(Unit)
 
+    /** 本地演示模式：记住模式即可，无需真正下发 */
+    override suspend fun setAppListPolicy(
+        deviceId: String,
+        mode: String,
+        requirePasswordOnLaunch: Boolean,
+        requirePasswordOnInstall: Boolean,
+        requirePasswordOnUninstall: Boolean
+    ): Result<Unit> = Result.success(Unit)
+
+    override suspend fun getAppListPolicy(deviceId: String): Result<AppListPolicyDto> =
+        Result.success(AppListPolicyDto())
+
     override suspend fun setAppsHiddenBatch(
         deviceId: String,
         packages: List<String>,
@@ -678,12 +751,6 @@ class LocalDataSource @Inject constructor(
         Result.success(Unit)
 
     override suspend fun setBrowserDisabled(deviceId: String, disabled: Boolean): Result<Unit> =
-        Result.success(Unit)
-
-    override suspend fun lockScreen(deviceId: String): Result<Unit> =
-        Result.success(Unit)
-
-    override suspend fun unlockScreen(deviceId: String): Result<Unit> =
         Result.success(Unit)
 
     override suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit> =
@@ -721,6 +788,37 @@ class LocalDataSource @Inject constructor(
 
     override suspend fun applyPolicyTemplate(deviceId: String, templateId: String): Result<Unit> =
         Result.success(Unit)
+
+    // ==================== 指令回执 (Mock) ====================
+
+    override suspend fun lockScreen(deviceId: String): Result<CommandResult> =
+        Result.success(CommandResult(msgId = "mock_lock_${System.currentTimeMillis()}", type = "LOCK_SCREEN", status = "PENDING"))
+
+    override suspend fun unlockScreen(deviceId: String): Result<CommandResult> =
+        Result.success(CommandResult(msgId = "mock_unlock_${System.currentTimeMillis()}", type = "UNLOCK", status = "PENDING"))
+
+    // Mock 里直接推进到已执行：离线预览时不必让界面一直停在"下发中"
+    override suspend fun getCommand(msgId: String): Result<CommandResult> =
+        Result.success(CommandResult(msgId = msgId, status = "SUCCESS", executedAt = System.currentTimeMillis()))
+
+    override suspend fun setWatermark(
+        deviceId: String,
+        enabled: Boolean,
+        content: String?
+    ): Result<CommandResult> =
+        Result.success(
+            CommandResult(
+                msgId = "mock_watermark_${System.currentTimeMillis()}",
+                type = "SET_WATERMARK",
+                status = "PENDING"
+            )
+        )
+
+    override suspend fun setGuardPassword(
+        deviceId: String,
+        password: String?,
+        clear: Boolean
+    ): Result<Unit> = Result.success(Unit)
 
     // ==================== TabletUsageSettingsRepository 实现 (Mock) ====================
 

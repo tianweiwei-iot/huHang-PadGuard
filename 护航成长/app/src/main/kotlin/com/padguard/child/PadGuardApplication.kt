@@ -1,8 +1,11 @@
 package com.padguard.child
 
 import android.app.Application
+import com.padguard.child.time.TimeOffsetPrefs
+import com.padguard.core.common.TimeProvider
 import com.padguard.core.engine.enforcer.setInstalledPackagesProvider
 import dagger.hilt.android.HiltAndroidApp
+import javax.inject.Inject
 
 /**
  * 应用入口。
@@ -15,10 +18,23 @@ import dagger.hilt.android.HiltAndroidApp
 @HiltAndroidApp
 class PadGuardApplication : Application() {
 
+    @Inject lateinit var timeProvider: TimeProvider
+
     override fun onCreate() {
         super.onCreate()
         AppForeground.install(this)
         installAppCategoryProvider()
+        seedClockOffset()
+    }
+
+    /**
+     * 用上一次的 offset 给时钟打底。
+     *
+     * Hilt 在 `super.onCreate()` 里完成 Application 的字段注入，
+     * 所以这里拿到的 [timeProvider] 一定非空。
+     */
+    private fun seedClockOffset() {
+        runCatching { timeProvider.seedOffset(TimeOffsetPrefs.load(this)) }
     }
 
     /**
@@ -57,6 +73,9 @@ object AppForeground {
     @Volatile
     private var resumedCount = 0
 
+    /** 前台回调列表。用并发集合：更有可能出现跨线程注册 / 触发。 */
+    private val listeners: MutableList<() -> Unit> = java.util.concurrent.CopyOnWriteArrayList()
+
     @Volatile
     private var installed = false
 
@@ -66,7 +85,10 @@ object AppForeground {
         app.registerActivityLifecycleCallbacks(
             object : android.app.Application.ActivityLifecycleCallbacks {
                 override fun onActivityResumed(activity: android.app.Activity) {
+                    val before = resumedCount
                     resumedCount++
+                    // 0 → 1 才是"真正回到前台"（页面互跳时不重复通知）
+                    if (before <= 0) notifyForeground()
                 }
 
                 // 必须与 onActivityResumed 严格配对（不能用 onStopped）：
@@ -100,4 +122,26 @@ object AppForeground {
 
     /** 本应用是否已有界面在前台（此时允许直接启动 Activity） */
     val isForeground: Boolean get() = resumedCount > 0
+
+    /**
+     * 订阅"本应用从后台回到前台"这一刻。
+     *
+     * 用途：Android 10 起，App 在后台**禁止读取位置**（无后台位置权限时系统会直接拒绝，
+     * 见 [com.padguard.child.monitor.LocationCollector]）。因此后台期间收到的定位指令
+     * 无法当场执行，只能先搁置，等界面回到前台时补做。
+     * 没有这个通知，后台攒下的定位请求就只能等到家长下一次下发指令才被想起。
+     *
+     * 只在 **0 → 1** 的边沿触发：App 内部页面互跳时计数早就大于 0，不应重复触发。
+     */
+    fun addForegroundListener(listener: () -> Unit) {
+        listeners.add(listener)
+    }
+
+    private fun notifyForeground() {
+        for (l in listeners) {
+            runCatching { l() }.onFailure {
+                com.padguard.core.common.Logger.w("AppForeground") { "foreground listener failed: $it" }
+            }
+        }
+    }
 }

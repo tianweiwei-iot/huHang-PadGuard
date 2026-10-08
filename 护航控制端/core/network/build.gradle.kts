@@ -17,7 +17,7 @@ android {
             buildConfigField("String", "BASE_URL", "\"https://api.padguard.com/v1/\"")
         }
         debug {
-            buildConfigField("String", "BASE_URL", "\"http://192.168.1.10:8090/v1/\"")
+            buildConfigField("String", "BASE_URL", "\"http://192.168.1.12:8090/v1/\"")
         }
     }
 

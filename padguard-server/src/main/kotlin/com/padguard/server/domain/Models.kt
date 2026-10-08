@@ -10,8 +10,21 @@ class User(
     @Column(name = "password_hash", nullable = false) var passwordHash: String = "",
     var nickname: String? = null,
     var avatar: String? = null,
+    /** 邮箱（选填，后台可维护，用于运营联系家长） */
+    @Column(name = "email") var email: String? = null,
+    /** 区域 / 渠道标记（选填，运营分组用） */
+    @Column(name = "region") var region: String? = null,
+    /** 备注（选填，渠道 / 来源等） */
+    @Column(name = "remark") var remark: String? = null,
     @Column(name = "role", nullable = false) var role: String = "",
     @Column(name = "scene_type", nullable = false) var sceneType: String = "",
+    /**
+     * 账号状态：active（正常）/ suspended（冻结）/ pending（待激活）。
+     * 新增列；存量行由 ddl-auto=update 补为 NULL，读取时按 "active" 兜底，避免空指针。
+     */
+    @Column(name = "status") var status: String? = "active",
+    /** 最近登录时刻（毫秒）；NULL 表示从未登录 */
+    @Column(name = "last_login_at") var lastLoginAt: Long? = null,
     @Column(name = "created_at") var createdAt: Long = 0
 )
 
@@ -39,6 +52,16 @@ class Device(
     var scene: String? = null,
     @Column(name = "online_status") var onlineStatus: String = "OFFLINE",
     @Column(name = "last_online_at") var lastOnlineAt: Long? = null,
+    /**
+     * 最近一次孩子端 HTTP 请求的来源 IP（局域网发现用）。
+     *
+     * 之所以要单独记录而不是每次现算：家长端点"发现局域网设备"时，孩子平板并不会
+     * 同时发一个请求过来，服务端无从知道它此刻的 IP —— 只能取它上次露面的地址。
+     * 家庭部署场景下服务端与平板在同一个网段，这个地址就是可直连的地址。
+     */
+    @Column(name = "last_ip") var lastIp: String? = null,
+    /** 最近活跃时刻（毫秒）。可空：老库该列可能为 NULL（与 remoteLocked/lastOnlineAt 一致）；映射到基元 Long 会抛异常，故用 Long?。 */
+    @Column(name = "last_active_at") var lastActiveAt: Long? = null,
     @Column(name = "battery_level") var batteryLevel: Int? = null,
     var latitude: Double? = null,
     var longitude: Double? = null,
@@ -69,6 +92,15 @@ class Device(
      * 可空：老库加列时已有行为 NULL（表示"未设置"，按 8–12 岁档回落）。
      */
     @Column(name = "age_band") var ageBand: String? = null,
+    /**
+     * 操作密码闸门：家长在家长端设置的操作密码哈希（SHA-256(明文) 的 Base64，无盐）。
+     *
+     * 三态语义（与服务端下发、孩子端落库口径完全一致）：
+     * - `null`：从未设置过（孩子端按"未启用"忽略，不拦截）；
+     * - `""`（空串非 null）：家长主动清除（孩子端清除本地密码）；
+     * - 非空：已启用，哈希随策略包下发给客户端，明文永不出服务端。
+     */
+    @Column(name = "guard_password_hash") var guardPasswordHash: String? = null,
     @Column(name = "created_at") var createdAt: Long = 0
 )
 
@@ -97,7 +129,18 @@ class Policy(
 )
 
 @Entity
-@Table(name = "commands")
+// 索引必须声明在实体上，不能只写在 Flyway 迁移里：
+// local / home 部署用的是 ddl-auto=update（flyway.enabled=false），
+// 迁移脚本根本不执行，等于线上查询全表扫描。这里声明后两种建表方式都能拿到索引。
+// idx_commands_poll 覆盖轮询下发的完整过滤条件（device_id + status + expires_at + created_at），
+// 让「孩子端每 3 秒拉一次指令」走索引定位而不是捞出该设备全部历史指令再内存过滤。
+@Table(
+    name = "commands",
+    indexes = [
+        Index(name = "idx_commands_device_id", columnList = "device_id"),
+        Index(name = "idx_commands_poll", columnList = "device_id, status, expires_at, created_at")
+    ]
+)
 class Command(
     @Id var id: String = "",
     @Column(name = "device_id") var deviceId: String = "",
@@ -109,7 +152,14 @@ class Command(
     var status: String = "PENDING",
     @Column(name = "expires_at") var expiresAt: Long = 0,
     @Column(name = "created_at") var createdAt: Long = 0,
-    @Column(name = "executed_at") var executedAt: Long? = null
+    @Column(name = "executed_at") var executedAt: Long? = null,
+    /**
+     * 指令回执携带的错误码 / 错误描述（P0-5 可观测性）。
+     * 孩子端执行失败（REJECTED / UNSUPPORTED / FAILED）时会回传，
+     * 服务端落库后家长端轮询 [getCommand] 即可看到"指令为什么没生效"。
+     */
+    @Column(name = "error_code") var errorCode: String? = null,
+    @Column(name = "error_message", columnDefinition = "text") var errorMessage: String? = null
 )
 
 @Entity
@@ -125,7 +175,10 @@ class UsageLog(
 )
 
 @Entity
-@Table(name = "device_events")
+@Table(
+    name = "device_events",
+    indexes = [Index(name = "idx_device_events_device_ts", columnList = "device_id, timestamp")]
+)
 class DeviceEvent(
     @Id var id: String = "",
     @Column(name = "device_id") var deviceId: String = "",

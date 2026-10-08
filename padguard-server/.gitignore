@@ -6,3 +6,13 @@ build/
 *.iml
 out/
 .kotlin/
+
+# 运行期调试抄本与疑似凭据（不入库，避免泄露/污染）
+_ps_*.txt
+token.txt
+login.json
+bind.json
+dev.json
+out_*.json
+server.err
+guard.*

@@ -1,6 +1,7 @@
 package com.padguard.core.transport.http
 
 import com.padguard.core.data.model.BehaviorLog
+import com.padguard.core.data.model.Command
 import com.padguard.core.data.model.LocationInfo
 import com.padguard.core.data.model.RiskEvent
 import com.padguard.core.data.model.policy.PolicyPackage
@@ -103,6 +104,29 @@ data class HeartbeatAck(
     @SerialName("pendingCommandCount") val pendingCommandCount: Int = 0,
     /** 服务端要求终端立即执行一次日志上报 */
     @SerialName("flushLogs") val flushLogs: Boolean = false
+)
+
+// ==================== 指令轮询 ====================
+
+/**
+ * 指令轮询响应（契约 §5.7 扩充）。
+ *
+ * ## 为什么要在指令轮询里"顺带"回传 [policyVersion]
+ * 孩子端走 HTTPS 轮询（MQTT 未启用），原本唯一的策略版本对账通道是**心跳回执**：
+ * 心跳 30s 一次、且长轮询挂起时本地拿不到真实版本，最坏 reconciliation 延迟约 1 分钟。
+ * 而指令轮询是**独立 3s 高频循环**（`COMMAND_PULL_INTERVAL_MS`），几乎恒定在线。
+ * 把最新策略版本号搭在指令轮询响应里，终端发现本地版本落后即触发一次 HTTPS 全量
+ * 拉取 —— 家长改完时间管控策略后，平板上限**最坏 3s 内**生效，不再受心跳节奏掣肘。
+ *
+ * 与 [HeartbeatAck.policyVersion] 同源（`deviceService.policyVersionOf`，唯一事实源是
+ * `policies` 表最新版本号），两条通道口径完全一致，互不打架。
+ *
+ * [policyVersion] 默认 -1：旧服务端 / 解析失败时取 -1，`> 0` 判定自动跳过，避免误触发全量拉取。
+ */
+@Serializable
+data class CommandsResponse(
+    @SerialName("policyVersion") val policyVersion: Int = -1,
+    @SerialName("commands") val commands: List<Command> = emptyList()
 )
 
 // ==================== 截图 ====================

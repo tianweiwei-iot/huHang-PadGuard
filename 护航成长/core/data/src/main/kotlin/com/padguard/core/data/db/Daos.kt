@@ -259,3 +259,33 @@ interface AgreementDao {
     @Query("DELETE FROM agreement WHERE signedAt < :before")
     suspend fun deleteBefore(before: Long)
 }
+
+@Dao
+interface ParentMessageDao {
+
+    /** 全部家长消息，按时间倒序（消息列表页直接消费） */
+    @Query("SELECT * FROM parent_message ORDER BY timestamp DESC")
+    fun observeAll(): Flow<List<ParentMessageEntity>>
+
+    /** 单条消息（消息详情页按 serverMsgId 取） */
+    @Query("SELECT * FROM parent_message WHERE serverMsgId = :serverMsgId")
+    fun observeByServerId(serverMsgId: String): Flow<ParentMessageEntity?>
+
+    @Query("SELECT * FROM parent_message WHERE serverMsgId = :serverMsgId")
+    suspend fun getByServerId(serverMsgId: String): ParentMessageEntity?
+
+    /** upsert：同一条消息重复下发只更新不新增（serverMsgId 唯一约束） */
+    @Upsert
+    suspend fun upsert(entity: ParentMessageEntity)
+
+    /** 标记已读（孩子打开详情后调用） */
+    @Query("UPDATE parent_message SET isRead = 1 WHERE serverMsgId = :serverMsgId")
+    suspend fun markRead(serverMsgId: String)
+
+    /** 未读数量，用于消息 Tab 红点 */
+    @Query("SELECT COUNT(*) FROM parent_message WHERE isRead = 0")
+    fun observeUnreadCount(): Flow<Int>
+
+    @Query("DELETE FROM parent_message")
+    suspend fun clear()
+}

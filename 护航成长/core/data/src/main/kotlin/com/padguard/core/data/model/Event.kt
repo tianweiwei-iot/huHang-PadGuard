@@ -22,14 +22,19 @@ enum class LogType {
     APP_USAGE,
 
     /**
-     * 当日全局使用时长（增量段）。
+     * 当日全局使用时长（累计值，非增量）。
      *
      * 为什么与 APP_USAGE 分开："今日总时长"来自 daily_usage（亮屏即累计），
      * 不依赖"使用情况访问"权限；而 APP_USAGE 依赖 UsageStats 前台探测，
      * 权限缺失时一条都发不出来 —— 若服务端只用 APP_USAGE 汇总，
      * 家长端"今日平板使用情况"在未授权设备上永远是 0（实际故障）。
      * 服务端统计总时长优先取 USAGE_TOTAL，没有时才回退累加 APP_USAGE。
-     * payload 约定：{ durationSec, dayKey, startAt, endAt }
+     *
+     * ## 上报语义（2026-10-03 修正）
+     * 每条携带「截至当前的当天累计秒」(durationSec)，并带 `cumulative=true` 标记。
+     * 同一天会收到多条（每 ~10s 一条），服务端按「当天取最大值」还原真实累计，天然幂等——
+     * 彻底取代旧"增量 + 已上报量台账"模型（旧模型在重启/日切时基准丢失会重复累加，导致高估数倍）。
+     * payload 约定：{ durationSec, dayKey, startAt, endAt, cumulative }
      */
     USAGE_TOTAL,
     APP_INSTALL,

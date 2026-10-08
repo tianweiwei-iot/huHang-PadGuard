@@ -7,9 +7,12 @@ import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.os.Build
 import com.padguard.core.common.Logger
+import com.padguard.core.transport.TransportSettings
+import com.padguard.core.transport.http.AuthInterceptor
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -39,8 +42,21 @@ import javax.inject.Singleton
 @Singleton
 class AppInstaller @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val http: OkHttpClient
+    private val settings: TransportSettings,
+    private val authInterceptor: AuthInterceptor
 ) {
+    /**
+     * 专用下载客户端：只挂鉴权拦截器，刻意避开 [com.padguard.core.transport.http.HostSelectionInterceptor]。
+     *
+     * 后者会把相对路径拼到 baseUrl 上，而 APK 下载地址 `/v1/files/{id}` 是服务端根路径，
+     * 一旦 baseUrl 带 `/v1` 前缀就会出现 `/v1/v1/files/{id}` 重复前缀导致 404。
+     * 这里由 [normalizeApkUrl] 直接拼出绝对 origin 地址，不经过 host 重写。
+     */
+    private val downloadClient: OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor(authInterceptor)
+        .connectTimeout(DOWNLOAD_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
+        .readTimeout(DOWNLOAD_READ_TIMEOUT_SEC, TimeUnit.SECONDS)
+        .build()
 
     /**
      * 下载并安装。
@@ -87,12 +103,9 @@ class AppInstaller @Inject constructor(
     }
 
     private fun download(apkUrl: String): File {
-        val request = Request.Builder().url(apkUrl).get().build()
-        val client = http.newBuilder()
-            .connectTimeout(DOWNLOAD_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
-            .readTimeout(DOWNLOAD_READ_TIMEOUT_SEC, TimeUnit.SECONDS)
-            .build()
-        client.newCall(request).execute().use { response ->
+        val url = normalizeApkUrl(apkUrl, settings.baseUrl.value)
+        val request = Request.Builder().url(url).get().build()
+        downloadClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) error("HTTP ${response.code}")
             val body = response.body ?: error("empty body")
             val out = File(context.cacheDir, "push_${System.currentTimeMillis()}.apk")
@@ -105,6 +118,32 @@ class AppInstaller @Inject constructor(
             }
             return out
         }
+    }
+
+    /**
+     * 把指令里的 apkUrl 规整成可直接下载的绝对地址。
+     *
+     * 服务端 [com.padguard.server.service.FileStorageService] 默认返回相对路径 `/v1/files/{id}`
+     * （`padguard.base-url` 留空时）；若部署时 `base-url` 配置不当（带 `/v1` 后缀）会拼出
+     * `/v1/v1/files/{id}` 这种重复前缀，直接 404。这里统一按本机接入点的 origin 重拼，
+     * 既兼容相对路径，也兜底修正重复前缀，使下发地址不再依赖服务端 base-url 配置。
+     */
+    private fun normalizeApkUrl(raw: String, baseUrl: String): String {
+        val trimmed = raw.trim()
+        val origin = baseUrl.toHttpUrlOrNull()?.let { "${it.scheme}://${it.host}:${it.port}" }
+            ?: run {
+                Logger.i(TAG) { "baseUrl 非法，无法规整 apkUrl: $baseUrl" }
+                return trimmed
+            }
+        // 绝对地址：抽取路径，修正 /v1/v1/ 重复前缀后按 origin 重拼
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            val u = trimmed.toHttpUrlOrNull() ?: return trimmed
+            val path = u.encodedPath.replace("/v1/v1/", "/v1/")
+            val query = if (u.encodedQuery.isNullOrBlank()) "" else "?${u.encodedQuery}"
+            return "$origin$path$query"
+        }
+        // 相对路径（以 / 开头）：直接按 origin 拼
+        return origin + trimmed
     }
 
     /**

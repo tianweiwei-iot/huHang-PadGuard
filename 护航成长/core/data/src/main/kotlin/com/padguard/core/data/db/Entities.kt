@@ -164,3 +164,35 @@ data class AgreementEntity(
     val snMask: String,
     val deviceId: String = ""
 )
+
+/**
+ * 家长端发布的信息（公告 / 图片 / 视频 / 语音）。
+ *
+ * 持久化到孩子端，孩子可随时在「消息」页查看；[serverMsgId] 唯一以去重 ——
+ * 同一条消息经推送 + 轮询兜底可能重复下发，重复只更新不新增。
+ * [isRead] 标记孩子是否已打开查看，用于列表未读高亮。
+ */
+@Entity(
+    tableName = "parent_message",
+    indices = [
+        Index(value = ["serverMsgId"], unique = true),
+        Index(value = ["timestamp"])
+    ]
+)
+data class ParentMessageEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    /** 服务端指令 msgId，稳定且唯一，作为消息页的导航 id 与去重键 */
+    val serverMsgId: String,
+    val title: String,
+    val body: String,
+    /** TEXT / IMAGE / VIDEO / AUDIO */
+    val contentType: String,
+    /** 素材下载地址（服务端 /v1/files/{id} 或绝对地址） */
+    val mediaUrl: String,
+    /** 语音素材展示名（无画面时用它占位） */
+    val mediaName: String,
+    val durationSec: Int,
+    val blocking: Boolean,
+    val timestamp: Long,
+    val isRead: Boolean = false
+)

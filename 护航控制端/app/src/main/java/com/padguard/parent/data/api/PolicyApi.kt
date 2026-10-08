@@ -11,6 +11,18 @@ import retrofit2.http.*
  */
 interface PolicyApi {
 
+    /**
+     * 护眼模式（蓝光滤镜）。
+     *
+     * PUT 而非 POST：这是"这台设备当前的护眼状态"的整体覆盖，不是追加一条策略。
+     * 服务端落成 device_settings 字段后随策略包下发，孩子端以悬浮暖色滤镜生效。
+     */
+    @PUT("policies/{deviceId}/eye-protection")
+    suspend fun setEyeProtection(
+        @Path("deviceId") deviceId: String,
+        @Body request: EyeProtectionRequest
+    ): Response<ApiResponse<EyeProtectionDto>>
+
     // === 使用时长 ===
     @GET("policies/{deviceId}/time-restrictions")
     suspend fun getTimeRestrictions(
@@ -57,6 +69,24 @@ interface PolicyApi {
     ): Response<ApiResponse<Unit>>
 
     /**
+     * 应用管控模式（白名单 / 黑名单）+ 启动拦截开关。
+     *
+     * 与黑名单分开：名单内容是高频增删，模式是低频设置。
+     * mode 决定孩子端按"只管名单内"还是"只放行名单内"执行 ——
+     * 服务端此前把它硬编码成 BLACKLIST，白名单模式在链路上是断的。
+     */
+    @PUT("policies/{deviceId}/apps/list-policy")
+    suspend fun updateAppListPolicy(
+        @Path("deviceId") deviceId: String,
+        @Body request: AppListPolicyRequest
+    ): Response<ApiResponse<Unit>>
+
+    @GET("policies/{deviceId}/apps/list-policy")
+    suspend fun getAppListPolicy(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<AppListPolicyDto>>
+
+    /**
      * 设置单应用时长限制。
      * 后端当前未单列"单应用"限制，/apps/limit 实际写入设备每日总时长；
      * 此处复用同一入口，将 AppPolicy.dailyLimitMinutes 作为每日总时长写入，保持行为一致。
@@ -93,16 +123,62 @@ interface PolicyApi {
     // 在**解析阶段**就抛异常 → 家长端弹"锁屏指令发送失败"，
     // 但服务端其实已经把指令下发成功、孩子端也照常锁屏了。
     // 指令类接口只关心 HTTP 是否成功，用 execRaw 处理即可。
+    /**
+     * 远程锁屏。
+     *
+     * 服务端返回的是指令对象（含 msgId），**必须解析出来**：
+     * 只有拿到 msgId 才能用下面的 [getCommand] 追踪这条指令最终有没有被执行。
+     * 早先这里声明成 `ResponseBody` 把响应体整个丢掉，于是家长端永远只能显示
+     * "已发送锁屏指令"，设备没反应时完全无从判断是没收到、没执行还是执行失败。
+     */
     @POST("policies/{deviceId}/lock")
     suspend fun lockScreen(
-        @Path("deviceId") deviceId: String
-    ): Response<okhttp3.ResponseBody>
+        @Path("deviceId") deviceId: String,
+        @Body request: LockReasonRequest = LockReasonRequest()
+    ): Response<ApiResponse<CommandResultDto>>
 
     /** 与 [lockScreen] 对称的解锁通道；缺了它远程锁屏就是单向闸门 */
     @POST("policies/{deviceId}/unlock")
     suspend fun unlockScreen(
-        @Path("deviceId") deviceId: String
-    ): Response<okhttp3.ResponseBody>
+        @Path("deviceId") deviceId: String,
+        @Body request: LockReasonRequest = LockReasonRequest()
+    ): Response<ApiResponse<CommandResultDto>>
+
+    /**
+     * 查询指令执行结果，供家长端把"已下发"推进到"已执行 / 执行失败 / 设备未响应"。
+     *
+     * 轮询终止条件由调用方决定（见 DeviceDetailViewModel）：
+     * 服务端不会主动推送指令结果给家长端，只能靠这里查。
+     */
+    @GET("commands/{msgId}")
+    suspend fun getCommand(
+        @Path("msgId") msgId: String
+    ): Response<ApiResponse<CommandResultDto>>
+
+    /**
+     * 受管控水印开关。
+     *
+     * 这条指令存在的理由不是"加个装饰"，而是替代一个**做不到的诉求**：
+     * 录屏时系统绘制的红色 REC 指示器属于 Android 隐私红线，
+     * 画在系统层、不进入应用画面，Device Owner 也关不掉。
+     * 真正能给家长的只有本应用自己的这个水印（可自定义文案、可随时关闭）。
+     */
+    @POST("policies/{deviceId}/watermark")
+    suspend fun setWatermark(
+        @Path("deviceId") deviceId: String,
+        @Body request: WatermarkRequestDto
+    ): Response<ApiResponse<CommandResultDto>>
+
+    /**
+     * 操作密码闸门：家长端设置 / 清除「设备操作密码」。
+     * 服务端按 SHA-256(明文) 的 Base64 哈希落库（无盐），随策略包下发给客户端，
+     * 明文永不出服务端。详见服务端 PolicyController.setGuardPassword。
+     */
+    @POST("policies/{deviceId}/guard-password")
+    suspend fun setGuardPassword(
+        @Path("deviceId") deviceId: String,
+        @Body request: GuardPasswordRequestDto
+    ): Response<ApiResponse<Unit>>
 
     @POST("policies/{deviceId}/mode")
     suspend fun setControlMode(

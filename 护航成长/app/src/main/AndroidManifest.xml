@@ -7,7 +7,19 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
-    <!-- 定位（实时定位 / 电子围栏，说明书 §6.5） -->
+    <!--
+      定位（实时定位 / 电子围栏，说明书 §6.5）。
+
+      ⚠️ 刻意**没有**声明 ACCESS_BACKGROUND_LOCATION，也不要给任何服务加
+      `android:foregroundServiceType="location"` —— 这不是遗漏，是合规决策：
+      1) ACCESS_BACKGROUND_LOCATION 属于 Google Play 受限权限，需专项申报；
+      2) 更关键的是 **Play 家庭政策禁止面向儿童的 App 申请后台位置**，本 App 正是孩子端。
+
+      代价与对策（已实现，勿绕回去）：Android 10(API29)+ 起，App 在后台**读不到位置**
+      （getLastKnownLocation 会被直接拒绝），而本 App 的定位是在后台守护服务里响应
+      家长指令触发的 —— 因此后台期间不读位置，而是登记待办，等界面回到前台时自动补传。
+      详见 LocationCollector 类注释。
+    -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
@@ -135,7 +147,7 @@
         android:usesCleartextTraffic="true"
         android:supportsRtl="true">
 
-        <!-- 入口：设备绑定 / 状态查看 -->
+        <!-- 入口：设备绑定 / 状态查看（管理界面，由应用图标启动） -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -143,14 +155,24 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-                <!--
-                  CATEGORY_HOME + CATEGORY_DEFAULT：把本应用注册为「桌面」备选。
-                  这是 Kiosk 常驻桌面的前提（KioskEnforcer.resolveOwnLauncher 靠它反查自身），
-                  也是**防变砖的关键兜底**：即便 Device Owner 被清除、addPersistentPreferredActivity
-                  失效，系统仍至少有本 HOME Activity 可回退，绝不会出现「开机无桌面」的砖头状态。
-                  注意：此 Activity 的 EntryRouter 在未绑定/未登录时会回退到 Splash/绑定页，
-                  因此即便被当作桌面拉起，也是可用界面而非黑屏。
-                -->
+            </intent-filter>
+        </activity>
+
+        <!--
+          孩子桌面（自定义 Launcher / 应用管控可视网关）。
+          仅 HOME 类目、无 LAUNCHER：它不出现在应用抽屉里，只在孩子按 HOME 且被设为默认桌面时拉起，
+          渲染白名单应用网格。保留 CATEGORY_DEFAULT 是为了让 KioskEnforcer.resolveOwnLauncher()
+          能反查到本 HOME Activity（DO 下把本桌面设为常驻默认桌面）。
+          本 Activity 也是 Kiosk / 防变砖的兜底：即便 DO 被清除，系统至少还有它可回退，不会开机无桌面。
+        -->
+        <activity
+            android:name=".KidHomeActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.PadGuard">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
@@ -185,6 +207,19 @@
             android:excludeFromRecents="true"
             android:theme="@style/Theme.PadGuard.Lock" />
 
+        <!--
+          操作密码解锁界面（设备操作闸门）。
+          当孩子尝试进入系统设置 / 卸载应用 / 安装未知来源应用，且家长已开启操作密码时，
+          无障碍服务会把家长挡在外面并拉起本界面；家长输对密码后开启 10 分钟解锁窗口。
+          仅通过 NEW_TASK 由无障碍服务或 App 内部硬控拉起，不对外暴露。
+        -->
+        <activity
+            android:name=".guard.GuardUnlockActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.PadGuard" />
+
         <!-- 管理员消息/公告全屏弹窗 -->
         <activity
             android:name=".ui.message.MessageActivity"
@@ -203,6 +238,16 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="device management / parental-control guard service" />
         </service>
+
+        <!--
+          守护服务看门狗：由系统进程周期回调（应用进程被杀也照样回调），
+          发现 GuardService 不在就把它拉起来 —— 只有这样才能做到"装了就能管控"。
+          BIND_JOB_SERVICE 是 JobService 的强制权限，缺了系统不会回调。
+        -->
+        <service
+            android:name=".service.GuardWatchdogService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!--
           屏幕采集（截屏 / 录屏 / 录音）：
@@ -229,9 +274,16 @@
             android:exported="false" />
 
         <!-- 设备管理器 / Device Owner 锚点 -->
+        <!--
+          exported 必须为 true：
+          1) 系统「设置」进程要解析本组件并弹出"激活设备管理器"确认页；
+             设为 false 时 Settings 解析不到，表现为点了激活【毫无反应】；
+          2) 声明了 intent-filter 时默认就是 true，之前显式写 false 是错的；
+          3) 安全性由 BIND_DEVICE_ADMIN 权限保证，不依赖 exported。
+        -->
         <receiver
             android:name=".receiver.PadGuardDeviceAdminReceiver"
-            android:exported="false"
+            android:exported="true"
             android:permission="android.permission.BIND_DEVICE_ADMIN">
             <meta-data
                 android:name="android.app.device_admin"
@@ -259,5 +311,27 @@
         <receiver
             android:name=".ui.message.MessageDismissReceiver"
             android:exported="false" />
+
+        <!--
+          操作闸门无障碍服务（软拦截核心）。
+          监听前台窗口切换：当孩子/家长处于「系统设置 / 应用卸载确认 / 未知来源安装确认」
+          且家长已开启操作密码且当前不在解锁窗口内时，弹出自家密码框（GuardUnlockActivity）
+          并用 performGlobalAction(BACK) 把用户顶回，从而实现对「改设置 / 卸载 / 安装」的密码拦截。
+
+          该服务不可靠地随安装自动开启：必须由用户在「设置 → 无障碍」中手动授权，
+          因此 GuardService 会在密码启用但服务未开时持续提示引导。
+          它不依赖设备所有者(DO)，存量 C 端平板同样可用。
+        -->
+        <service
+            android:name=".guard.OperationGuardAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/operation_guard_accessibility" />
+        </service>
     </application>
 </manifest>

@@ -24,6 +24,7 @@ import com.padguard.core.transport.http.DeviceNameRequest
 import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
 import com.padguard.core.transport.http.BindRequest
+import com.padguard.core.transport.http.CommandsResponse
 import com.padguard.core.transport.http.HeartbeatAck
 import com.padguard.core.transport.http.LogUploadResponse
 import com.padguard.core.transport.http.PolicyFetchResult
@@ -344,8 +345,8 @@ class MockRemoteDataSource @Inject constructor(
         return ApiResult.Success(Unit, timeProvider.now())
     }
 
-    override suspend fun pullCommands(since: Long): ApiResult<List<Command>> {
-        simulateNetwork<List<Command>>()?.let { return it }
+    override suspend fun pullCommands(since: Long): ApiResult<CommandsResponse> {
+        simulateNetwork<CommandsResponse>()?.let { return it }
         val drained = stateMutex.withLock {
             val list = pendingCommands.toList()
             pendingCommands.clear()
@@ -355,7 +356,10 @@ class MockRemoteDataSource @Inject constructor(
             Logger.i(TAG) { "polling delivered ${drained.size} command(s)" }
             _stats.value = _stats.value.copy(pendingCommandCount = 0)
         }
-        return ApiResult.Success(drained, timeProvider.now())
+        // 顺带回传当前策略版本号，使 Mock 通道同样走"指令轮询即策略对账"路径；
+        // Mock 下 policyVersion 取最新已落地策略版本（或 0），与真实服务端口径一致。
+        val version = policyVersion
+        return ApiResult.Success(CommandsResponse(policyVersion = version, commands = drained), timeProvider.now())
     }
 
     // ==================== 调试注入 API（供调试页调用） ====================

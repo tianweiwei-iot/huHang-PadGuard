@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.padguard.core.data.di.AuthDataStore
@@ -57,6 +58,18 @@ class AuthRepository @Inject constructor(
 
         // === 权限引导完成态（初次打开一次性授予，后续登录不再重复） ===
         val PERMISSIONS_DONE = booleanPreferencesKey("permissions_done")
+
+        /**
+         * 「一次性授权」已完成的**版本号**（孩子端装机引导版本）。
+         *
+         * 为什么是版本号而不是布尔值：装机需要用户参与的清单会随功能演进变长
+         * （例如后来新增了无障碍服务、屏幕采集）。布尔值一旦写过 true，
+         * 老设备升级后就再也不会补齐新项——而缺失这些项的后果是**静默失效**
+         * （密码闸门被绕过、实时看屏没画面），家长根本无从察觉。
+         * 版本号语义与 Flyway 迁移一致：低于 [CONSENT_VERSION_CURRENT] 就补跑一次，
+         * 跑完写到当前版本，**且补跑是幂等的**（已就绪的项不会重复打扰）。
+         */
+        val CONSENT_VERSION = intPreferencesKey("consent_version")
     }
 
     /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
@@ -212,6 +225,43 @@ class AuthRepository @Inject constructor(
         }
     }
 
+    /**
+     * 当前装机引导版本号。
+     *
+     * **每次往「一次性授权」清单里新增用户必须参与的项，都必须 +1**，
+     * 否则存量设备不会补齐新增项（缺失表现为静默失效，家长无从察觉）。
+     */
+    companion object {
+        /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
+        const val CURRENT_AGREEMENT_VERSION = "1.0.0"
+
+        /**
+         * 当前装机引导版本号。
+         *
+         * **每次往「一次性授权」清单里新增用户必须参与的项，都必须 +1**，
+         * 否则存量设备不会补齐新增项（缺失表现为静默失效，家长无从察觉）。
+         */
+        const val CONSENT_VERSION_CURRENT = 1
+    }
+
+    /**
+     * 已完成的装机引导版本；0 表示从未走过引导。
+     * 入口分流据此决定是否需要展示一次性授权页：低于 [CONSENT_VERSION_CURRENT] 就补一次。
+     */
+    val consentVersion: Flow<Int> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.CONSENT_VERSION] ?: 0 }
+
+    /** 一次性授权是否已做到当前版本（幂等判定，直接驱动入口分流）。 */
+    val isConsentDone: Flow<Boolean> = consentVersion.map { it >= CONSENT_VERSION_CURRENT }
+
+    /** 标记一次性授权已完成到当前版本。 */
+    suspend fun saveConsentDone(version: Int = CONSENT_VERSION_CURRENT) {
+        store.edit {
+            it[Keys.CONSENT_VERSION] = version
+            it[Keys.PERMISSIONS_DONE] = true
+        }
+    }
+
     /** 标记权限引导已完成，后续登录不再重复申请。 */
     suspend fun savePermissionsDone() {
         store.edit { it[Keys.PERMISSIONS_DONE] = true }
@@ -263,10 +313,5 @@ class AuthRepository @Inject constructor(
             // DataStore 写入失败时重试一次，仍失败则记录日志交由上层处理
             store.edit { it.clear() }
         }
-    }
-
-    companion object {
-        /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
-        const val CURRENT_AGREEMENT_VERSION = "1.0.0"
     }
 }

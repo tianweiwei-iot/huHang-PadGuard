@@ -120,12 +120,38 @@ fun DeviceDetailScreen(
             MinorModeCard(
                 minorMode = uiState.minorMode,
                 ageBandDefaults = uiState.ageBandDefaults,
+                effectiveDailyLimitMinutes = uiState.effectiveDailyLimitMinutes,
                 busy = uiState.minorModeBusy,
                 onToggle = viewModel::setMinorModeEnabled,
                 onSelectBand = viewModel::selectAgeBand,
                 onToggleCurfew = viewModel::setCurfewEnabled,
                 onGrantExemption = viewModel::grantExemption
             )
+
+            // 受管控水印（P0-1）：替代"关不掉的系统录屏红点"的可控提示手段，
+            // 卡片内已写明系统限制，避免家长把两者混淆。
+            WatermarkCard(
+                enabled = uiState.watermarkEnabled,
+                content = uiState.watermarkContent,
+                busy = uiState.watermarkBusy,
+                onApply = viewModel::setWatermark
+            )
+
+            // 操作密码闸门（C 端软拦截方案）：开启后孩子改动设备须输入家长密码。
+            // 见 GuardPasswordCard 注释中的能力边界说明。
+            GuardPasswordCard(
+                set = uiState.guardPasswordSet,
+                busy = uiState.guardPasswordBusy,
+                onSet = { viewModel.setGuardPassword(it) },
+                onClear = { viewModel.setGuardPassword("", clear = true) }
+            )
+
+            // 引导：设好操作密码后，若还希望"打开受管控应用也要密码"，
+            // 必须再到「应用管理」开启『打开应用也要密码』开关——两步分散在两页，极易漏掉第二步。
+            // 这里把两步显式串成引导，降低遗漏率。
+            if (uiState.guardPasswordSet) {
+                LaunchGuardGuideCard(onOpenAppManage = { onNavigateToAppManage(deviceId) })
+            }
 
             TodayUsageDetailCard(uiState.todayUsage?.totalUsageMinutes ?: 0)
 
@@ -169,9 +195,58 @@ fun DeviceDetailScreen(
         onClose = viewModel::closeAdminSheet,
         onUpdatePermissions = viewModel::updatePermissions,
         onUpdateFunctions = viewModel::updateFunctionConfig,
-        onDispatchApp = viewModel::dispatchApp,
-        onStartUpgrade = viewModel::startUpgrade
+        onDispatchApp = { id -> viewModel.dispatchApp(id) },
+        onForceDispatchApp = { id -> viewModel.dispatchApp(id, force = true) },
+        onStartUpgrade = { id -> viewModel.startUpgrade(id) },
+        onUploadApp = { bytes, meta, name -> viewModel.uploadApp(bytes, meta, name) },
+        onDeleteApp = { id -> viewModel.deleteApp(id) },
+        onUninstallApp = { pkg -> viewModel.uninstallDistributedApp(pkg) }
     )
+}
+
+/**
+ * 引导卡：家长在「设备操作密码」里设好密码后，若还希望"打开受管控应用也要密码"，
+ * 必须再到「应用管理」开启『打开应用也要密码』开关（两步分散在两页，极易漏掉第二步）。
+ * 这里把两步显式串成引导，降低遗漏率。
+ */
+@Composable
+private fun LaunchGuardGuideCard(onOpenAppManage: () -> Unit) {
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    Icons.Default.Lock,
+                    contentDescription = null,
+                    tint = PadGuardColors.PrimaryBlue,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text("还想让打开受管控应用也要密码？", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            }
+            Text(
+                "你已开启「设备操作密码」。若希望孩子打开受管控应用时也需输入此密码，" +
+                    "请到「应用管理」开启『打开应用也要密码』开关——仅此开关开启后才生效" +
+                    "（安装 / 卸载始终需要密码，无需开启此开关）。",
+                fontSize = 12.sp,
+                color = PadGuardColors.TextSecondary
+            )
+            Button(
+                onClick = onOpenAppManage,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = PadGuardColors.PrimaryBlue)
+            ) {
+                Icon(Icons.Default.Apps, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("去应用管理开启")
+            }
+        }
+    }
 }
 
 @Composable

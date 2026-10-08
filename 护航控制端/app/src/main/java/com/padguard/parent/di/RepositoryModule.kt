@@ -1,5 +1,6 @@
 package com.padguard.parent.di
 
+import com.padguard.domain.repository.BillingRepository
 import com.padguard.domain.repository.AlertRepository
 import com.padguard.domain.repository.AuthRepository
 import com.padguard.domain.repository.DeviceRepository
@@ -73,4 +74,11 @@ object RepositoryModule {
     fun provideAlertRepository(
         apiDataSource: ApiDataSource
     ): AlertRepository = apiDataSource
+
+    @Provides
+    @Singleton
+    fun provideBillingRepository(
+        apiDataSource: ApiDataSource
+    ): BillingRepository = apiDataSource
+
 }

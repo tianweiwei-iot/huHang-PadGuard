@@ -1,5 +1,11 @@
 package com.padguard.domain.repository
 
+import com.padguard.data.model.SubscriptionDto
+import com.padguard.data.model.PlanDto
+import com.padguard.data.model.OrderDto
+import com.padguard.data.model.CreateOrderResponse
+import com.padguard.data.model.PayChannelDto
+import com.padguard.data.model.AppListPolicyDto
 import android.graphics.Bitmap
 import com.padguard.domain.model.*
 import kotlinx.coroutines.flow.Flow
@@ -13,6 +19,14 @@ interface AuthRepository {
 
     /** 手机号+密码登录 */
     suspend fun loginWithPassword(phone: String, password: String): Result<User>
+
+    /**
+     * 手机号注册并自动登录。
+     *
+     * @param nickname 可选昵称；留空由服务端生成默认昵称
+     * @return 注册成功后的用户信息（已由实现层完成 token 落盘）
+     */
+    suspend fun register(phone: String, password: String, nickname: String? = null): Result<User>
 
     /** 手机号+短信验证码登录 */
     suspend fun loginWithSmsCode(phone: String, code: String): Result<User>
@@ -106,14 +120,25 @@ interface DeviceRepository {
     /** 获取可分发的企业应用库 */
     suspend fun getDistributableApps(deviceId: String): Result<List<DistributableApp>>
 
-    /** 对设备执行应用分发动作（安装/卸载/黑白名单） */
-    suspend fun dispatchApp(deviceId: String, packageName: String, action: AppDispatchAction): Result<Unit>
+    /** 对设备执行应用分发（从企业应用库静默安装到被控平板） */
+    suspend fun dispatchApp(deviceId: String, catalogId: String, force: Boolean = false): Result<Unit>
 
-    /** 获取设备升级信息（当前版本 vs 最新版本） */
-    suspend fun getDeviceUpgradeInfo(deviceId: String): Result<DeviceUpgradeInfo>
+    /** 获取设备可升级应用列表（目录库最新版本 vs 设备已装版本） */
+    suspend fun getDeviceUpgradeInfo(deviceId: String): Result<List<AppUpgradeItem>>
 
-    /** 下发远程升级指令 */
-    suspend fun upgradeDevice(deviceId: String): Result<Unit>
+    /** 下发远程升级指令（覆盖安装到指定版本） */
+    suspend fun upgradeDevice(deviceId: String, catalogId: String): Result<Unit>
+
+    /** 上传 APK 到应用库（应用分发 / 远程升级的源头）；返回落库后的应用条目 */
+    suspend fun uploadAppCatalog(
+        deviceId: String,
+        bytes: ByteArray,
+        meta: AppUploadMeta,
+        fileName: String
+    ): Result<DistributableApp>
+
+    /** 从应用库删除一个 APK */
+    suspend fun deleteAppCatalog(deviceId: String, catalogId: String): Result<Unit>
 }
 
 data class DeviceGroup(
@@ -260,6 +285,15 @@ interface LocationRepository {
 
     /** 获取设备越界后的移动轨迹（按时间正序） */
     suspend fun getTrackHistory(deviceId: String): Result<List<LocationInfo>>
+
+    /**
+     * 请求设备立即定位（下发 LOCATE 指令）。
+     *
+     * 异步：这里成功只代表"指令已下发"，位置要等孩子端采集上报后再用
+     * [getDeviceLocation] 拉取。孩子此刻没在用平板时，端上会搁置该请求、
+     * 等界面回到前台自动补传。
+     */
+    suspend fun requestLocate(deviceId: String): Result<Unit>
 }
 
 /**
@@ -320,6 +354,31 @@ interface PolicyRepository {
     suspend fun setAppHidden(deviceId: String, packageName: String, hidden: Boolean): Result<Unit>
 
     /**
+     * 设置应用管控模式（白名单 / 黑名单）与无 DO 降级下的密码闸门开关。
+     *
+     * 这不是"多一个开关"，而是决定 [setAppHidden] 那些开关的**判定口径**：
+     * - BLACKLIST：关掉的应用 = 受管控；
+     * - WHITELIST：只有打开的应用能用，其余一律受管控。
+     *
+     * @param requirePasswordOnLaunch 无 DO 设备上打开受管控应用是否要密码。
+     *        仅在设备没有 Device Owner 时生效 —— 有 DO 时管控由系统隐藏/挂起完成，
+     *        根本走不到"打开"这一步。默认关闭，避免白名单下每开一个应用都要输密码。
+     * @param requirePasswordOnInstall 无 DO 设备上安装确认页是否要密码；默认 true（核心安全能力）。
+     * @param requirePasswordOnUninstall 无 DO 设备上卸载确认页是否要密码；默认 true。
+     *        三者都仅在设备没有 DO、且家长已设置「设备操作密码」时生效。
+     */
+    suspend fun setAppListPolicy(
+        deviceId: String,
+        mode: String,
+        requirePasswordOnLaunch: Boolean,
+        requirePasswordOnInstall: Boolean,
+        requirePasswordOnUninstall: Boolean
+    ): Result<Unit>
+
+    /** 读取应用管控模式，供页面回显 */
+    suspend fun getAppListPolicy(deviceId: String): Result<AppListPolicyDto>
+
+    /**
      * 批量设置使用权限（隐藏 / 显示）。
      * @param all true 时作用于全部已安装应用（一键授权全部 / 一键取消全部），此时 [packages] 可空。
      */
@@ -354,11 +413,48 @@ interface PolicyRepository {
     suspend fun setBrowserDisabled(deviceId: String, disabled: Boolean): Result<Unit>
 
     // === 系统与安全 ===
-    /** 一键锁屏 */
-    suspend fun lockScreen(deviceId: String): Result<Unit>
+    /**
+     * 一键锁屏。
+     *
+     * 返回 [CommandResult] 而不是 Unit：调用方要用其中的 [CommandResult.msgId]
+     * 继续查执行结果，把"指令已下发"推进到"设备已执行"。
+     * 只返回成功/失败的话，家长点完锁屏看到"已发送"，设备却毫无反应时，
+     * 根本无法区分是"没收到""没执行"还是"执行失败" ——
+     * 这正是 P0-5 可观测性要解决的核心问题。
+     */
+    suspend fun lockScreen(deviceId: String): Result<CommandResult>
 
     /** 一键解锁：解除家长发起的远程锁屏，按钮回到"锁屏" */
-    suspend fun unlockScreen(deviceId: String): Result<Unit>
+    suspend fun unlockScreen(deviceId: String): Result<CommandResult>
+
+    /** 查询指令执行结果；调用方据此把界面推进到"已执行 / 未响应 / 失败" */
+    suspend fun getCommand(msgId: String): Result<CommandResult>
+
+    /**
+     * 受管控水印开关。
+     *
+     * [content] 为 null/空时孩子端使用默认文案。
+     * 注意这不是"关闭录屏红点"（那是系统隐私指示器，做不到），
+     * 详见 ApiDataSource 实现处的说明。
+     */
+    suspend fun setWatermark(
+        deviceId: String,
+        enabled: Boolean,
+        content: String? = null
+    ): Result<CommandResult>
+
+    /**
+     * 操作密码闸门：家长端设置 / 清除「设备操作密码」。
+     *
+     * - [password] 非空 → 设置（服务端哈希后下发，明文不出家长端 / 服务端）；
+     * - [clear] 为真 → 清除，孩子端恢复为「改动无需密码」；
+     * - 两者皆空 → 无操作。
+     */
+    suspend fun setGuardPassword(
+        deviceId: String,
+        password: String?,
+        clear: Boolean = false
+    ): Result<Unit>
 
     /** 设置护眼参数 */
     suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit>
@@ -418,6 +514,36 @@ interface PolicyRepository {
 
     /** 各龄档的合规默认值，供选档界面在下发前展示后果 */
     suspend fun getAgeBandDefaults(): Result<Map<AgeBand, AgeBandDefault>>
+}
+
+/**
+ * 指令执行结果（P0-5 可观测性）。
+ *
+ * [status] 直接透传服务端语义：PENDING（设备还没回执）/ SUCCESS（已执行）/
+ * FAILED（执行失败）/ EXPIRED（超时未执行）。
+ * 界面据此给出**可行动**的文案，而不是笼统的"已发送"：
+ * - PENDING 超过一定时间 → "设备可能离线或网络不通"，家长知道该去查设备；
+ * - FAILED → 明确说执行失败，而不是让家长以为锁上了。
+ */
+data class CommandResult(
+    val msgId: String = "",
+    val type: String = "",
+    val status: String = "",
+    val createdAt: Long = 0,
+    val executedAt: Long? = null,
+    /** P0-5：指令回执的错误码 / 描述，说明"为什么没生效" */
+    val errorCode: String? = null,
+    val errorMessage: String? = null
+) {
+    val executed: Boolean get() = status == "SUCCESS"
+    val failed: Boolean get() = status.equals("FAILED", ignoreCase = true) ||
+        status.equals("UNSUPPORTED", ignoreCase = true) ||
+        status.equals("REJECTED", ignoreCase = true)
+    val expired: Boolean get() = status.equals("EXPIRED", ignoreCase = true)
+    val pending: Boolean get() = status.equals("PENDING", ignoreCase = true)
+    /** 指令未成功时的可读原因（错误描述优先，其次错误码） */
+    val failureReason: String? get() = errorMessage?.takeIf { it.isNotBlank() }
+        ?: errorCode?.takeIf { it.isNotBlank() }
 }
 
 /**
@@ -591,4 +717,31 @@ interface AlertRepository {
 
     /** 观察新告警（实时推送） */
     fun observeAlerts(): Flow<Alert>
+}
+
+/**
+ * 订阅与计费。
+ *
+ * 这里直接用 DTO 而不是再套一层领域模型：订阅状态本身就是纯展示数据，
+ * 没有任何领域行为，多做一层映射只会增加不一致的风险。
+ */
+interface BillingRepository {
+
+    /** 可购买套餐 */
+    suspend fun getPlans(): Result<List<PlanDto>>
+
+    /** 当前订阅状态；服务端在家长无订阅时会自动开通试用 */
+    suspend fun getSubscription(): Result<SubscriptionDto>
+
+    /** 下单。目前仅支持 MANUAL 渠道（后台开通），微信/支付宝接入后由 [payParams] 拉起 */
+    suspend fun createOrder(plan: String, channel: String = "MANUAL"): Result<CreateOrderResponse>
+
+    /** 我的订单 */
+    suspend fun getOrders(limit: Int = 20): Result<List<OrderDto>>
+
+    /** 收银台可选支付渠道（含示例支付标识） */
+    suspend fun getChannels(): Result<List<PayChannelDto>>
+
+    /** 示例支付：真实渠道接入后由支付回调代替 */
+    suspend fun mockPay(orderNo: String): Result<SubscriptionDto>
 }

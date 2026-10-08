@@ -39,6 +39,17 @@ object ApiCode {
     /** 设备已绑定其他账号 */
     const val BIND_CONFLICT = 40303
 
+    /**
+     * 家长账号未订阅或已过期。
+     *
+     * 必须给出这条专门提示：绑定时遇到它，家长此刻正拿着平板等结果，
+     * 若只显示笼统的"绑定失败"，他会反复重试绑定码，而真正要做的去续费。
+     */
+    const val SUBSCRIPTION_REQUIRED = 40304
+
+    /** 家长账号可绑定设备数已达套餐上限 */
+    const val DEVICE_LIMIT_EXCEEDED = 40305
+
     /** 与服务端时间差超过 5 分钟：终端应立即对时后重试 */
     const val CLOCK_SKEW = 40901
 
@@ -74,11 +85,19 @@ sealed interface ApiResult<out T> {
     fun isFatal(): Boolean = this is BizError && code in FATAL_CODES
 
     companion object {
+        /**
+         * "重试也没意义"的终态错误。
+         *
+         * 订阅过期与设备数超限都在此列：家长不续费 / 不升级套餐，
+         * 孩子端无论重试多少次结果都一样，只会白白消耗电量与用户耐心。
+         */
         private val FATAL_CODES = setOf(
             ApiCode.TOKEN_INVALID,
             ApiCode.DEVICE_UNBOUND,
             ApiCode.BIND_CODE_EXPIRED,
-            ApiCode.BIND_CONFLICT
+            ApiCode.BIND_CONFLICT,
+            ApiCode.SUBSCRIPTION_REQUIRED,
+            ApiCode.DEVICE_LIMIT_EXCEEDED
         )
     }
 }

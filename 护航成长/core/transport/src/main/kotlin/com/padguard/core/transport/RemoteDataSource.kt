@@ -9,6 +9,7 @@ import com.padguard.core.data.model.LocationInfo
 import com.padguard.core.data.model.RiskEvent
 import com.padguard.core.transport.http.ApiResult
 import com.padguard.core.transport.http.BindRequest
+import com.padguard.core.transport.http.CommandsResponse
 import com.padguard.core.transport.http.HeartbeatAck
 import com.padguard.core.transport.http.LogUploadResponse
 import com.padguard.core.transport.http.PolicyFetchResult
@@ -112,8 +113,12 @@ interface RemoteDataSource {
      */
     suspend fun uploadApps(deviceId: String, apps: List<AppInventoryItem>): ApiResult<AppSyncAck>
 
-    /** 轮询降级通道主动拉取指令；MQTT 模式下不应调用 */
-    suspend fun pullCommands(since: Long): ApiResult<List<Command>>
+    /**
+     * 轮询降级通道主动拉取指令；MQTT 模式下不应调用。
+     * 返回 [com.padguard.core.transport.http.CommandsResponse]，除指令列表外携带服务端最新策略
+     * 版本号，使 3s 一次的指令轮询同时承担策略版本对账，家长改策略后最坏 3s 内设备感知并全量拉新。
+     */
+    suspend fun pullCommands(since: Long): ApiResult<CommandsResponse>
 
     /** 孩子端自定义设备名并上报服务端（实时同步到家长端台账） */
     suspend fun updateDeviceName(deviceId: String, name: String): ApiResult<Unit>
