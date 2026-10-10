@@ -407,10 +407,16 @@ class BillingService(
         return statusOf(userId)
     }
 
-    /** 模拟支付：仅开发环境开启，生产必须关闭，否则等于绕过收费 */
-    fun mockPay(orderNo: String): SubscriptionDto {
+    /** 模拟支付：仅开发环境开启，生产必须关闭，否则等于绕过收费（S16 补归属校验） */
+    fun mockPay(userId: String, orderNo: String): SubscriptionDto {
         if (!mockPayEnabled) {
             throw BizException(ParentErr.PARAM_ERROR, "模拟支付未开启", Audience.PARENT)
+        }
+        val order = paymentOrderRepository.findByOrderNo(orderNo)
+            ?: throw BizException(ParentErr.ORDER_NOT_FOUND, "订单不存在", Audience.PARENT)
+        // S16：mockPay 可把任意订单置为已支付，无归属校验时知道 orderNo 就能替别人"付款"
+        if (order.userId != userId) {
+            throw BizException(ParentErr.DEVICE_NOT_OWNED, "订单不属于当前用户", Audience.PARENT)
         }
         return markPaid(orderNo, "MOCK")
     }

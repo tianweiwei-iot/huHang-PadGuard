@@ -23,6 +23,7 @@ import java.util.UUID
 @Transactional
 class PolicyExtensionService(
     private val deviceRepository: DeviceRepository,
+    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
     private val policyRepository: PolicyRepository,
     private val appPolicyRepository: AppPolicyRepository,
     private val timeRestrictionRepository: TimeRestrictionRepository,
@@ -599,13 +600,12 @@ class PolicyExtensionService(
     private fun deviceSettingOf(deviceId: String): DeviceSetting =
         deviceSettingRepository.findById(deviceId).orElse(DeviceSetting(deviceId = deviceId))
 
-    private fun requireOwned(userId: String, deviceId: String) {
-        val dev = deviceRepository.findById(deviceId).orElse(null)
-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
-        if (dev.userId != userId) {
-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
-        }
-    }
+    /**
+     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
+     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
+     */
+    private fun requireOwned(userId: String, deviceId: String) =
+        ownershipGuard.requireOwned(userId, deviceId)
 
     private companion object {
         /** 护眼滤镜强度的有效区间：孩子端按此映射遮罩透明度，两端必须同源。 */

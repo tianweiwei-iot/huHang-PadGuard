@@ -23,7 +23,7 @@ class ParentMonitorController(
 
     @GetMapping("/{deviceId}/location")
     fun location(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
-        ApiResponse.ok(geofenceService.currentLocation(deviceId))
+        ApiResponse.ok(geofenceService.currentLocation(userId, deviceId))
 
     /**
      * 家长点"立即定位"：下发 LOCATE 指令，让端上马上补采一次位置。
@@ -103,19 +103,19 @@ class ParentLocationController(private val geofenceService: GeofenceService) {
 
     @GetMapping("/{deviceId}/current")
     fun current(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
-        ApiResponse.ok(geofenceService.currentLocation(deviceId))
+        ApiResponse.ok(geofenceService.currentLocation(userId, deviceId))
 
     @GetMapping("/{deviceId}/geofence")
     fun geofence(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
-        ApiResponse.ok(geofenceService.getGeofence(deviceId))
+        ApiResponse.ok(geofenceService.getGeofence(userId, deviceId))
 
     @PutMapping("/{deviceId}/geofence")
     fun updateGeofence(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: GeofenceDto) =
-        ApiResponse.ok(geofenceService.updateGeofence(deviceId, req))
+        ApiResponse.ok(geofenceService.updateGeofence(userId, deviceId, req))
 
     @GetMapping("/{deviceId}/track")
     fun track(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestParam(required = false, defaultValue = "200") limit: Int) =
-        ApiResponse.ok(geofenceService.trackHistory(deviceId, limit))
+        ApiResponse.ok(geofenceService.trackHistory(userId, deviceId, limit))
 }
 
 // ==================== 策略扩展（时段/应用/上网/模板） ====================

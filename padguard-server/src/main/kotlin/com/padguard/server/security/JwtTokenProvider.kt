@@ -75,10 +75,27 @@ class JwtTokenProvider(
         .signWith(key)
         .compact()
 
-    fun parseUserId(token: String): String =
-        Jwts.parser().verifyWith(key).build().parseSignedClaims(token).payload.subject
+    /**
+     * 按令牌类型解析。三类令牌（家长 access / refresh、管理员）用同一密钥签发，
+     * 仅靠 typ 声明区分 —— 此前 parseUserId 只验签不验 typ，导致：
+     * 30 天的 refresh token 可当 access token 调全部业务接口；
+     * access token 可被拿去无限续期；管理员令牌可通过家长 WS 握手。
+     * 现在调用方必须声明自己期望的令牌类型，类型不符一律拒绝。
+     */
+    fun parseAccessToken(token: String): String = parseWithTyp(token, "access")
 
-    fun isValid(token: String): Boolean = runCatching { parseUserId(token) }.isSuccess
+    fun parseRefreshToken(token: String): String = parseWithTyp(token, "refresh")
+
+    fun parseAdminToken(token: String): String = parseWithTyp(token, "admin_access")
+
+    private fun parseWithTyp(token: String, expectedTyp: String): String {
+        val claims = Jwts.parser().verifyWith(key).build().parseSignedClaims(token).payload
+        val typ = claims["typ"] as? String
+        if (typ != expectedTyp) {
+            throw io.jsonwebtoken.JwtException("token typ mismatch: expected=$expectedTyp actual=$typ")
+        }
+        return claims.subject
+    }
 
     /**
      * 签发管理员令牌。与家长令牌用同一密钥，但带 `scope=admin` 声明，

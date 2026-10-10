@@ -60,6 +60,8 @@ class AuthServiceTest {
         override fun countByUserId(userId: String) = table.values.count { it.userId == userId }.toLong()
         override fun countByOnlineStatus(onlineStatus: String) = table.values.count { it.onlineStatus == onlineStatus }.toLong()
         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
+        override fun findByLastActiveAtGreaterThan(since: Long) =
+            table.values.filter { (it.lastActiveAt ?: 0L) > since }
     }
 
     private fun fixture(): Triple<AuthService, FakeUserRepo, FakeSubRepo> {

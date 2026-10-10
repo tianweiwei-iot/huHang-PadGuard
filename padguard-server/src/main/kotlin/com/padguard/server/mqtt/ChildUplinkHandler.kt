@@ -94,8 +94,31 @@ class ChildUplinkHandler(
         }
     }
 
+    /**
+     * ack 状态机（S6）。三条硬约束：
+     *
+     * 1. **双键匹配**：按 msgId + deviceId 查指令。只按 msgId 查的话，任何知道别人 msgId
+     *    的设备都能伪造回执（MQTT 上行无来源校验），把别人的指令改成 SUCCESS。
+     * 2. **白名单**：只接受孩子端契约 [com.padguard.core.data.model.AckStatus] 定义过的
+     *    5 种状态（SUCCESS/FAILED/UNSUPPORTED/DUPLICATED/REJECTED）+ 服务端 EXPIRED 之外的
+     *    任意垃圾值一律丢弃，避免脏状态进库后家长端轮询逻辑失明。
+     * 3. **单向流转**：终态（SUCCESS/UNSUPPORTED/DUPLICATED/REJECTED/EXPIRED）不可再被覆盖。
+     *    EXPIRED 是服务端 sweeper 判定的最终结论，之后才慢悠悠到达的回执不能"复活"指令；
+     *    FAILED 不算终态 —— 孩子端 FAILED 会带 retryCount<3 重试，允许 FAILED -> SUCCESS 升级。
+     */
     private fun applyAck(deviceId: String, ack: AckPacket) {
-        val cmd = commandRepository.findByMsgId(ack.msgId) ?: return
+        val cmd = commandRepository.findByMsgIdAndDeviceId(ack.msgId, deviceId) ?: run {
+            log.warn("ack dropped: msgId={} not found on device {}", ack.msgId, deviceId)
+            return
+        }
+        if (ack.status !in ACK_ALLOWED_STATUSES) {
+            log.warn("ack dropped: msgId={} illegal status={}", ack.msgId, ack.status)
+            return
+        }
+        if (cmd.status in ACK_TERMINAL_STATUSES) {
+            log.info("ack ignored: msgId={} already terminal status={}", ack.msgId, cmd.status)
+            return
+        }
         cmd.status = ack.status
         cmd.executedAt = ack.executedAt
         // P0-5：回执里的错误码 / 描述一并落库，家长端才能看到"指令为什么没生效"。
@@ -111,6 +134,14 @@ class ChildUplinkHandler(
                 "msgId" to ack.msgId, "status" to ack.status
             ))
         }
+    }
+
+    companion object {
+        /** 孩子端契约 AckStatus 全集（护航成长 core/data Command.kt:156） */
+        val ACK_ALLOWED_STATUSES = setOf("SUCCESS", "FAILED", "UNSUPPORTED", "DUPLICATED", "REJECTED")
+
+        /** 终态：一旦到达不可回退。FAILED 可重试所以不在内；EXPIRED 是服务端 sweeper 结论。 */
+        val ACK_TERMINAL_STATUSES = setOf("SUCCESS", "UNSUPPORTED", "DUPLICATED", "REJECTED", "EXPIRED")
     }
 
     private fun handleHeartbeat(deviceId: String, json: String) {
@@ -142,18 +173,33 @@ class ChildUplinkHandler(
         val fresh = candidates.filter { it.eventId !in existing }
         if (fresh.isEmpty()) return 0 to events.size
 
-        deviceEventRepository.saveAll(fresh.map { ev ->
-            DeviceEvent(
-                id = UUID.randomUUID().toString(), deviceId = deviceId, eventId = ev.eventId,
-                type = ev.type, level = ev.level, timestamp = ev.timestamp,
-                detailJson = objectMapper.writeValueAsString(ev.detail ?: emptyMap<String, Any?>())
-            )
-        })
+        // S8：批量写入；并发上报同一 eventId 撞 unique 约束时降级为逐行 ON CONFLICT DO NOTHING。
+        // 告警与 WS 推送只作用于**真正落库**的事件，保持「去重作用在整条链路」的语义不变。
+        val inserted = try {
+            deviceEventRepository.saveAll(fresh.map { ev ->
+                DeviceEvent(
+                    id = UUID.randomUUID().toString(), deviceId = deviceId, eventId = ev.eventId,
+                    type = ev.type, level = ev.level, timestamp = ev.timestamp,
+                    detailJson = objectMapper.writeValueAsString(ev.detail ?: emptyMap<String, Any?>())
+                )
+            })
+            fresh
+        } catch (e: org.springframework.dao.DataIntegrityViolationException) {
+            log.warn("device_events 批量写入撞唯一约束（并发上报竞态），降级逐行 upsert: {}", e.message)
+            fresh.filter { ev ->
+                deviceEventRepository.insertIgnoreConflict(
+                    id = UUID.randomUUID().toString(), deviceId = deviceId, eventId = ev.eventId,
+                    type = ev.type, level = ev.level,
+                    detailJson = objectMapper.writeValueAsString(ev.detail ?: emptyMap<String, Any?>()),
+                    timestamp = ev.timestamp
+                ) > 0
+            }
+        }
 
         // 高危事件落告警并推 WS。
         // 去重作用在**整条链路**上，而不是只挡住落库：MQTT QoS1 与 HTTP 重试都会让同一条
         // 事件重复到达，只挡落库却照常告警的话，一次重传就给家长推一条重复告警。
-        fresh.forEach { ev ->
+        inserted.forEach { ev ->
             alertService.createFromEvent(deviceId, ev.type, ev.level, ev.detail)
             deviceService.getUserId(deviceId)?.let { userId ->
                 webSocketPush.pushToUser(userId, mapOf(
@@ -162,7 +208,7 @@ class ChildUplinkHandler(
                 ))
             }
         }
-        return fresh.size to (events.size - fresh.size)
+        return inserted.size to (events.size - inserted.size)
     }
 
     private fun handleStatus(deviceId: String, json: String) {

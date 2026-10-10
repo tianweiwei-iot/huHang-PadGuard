@@ -106,7 +106,7 @@ class AuthService(
 
     fun refresh(refreshToken: String): TokenResponse {
         val userId = try {
-            jwt.parseUserId(refreshToken)
+            jwt.parseRefreshToken(refreshToken)
         } catch (e: Exception) {
             throw BizException(ParentErr.UNAUTHORIZED, "refresh 失效", Audience.PARENT)
         }

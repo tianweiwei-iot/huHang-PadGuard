@@ -21,6 +21,11 @@ dependencies {
     runtimeOnly("com.h2database:h2")
     implementation("org.springframework.security:spring-security-crypto:6.3.1")
 
+    // Resilience4j（S14 限流）：只用核心 ratelimiter 模块。
+    // 动态 key（按 IP / 账号）只能编程式经 Registry 管理，注解式 starter 不适用；
+    // 核心模块即 Resilience4j 官方对动态场景的标准用法。
+    implementation("io.github.resilience4j:resilience4j-ratelimiter:2.2.0")
+
     // JWT (parent auth) — jjwt 0.12.x
     implementation("io.jsonwebtoken:jjwt-api:0.12.6")
     runtimeOnly("io.jsonwebtoken:jjwt-impl:0.12.6")

@@ -26,8 +26,15 @@ import java.util.UUID
  * 开发用"孩子端模拟器"：无真实被管控端时，自动订阅下行指令并回执 ack，
  * 便于在本地演示"绑定 -> 锁屏 -> ack 回显"主链路闭环。
  * 由 padguard.dev.child-simulator=true 开启；生产环境务必关闭。
+ *
+ * ## 双保险门控
+ * 仅靠配置开关不够：配置文件随安装包分发，生产环境误开 = 模拟器订阅**全租户所有设备**
+ * 的下行指令并抢先回 SUCCESS，指令状态机被彻底污染（家长看到"执行成功"，真实设备根本
+ * 没执行）。因此再加 @Profile 限制 —— 组件只在 local/dev 装配，生产 profile 下即使开关
+ * 被误配，该 Bean 也根本不存在。
  */
 @Component
+@org.springframework.context.annotation.Profile("local", "dev")
 class DevChildSimulator(
     @Value("\${padguard.mqtt.broker-url}") private val brokerUrl: String,
     @Value("\${padguard.mqtt.tenant:default}") private val tenant: String,

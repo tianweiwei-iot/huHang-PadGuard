@@ -9,6 +9,7 @@ import com.padguard.server.dto.CommandPacket
 import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.CommandRepository
 import com.padguard.server.repository.DeviceRepository
+import com.padguard.server.security.DeviceOwnershipGuard
 import com.padguard.server.service.AuditAction
 import com.padguard.server.service.AuditService
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -29,7 +30,8 @@ class CommandService(
     private val mqttGateway: MqttGateway,
     private val objectMapper: ObjectMapper,
     private val expiredCommandSweeper: ExpiredCommandSweeper,
-    private val auditService: AuditService
+    private val auditService: AuditService,
+    private val ownershipGuard: DeviceOwnershipGuard
 ) {
     /**
      * 家长端下发指令：构造指令包(HMAC 签名) -> 落库 -> 经 MQ/M轮询下发。
@@ -74,9 +76,17 @@ class CommandService(
         return CommandDto(msgId, type, "PENDING", strPayload, now, null)
     }
 
-    fun getCommand(msgId: String): CommandDto {
+    /**
+     * 查询指令状态（S16 归属校验）。
+     *
+     * 指令 payload 里可能带设备信息，msgId 可枚举猜测；无归属校验时任何家长
+     * 能凭 msgId 查到别人设备的指令内容。先按 msgId 查到指令，再经统一归属闸门
+     * 校验指令所属设备确属当前用户，否则按"不存在"处理（不泄露存在性）。
+     */
+    fun getCommand(userId: String, msgId: String): CommandDto {
         val cmd = commandRepository.findByMsgId(msgId)
             ?: throw BizException(ParentErr.PARAM_ERROR, "指令不存在", Audience.PARENT)
+        ownershipGuard.requireOwned(userId, cmd.deviceId)
         val payloadMap = cmd.payloadJson?.let {
             runCatching { objectMapper.readValue(it, Map::class.java) as Map<String, Any?> }.getOrNull()
         }

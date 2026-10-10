@@ -133,7 +133,10 @@ class AlertService(
             "BLOCKED_URL_ACCESS" to ("访问被拦截网址" to "尝试访问被屏蔽的网址"),
             "TIME_LIMIT_EXCEEDED" to ("使用时长超限" to "今日使用时长已超过限制"),
             "PERMISSION_REVOKED" to ("权限被撤销" to "管控所需权限被撤销"),
-            "POLICY_APPLY_FAILED" to ("策略应用失败" to "部分管控策略未能生效")
+            "POLICY_APPLY_FAILED" to ("策略应用失败" to "部分管控策略未能生效"),
+            "ACCESSIBILITY_DISABLED" to ("无障碍服务被关闭" to "操作闸门的系统级拦截已失效，可能被人为关闭"),
+            "USAGE_ACCESS_LOST" to ("使用情况权限被关闭" to "使用情况访问权限被关闭，应用管控与时长统计将失效"),
+            "GUARD_PASSWORD_NOT_SET" to ("操作密码尚未设置" to "管控设备未设置操作密码，设置页无法验证家长身份，请尽快补设")
         )
     }
 }

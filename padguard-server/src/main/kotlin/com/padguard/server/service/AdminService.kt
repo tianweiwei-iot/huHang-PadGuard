@@ -168,7 +168,10 @@ class AdminService(
 
     // ============================ 仪表盘 ============================
 
-    fun dashboard(): DashboardResponse {
+    fun dashboard(adminId: String): DashboardResponse {
+        // S13：仪表盘是跨领域聚合（含服务器状态），统一挂 server:read。
+        // 默认五个内置角色的权限矩阵均含 server:read，不受影响；自定义角色需在 RBAC 矩阵中显式勾选。
+        adminPerm.require(adminId, "server", "read")
         val users = userRepository.findAll()
         val parentsTotal = users.size.toLong()
         val parentsActive = users.count { (it.status ?: "active") == "active" }.toLong()
@@ -191,7 +194,7 @@ class AdminService(
 
         val alertsOpen = alertRepository.countByStatus("ACTIVE")
 
-        val recent = audit(null).take(6)
+        val recent = auditInternal(null).take(6)
 
         return DashboardResponse(
             kpis = Kpis(
@@ -250,7 +253,9 @@ class AdminService(
 
     // ============================ 家长账号 ============================
 
-    fun listParents(keyword: String?, status: String?, plan: String?): List<ParentRow> {
+    fun listParents(adminId: String, keyword: String?, status: String?, plan: String?): List<ParentRow> {
+        // S13：读操作同样过 RBAC 闸门 —— 列表里含家长手机号等敏感数据，只读角色之外不应可见
+        adminPerm.require(adminId, "parents", "read")
         var users = userRepository.findAll()
         if (!status.isNullOrBlank()) users = users.filter { (it.status ?: "active") == status }
         if (!plan.isNullOrBlank()) {
@@ -283,7 +288,8 @@ class AdminService(
         )
     }
 
-    fun parentDetail(id: String): ParentDetail? {
+    fun parentDetail(adminId: String, id: String): ParentDetail? {
+        adminPerm.require(adminId, "parents", "read")
         val u = userRepository.findById(id).orElse(null) ?: return null
         val sub = subscriptionRepository.findByUserId(id)
         val devices = deviceRepository.findByUserId(id).map {
@@ -385,7 +391,8 @@ class AdminService(
 
     // ============================ 设备 ============================
 
-    fun listDevices(keyword: String?, online: String?): List<DeviceRow> {
+    fun listDevices(adminId: String, keyword: String?, online: String?): List<DeviceRow> {
+        adminPerm.require(adminId, "devices", "read")
         val users = userRepository.findAll()
         val userMap = users.associateBy { it.id }
         var devs = deviceRepository.findAll()
@@ -439,14 +446,18 @@ class AdminService(
 
     // ============================ 订阅计费 ============================
 
-    fun listPlans(): List<AdminPlanDto> = billingService.plans().map { p ->
-        AdminPlanDto(
-            id = p.key, name = p.label, priceFen = p.amountFen, deviceLimit = p.deviceLimit,
-            features = PLAN_FEATURES[p.key] ?: emptyList()
-        )
+    fun listPlans(adminId: String): List<AdminPlanDto> {
+        adminPerm.require(adminId, "billing", "read")
+        return billingService.plans().map { p ->
+            AdminPlanDto(
+                id = p.key, name = p.label, priceFen = p.amountFen, deviceLimit = p.deviceLimit,
+                features = PLAN_FEATURES[p.key] ?: emptyList()
+            )
+        }
     }
 
-    fun listSubscriptions(status: String?): List<SubRow> {
+    fun listSubscriptions(adminId: String, status: String?): List<SubRow> {
+        adminPerm.require(adminId, "billing", "read")
         var subs = subscriptionRepository.findAllByOrderByExpiredAtDesc()
         if (!status.isNullOrBlank()) subs = subs.filter { subStatusLower(it.status) == status.lowercase() }
         val userMap = userRepository.findAll().associateBy { it.id }
@@ -461,7 +472,8 @@ class AdminService(
         }
     }
 
-    fun listOrders(status: String?): List<OrderRow> {
+    fun listOrders(adminId: String, status: String?): List<OrderRow> {
+        adminPerm.require(adminId, "billing", "read")
         var orders = paymentOrderRepository.findAllByOrderByCreatedAtDesc()
         if (!status.isNullOrBlank()) orders = orders.filter { orderStatusLower(it.status) == status.lowercase() }
         val userMap = userRepository.findAll().associateBy { it.id }
@@ -528,11 +540,17 @@ class AdminService(
         return mapOf("ok" to true)
     }
 
-    fun revenue(): List<RevenueMonth> = lastMonthsRevenue(12)
+    fun revenue(adminId: String): List<RevenueMonth> {
+        adminPerm.require(adminId, "billing", "read")
+        return lastMonthsRevenue(12)
+    }
 
     // ============================ RBAC ============================
 
-    fun listRoles() = adminPerm.listRoles()
+    fun listRoles(adminId: String): List<AdminRoles.RoleDef> {
+        adminPerm.require(adminId, "rbac", "read")
+        return adminPerm.listRoles()
+    }
 
     @Transactional
     fun saveRole(adminId: String, role: AdminRolePrivilegesDto): Map<String, Any> {
@@ -542,7 +560,10 @@ class AdminService(
         return mapOf("ok" to true)
     }
 
-    fun listAdmins(): List<AdminDto> = adminRepository.findAll().map { toAdminDto(it) }
+    fun listAdmins(adminId: String): List<AdminDto> {
+        adminPerm.require(adminId, "rbac", "read")
+        return adminRepository.findAll().map { toAdminDto(it) }
+    }
 
     @Transactional
     fun createAdmin(adminId: String, req: AdminCreateRequest): Map<String, Any> {
@@ -641,7 +662,8 @@ class AdminService(
 
     // ============================ 服务端监控 ============================
 
-    fun serverMetrics(): ServerMetrics {
+    fun serverMetrics(adminId: String): ServerMetrics {
+        adminPerm.require(adminId, "server", "read")
         val rt = Runtime.getRuntime()
         val usedMb = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024)
         val maxMb = rt.maxMemory() / (1024 * 1024)
@@ -666,7 +688,13 @@ class AdminService(
 
     // ============================ 审计 / 告警 ============================
 
-    fun audit(area: String?): List<AuditItem> {
+    /** 对外审计查询：过 audit:read 闸门后委托内部实现（S13 读闸门） */
+    fun audit(adminId: String, area: String?): List<AuditItem> {
+        adminPerm.require(adminId, "audit", "read")
+        return auditInternal(area)
+    }
+
+    private fun auditInternal(area: String?): List<AuditItem> {
         val admins = adminRepository.findAll().associateBy { it.id }
         val users = userRepository.findAll().associateBy { it.id }
         val rows = auditLogRepository.findAllByOrderByCreatedAtDesc().take(200)
@@ -716,7 +744,9 @@ class AdminService(
         else -> "" to action
     }
 
-    fun alerts(): List<AlertItem> {
+    fun alerts(adminId: String): List<AlertItem> {
+        // 告警归属 audit 领域（与 closeAlert 的 audit:write 同域），读侧只需 audit:read
+        adminPerm.require(adminId, "audit", "read")
         val users = userRepository.findAll().associateBy { it.id }
         return alertRepository.findAll().map { a ->
             val level = when (a.level.uppercase()) {
@@ -747,7 +777,8 @@ class AdminService(
 
     // ============================ 系统设置 ============================
 
-    fun settings(): AdminSettingsDto {
+    fun settings(adminId: String): AdminSettingsDto {
+        adminPerm.require(adminId, "settings", "read")
         val store = loadSettingsStore()
         val plans = billingService.plans().map { p ->
             val price = store.planPrices[p.key] ?: p.amountFen
@@ -777,7 +808,7 @@ class AdminService(
         )
         systemSettingRepository.save(SystemSetting("admin.settings", objectMapper.writeValueAsString(next)))
         auditService.record(adminId, null, AdminAudit.SETTINGS_WRITE, targetType = "settings", targetId = "admin.settings", detail = "修改系统设置")
-        return settings()
+        return settings(adminId)
     }
 
     private data class SettingsStore(

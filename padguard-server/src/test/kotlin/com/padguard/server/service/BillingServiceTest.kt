@@ -72,6 +72,7 @@ class BillingServiceTest {
         override fun findByUserId(userId: String): List<Device> = emptyList()
         override fun findByDeviceSn(deviceSn: String): List<Device> = emptyList()
         override fun countByOnlineStatus(onlineStatus: String): Long = 0L
+        override fun findByLastActiveAtGreaterThan(since: Long): List<Device> = emptyList()
     }
 
     /** 一套内存依赖，各用例独立构造。 */
@@ -430,7 +431,17 @@ class BillingServiceTest {
     fun `mock pay is disabled by default so production cannot be bypassed`() {
         val f = service(mockPayEnabled = false)
         // 生产环境若开着模拟支付，任何人都能免费续费
-        assertThrows(BizException::class.java) { f.svc.mockPay(f.order("MONTHLY")) }
+        assertThrows(BizException::class.java) { f.svc.mockPay("parent-1", f.order("MONTHLY")) }
+    }
+
+    @Test
+    fun `mock pay rejects orders belonging to another user (s16 ownership)`() {
+        val f = service(mockPayEnabled = true)
+        val orderNo = f.order("MONTHLY") // 订单归属 parent-1
+        val ex = assertThrows(BizException::class.java) { f.svc.mockPay("someone-else", orderNo) }
+        assertEquals(com.padguard.server.common.ParentErr.DEVICE_NOT_OWNED, ex.code, "他人订单不得被替付")
+        val paid = f.svc.mockPay("parent-1", orderNo)
+        assertEquals(true, paid.active, "归属人本人 mock 支付应正常开通")
     }
 
     // ------------------------------------------------------------ 支付回调验签

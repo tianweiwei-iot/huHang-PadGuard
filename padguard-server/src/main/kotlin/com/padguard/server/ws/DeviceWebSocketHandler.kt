@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component
 @Component
 class DeviceWebSocketHandler(
     private val jwt: JwtTokenProvider,
+    private val users: com.padguard.server.repository.UserRepository,
     private val webSocketPush: WebSocketPushService
 ) : WebSocketHandler {
 
@@ -20,8 +21,13 @@ class DeviceWebSocketHandler(
 
     override fun afterConnectionEstablished(session: WebSocketSession) {
         val token = session.uri?.query?.let { parseToken(it) }
+        // 必须是 access token（refresh/管理员令牌不得建立家长推送通道），
+        // 且账号必须真实存在 —— 与 ParentAuthInterceptor 的"幽灵账号"防护同口径。
         val userId = if (token != null) {
-            try { jwt.parseUserId(token) } catch (e: Exception) { null }
+            try {
+                val parsed = jwt.parseAccessToken(token)
+                if (users.existsById(parsed)) parsed else null
+            } catch (e: Exception) { null }
         } else null
 
         if (userId == null) {

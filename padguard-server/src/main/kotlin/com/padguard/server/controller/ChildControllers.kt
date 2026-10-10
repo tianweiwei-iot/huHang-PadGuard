@@ -4,6 +4,7 @@ import com.padguard.server.common.DeviceApiResponse
 import com.padguard.server.dto.*
 import com.padguard.server.service.*
 import com.padguard.server.mqtt.ChildUplinkHandler
+import com.padguard.server.security.RateLimit
 import org.springframework.http.MediaType
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.context.request.async.DeferredResult
@@ -14,15 +15,29 @@ import org.springframework.web.multipart.MultipartFile
 class ChildDeviceController(
     private val deviceService: DeviceService,
     private val policyService: PolicyService,
-    private val policyExtensionService: PolicyExtensionService
+    private val policyExtensionService: PolicyExtensionService,
+    private val rateLimit: RateLimit
 ) {
     @PostMapping("/bind")
-    fun bind(@RequestBody req: BindRequest) = DeviceApiResponse.ok(deviceService.bindChild(req))
+    fun bind(@RequestBody req: BindRequest, httpRequest: jakarta.servlet.http.HttpServletRequest) =
+        DeviceApiResponse.ok(
+            run {
+                // 绑定码可匿名穷举，限流必须先于任何查询（S14）
+                rateLimit.require("bind", httpRequest, req.bindCode, com.padguard.server.common.Audience.CHILD)
+                deviceService.bindChild(req)
+            }
+        )
 
     /** 账号密码绑定：孩子端输入家长手机号 + 密码，免配对码完成绑定（方式④） */
     @PostMapping("/bind-by-account")
-    fun bindByAccount(@RequestBody req: BindByAccountRequest) =
-        DeviceApiResponse.ok(deviceService.bindChildByAccount(req))
+    fun bindByAccount(@RequestBody req: BindByAccountRequest, httpRequest: jakarta.servlet.http.HttpServletRequest) =
+        DeviceApiResponse.ok(
+            run {
+                // 家长密码可匿名穷举，与登录同型爆破面（S14）
+                rateLimit.require("bind_by_account", httpRequest, req.phone, com.padguard.server.common.Audience.CHILD)
+                deviceService.bindChildByAccount(req)
+            }
+        )
 
     @GetMapping("/time")
     fun time() = DeviceApiResponse.ok(mapOf("serverTime" to System.currentTimeMillis()))

@@ -39,7 +39,16 @@ class DataInitializer(
     @EventListener(ApplicationReadyEvent::class)
     fun seed() {
         seedParentAccount()
-        seedTestAccount()
+        if (env.activeProfiles.contains(PROFILE_LOCAL)) {
+            // 测试账号（PERMANENT 永久订阅）只允许在 local 联调环境播种。
+            // 此前它对所有环境无条件生效，等于随安装包分发一个永久全功能账号，
+            // 密码还随源码/安装包分发 —— 与演示账号属同一类漏洞，收口到同一处理口径。
+            seedTestAccount()
+        } else {
+            // 已部署库里若已存在仍在用出厂弱口令的测试账号，强制重置 ——
+            // 光"跳过播种"挡不住存量库（与 seedParentAccount 对 admin123 的处理同口径）。
+            resetTestAccountIfPresent()
+        }
         seedPolicyTemplates()
         runCatching { contentFilterService.seedDictionaries() }
             .onFailure { log.warn("seed content dictionaries failed: {}", it.message) }
@@ -76,11 +85,20 @@ class DataInitializer(
         }
     }
 
+    /** 正式部署：识别仍在使用出厂弱口令的测试账号并强制重置（与演示账号同口径） */
+    private fun resetTestAccountIfPresent() {
+        val existing = userRepository.findByPhone(TEST_ACCOUNT_PHONE) ?: return
+        if (!Passwords.matches(TEST_ACCOUNT_PASSWORD, existing.passwordHash)) return
+        val password = randomPassword()
+        userRepository.save(existing.apply { passwordHash = Passwords.encode(password) })
+        writeInitialPasswordFile(existing.phone, password, forceReset = true)
+    }
+
     /** 为已有账号强制重置口令并落盘，返回新明文口令。 */
     private fun seedInitialAdminPassword(user: User): String {
         val password = randomPassword()
         userRepository.save(user)
-        writeInitialPasswordFile(password, forceReset = true)
+        writeInitialPasswordFile(user.phone, password, forceReset = true)
         return password
     }
 
@@ -114,7 +132,7 @@ class DataInitializer(
                 createdAt = System.currentTimeMillis()
             )
         )
-        writeInitialPasswordFile(password, forceReset = false)
+        writeInitialPasswordFile(DEFAULT_ADMIN_PHONE, password, forceReset = false)
     }
 
     /**
@@ -124,14 +142,14 @@ class DataInitializer(
      * 拿不到密码就进不去家长端，系统等于锁死。而口令不能硬编码（那正是本次要修的漏洞），
      * 所以"随机生成 + 落到显眼的文件 + 日志提示路径"是唯一既安全又可用的组合。
      */
-    private fun writeInitialPasswordFile(password: String, forceReset: Boolean) {
+    private fun writeInitialPasswordFile(phone: String, password: String, forceReset: Boolean) {
         val file = File(INITIAL_PASSWORD_FILE)
         runCatching {
             file.writeText(
                 """
-                PadGuard 初始家长账号
+                PadGuard 初始账号口令
                 ============================
-                手机号：$DEFAULT_ADMIN_PHONE
+                手机号：$phone
                 初始密码：$password
 
                 ${if (forceReset) "检测到该账号仍在使用出厂弱口令，已强制重置为上述随机口令。" else ""}
@@ -141,8 +159,8 @@ class DataInitializer(
             )
         }.onFailure { log.error("写入初始密码文件失败: {}", it.message) }
         log.warn(
-            "家长账号 phone={} 的口令已写入 {}（请登录后立即修改该文件并删除）",
-            DEFAULT_ADMIN_PHONE, file.absolutePath
+            "账号 phone={} 的口令已写入 {}（请登录后立即修改该文件并删除）",
+            phone, file.absolutePath
         )
     }
 
@@ -185,7 +203,7 @@ class DataInitializer(
                 updatedAt = now
             )
         )
-        log.warn("已播种测试账号：手机号={} / 密码={} / 永久会员（请在验收后尽快修改密码）", phone, TEST_ACCOUNT_PASSWORD)
+        log.warn("已播种测试账号：手机号={} / 永久会员（仅限 local 联调环境）", phone)
     }
 
     /** 去掉了 0/O、1/l/I 等易看错的字符，避免家长照抄时反复失败 */

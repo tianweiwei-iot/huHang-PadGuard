@@ -12,6 +12,7 @@ import com.padguard.server.dto.TrackPointDto
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.GeofenceRepository
 import com.padguard.server.repository.LocationTrackRepository
+import com.padguard.server.security.DeviceOwnershipGuard
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 import java.util.UUID
@@ -22,11 +23,11 @@ class GeofenceService(
     private val deviceRepository: DeviceRepository,
     private val locationTrackRepository: LocationTrackRepository,
     private val geofenceRepository: GeofenceRepository,
-    private val alertService: AlertService
+    private val alertService: AlertService,
+    private val ownershipGuard: DeviceOwnershipGuard
 ) {
-    fun currentLocation(deviceId: String): LocationDto {
-        val dev = deviceRepository.findById(deviceId).orElse(null)
-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+    fun currentLocation(userId: String, deviceId: String): LocationDto {
+        val dev = ownershipGuard.requireOwned(userId, deviceId)
         val latest = locationTrackRepository
             .findByDeviceIdOrderByTsDesc(deviceId, PageRequest.of(0, 1)).firstOrNull()
         val lat = latest?.lat ?: dev.latitude ?: 0.0
@@ -37,8 +38,9 @@ class GeofenceService(
         )
     }
 
-    fun trackHistory(deviceId: String, limit: Int): List<TrackPointDto> =
-        locationTrackRepository
+    fun trackHistory(userId: String, deviceId: String, limit: Int): List<TrackPointDto> {
+        ownershipGuard.requireOwned(userId, deviceId)
+        return locationTrackRepository
             .findByDeviceIdOrderByTsDesc(deviceId, PageRequest.of(0, limit.coerceAtLeast(1)))
             .map {
                 TrackPointDto(
@@ -46,8 +48,10 @@ class GeofenceService(
                     accuracy = it.accuracy?.toFloat(), timestamp = it.ts ?: 0
                 )
             }
+    }
 
-    fun getGeofence(deviceId: String): GeofenceDto {
+    fun getGeofence(userId: String, deviceId: String): GeofenceDto {
+        ownershipGuard.requireOwned(userId, deviceId)
         val g = geofenceRepository.findById(deviceId).orElse(null)
         return if (g != null) GeofenceDto(
             deviceId = deviceId, enabled = g.enabled, name = g.name,
@@ -59,7 +63,8 @@ class GeofenceService(
         )
     }
 
-    fun updateGeofence(deviceId: String, req: GeofenceDto): GeofenceDto {
+    fun updateGeofence(userId: String, deviceId: String, req: GeofenceDto): GeofenceDto {
+        ownershipGuard.requireOwned(userId, deviceId)
         val g = geofenceRepository.findById(deviceId).orElse(Geofence(deviceId = deviceId))
         g.enabled = req.enabled
         g.name = req.name
@@ -68,7 +73,7 @@ class GeofenceService(
         g.radiusMeters = req.radiusMeters
         g.alertOnExit = req.alertOnExit
         geofenceRepository.save(g)
-        return getGeofence(deviceId)
+        return getGeofence(userId, deviceId)
     }
 
     /**

@@ -31,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap
 @Service
 class DeviceService(
     private val deviceRepository: DeviceRepository,
+    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
     private val bindCodeService: BindCodeService,
     private val policyService: PolicyService,
     private val webSocketPush: WebSocketPushService,
@@ -180,7 +181,13 @@ class DeviceService(
      *
      * 与 [bindChild] 的唯一区别是归属家长的确认方式（账号密码 vs 一次性绑定码），
      * 设备台账、令牌下发、默认策略等后续逻辑完全复用，避免两套实现漂移。
+     *
+     * 必须整体事务（与 [bindChild] 同口径）：建设备台账 + createDefault 策略 + audit
+     * 要么全成要么全败。注意 @Transactional 必须加在这个**外部入口**上 ——
+     * 若只加在被内部自调用的 bindChildWithUser 上，Spring 同类自调用不走代理，
+     * 事务注解会静默失效（bindChild 路径不受影响：其自身注解已覆盖整个流程）。
      */
+    @Transactional
     fun bindChildByAccount(req: com.padguard.server.dto.BindByAccountRequest): BindResult {
         val user = userRepository.findByPhone(req.phone.trim())
             ?: throw BizException(ChildErr.TOKEN_INVALID, "家长账号不存在", Audience.CHILD)
@@ -439,14 +446,12 @@ class DeviceService(
         deviceRepository.save(dev)
     }
 
-    private fun requireOwned(userId: String, deviceId: String): Device {
-        val dev = deviceRepository.findById(deviceId).orElse(null)
-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
-        if (dev.userId != userId) {
-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
-        }
-        return dev
-    }
+    /**
+     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
+     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
+     */
+    private fun requireOwned(userId: String, deviceId: String): Device =
+        ownershipGuard.requireOwned(userId, deviceId)
 
     fun applyHeartbeatOnline(deviceId: String) {
         deviceRepository.findById(deviceId).ifPresent { dev ->

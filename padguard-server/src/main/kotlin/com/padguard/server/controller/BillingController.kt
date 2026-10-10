@@ -78,7 +78,7 @@ class BillingController(
     fun mockPay(
         @RequestAttribute("userId") userId: String,
         @PathVariable orderNo: String
-    ) = ApiResponse.ok(billingService.mockPay(orderNo))
+    ) = ApiResponse.ok(billingService.mockPay(userId, orderNo))
 
     /**
      * 支付回调统一入口（无鉴权：支付网关的异步回调带不来家长 JWT，验签是它的唯一信任依据）。

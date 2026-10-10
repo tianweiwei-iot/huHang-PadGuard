@@ -34,6 +34,7 @@ import jakarta.annotation.PostConstruct
 @Service
 class ContentFilterService(
     private val deviceRepository: DeviceRepository,
+    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
     private val deviceSettingRepository: DeviceSettingRepository,
     private val urlCategoryRepository: UrlCategoryRepository,
     private val sensitiveWordRepository: SensitiveWordRepository,
@@ -176,13 +177,12 @@ class ContentFilterService(
     private fun deviceSettingOf(deviceId: String): DeviceSetting =
         deviceSettingRepository.findById(deviceId).orElse(DeviceSetting(deviceId = deviceId))
 
-    private fun requireOwned(userId: String, deviceId: String) {
-        val dev = deviceRepository.findById(deviceId).orElse(null)
-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
-        if (dev.userId != userId) {
-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
-        }
-    }
+    /**
+     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
+     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
+     */
+    private fun requireOwned(userId: String, deviceId: String) =
+        ownershipGuard.requireOwned(userId, deviceId)
 
     private fun now() = System.currentTimeMillis()
 

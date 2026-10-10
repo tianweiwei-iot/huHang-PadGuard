@@ -64,6 +64,10 @@ class WebConfig(
                 // 注册必须放行：注册是「无 token 也能调」的公开入口，否则新用户永远注册不了。
                 // 登录/注册是仅有的两个公开端点，其余 /v1/auth/**（如 logout）仍要求已登录。
                 "/v1/auth/register",
+                // 支付回调必须放行：网关侧服务器-to-服务器调用不带家长 JWT，
+                // 其合法性由 PaymentVerifier 验签保证（BillingController 注释声明的意图，
+                // 此前漏配在本清单 —— 真实渠道回调会被这里 401 掉）。
+                "/v1/billing/notify",
                 "/v1/files/**",
                 // 公开服务器信息端点：客户端绑定引导/信息展示需匿名读取
                 "/v1/server/info",

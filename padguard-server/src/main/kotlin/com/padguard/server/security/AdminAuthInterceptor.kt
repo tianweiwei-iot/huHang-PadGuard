@@ -37,7 +37,7 @@ class AdminAuthInterceptor(
             throw BizException(ParentErr.UNAUTHORIZED, "invalid admin token", Audience.PARENT)
         }
         val adminId = try {
-            jwt.parseUserId(token)
+            jwt.parseAdminToken(token)
         } catch (e: Exception) {
             throw BizException(ParentErr.UNAUTHORIZED, "invalid token", Audience.PARENT)
         }

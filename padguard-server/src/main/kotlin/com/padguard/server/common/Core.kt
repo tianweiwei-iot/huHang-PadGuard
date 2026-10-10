@@ -31,6 +31,8 @@ object ParentErr {
     const val DEVICE_LIMIT_EXCEEDED = 4002
     const val ORDER_NOT_FOUND = 4003
     const val ORDER_STATE_INVALID = 4004
+    /** S14 限流：触发频控（登录 / 绑定等爆破面） */
+    const val TOO_MANY_REQUESTS = 1004
     const val SERVER_ERROR = 5001
 }
 
@@ -47,6 +49,8 @@ object ChildErr {
     /** 可绑定设备数已达套餐上限 */
     const val DEVICE_LIMIT_EXCEEDED = 40305
     const val TIME_OUT_OF_SYNC = 40901
+    /** S14 限流：绑定等匿名入口触发频控 */
+    const val TOO_MANY_REQUESTS = 40902
     const val SERVER_ERROR = 50000
 }
 
@@ -119,6 +123,9 @@ class GlobalExceptionHandler {
         //   "已绑定"的假象里（例如服务端换库后设备记录已不存在）。
         val status = when {
             e.audience == Audience.PARENT && e.code == ParentErr.UNAUTHORIZED -> HttpStatus.UNAUTHORIZED
+            // S14 限流：必须是 429，客户端与网关才能识别"稍后重试"语义，重试退避才不会变成立即重打
+            e.code == ParentErr.TOO_MANY_REQUESTS || e.code == ChildErr.TOO_MANY_REQUESTS ->
+                HttpStatus.TOO_MANY_REQUESTS
             // 越权（含后台 RBAC 闸门拒绝、家长端"资源不属于当前用户"）必须落到 403：
             // HTTP 状态码是网关 / 前端拦截器判断成败的首要依据，回 200 会让越权操作被误判为"成功"，
             // 管理端 http() 在 !res.ok 时直接抛错、家长端 ApiDataSource 在 !isSuccessful 时走错误分支——

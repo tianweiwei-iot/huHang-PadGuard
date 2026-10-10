@@ -34,7 +34,7 @@ class ParentAuthInterceptor(
             throw BizException(ParentErr.UNAUTHORIZED, "missing or invalid Authorization", Audience.PARENT)
         }
         val userId = try {
-            jwt.parseUserId(auth.substring(7))
+            jwt.parseAccessToken(auth.substring(7))
         } catch (e: Exception) {
             throw BizException(ParentErr.UNAUTHORIZED, "invalid token", Audience.PARENT)
         }
@@ -74,7 +74,7 @@ class FileAccessInterceptor(
         val auth = request.getHeader("Authorization")
         val token = auth?.takeIf { it.startsWith("Bearer ") }?.substring(7)
         val matchedParent = token
-            ?.let { runCatching { jwt.parseUserId(it) }.getOrNull() }
+            ?.let { runCatching { jwt.parseAccessToken(it) }.getOrNull() }
             ?.takeIf { runCatching { users.existsById(it) }.getOrDefault(false) }
         if (matchedParent != null) {
             request.setAttribute("fileViewerUserId", matchedParent)

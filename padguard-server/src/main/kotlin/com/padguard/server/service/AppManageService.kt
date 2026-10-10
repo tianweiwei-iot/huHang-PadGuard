@@ -43,6 +43,7 @@ import java.util.UUID
 class AppManageService(
     private val fileStorageService: FileStorageService,
     private val deviceRepository: DeviceRepository,
+    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
     private val installedAppRepository: InstalledAppRepository,
     private val appPolicyRepository: AppPolicyRepository,
     private val commandService: CommandService,
@@ -427,13 +428,13 @@ class AppManageService(
 
     // ==================== 工具 ====================
 
-    private fun requireOwned(userId: String, deviceId: String) {
-        val dev = deviceRepository.findById(deviceId).orElse(null)
-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
-        if (dev.userId != userId) {
-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
-        }
-    }
+    /**
+     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现）。
+     * 此前这里是逐 Service 复制的私有副本，复制粘贴模式必然漏网 ——
+     * GeofenceService 正是漏抄的一份，造成位置/围栏全线 IDOR。逻辑现在只存在一份。
+     */
+    private fun requireOwned(userId: String, deviceId: String) =
+        ownershipGuard.requireOwned(userId, deviceId)
 
     private companion object {
         const val SELF_PACKAGE = "com.padguard.child"

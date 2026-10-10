@@ -24,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap
 @Service
 class StatisticsService(
     private val deviceRepository: DeviceRepository,
+    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
     private val usageLogRepository: UsageLogRepository,
     private val deviceEventRepository: DeviceEventRepository,
     private val alertRepository: AlertRepository,
@@ -306,13 +307,12 @@ class StatisticsService(
     private fun parsePayload(log: UsageLog): Map<String, Any?> =
         log.payloadJson?.let { runCatching { objectMapper.readValue(it, Map::class.java) as Map<String, Any?> }.getOrNull() } ?: emptyMap()
 
-    private fun requireOwned(userId: String, deviceId: String) {
-        val dev = deviceRepository.findById(deviceId).orElse(null)
-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
-        if (dev.userId != userId) {
-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
-        }
-    }
+    /**
+     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
+     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
+     */
+    private fun requireOwned(userId: String, deviceId: String) =
+        ownershipGuard.requireOwned(userId, deviceId)
 
     private fun range(days: Int): Pair<Long, Long> {
         val end = LocalDate.now(zone).plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()

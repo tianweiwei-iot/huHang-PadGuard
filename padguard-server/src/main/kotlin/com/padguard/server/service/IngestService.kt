@@ -60,26 +60,40 @@ class IngestService(
         }
 
         val now = System.currentTimeMillis()
-        usageLogRepository.saveAll(
-            fresh.map { item ->
+        // S8：批量写入；若并发上报同一 logId 撞 unique 约束导致整批失败，
+        // 降级为逐行 ON CONFLICT DO NOTHING，只跳过真正已存在的行。
+        val inserted = try {
+            usageLogRepository.saveAll(fresh.map { item ->
                 UsageLog(
                     id = UUID.randomUUID().toString(), deviceId = req.deviceId, logId = item.logId,
                     type = item.type, timestamp = item.timestamp,
                     payloadJson = item.payload?.let { objectMapper.writeValueAsString(it) },
                     receivedAt = now
                 )
+            })
+            fresh
+        } catch (e: org.springframework.dao.DataIntegrityViolationException) {
+            log.warn("usage_logs 批量写入撞唯一约束（并发上报竞态），降级逐行 upsert: {}", e.message)
+            fresh.filter { item ->
+                usageLogRepository.insertIgnoreConflict(
+                    id = UUID.randomUUID().toString(), deviceId = req.deviceId, logId = item.logId,
+                    type = item.type, timestamp = item.timestamp,
+                    payloadJson = item.payload?.let { objectMapper.writeValueAsString(it) },
+                    receivedAt = now
+                ) > 0
             }
-        )
+        }
+
         // 只对真正新增的日志建工单；重复上报不应刷出一堆解锁工单
-        fresh.filter { it.type == "UNLOCK_REQUEST" }
+        inserted.filter { it.type == "UNLOCK_REQUEST" }
             .forEach { unlockService.createFromRequest(req.deviceId, it.payload) }
 
         // 今日用量看板实时推送：孩子端上行了用量类日志，立即把最新今日快照经 WS 推给家长端，
         // 家长端无需轮询即实时刷新（"今日平板使用情况"实时 + 不占轮询资源）。
         // 推送失败绝不拖累入库：整段兜底，且只在确有 usage 变化时触发。
-        pushTodayIfNeeded(req.deviceId, fresh)
+        pushTodayIfNeeded(req.deviceId, inserted)
 
-        return mapOf("accepted" to fresh.size, "duplicated" to items.size - fresh.size)
+        return mapOf("accepted" to inserted.size, "duplicated" to items.size - inserted.size)
     }
 
     /**

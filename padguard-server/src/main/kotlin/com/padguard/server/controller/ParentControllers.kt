@@ -13,15 +13,22 @@ import com.padguard.server.service.GroupService
 import com.padguard.server.service.PolicyExtensionService
 import com.padguard.server.service.PolicyService
 import com.padguard.server.security.GuardPasswords
+import com.padguard.server.security.RateLimit
 import org.slf4j.LoggerFactory
 import org.springframework.web.bind.annotation.*
 
 @RestController
 @RequestMapping("/v1/auth")
-class AuthController(private val authService: AuthService) {
+class AuthController(private val authService: AuthService, private val rateLimit: RateLimit) {
 
     @PostMapping("/login/password")
-    fun loginPassword(@RequestBody req: LoginPasswordRequest) = ApiResponse.ok(authService.loginWithPassword(req))
+    fun loginPassword(@RequestBody req: LoginPasswordRequest, httpRequest: jakarta.servlet.http.HttpServletRequest) =
+        ApiResponse.ok(
+            run {
+                rateLimit.require("login", httpRequest, req.phone)
+                authService.loginWithPassword(req)
+            }
+        )
 
     @PostMapping("/register")
     fun register(@RequestBody req: RegisterRequest) = ApiResponse.ok(authService.register(req))
@@ -347,5 +354,5 @@ class PolicyController(
 
     @GetMapping("/commands/{msgId}")
     fun command(@RequestAttribute("userId") userId: String, @PathVariable msgId: String) =
-        ApiResponse.ok(commandService.getCommand(msgId))
+        ApiResponse.ok(commandService.getCommand(userId, msgId))
 }

@@ -57,6 +57,8 @@ class AdminServiceTest {
         override fun countByUserId(userId: String) = table.values.count { it.userId == userId }.toLong()
         override fun countByOnlineStatus(onlineStatus: String) = table.values.count { it.onlineStatus == onlineStatus }.toLong()
         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
+        override fun findByLastActiveAtGreaterThan(since: Long) =
+            table.values.filter { (it.lastActiveAt ?: 0L) > since }
     }
 
     private class FakeSubRepo : FakeJpaRepository<Subscription, String>(), SubscriptionRepository {
@@ -103,6 +105,11 @@ class AdminServiceTest {
         override fun findByUserIdAndDeviceIdAndStatus(userId: String, deviceId: String, status: String, pageable: Pageable) = emptyList<Alert>()
         override fun findByUserIdAndDeviceId(userId: String, deviceId: String, pageable: Pageable) = emptyList<Alert>()
         override fun countByUserIdAndStatusAndDeviceId(userId: String, status: String, deviceId: String) = 0L
+        override fun deleteByDeviceId(deviceId: String): Int {
+            val before = table.size
+            table.values.removeIf { it.deviceId == deviceId }
+            return before - table.size
+        }
     }
 
     private class FakeAuditLogRepo : FakeJpaRepository<AuditLog, String>(), AuditLogRepository {
@@ -126,12 +133,19 @@ class AdminServiceTest {
         override val table = LinkedHashMap<String, Command>()
         override fun idOf(e: Command) = e.id
         override fun findByMsgId(msgId: String): Command? = table.values.firstOrNull { it.msgId == msgId }
+        override fun findByMsgIdAndDeviceId(msgId: String, deviceId: String): Command? =
+            table.values.firstOrNull { it.msgId == msgId && it.deviceId == deviceId }
         override fun findByDeviceIdOrderByCreatedAtDesc(deviceId: String) =
             table.values.filter { it.deviceId == deviceId }.sortedByDescending { it.createdAt }
         override fun findByDeviceIdOrderByCreatedAtAsc(deviceId: String) =
             table.values.filter { it.deviceId == deviceId }.sortedBy { it.createdAt }
         override fun findPendingForPolling(deviceId: String, status: String, now: Long, cursor: Long, pageable: Pageable) = emptyList<Command>()
         override fun findExpiredPending(deviceId: String, status: String, now: Long) = emptyList<Command>()
+        override fun deleteByDeviceId(deviceId: String): Int {
+            val before = table.size
+            table.values.removeIf { it.deviceId == deviceId }
+            return before - table.size
+        }
     }
 
     private class FakeScreenshotRepo : FakeJpaRepository<Screenshot, String>(), ScreenshotRepository {
@@ -139,6 +153,11 @@ class AdminServiceTest {
         override fun idOf(e: Screenshot) = e.id
         override fun findByDeviceIdOrderByCapturedAtDesc(deviceId: String, pageable: Pageable) = emptyList<Screenshot>()
         override fun findFirstByDeviceIdAndShotId(deviceId: String, shotId: String): Screenshot? = null
+        override fun deleteByDeviceId(deviceId: String): Int {
+            val before = table.size
+            table.values.removeIf { it.deviceId == deviceId }
+            return before - table.size
+        }
     }
 
     // ----------------------------- 测试夹具 -----------------------------
@@ -176,7 +195,10 @@ class AdminServiceTest {
         val adminPerm = AdminPermissionService(admins, overrides, objectMapper)
         val mqtt = MqttGateway(null, objectMapper, "default")
         val sweeper = ExpiredCommandSweeper(commands, screenshots, objectMapper)
-        val commandService = CommandService(devices, commands, mqtt, objectMapper, sweeper, auditService)
+        val commandService = CommandService(
+            devices, commands, mqtt, objectMapper, sweeper, auditService,
+            com.padguard.server.security.DeviceOwnershipGuard(devices)
+        )
         // 密钥仅用于构造；createAdmin 不签发令牌，不会真正用到。
         val jwt = JwtTokenProvider("padguard-unit-test-secret-0123456789abcdef", 120, 30)
         // 仅 dbUp() 用到；该方法以 runCatching 包裹，getConnection 抛错时回落 false，不影响写操作测试。

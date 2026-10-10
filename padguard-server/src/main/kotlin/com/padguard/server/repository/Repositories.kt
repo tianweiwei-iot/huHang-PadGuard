@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 
 @Repository
 interface UserRepository : JpaRepository<User, String> {
@@ -60,6 +61,10 @@ interface PolicyRepository : JpaRepository<Policy, String> {
 @Repository
 interface CommandRepository : JpaRepository<Command, String> {
     fun findByMsgId(msgId: String): Command?
+
+    /** ack 状态机（S6）：msgId + deviceId 双键匹配，跨设备伪造的回执查不到记录 */
+    fun findByMsgIdAndDeviceId(msgId: String, deviceId: String): Command?
+
     fun findByDeviceIdOrderByCreatedAtDesc(deviceId: String): List<Command>
 
     /**
@@ -144,6 +149,32 @@ interface UsageLogRepository : JpaRepository<UsageLog, String> {
     fun findExistingLogIds(@Param("logIds") logIds: Collection<String>): Set<String>
 
     /**
+     * 逐行幂等 upsert（S8 批写竞态的降级路径）。
+     *
+     * 常规路径是「一次查重 + 一次批量 saveAll」；但查重与写入之间存在竞态窗口：
+     * 同一 logId 的两次并发上报可能都通过查重，后提交者撞 unique 约束导致**整批**失败。
+     * 命中约束时降级为本方法逐行 `ON CONFLICT DO NOTHING`（H2 2.2.x 与 PG16 均支持），
+     * 只跳过真正已存在的行。仅竞态时触发，不影响常规批量性能。
+     */
+    @Modifying
+    @Transactional
+    @Query(
+        value = "insert into usage_logs (id, device_id, log_id, type, \"timestamp\", payload_json, received_at) " +
+                "values (:id, :deviceId, :logId, :type, :timestamp, :payloadJson, :receivedAt) " +
+                "on conflict (log_id) do nothing",
+        nativeQuery = true
+    )
+    fun insertIgnoreConflict(
+        @Param("id") id: String,
+        @Param("deviceId") deviceId: String,
+        @Param("logId") logId: String,
+        @Param("type") type: String?,
+        @Param("timestamp") timestamp: Long?,
+        @Param("payloadJson") payloadJson: String?,
+        @Param("receivedAt") receivedAt: Long
+    ): Int
+
+    /**
      * 设备易主（孤儿回收 / 跨账号复用）或解绑时，清掉该设备的全部历史用量日志，
      * 避免新账号继承上一任记录。
      *
@@ -209,4 +240,26 @@ interface DeviceEventRepository : JpaRepository<DeviceEvent, String> {
      */
     @Query("select e.eventId from DeviceEvent e where e.eventId in :eventIds")
     fun findExistingEventIds(@Param("eventIds") eventIds: Collection<String>): Set<String>
+
+    /**
+     * 逐行幂等 upsert（S8，与 [UsageLogRepository.insertIgnoreConflict] 同款）：
+     * event_id 竞态并发上报时整批撞 unique 约束，降级为逐行 ON CONFLICT DO NOTHING。
+     */
+    @Modifying
+    @Transactional
+    @Query(
+        value = "insert into device_events (id, device_id, event_id, type, \"level\", detail_json, \"timestamp\") " +
+                "values (:id, :deviceId, :eventId, :type, :level, :detailJson, :timestamp) " +
+                "on conflict (event_id) do nothing",
+        nativeQuery = true
+    )
+    fun insertIgnoreConflict(
+        @Param("id") id: String,
+        @Param("deviceId") deviceId: String,
+        @Param("eventId") eventId: String,
+        @Param("type") type: String?,
+        @Param("level") level: String?,
+        @Param("detailJson") detailJson: String?,
+        @Param("timestamp") timestamp: Long?
+    ): Int
 }
