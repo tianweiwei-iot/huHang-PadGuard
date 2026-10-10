@@ -22,6 +22,9 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.springframework.data.domain.Pageable
 import org.springframework.jdbc.datasource.DriverManagerDataSource
+import org.springframework.mail.javamail.JavaMailSenderImpl
+import com.padguard.server.observability.RequestMetrics
+import com.padguard.server.observability.RuntimeLogRing
 import java.util.LinkedHashMap
 
 /**
@@ -129,6 +132,13 @@ class AdminServiceTest {
         override fun idOf(e: SystemSetting) = e.key
     }
 
+    /** 同事 RBAC 自定义角色的内存 fake（AdminPermissionService 构造需要） */
+    private class FakeCustomRoleRepo : FakeJpaRepository<CustomAdminRole, String>(), CustomAdminRoleRepository {
+        override val table = LinkedHashMap<String, CustomAdminRole>()
+        override fun idOf(e: CustomAdminRole) = e.id
+        override fun existsByName(name: String) = table.values.any { it.name == name }
+    }
+
     private class FakeCommandRepo : FakeJpaRepository<Command, String>(), CommandRepository {
         override val table = LinkedHashMap<String, Command>()
         override fun idOf(e: Command) = e.id
@@ -189,10 +199,10 @@ class AdminServiceTest {
         val objectMapper = ObjectMapper()
         // 计费/指令等服务仅用于满足 AdminService 构造；本测试不触发它们的业务路径。
         // 计费验签器用示例支付放行模式（mockPayEnabled=true），避免影响 refund/manualActivate 等用例。
-        val billing = BillingService(subs, orders, devices, 7L, 3, 3800, 9800, 29800, 3, 3, 5, 30L, true, com.padguard.server.security.ConfigurablePaymentVerifier(true, listOf()), FakeSystemSettingRepo(), ObjectMapper())
+        val billing = BillingService(subs, orders, devices, users, 7L, 3, 3800, 9800, 29800, 3, 3, 5, 30L, true, com.padguard.server.security.ConfigurablePaymentVerifier(true, listOf()), FakeSystemSettingRepo(), ObjectMapper())
         val auditService = AuditService(auditLogs)
         // 真实 RBAC 闸门，与 AdminService 共享同一份 admin 仓储 —— 权限事实一致。
-        val adminPerm = AdminPermissionService(admins, overrides, objectMapper)
+        val adminPerm = AdminPermissionService(admins, overrides, FakeCustomRoleRepo(), objectMapper)
         val mqtt = MqttGateway(null, objectMapper, "default")
         val sweeper = ExpiredCommandSweeper(commands, screenshots, objectMapper)
         val commandService = CommandService(
@@ -203,11 +213,15 @@ class AdminServiceTest {
         val jwt = JwtTokenProvider("padguard-unit-test-secret-0123456789abcdef", 120, 30)
         // 仅 dbUp() 用到；该方法以 runCatching 包裹，getConnection 抛错时回落 false，不影响写操作测试。
         val dataSource = DriverManagerDataSource()
+        // 同事新增依赖：邮件（enabled=false 永不发送）、服务档案、可观测性 —— 仅满足构造，不在本测试触发。
+        val mailService = MailService(JavaMailSenderImpl(), false, "test@padguard.local", "")
+        val serverProfileService = ServerProfileService(settings, adminPerm, objectMapper)
 
         val svc = AdminService(
             users, devices, subs, orders,
             admins, overrides, alerts, auditLogs, settings,
-            billing, commandService, jwt, adminPerm, auditService, objectMapper, dataSource
+            billing, commandService, jwt, adminPerm, auditService, mailService,
+            objectMapper, dataSource, serverProfileService, RequestMetrics(), RuntimeLogRing()
         )
 
         // 种入管理员：超管 / 运营 / 审计 / 财务 / 已停用超管

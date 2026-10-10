@@ -52,14 +52,30 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    fun `other parent business errors still return 200 with the code in body`() {
-        // 非鉴权类业务错误（如参数错误）按既有约定仍是 200 + body code，避免影响既有前端判断。
+    fun `parent PARAM_ERROR maps to HTTP 400 and keeps the business code in body`() {
+        // 参数错误 / 业务校验失败落到 400（同事 8cce9bf 修复）：admin 前端 api.js 的 http()
+        // 以 res.ok（HTTP 2xx）判定成败，回 200 会把 { code:1001 } 当成成功，
+        // 前端弹"保存成功"而服务端实际拒绝写入。与 FORBIDDEN→403 同一类不一致，一并消除。
         val resp = MockHttpServletResponse()
         val ex = BizException(ParentErr.PARAM_ERROR, "手机号已注册", Audience.PARENT)
 
         val entity = handler.handleBiz(ex, resp)!!
 
-        assertEquals(HttpStatus.OK.value(), entity.statusCode.value())
+        assertEquals(HttpStatus.BAD_REQUEST.value(), entity.statusCode.value())
         assertEquals(ParentErr.PARAM_ERROR, (entity.body as ApiResponse<*>).code)
+        assertEquals("手机号已注册", (entity.body as ApiResponse<*>).message)
+    }
+
+    @Test
+    fun `other parent business errors still return 200 with the code in body`() {
+        // 未被显式映射的业务错误（如设备离线）维持既有约定：200 + body code。
+        // 显式映射（401/403/400/429）之外的错误码不应被波及。
+        val resp = MockHttpServletResponse()
+        val ex = BizException(ParentErr.DEVICE_OFFLINE, "设备离线，暂无法下发", Audience.PARENT)
+
+        val entity = handler.handleBiz(ex, resp)!!
+
+        assertEquals(HttpStatus.OK.value(), entity.statusCode.value())
+        assertEquals(ParentErr.DEVICE_OFFLINE, (entity.body as ApiResponse<*>).code)
     }
 }

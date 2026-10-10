@@ -70,7 +70,7 @@ class AuthServiceTest {
         val orders = FakeOrderRepo()
         val devices = FakeDeviceRepo()
         // 验签器用示例支付放行模式（与注册链路无关，仅满足 BillingService 构造）
-        val billing = BillingService(subs, orders, devices, 1L, 3, 3800, 9800, 29800, 3, 3, 5, 30L, true, ConfigurablePaymentVerifier(true, listOf()), FakeSystemSettingRepo(), ObjectMapper())
+        val billing = BillingService(subs, orders, devices, users, 1L, 3, 3800, 9800, 29800, 3, 3, 5, 30L, true, ConfigurablePaymentVerifier(true, listOf()), FakeSystemSettingRepo(), ObjectMapper())
         val jwt = JwtTokenProvider("padguard-unit-test-secret-0123456789abcdef", 120, 30)
         val auth = AuthService(users, jwt, billing, false)
         return Triple(auth, users, subs)

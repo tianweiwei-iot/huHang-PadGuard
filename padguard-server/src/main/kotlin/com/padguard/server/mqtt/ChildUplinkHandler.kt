@@ -142,6 +142,9 @@ class ChildUplinkHandler(
 
         /** 终态：一旦到达不可回退。FAILED 可重试所以不在内；EXPIRED 是服务端 sweeper 结论。 */
         val ACK_TERMINAL_STATUSES = setOf("SUCCESS", "UNSUPPORTED", "DUPLICATED", "REJECTED", "EXPIRED")
+
+        /** 与孩子端 RiskType.TIME_LIMIT_EXCEEDED 逐字符一致 */
+        const val EVENT_TIME_LIMIT_EXCEEDED = "TIME_LIMIT_EXCEEDED"
     }
 
     private fun handleHeartbeat(deviceId: String, json: String) {
@@ -234,10 +237,5 @@ class ChildUplinkHandler(
 
     override fun connectComplete(reconnect: Boolean, serverURI: String?) {
         log.info("MQTT connectComplete reconnect=$reconnect uri=$serverURI")
-    }
-
-    private companion object {
-        /** 与孩子端 RiskType.TIME_LIMIT_EXCEEDED 逐字符一致 */
-        const val EVENT_TIME_LIMIT_EXCEEDED = "TIME_LIMIT_EXCEEDED"
     }
 }

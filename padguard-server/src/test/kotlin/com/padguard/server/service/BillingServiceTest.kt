@@ -10,8 +10,10 @@ import com.padguard.server.domain.PaymentOrder
 import com.padguard.server.domain.Plan
 import com.padguard.server.domain.SubStatus
 import com.padguard.server.domain.Subscription
+import com.padguard.server.domain.User
 import com.padguard.server.dto.CreateOrderRequest
 import com.padguard.server.dto.PayRequest
+import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.ConfigurablePaymentVerifier
 import com.padguard.server.security.PaymentVerifier
 import com.padguard.server.repository.DeviceRepository
@@ -37,6 +39,15 @@ import java.time.ZoneId
  * 反过来误判（把已付费用户拦住）会立刻引发投诉。两个方向的代价都很高。
  */
 class BillingServiceTest {
+
+    /** 同事为 BillingService 增加账号状态闸门后的用户仓储内存 fake */
+    private class FakeUserRepo : FakeJpaRepository<User, String>(), UserRepository {
+        override val table = LinkedHashMap<String, User>()
+        override fun idOf(e: User) = e.id
+        override fun existsByPhone(phone: String) = table.values.any { it.phone == phone }
+        override fun findByPhone(phone: String): User? = table.values.firstOrNull { it.phone == phone }
+        override fun countByStatus(status: String) = table.values.count { (it.status ?: "active") == status }.toLong()
+    }
 
     private class FakeSubscriptionRepo : FakeJpaRepository<Subscription, String>(), SubscriptionRepository {
         override val table = LinkedHashMap<String, Subscription>()
@@ -105,8 +116,12 @@ class BillingServiceTest {
         val subRepo = FakeSubscriptionRepo()
         val orderRepo = FakeOrderRepo()
         val deviceRepo = FakeDeviceRepo()
+        // 同事为 BillingService 增加了账号状态闸门（requireUsableAccount），构造需要用户仓储；
+        // 预置一个 active 的 parent-1，保证 statusOf/ensureActive 等路径不受影响。
+        val userRepo = FakeUserRepo()
+        userRepo.save(User(id = "parent-1", phone = "13800000001", passwordHash = "h", role = "parent", sceneType = "family", status = "active"))
         val svc = BillingService(
-            subRepo, orderRepo, deviceRepo,
+            subRepo, orderRepo, deviceRepo, userRepo,
             trialDays, trialDevices,
             3800, 9800, 29800,   // 月 / 季 / 年（分）
             3, 3, 5,             // 各档设备上限
