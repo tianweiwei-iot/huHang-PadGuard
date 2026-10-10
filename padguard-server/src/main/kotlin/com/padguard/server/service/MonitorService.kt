@@ -7,6 +7,8 @@ import com.padguard.server.domain.DeviceSetting
 import com.padguard.server.domain.MediaTask
 import com.padguard.server.domain.Screenshot
 import com.padguard.server.dto.*
+import com.padguard.server.stream.ScreenStreamHub
+import org.springframework.beans.factory.annotation.Value
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.DeviceSettingRepository
 import com.padguard.server.repository.MediaTaskRepository
@@ -23,7 +25,9 @@ class MonitorService(
     private val screenshotRepository: ScreenshotRepository,
     private val mediaTaskRepository: MediaTaskRepository,
     private val deviceSettingRepository: DeviceSettingRepository,
-    private val webSocketPush: WebSocketPushService
+    private val webSocketPush: WebSocketPushService,
+    private val hub: ScreenStreamHub,
+    @Value("\${padguard.stream.max-live-devices:1000}") private val maxLiveDevices: Int = 1000
 ) {
     /** 家长请求实时截屏：落 PENDING 截图记录 + 下发 SCREENSHOT 指令（带 shotId 便于回传关联） */
     fun requestScreenshot(userId: String, deviceId: String): ScreenshotRequestResult {
@@ -127,13 +131,31 @@ class MonitorService(
      * 只能由孩子端主动把帧推到服务端、家长端再从服务端拉。
      * 这条指令就是"开始推流"的开关；家长端观看期间会周期性重发它做续期，
      * 一旦家长关掉页面或掉线，续期停止，孩子端的推流会在 TTL 到点后自动结束。
+     *
+     * 画质档位必须随指令下发（[CommandKey.HIGH_DEFINITION]）：
+     * 孩子端的推流宽度与 JPEG 质量原本是写死的常量，家长在设置页改了「高清画面」
+     * 以后设备端收不到任何通知，开关形同虚设。续期时也会带上最新档位，
+     * 因此家长在观看途中切换开关，下一次续期即可生效，无需退出页面重进。
      */
     fun startLiveView(userId: String, deviceId: String): Map<String, Any> {
         requireOwned(userId, deviceId)
+        // 并发准入：服务端中转架构下，每一路实时看屏都是"一份上行 + 一份下行"带宽。
+        // 不限制的话，并发推流设备一多出口带宽会被打满、各路一起卡，正是规模化的核心风险。
+        // 达到上限直接拒绝新开流（已开的不受影响，避免误杀正常观看），家长端给出明确提示。
+        if (hub.publisherCount() >= maxLiveDevices) {
+            throw BizException(
+                ParentErr.LIVE_DEVICES_FULL,
+                "当前实时观看设备数已达上限（${maxLiveDevices}），请稍后再试",
+                Audience.PARENT
+            )
+        }
+        val highDefinition = runCatching { deviceSettingOf(deviceId).highDefinition }.getOrDefault(false)
         commandService.issueCommand(
-            deviceId, CommandType.LIVE_VIEW_START, emptyMap(), priority = "HIGH"
+            deviceId, CommandType.LIVE_VIEW_START,
+            mapOf(CommandKey.HIGH_DEFINITION to highDefinition),
+            priority = "HIGH"
         )
-        return mapOf("deviceId" to deviceId, "live" to true)
+        return mapOf("deviceId" to deviceId, "live" to true, "highDefinition" to highDefinition)
     }
 
     fun stopLiveView(userId: String, deviceId: String): Map<String, Any> {

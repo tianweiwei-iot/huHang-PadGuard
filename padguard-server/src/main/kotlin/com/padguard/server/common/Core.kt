@@ -17,11 +17,23 @@ object ParentErr {
     const val PARAM_ERROR = 1001
     const val UNAUTHORIZED = 1002
     const val FORBIDDEN = 1003
+    /**
+     * 账号已被后台冻结（suspended）。
+     *
+     * 独立错误码而非复用 UNAUTHORIZED：客户端要能据此给出"账号已被冻结，请联系客服"
+     * 的明确提示，而不是笼统的"登录已过期，请重新登录"——后者会让家长反复重试登录，
+     * 永远得不到可执行的下一步。
+     */
+    const val ACCOUNT_SUSPENDED = 1004
+    /** 账号待激活（pending）：已建档但未开通，同样不允许登录 */
+    const val ACCOUNT_PENDING = 1005
     const val DEVICE_NOT_FOUND = 2001
     const val DEVICE_OFFLINE = 2002
     const val DEVICE_NOT_OWNED = 2003
     /** 同一设备的并发观看数已达上限（每路观看都是一份完整的上行+下行带宽） */
     const val LIVE_VIEWERS_FULL = 2004
+    /** 服务端同时推流的设备数已达上限（并发带宽保护，见 MonitorService.startLiveView） */
+    const val LIVE_DEVICES_FULL = 2006
     const val POLICY_NOT_FOUND = 3001
     const val POLICY_CONFLICT = 3002
     // 订阅：4xxx
@@ -46,6 +58,8 @@ object ChildErr {
     const val SUBSCRIPTION_REQUIRED = 40304
     /** 可绑定设备数已达套餐上限 */
     const val DEVICE_LIMIT_EXCEEDED = 40305
+    /** 家长账号已被冻结：孩子端不得继续绑定/换绑，需提示"家长账号已被冻结" */
+    const val PARENT_ACCOUNT_SUSPENDED = 40306
     const val TIME_OUT_OF_SYNC = 40901
     const val SERVER_ERROR = 50000
 }
@@ -119,6 +133,13 @@ class GlobalExceptionHandler {
         //   "已绑定"的假象里（例如服务端换库后设备记录已不存在）。
         val status = when {
             e.audience == Audience.PARENT && e.code == ParentErr.UNAUTHORIZED -> HttpStatus.UNAUTHORIZED
+            // 冻结/待激活必须落到 401 而不是 403：
+            // 家长端 OkHttp Authenticator 只在 401 上触发（刷新令牌→失败→清空本地会话→
+            // SessionViewModel 响应式退回登录页）。回 403 的话 Authenticator 根本不介入，
+            // 客户端会停在"令牌还在、界面还在主页、但每个接口都报错"的假登录态里。
+            e.audience == Audience.PARENT &&
+                (e.code == ParentErr.ACCOUNT_SUSPENDED || e.code == ParentErr.ACCOUNT_PENDING) ->
+                HttpStatus.UNAUTHORIZED
             // 越权（含后台 RBAC 闸门拒绝、家长端"资源不属于当前用户"）必须落到 403：
             // HTTP 状态码是网关 / 前端拦截器判断成败的首要依据，回 200 会让越权操作被误判为"成功"，
             // 管理端 http() 在 !res.ok 时直接抛错、家长端 ApiDataSource 在 !isSuccessful 时走错误分支——
@@ -126,6 +147,15 @@ class GlobalExceptionHandler {
             e.audience == Audience.PARENT && e.code == ParentErr.FORBIDDEN -> HttpStatus.FORBIDDEN
             e.audience == Audience.CHILD && e.code == ChildErr.TOKEN_INVALID -> HttpStatus.UNAUTHORIZED
             e.audience == Audience.CHILD && e.code == ChildErr.DEVICE_UNBOUND -> HttpStatus.FORBIDDEN
+            // 家长账号被冻结：孩子端是"已绑定设备想再绑/换绑"的场景，属终态拒绝（403），
+            // 不能回 401 —— 401 会让孩子端清空凭据回到绑定页，把已绑定设备也一并踢掉。
+            e.audience == Audience.CHILD && e.code == ChildErr.PARENT_ACCOUNT_SUSPENDED -> HttpStatus.FORBIDDEN
+            // 参数错误 / 业务校验失败落到 400，不能回 200 只把错误码塞进响应体：
+            // 管理端 api.js 的 http() 以 `res.ok`（即 HTTP 2xx）判定成败，
+            // 回 200 时它会把 { code:1001, data:null } 当成成功返回，
+            // 于是前端弹出"保存成功"，而事实上服务端拒绝写入 —— 用户改了半天权限，什么都没变。
+            // 典型场景：RBAC 保存时"有写无读"的前置校验被拦，前台却提示保存成功。
+            e.code == ParentErr.PARAM_ERROR -> HttpStatus.BAD_REQUEST
             else -> HttpStatus.OK
         }
         return if (e.audience == Audience.CHILD) {

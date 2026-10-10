@@ -336,9 +336,52 @@ data class TabletUsageSettings(
     val weekendLimitMinutes: Int = 60,
     val restAfterMinutes: Int = 60,
     val restDurationMinutes: Int = 15,
-    val timeUpMessage: String = "观看时间已达上限，请休息一会儿再回来！",
     val syncToDevice: Boolean = false
 )
+
+/**
+ * 平板使用计时会话（家长端展示用，字段与服务端、孩子端一致）。
+ *
+ * 三端一律以服务端锚定的 [serverNow] 减去 [startEpoch] 派生已用时长，
+ * 剩余 = (quotaMinutes + extendedMinutes) 分钟 − 已用，因此家长端看到的数字
+ * 与孩子端、服务端严格一致，不再各自按本地时钟计算导致对不上。
+ *
+ * [liveRemainingMs] 用本地墙钟对服务端基线做平滑插值，供界面每秒刷新倒计时，
+ * 真正的到期判定仍以服务端下发的基线为准。
+ */
+data class UsageSession(
+    val deviceId: String = "",
+    /** 服务端墙钟（毫秒），三端统一的时间基准 */
+    val serverNow: Long = 0L,
+    /** 计时是否已激活（孩子已确认"计时开始"，服务端已锁今日起点） */
+    val active: Boolean = false,
+    /** 本地日期键（Asia/Shanghai），如 2026-10-09 */
+    val dayKey: String = "",
+    /** 计时起点（服务端墙钟，毫秒）；null 表示今日尚未开始计时 */
+    val startEpoch: Long? = null,
+    /** 当日额度（分钟，不含延时） */
+    val quotaMinutes: Int = 0,
+    /** 累计延时（分钟） */
+    val extendedMinutes: Int = 0,
+    /** 剩余分钟数（快照，serverNow 时刻） */
+    val remainingMinutes: Int = 0,
+    /** 剩余毫秒数（快照，serverNow 时刻） */
+    val remainingMs: Long = 0L,
+    /** 进入倒计时提示的剩余阈值（毫秒），默认 10 分钟 */
+    val countdownThresholdMs: Long = 10 * 60_000L,
+    /** 延时申请可选档位（分钟） */
+    val delayOptions: List<Int> = listOf(15, 30, 45, 60),
+    /** 单日累计延时上限（分钟） */
+    val maxDailyExtendMinutes: Int = 120,
+    /** 最近一次延时申请的服务端墙钟 */
+    val lastDelayEpoch: Long? = null
+) {
+    /** 以本地墙钟 [now] 平滑插值，得到与家长端/孩子端一致的实时剩余毫秒（永不为负） */
+    fun liveRemainingMs(now: Long): Long {
+        val remaining = remainingMs - (now - serverNow)
+        return if (remaining > 0L) remaining else 0L
+    }
+}
 
 /**
  * 时间段（HH:mm - HH:mm）
@@ -382,6 +425,24 @@ data class ScreenMonitorSettings(
     val recordResolution: RecordResolution = RecordResolution.HD_720P,
     val recordWithAudio: Boolean = false,                   // 录屏是否同时采集设备声音
     val allowRemoteLock: Boolean = true                     // 是否允许远程锁屏
+)
+
+/**
+ * 实时看屏状态（含带宽遥测）。
+ *
+ * 由家长端实时画面页消费，用于显示"画面是否在线"与"当前实时带宽占用"，
+ * 直接回答家长"实时看屏到底占了多少带宽"。
+ *
+ * [upstreamBps] / [downstreamBps] 是**字节**速率（KB/s = 值 ÷ 1024），非比特率。
+ * [frameAgeMs] 为最近一帧距现在的毫秒数；[live] 为最近 5s 内有帧即视为在线。
+ */
+data class ScreenLiveStatus(
+    val deviceId: String,
+    val live: Boolean,
+    val frameAgeMs: Long,
+    val upstreamBps: Long,
+    val downstreamBps: Long,
+    val totalBytes: Long
 )
 
 /**

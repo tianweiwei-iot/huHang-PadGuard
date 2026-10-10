@@ -121,7 +121,9 @@ class KidHomeViewModel @Inject constructor(
      * 确保「桌面点开」与「最近任务/通知点开」（无障碍兜底）行为统一，不会一边免密一边要密：
      * - 操作密码未启用 → 不拦（没密码可验）；
      * - 处于解锁窗口内 → 放行；
-     * - 家长未开启「打开应用也要密码」([AppGuardPolicyStore.launchBlockEnabled]) → 不拦；
+     * - 家长"关闭了应用使用权限"（hidden）→ 必须先输密码，且不依赖「打开应用也要密码」开关
+     *   （关闭权限 = 打开需密码，是无条件底线，见 [AppGuardPolicyStore.isHiddenControlled]）；
+     * - 其余：家长未开启「打开应用也要密码」([AppGuardPolicyStore.launchBlockEnabled]) → 不拦；
      * - 系统关键包（防砖名单）→ 不拦；
      * - 其余命中管控名单的应用 → 必须先输密码。
      *
@@ -131,8 +133,11 @@ class KidHomeViewModel @Inject constructor(
     fun needsLaunchGuard(pkg: String): Boolean {
         if (!guard.isEnabledNow()) return false
         if (guard.isUnlockedNow()) return false
-        if (!appGuard.launchBlockEnabled()) return false
         if (appGuard.isSystemCritical(pkg)) return false
+        // 关闭权限的应用：无论"打开应用也要密码"开关是否开启，打开都要先输密码。
+        // 这是"权限已关闭"的底线语义，不能依赖 launchBlockEnabled（默认关闭会完全失效）。
+        if (appGuard.isHiddenControlled(pkg)) return true
+        if (!appGuard.launchBlockEnabled()) return false
         return appGuard.isControlled(pkg)
     }
 }

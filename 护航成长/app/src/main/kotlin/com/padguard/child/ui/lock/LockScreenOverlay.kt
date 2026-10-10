@@ -84,6 +84,7 @@ class LockScreenOverlay @Inject constructor(
             WindowManager.LayoutParams.MATCH_PARENT,
             overlayType(),
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_FULLSCREEN or
                 WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -124,8 +125,21 @@ class LockScreenOverlay @Inject constructor(
             setPadding(pad, (48 * density).toInt(), pad, pad)
             // 关键：锁定层必须吃掉触摸，否则孩子能直接点穿到下面的应用
             isClickable = true
-            isFocusable = false
+            // 必须可聚焦：不可聚焦的窗口拿不到按键派发，返回键会直接穿给下层应用，
+            // 表现就是"铺了锁定层，按返回照样退出刚才的应用"。
+            isFocusable = true
+            isFocusableInTouchMode = true
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            // 吞掉返回 / 最近任务 / 菜单：锁定层是最后一道防线，不能留逃逸键。
+            // HOME 由系统保留、无法拦截，靠 LockScreenPresenter 的持续重试把锁定页顶回来。
+            setOnKeyListener { _, keyCode, _ -> keyCode in BLOCKED_KEYS }
+            // 隐藏状态栏与导航栏：留着导航栏会给孩子"还能滑"的暗示（悬浮层无法真正禁手势，
+            // 但隐藏视觉提示能显著降低尝试率；真正的手势封锁由 Activity 的 Lock Task 承担）。
+            systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                )
         }
 
         container.addView(TextView(context).apply {
@@ -202,5 +216,13 @@ class LockScreenOverlay @Inject constructor(
         const val ID_DETAIL = 0x00D0_0001
         /** 与 LockScreenActivity 的默认申请时长保持一致 */
         const val DEFAULT_REQUEST_MINUTES = 30
+
+        /** 锁定层吞掉的按键 */
+        private val BLOCKED_KEYS = setOf(
+            android.view.KeyEvent.KEYCODE_BACK,
+            android.view.KeyEvent.KEYCODE_APP_SWITCH,
+            android.view.KeyEvent.KEYCODE_MENU,
+            android.view.KeyEvent.KEYCODE_RECENT_APPS
+        )
     }
 }

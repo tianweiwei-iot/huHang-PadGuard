@@ -42,9 +42,11 @@ object CaptureConsentPrompter {
     /**
      * 派发一条采集请求。
      *
-     * @return true = 已授权，请求已直接下发（静默）；false = 尚无授权，已发通知引导
+     * @param silentIfBackground 后台态下是否静默（不弹通知）。暖令牌场景用 true：
+     *   设备解锁/开机时若暂不是前台，不主动打扰，等真正回到前台再补。
+     * @return true = 已授权，请求已直接下发（静默）；false = 尚无授权，已发通知引导（或静默跳过）
      */
-    fun dispatch(context: Context, captureIntent: Intent): Boolean {
+    fun dispatch(context: Context, captureIntent: Intent, silentIfBackground: Boolean = false): Boolean {
         if (ScreenCaptureSession.hasToken()) {
             ScreenCaptureService.startAuthorized(context, captureIntent)
             return true
@@ -63,15 +65,46 @@ object CaptureConsentPrompter {
                 // 否则家长端会永远停在"连接中"，平板上却什么提示都没有。
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     if (CapturePermissionActivity.lastCreateAtMs < attemptAt) {
-                        Logger.w(TAG) { "consent activity silently dropped, fallback to notification" }
-                        prompt(context, captureIntent)
+                        Logger.w(TAG) { "consent activity silently dropped, fallback" }
+                        if (!silentIfBackground) prompt(context, captureIntent)
                     }
                 }, LAUNCH_CONFIRM_DELAY_MS)
                 return false
             }
         }
+        if (silentIfBackground) return false
         prompt(context, captureIntent)
         return false
+    }
+
+    /**
+     * 设备解锁 / 开机后主动补齐 MediaProjection 凭据（"暖令牌"）。
+     *
+     * 只要孩子在用平板，家长端随时可能下发实时看屏/截屏/录屏；
+     * 若凭据在重启后丢失却只在"家长点开看屏"那一刻才去要授权，
+     * 孩子就会看到突兀的弹窗、甚至因一时不点确认导致监护失败。
+     * 因此把这一次要授权收拢到设备解锁/开机这个天然时刻，由应用在前台态下
+     * 把系统确认框顶起来——此刻孩子本就在操作设备，体验远好于看屏中途打断。
+     *
+     * 不是静默（Android 隐私红线，Device Owner 也绕不过），
+     * 但把"必须确认一次"压缩到装机一次 + 之后每次重启后第一次解锁，
+     * 且帧面就是 Android 原生确认框，不含任何"家长正在看"之类会引导孩子抵触的文案。
+     */
+    fun warmUp(context: Context) {
+        if (ScreenCaptureSession.hasToken()) return
+        if (!AppForeground.isForeground) return
+        if (!CaptureConsent.shouldRequest(context)) return
+        Logger.i(TAG) { "warm-up capture consent at device interactive" }
+        dispatch(context, ScreenCaptureService.warmupIntent(context), silentIfBackground = true)
+    }
+
+    /**
+     * 新一轮设备交互（解锁 / 开机 / 覆盖安装）：先解除上一轮拒绝冷却，再暖令牌。
+     * 拒绝只在"本次解锁"内有效，下一轮重新给机会，避免孩子一次点取消就永久失监护。
+     */
+    fun onDeviceInteractive(context: Context) {
+        CaptureConsent.clearDenyCooldown(context)
+        warmUp(context)
     }
 
     /**
@@ -123,7 +156,7 @@ object CaptureConsentPrompter {
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("护航守护")
-            .setContentText("家长请求查看屏幕：点击此处开启屏幕采集")
+            .setContentText("为实时守护做准备，请确认屏幕采集授权")
             .setSmallIcon(context.applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_menu_gallery)
             .setContentIntent(pi)
             .setOngoing(false)

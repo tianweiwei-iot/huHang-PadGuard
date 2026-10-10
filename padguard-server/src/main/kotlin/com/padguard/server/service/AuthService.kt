@@ -4,6 +4,7 @@ import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
 import com.padguard.server.domain.User
+import com.padguard.server.domain.UserStatus
 import com.padguard.server.dto.LoginResponse
 import com.padguard.server.dto.LoginPasswordRequest
 import com.padguard.server.dto.LoginSmsRequest
@@ -31,12 +32,40 @@ class AuthService(
 
     /** 中国大陆手机号：1 开头、第二位 3-9、共 11 位 */
     private val CN_MOBILE = Pattern.compile("^1[3-9]\\d{9}$")
+
+    /**
+     * 登录前置闸门：账号必须处于可用状态。
+     *
+     * 之前只校验"手机号存在 + 密码正确"，完全不看 `users.status`，
+     * 于是后台点「冻结」只改了一个没人读的字段 —— 家长端照常登录、照常用全部权益。
+     * 校验必须在登录**与**令牌刷新**与**每次接口调用三处都做，缺一处就等于没冻结
+     * （详见 ParentAuthInterceptor 与 BillingService.ensureActive 的同类注释）。
+     *
+     * 注意校验顺序：先验证凭据再判状态。反过来会泄露"这个手机号是不是我们用户"，
+     * 属于可被枚举的账号存在性信息。
+     */
+    private fun requireUsableAccount(user: User) {
+        val status = UserStatus.of(user.status)
+        if (UserStatus.isUsable(status)) return
+        val (code, msg) = when (status) {
+            UserStatus.SUSPENDED -> ParentErr.ACCOUNT_SUSPENDED to
+                "账号已被冻结，无法登录。如需恢复请联系客服。"
+            UserStatus.PENDING -> ParentErr.ACCOUNT_PENDING to
+                "账号尚未激活，请等待开通后再登录。"
+            else -> ParentErr.ACCOUNT_SUSPENDED to
+                "账号状态异常（$status），无法登录。如需恢复请联系客服。"
+        }
+        log.info("login/refresh rejected: userId={}, status={}", user.id, status)
+        throw BizException(code, msg, Audience.PARENT)
+    }
+
     fun loginWithPassword(req: LoginPasswordRequest): LoginResponse {
         val user = userRepository.findByPhone(req.phone)
             ?: throw BizException(ParentErr.UNAUTHORIZED, "用户不存在", Audience.PARENT)
         if (!Passwords.matches(req.password, user.passwordHash)) {
             throw BizException(ParentErr.UNAUTHORIZED, "密码错误", Audience.PARENT)
         }
+        requireUsableAccount(user)
         return buildLoginResponse(user)
     }
 
@@ -101,9 +130,17 @@ class AuthService(
         }
         val user = userRepository.findByPhone(req.phone)
             ?: throw BizException(ParentErr.UNAUTHORIZED, "用户不存在", Audience.PARENT)
+        requireUsableAccount(user)
         return buildLoginResponse(user)
     }
 
+    /**
+     * 用 refreshToken 换发新令牌。
+     *
+     * 这里**必须**复检账号状态：refreshToken 有效期 30 天，冻结账号时它还在客户端手里，
+     * 若放行续期，家长端就能靠它无限续出新的 accessToken —— 冻结形同虚设。
+     * 拒绝续期后家长端 OkHttp Authenticator 会清空本地会话并退回登录页。
+     */
     fun refresh(refreshToken: String): TokenResponse {
         val userId = try {
             jwt.parseUserId(refreshToken)
@@ -112,13 +149,19 @@ class AuthService(
         }
         // 必须确认用户仍存在：服务器换库/清库后旧令牌签名依然有效，
         // 若不校验，客户端会拿着"幽灵账号"的令牌永远续期，绑定的设备全挂在不存在的用户下。
-        if (!userRepository.existsById(userId)) {
-            throw BizException(ParentErr.UNAUTHORIZED, "账号不存在或已被重置，请重新登录", Audience.PARENT)
-        }
+        val user = userRepository.findById(userId).orElse(null)
+            ?: throw BizException(ParentErr.UNAUTHORIZED, "账号不存在或已被重置，请重新登录", Audience.PARENT)
+        requireUsableAccount(user)
         return TokenResponse(jwt.createAccessToken(userId), jwt.createRefreshToken(userId))
     }
 
     private fun buildLoginResponse(user: User): LoginResponse {
+        // 最近登录时刻：后台「家长账号」列表要展示它，注册/登录成功后必须落库，
+        // 否则那一列永远是空的，运营无法判断账号是否还在使用。
+        runCatching {
+            user.lastLoginAt = System.currentTimeMillis()
+            userRepository.save(user)
+        }.onFailure { log.warn("update lastLoginAt failed for {}: {}", user.id, it.message) }
         val access = jwt.createAccessToken(user.id)
         val refresh = jwt.createRefreshToken(user.id)
         return LoginResponse(

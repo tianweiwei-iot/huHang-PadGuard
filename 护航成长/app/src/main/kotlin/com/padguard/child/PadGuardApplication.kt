@@ -25,6 +25,11 @@ class PadGuardApplication : Application() {
         AppForeground.install(this)
         installAppCategoryProvider()
         seedClockOffset()
+        // 设备解锁 / 开机后主动暖令牌：孩子端每次回到前台（含开机后首次进入桌面）
+        // 若尚未持有屏幕采集凭据，就在前台态下补一次系统确认，保证家长随时看屏都无需再确认。
+        AppForeground.addForegroundListener {
+            com.padguard.child.capture.CaptureConsentPrompter.warmUp(this@PadGuardApplication)
+        }
     }
 
     /**

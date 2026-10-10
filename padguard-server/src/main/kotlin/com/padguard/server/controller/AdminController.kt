@@ -28,10 +28,18 @@ class AdminController(
     fun login(@RequestBody req: AdminLoginRequest): ApiResponse<AdminLoginResponse> =
         ApiResponse.ok(adminService.login(req.username, req.password))
 
+    // ---------- 自助修改当前管理员密码（需当前密码，免 RBAC 闸门） ----------
+    @PostMapping("/me/password")
+    fun changeOwnPassword(
+        @RequestAttribute("adminId") adminId: String,
+        @RequestBody req: AdminChangePasswordRequest
+    ): ApiResponse<Map<String, Any>> =
+        ApiResponse.ok(adminService.changeOwnPassword(adminId, req.currentPassword, req.newPassword))
+
     // ---------- 仪表盘 ----------
     @GetMapping("/dashboard")
     fun dashboard(@RequestAttribute("adminId") adminId: String): ApiResponse<DashboardResponse> =
-        ApiResponse.ok(adminService.dashboard())
+        ApiResponse.ok(adminService.dashboard(adminId))
 
     // ---------- 家长账号 ----------
     @GetMapping("/parents")
@@ -40,13 +48,13 @@ class AdminController(
         @RequestParam(required = false) keyword: String?,
         @RequestParam(required = false) status: String?,
         @RequestParam(required = false) plan: String?
-    ): ApiResponse<List<ParentRow>> = ApiResponse.ok(adminService.listParents(keyword, status, plan))
+    ): ApiResponse<List<ParentRow>> = ApiResponse.ok(adminService.listParents(adminId, keyword, status, plan))
 
     @GetMapping("/parents/{id}")
     fun parentDetail(
         @RequestAttribute("adminId") adminId: String,
         @PathVariable id: String
-    ): ApiResponse<ParentDetail?> = ApiResponse.ok(adminService.parentDetail(id))
+    ): ApiResponse<ParentDetail?> = ApiResponse.ok(adminService.parentDetail(adminId, id))
 
     @PostMapping("/parents")
     fun createParent(
@@ -91,7 +99,7 @@ class AdminController(
         @RequestAttribute("adminId") adminId: String,
         @RequestParam(required = false) keyword: String?,
         @RequestParam(required = false) online: String?
-    ): ApiResponse<List<DeviceRow>> = ApiResponse.ok(adminService.listDevices(keyword, online))
+    ): ApiResponse<List<DeviceRow>> = ApiResponse.ok(adminService.listDevices(adminId, keyword, online))
 
     @PostMapping("/devices/{id}/lock")
     fun lockDevice(
@@ -108,19 +116,19 @@ class AdminController(
     // ---------- 订阅计费 ----------
     @GetMapping("/billing/plans")
     fun listPlans(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AdminPlanDto>> =
-        ApiResponse.ok(adminService.listPlans())
+        ApiResponse.ok(adminService.listPlans(adminId))
 
     @GetMapping("/billing/subscriptions")
     fun listSubscriptions(
         @RequestAttribute("adminId") adminId: String,
         @RequestParam(required = false) status: String?
-    ): ApiResponse<List<SubRow>> = ApiResponse.ok(adminService.listSubscriptions(status))
+    ): ApiResponse<List<SubRow>> = ApiResponse.ok(adminService.listSubscriptions(adminId, status))
 
     @GetMapping("/billing/orders")
     fun listOrders(
         @RequestAttribute("adminId") adminId: String,
         @RequestParam(required = false) status: String?
-    ): ApiResponse<List<OrderRow>> = ApiResponse.ok(adminService.listOrders(status))
+    ): ApiResponse<List<OrderRow>> = ApiResponse.ok(adminService.listOrders(adminId, status))
 
     @PostMapping("/billing/subscriptions/manual")
     fun manualActivate(
@@ -136,12 +144,27 @@ class AdminController(
 
     @GetMapping("/billing/revenue")
     fun revenue(@RequestAttribute("adminId") adminId: String): ApiResponse<List<RevenueMonth>> =
-        ApiResponse.ok(adminService.revenue())
+        ApiResponse.ok(adminService.revenue(adminId))
 
     // ---------- RBAC ----------
+    /**
+     * 权限元数据（领域 + 动作的中文名、危险等级、系统锁定角色）。
+     *
+     * 前端矩阵据此渲染，不再自带白名单副本 —— 这是"前端有 monitor 列、服务端却不敢认"
+     * 这类静默失效的根治手段：新增权限只需改服务端一处。
+     *
+     * 注：原前端自带的 `monitor` 领域已移除。家长端的实时监控接口服务于「家长查看自己绑定的
+     * 设备」，后台无对应视图；设备在运营侧的管控已由 `devices` 领域的 lock/unlock 覆盖。
+     * 保留一个无端点支撑的领域只会让"配了不生效"重演。
+     * （此处不可书写含连续斜杠与星号的路径：Kotlin 块注释不支持嵌套。）
+     */
+    @GetMapping("/rbac/permissions")
+    fun permissionSchema(@RequestAttribute("adminId") adminId: String): ApiResponse<*> =
+        ApiResponse.ok(adminService.permissionSchema(adminId))
+
     @GetMapping("/rbac/roles")
     fun listRoles(@RequestAttribute("adminId") adminId: String): ApiResponse<*> =
-        ApiResponse.ok(adminService.listRoles())
+        ApiResponse.ok(adminService.listRoles(adminId))
 
     @PutMapping("/rbac/roles")
     fun saveRole(
@@ -149,9 +172,30 @@ class AdminController(
         @RequestBody role: AdminRolePrivilegesDto
     ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.saveRole(adminId, role))
 
+    /** 还原某角色的权限到系统默认值（清除后台调整记录） */
+    @DeleteMapping("/rbac/roles/{roleId}/privileges")
+    fun resetRolePrivileges(
+        @RequestAttribute("adminId") adminId: String,
+        @PathVariable roleId: String
+    ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.resetRolePrivileges(adminId, roleId))
+
+    /** 新建自定义角色（落库 admin_roles，立即可用于指派） */
+    @PostMapping("/rbac/roles")
+    fun createRole(
+        @RequestAttribute("adminId") adminId: String,
+        @RequestBody req: AdminRoleCreateRequest
+    ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.createRole(adminId, req))
+
+    /** 删除自定义角色（内置角色 / 仍有成员的角色会被拒绝） */
+    @DeleteMapping("/rbac/roles/{roleId}")
+    fun deleteRole(
+        @RequestAttribute("adminId") adminId: String,
+        @PathVariable roleId: String
+    ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.deleteRole(adminId, roleId))
+
     @GetMapping("/rbac/admins")
     fun listAdmins(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AdminDto>> =
-        ApiResponse.ok(adminService.listAdmins())
+        ApiResponse.ok(adminService.listAdmins(adminId))
 
     @PostMapping("/rbac/admins")
     fun createAdmin(
@@ -188,18 +232,23 @@ class AdminController(
     // ---------- 服务端监控 ----------
     @GetMapping("/server/metrics")
     fun serverMetrics(@RequestAttribute("adminId") adminId: String): ApiResponse<ServerMetrics> =
-        ApiResponse.ok(adminService.serverMetrics())
+        ApiResponse.ok(adminService.serverMetrics(adminId))
+
+    /** 运行日志（进程内环形缓冲，最近的 WARN/ERROR 与本服务 INFO 业务事件） */
+    @GetMapping("/server/logs")
+    fun serverLogs(@RequestAttribute("adminId") adminId: String): ApiResponse<List<ServerMetrics.LogLine>> =
+        ApiResponse.ok(adminService.serverLogs(adminId))
 
     // ---------- 审计 / 告警 ----------
     @GetMapping("/audit")
     fun audit(
         @RequestAttribute("adminId") adminId: String,
         @RequestParam(required = false) area: String?
-    ): ApiResponse<List<AuditItem>> = ApiResponse.ok(adminService.audit(area))
+    ): ApiResponse<List<AuditItem>> = ApiResponse.ok(adminService.audit(adminId, area))
 
     @GetMapping("/alerts")
     fun alerts(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AlertItem>> =
-        ApiResponse.ok(adminService.alerts())
+        ApiResponse.ok(adminService.alerts(adminId))
 
     @PostMapping("/alerts/{id}/close")
     fun closeAlert(
@@ -210,7 +259,7 @@ class AdminController(
     // ---------- 系统设置 ----------
     @GetMapping("/settings")
     fun settings(@RequestAttribute("adminId") adminId: String): ApiResponse<AdminSettingsDto> =
-        ApiResponse.ok(adminService.settings())
+        ApiResponse.ok(adminService.settings(adminId))
 
     @PutMapping("/settings")
     fun saveSettings(

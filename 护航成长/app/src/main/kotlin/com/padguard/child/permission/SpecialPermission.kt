@@ -1,6 +1,7 @@
 package com.padguard.child.permission
 
 import android.app.AppOpsManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -44,20 +45,15 @@ enum class SpecialPermission(
     /** 缺失后果（家长看得懂的白话，不写技术名词） */
     val impact: String
 ) {
-    USAGE_STATS(
-        "usageStats",
-        "使用情况访问",
-        "应用使用时长统计与单个应用限额都依赖它，未开启则限额设了不生效、用量恒为 0"
-    ),
     OVERLAY(
         "overlay",
         "悬浮窗",
         "全局水印依赖它显示，未开启则水印不会出现"
     ),
-    INSTALL_PACKAGES(
-        "installPackages",
-        "安装未知应用",
-        "家长端远程推送安装应用时需要；已是设备所有者则不需要（可静默安装）"
+    USAGE_STATS(
+        "usageStats",
+        "使用情况访问",
+        "应用使用时长统计与单个应用限额都依赖它，未开启则限额设了不生效、用量恒为 0"
     ),
     /**
      * 操作闸门无障碍服务。
@@ -66,11 +62,25 @@ enum class SpecialPermission(
      * 但仍与上面几项**同构**：App 无法自开、DO 也无法代开，只有家长在系统设置页手动启用。
      * 因此归入同一枚举，一次性装机流程才能用同一套模型自动排队打开，
      * 而不是像以前那样单独藏在「我的」页里、等到家长配置应用管控时才发现没开。
+     *
+     * ## 跳转策略（务必稳定，不玩 ROM 黑魔法）
+     * 无障碍详情页**不接受**让我们直接落到本应用服务开关的通用深链；各厂商 ROM 还各自改写了入口，
+     * 靠 `ComponentName` 硬跳在 A 手机能开、B 手机就崩，正式产品不可依赖。
+     * 因此只走官方 `ACTION_ACCESSIBILITY_SETTINGS`（落到无障碍列表），
+     * 并以 `Intent.EXTRA_COMPONENT_NAME` 做**尽力深链**：原生/部分 ROM 会直接定位到本服务详情，
+     * 识别不了的 ROM 静默降级为列表页——两条路都安全、都不会崩。
+     * 真正的"免手动返回"由 [ConsentReturnPresenter] 的轮询守护 + 全屏 Intent 兜底，
+     * 不靠深链，所以这里只需把家长"送到能找到开关的地方"。
      */
     ACCESSIBILITY(
         "accessibility",
         "无障碍服务（操作闸门）",
         "密码闸门的系统级拦截依赖它，未启用则孩子可从系统设置绕过管控、卸载本应用"
+    ),
+    INSTALL_PACKAGES(
+        "installPackages",
+        "安装未知应用",
+        "家长端远程推送安装应用时需要；已是设备所有者则不需要（可静默安装）"
     );
 
     /**
@@ -120,7 +130,16 @@ enum class SpecialPermission(
             .setData(Uri.fromParts("package", context.packageName, null))
         INSTALL_PACKAGES -> Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
             .setData(Uri.fromParts("package", context.packageName, null))
-        ACCESSIBILITY -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+        ACCESSIBILITY -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+            // 尽力深链到本应用无障碍服务详情（见枚举注释）；识别不了的 ROM 静默降级为列表页。
+            putExtra(
+                Intent.EXTRA_COMPONENT_NAME,
+                ComponentName(
+                    context.packageName,
+                    "com.padguard.child.guard.OperationGuardAccessibilityService"
+                ).flattenToString()
+            )
+        }
     }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     companion object {

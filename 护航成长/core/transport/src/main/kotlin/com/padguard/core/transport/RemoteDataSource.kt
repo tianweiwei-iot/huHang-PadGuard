@@ -17,6 +17,7 @@ import com.padguard.core.transport.http.AppInventoryItem
 import com.padguard.core.transport.http.AppSyncAck
 import com.padguard.core.transport.http.ScreenshotAck
 import com.padguard.core.transport.http.MediaAck
+import com.padguard.core.transport.http.UsageSessionDto
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -72,6 +73,20 @@ interface RemoteDataSource {
     suspend fun syncTime(): ApiResult<Long>
 
     suspend fun fetchPolicy(currentVersion: Int): ApiResult<PolicyFetchResult>
+
+    /**
+     * 拉取当前使用计时会话（三端时间一致的权威来源）。
+     *
+     * 返回的 [com.padguard.core.transport.http.UsageSessionDto] 携带服务端墙钟 serverNow，
+     * 三端据此派生完全一致的剩余时长。
+     */
+    suspend fun getUsageSession(): ApiResult<UsageSessionDto>
+
+    /** 孩子端确认"计时开始"：服务端锁定今日计时起点与额度（幂等） */
+    suspend fun startUsageSession(): ApiResult<UsageSessionDto>
+
+    /** 孩子端申请延时：minutes 必须落在档位内，单日累计不超上限 */
+    suspend fun extendUsageSession(minutes: Int): ApiResult<UsageSessionDto>
 
     // ---------- 上行 ----------
 

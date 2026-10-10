@@ -555,6 +555,19 @@ class LocalDataSource @Inject constructor(
         return Result.success(settings)
     }
 
+    override suspend fun getLiveStatus(deviceId: String): Result<ScreenLiveStatus> =
+        // 本地模式无真实推流，返回"离线 + 零带宽"，与 liveFrames 挂起的行为一致
+        Result.success(
+            ScreenLiveStatus(
+                deviceId = deviceId,
+                live = false,
+                frameAgeMs = -1,
+                upstreamBps = 0,
+                downstreamBps = 0,
+                totalBytes = 0
+            )
+        )
+
     // ==================== MessageRepository 实现 (Mock) ====================
 
     private val publishedMessagesStore = mutableMapOf<String, MutableList<PublishedMessage>>()
@@ -840,6 +853,26 @@ class LocalDataSource @Inject constructor(
         val synced = settings.copy(syncToDevice = true)
         tabletUsageSettingsStore[settings.deviceId] = synced
         return Result.success(synced)
+    }
+
+    override suspend fun getUsageSession(deviceId: String): Result<UsageSession> {
+        val now = System.currentTimeMillis()
+        // Mock：模拟一个已激活、剩余约 90 分钟的会话，便于界面验证三端一致倒计时
+        return Result.success(
+            UsageSession(
+                deviceId = deviceId,
+                serverNow = now,
+                active = true,
+                startEpoch = now - 30 * 60_000L,
+                quotaMinutes = 120,
+                extendedMinutes = 0,
+                remainingMinutes = 90,
+                remainingMs = 90 * 60_000L,
+                countdownThresholdMs = 10 * 60_000L,
+                delayOptions = listOf(15, 30, 45, 60),
+                maxDailyExtendMinutes = 120
+            )
+        )
     }
 
     // ==================== 未成年人模式 (Mock) ====================

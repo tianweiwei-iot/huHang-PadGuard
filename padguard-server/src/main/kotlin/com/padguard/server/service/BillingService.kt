@@ -10,6 +10,7 @@ import com.padguard.server.domain.PaymentOrder
 import com.padguard.server.domain.Plan
 import com.padguard.server.domain.SubStatus
 import com.padguard.server.domain.Subscription
+import com.padguard.server.domain.UserStatus
 import com.padguard.server.dto.CreateOrderRequest
 import com.padguard.server.dto.CreateOrderResponse
 import com.padguard.server.dto.OrderDto
@@ -20,6 +21,7 @@ import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.PaymentOrderRepository
 import com.padguard.server.repository.SubscriptionRepository
 import com.padguard.server.repository.SystemSettingRepository
+import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.PaymentVerifier
 import com.padguard.server.dto.PayRequest
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -51,6 +53,7 @@ class BillingService(
     private val subscriptionRepository: SubscriptionRepository,
     private val paymentOrderRepository: PaymentOrderRepository,
     private val deviceRepository: DeviceRepository,
+    private val userRepository: UserRepository,
 
     @Value("\${padguard.billing.trial-days:1}") private val trialDays: Long,
     @Value("\${padguard.billing.trial-devices:3}") private val trialDevices: Int,
@@ -61,7 +64,8 @@ class BillingService(
     @Value("\${padguard.billing.devices.quarterly:3}") private val devicesQuarterly: Int,
     @Value("\${padguard.billing.devices.yearly:5}") private val devicesYearly: Int,
     @Value("\${padguard.billing.pay-timeout-minutes:30}") private val payTimeoutMinutes: Long,
-    @Value("\${padguard.billing.mock-pay-enabled:false}") private val mockPayEnabled: Boolean,
+    /** 部署期兜底值；运营在后台改过之后以 DB 为准（见 [mockPayEnabled]） */
+    @Value("\${padguard.billing.mock-pay-enabled:false}") private val configMockPayEnabled: Boolean,
     private val paymentVerifier: PaymentVerifier,
     private val systemSettingRepository: SystemSettingRepository,
     private val objectMapper: ObjectMapper
@@ -106,9 +110,9 @@ class BillingService(
         PayChannelDto(
             key = c.name,
             label = c.label,
-            enabled = mockPayEnabled,
-            mock = mockPayEnabled,
-            note = if (mockPayEnabled) "示例支付，不会产生真实扣款" else "渠道接入中，暂不可用"
+            enabled = mockPayEnabled(),
+            mock = mockPayEnabled(),
+            note = if (mockPayEnabled()) "示例支付，不会产生真实扣款" else "渠道接入中，暂不可用"
         )
     }
 
@@ -175,6 +179,20 @@ class BillingService(
      * 只按字段名读取而非反序列化整个后台设置对象，是为了不把计费绑死在后台设置的结构上：
      * 后台设置将来增删字段不会导致这里解析失败（解析失败也只会安全回退到配置值）。
      */
+    /**
+     * 示例支付开关：后台系统设置（DB）优先，未保存则回退部署配置。
+     *
+     * 为什么改：此前后台「系统设置 → 示例支付」只是把一个布尔值存进库里，
+     * 计费侧读的却是启动时的 `padguard.billing.mock-pay-enabled` 配置项，
+     * 两者完全断开 —— 运营在后台打开开关没有任何效果，必须改配置重启，属于"设了没用"。
+     * 现在与 [effectiveTrialDays] 同一口径：DB 优先、配置兜底、解析失败安全回退。
+     */
+    private fun mockPayEnabled(): Boolean =
+        runCatching {
+            systemSettingRepository.findById(SETTINGS_KEY).orElse(null)?.valueJson
+                ?.let { objectMapper.readTree(it).get("mockPay")?.asBoolean() }
+        }.getOrNull() ?: configMockPayEnabled
+
     private fun effectiveTrialDays(): Long =
         runCatching {
             systemSettingRepository.findById(SETTINGS_KEY).orElse(null)?.valueJson
@@ -208,8 +226,13 @@ class BillingService(
      *
      * 这是全系统"付费才能用"的唯一闸门 —— 所有受控能力都必须经过它，
      * 而不是每个接口各写一遍判断（那样迟早有接口漏掉，变成免费后门）。
+     *
+     * **账号冻结优先于订阅判定**：一条 status=ACTIVE（甚至永久会员）的订阅，
+     * 不代表被冻结的账号能继续用它。之前这里只看订阅，
+     * 于是"后台冻结 + 永久会员"组合下家长端所有权益照常可用 —— 正是本次修复的缺陷。
      */
     fun ensureActive(userId: String) {
+        requireUsableAccount(userId)
         val sub = subscriptionRepository.findByUserId(userId) ?: createTrial(userId)
         refreshStatus(sub)
         when (sub.status) {
@@ -226,8 +249,36 @@ class BillingService(
         }
     }
 
+    /**
+     * 账号状态闸门：冻结 / 未激活的家长，其名下权益一律停用。
+     *
+     * 与 [ParentAuthInterceptor] 中的判定是同一份 [UserStatus.isUsable] 口径，
+     * 这里再判一次不是为了重复，而是因为订阅闸门还被鉴权链路之外的调用方触达
+     * （WebSocket 握手、孩子端绑定、后台手动开通等），那些路径不会经过家长端拦截器。
+     */
+    private fun requireUsableAccount(userId: String) {
+        val user = userRepository.findById(userId).orElse(null)
+            ?: throw BizException(ParentErr.UNAUTHORIZED, "账号不存在或已被重置，请重新登录", Audience.PARENT)
+        val status = UserStatus.of(user.status)
+        if (UserStatus.isUsable(status)) return
+        throw BizException(
+            if (status == UserStatus.PENDING) ParentErr.ACCOUNT_PENDING else ParentErr.ACCOUNT_SUSPENDED,
+            if (status == UserStatus.SUSPENDED) "账号已被冻结，权益暂不可用。如需恢复请联系客服。"
+            else "账号尚未激活，请等待开通后再使用。",
+            Audience.PARENT
+        )
+    }
+
     /** 孩子端视角的校验：错误码走 ChildErr，提示语要让孩子端能直接展示给家长看 */
     fun ensureActiveForChild(userId: String) {
+        val user = userRepository.findById(userId).orElse(null)
+        if (user != null && !UserStatus.isUsable(user.status)) {
+            throw BizException(
+                ChildErr.PARENT_ACCOUNT_SUSPENDED,
+                "家长账号已被冻结，无法绑定设备。请联系客服恢复后再试。",
+                Audience.CHILD
+            )
+        }
         val sub = subscriptionRepository.findByUserId(userId) ?: createTrial(userId)
         refreshStatus(sub)
         if (sub.status != SubStatus.TRIAL.name && sub.status != SubStatus.ACTIVE.name) {
@@ -286,7 +337,7 @@ class BillingService(
         // 客服代开通（MANUAL）永远可用；收银台渠道只有在开了示例支付时才可下单 ——
         // 真实渠道未接入前就在生产放开它们，等于开一条"能下单、没人收款、也没人开通"的口子，
         // 家长付款后订阅不变，是最难解释的一类投诉。
-        if (channel != PayChannel.MANUAL && !mockPayEnabled) {
+        if (channel != PayChannel.MANUAL && !mockPayEnabled()) {
             throw BizException(
                 ParentErr.PARAM_ERROR,
                 "支付渠道 ${channel.label} 尚未接入，请稍后开放",
@@ -409,7 +460,7 @@ class BillingService(
 
     /** 模拟支付：仅开发环境开启，生产必须关闭，否则等于绕过收费 */
     fun mockPay(orderNo: String): SubscriptionDto {
-        if (!mockPayEnabled) {
+        if (!mockPayEnabled()) {
             throw BizException(ParentErr.PARAM_ERROR, "模拟支付未开启", Audience.PARENT)
         }
         return markPaid(orderNo, "MOCK")

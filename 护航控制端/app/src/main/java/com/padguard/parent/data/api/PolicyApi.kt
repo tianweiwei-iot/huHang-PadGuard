@@ -268,6 +268,15 @@ interface PolicyApi {
         @Body request: TabletUsageSettingsDto
     ): Response<ApiResponse<TabletUsageSettingsDto>>
 
+    /**
+     * 平板使用计时会话：读取服务端锚定的剩余时长（三端一致来源）。
+     * 服务端按 deviceId 返回与孩子端同一份会话数据。
+     */
+    @GET("policies/{deviceId}/usage-session")
+    suspend fun getUsageSession(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<UsageSessionDto>>
+
     // === 未成年人模式（P1 合规底座） ===
     @GET("policies/{deviceId}/minor-mode")
     suspend fun getMinorMode(

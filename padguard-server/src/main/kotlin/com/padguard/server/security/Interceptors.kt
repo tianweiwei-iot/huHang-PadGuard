@@ -5,6 +5,7 @@ import com.padguard.server.common.BizException
 import com.padguard.server.common.ChildErr
 import com.padguard.server.common.HashUtil
 import com.padguard.server.common.ParentErr
+import com.padguard.server.domain.UserStatus
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.service.DeviceService
@@ -21,6 +22,11 @@ import org.springframework.web.servlet.HandlerInterceptor
  * 服务端换库/清库后，客户端手里的旧 JWT 签名依然有效（密钥没变），
  * 若不校验存在性，就会出现"幽灵账号"——能正常调接口、能生成绑定码，
  * 但绑出来的设备挂在一个数据库里根本不存在的用户名下，家长端永远看不到。
+ *
+ * **还必须校验账号状态**（[UserStatus.isUsable]）：accessToken 有效期 120 分钟，
+ * 后台冻结账号时客户端手里的令牌并没有过期，只挡登录的话，
+ * 已登录的家长端还能继续用满两小时再靠 refreshToken 无限续下去 ——
+ * 冻结就成了"下次登录才生效"的空文。这里拒绝后客户端会立刻退回登录页。
  */
 @Component
 class ParentAuthInterceptor(
@@ -38,8 +44,16 @@ class ParentAuthInterceptor(
         } catch (e: Exception) {
             throw BizException(ParentErr.UNAUTHORIZED, "invalid token", Audience.PARENT)
         }
-        if (!users.existsById(userId)) {
-            throw BizException(ParentErr.UNAUTHORIZED, "账号不存在或已被重置，请重新登录", Audience.PARENT)
+        val user = users.findById(userId).orElse(null)
+            ?: throw BizException(ParentErr.UNAUTHORIZED, "账号不存在或已被重置，请重新登录", Audience.PARENT)
+        val status = UserStatus.of(user.status)
+        if (!UserStatus.isUsable(status)) {
+            throw BizException(
+                if (status == UserStatus.PENDING) ParentErr.ACCOUNT_PENDING else ParentErr.ACCOUNT_SUSPENDED,
+                if (status == UserStatus.SUSPENDED) "账号已被冻结，无法继续使用。如需恢复请联系客服。"
+                else "账号尚未激活，请等待开通后再使用。",
+                Audience.PARENT
+            )
         }
         request.setAttribute("userId", userId)
         return true
@@ -70,12 +84,16 @@ class FileAccessInterceptor(
     override fun preHandle(request: HttpServletRequest, response: HttpServletResponse, handler: Any): Boolean {
         if (handler !is HandlerMethod) return true
 
-        // 家长 JWT：识别成功且账号存在才记为已认证调用方
+        // 家长 JWT：识别成功、账号存在**且账号状态可用**才记为已认证调用方。
+        // 冻结账号在这里一律不认：否则 /v1/files/** 是 ParentAuthInterceptor 的排除路径，
+        // 被冻结的家长仍能以家长身份下载素材（精确归属校验会放行本家人的文件）。
         val auth = request.getHeader("Authorization")
         val token = auth?.takeIf { it.startsWith("Bearer ") }?.substring(7)
         val matchedParent = token
             ?.let { runCatching { jwt.parseUserId(it) }.getOrNull() }
-            ?.takeIf { runCatching { users.existsById(it) }.getOrDefault(false) }
+            ?.let { uid -> runCatching { users.findById(uid).orElse(null) }.getOrNull() }
+            ?.takeIf { UserStatus.isUsable(it.status) }
+            ?.id
         if (matchedParent != null) {
             request.setAttribute("fileViewerUserId", matchedParent)
             return true

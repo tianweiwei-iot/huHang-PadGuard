@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
@@ -38,6 +39,7 @@ import com.padguard.child.monitor.LocationOutcome
 import com.padguard.child.monitor.LocationAutoReporter
 import com.padguard.child.ui.block.AppBlockActivity
 import com.padguard.child.ui.lock.LockScreenActivity
+import com.padguard.child.usagesession.UsageSessionManager
 import com.padguard.child.ui.lock.LockScreenPresenter
 import com.padguard.child.ui.message.MessageActivity
 import com.padguard.child.ui.overlay.WatermarkOverlay
@@ -125,6 +127,7 @@ class GuardService : Service() {
     @Inject lateinit var logRepository: LogRepository
     @Inject lateinit var admin: DeviceAdminBridge
     @Inject lateinit var lockController: LockController
+    @Inject lateinit var usageSessionManager: UsageSessionManager
     @Inject lateinit var permissionGranter: PermissionGranter
     @Inject lateinit var timeProvider: TimeProvider
     @Inject lateinit var unlockRequestRepository: UnlockRequestRepository
@@ -205,6 +208,32 @@ class GuardService : Service() {
      */
     @Volatile private var lastCommandPullAtMs = System.currentTimeMillis()
 
+    /**
+     * 动态重启广播：监听「屏幕亮起 / 网络恢复」。
+     *
+     * ## 为什么用动态而非 Manifest 静态注册
+     * `ACTION_SCREEN_ON` / `CONNECTIVITY_ACTION` 在 Android 8+ 已被禁止 Manifest 静态接收，
+     * 只能动态注册——而动态接收器随进程存活：进程被强杀时它一起没。
+     * 所以它的角色是**保活增强**而非「防强停」：
+     * 覆盖「进程还在、但守护服务被 stopSelf / 异常退出」这类边缘场景，
+     * 让「孩子一碰平板（亮屏）/ 一连网」就把服务拉回来，而非苦等看门狗的下一周期。
+     *
+     * ## 真正的「防强停」不在应用层
+     * 设备被设置里「强制停止」会进入系统停止态，动态接收器、看门狗 JobScheduler、
+     * START_STICKY、所有广播全部失效——这是 Android 安全模型，应用代码绕不过。
+     * 唯一正解是设备成为 Device Owner（见 [com.padguard.core.engine.enforcer.SecurityEnforcer]
+     * 的 DISALLOW_APPS_CONTROL，会把「强制停止」按钮置灰）。
+     */
+    private val restartReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent?) {
+            val action = intent?.action ?: return
+            if (isRunning) return // 已在跑就不动，避免无谓重启
+            Logger.i(TAG) { "restart trigger ($action), guard not running -> restarting" }
+            runCatching { start(applicationContext, "restart:$action") }
+                .onFailure { Logger.e(TAG, it) { "restart via broadcast failed" } }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         // 必须第一时间进入前台：Android 对 startForegroundService 后的宽限期只有 5 秒，
@@ -214,6 +243,8 @@ class GuardService : Service() {
         // 监听本机应用装卸：孩子手动安装/卸载是即时管理动作，命中即触发台账同步，
         // 避免家长端在 30 分钟周期内看到"幽灵应用"且对其授权无效。
         registerAppChangeReceiver()
+        // 动态重启广播（屏幕亮起 / 网络恢复时立即把服务拉回，缩小脱管窗口）
+        registerRestartReceiver()
         Logger.i(TAG) { "GuardService created, controlMode=${admin.refreshControlMode()}" }
         isRunning = true
         // 注册看门狗：进程被系统/清理工具杀掉后由系统侧周期拉起（START_STICKY 并不保证重建）。
@@ -274,6 +305,8 @@ class GuardService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        runCatching { unregisterReceiver(restartReceiver) }
+            .onFailure { Logger.w(TAG) { "unregister restart receiver failed: ${it.message}" } }
         Logger.w(TAG) { "GuardService destroyed" }
         // 周期定位必须跟着守护服务一起停：服务停掉通常意味着解绑 / 退出管控，
         // 此时继续采集位置既没有上报对象，也越过"家长未授权即采集"的边界。
@@ -354,6 +387,8 @@ class GuardService : Service() {
                     // 一旦落下，应用自身再也解不开（lockNow 只能锁、不能程序化解）。
                     boundNow.set(false)
                     lockController.releaseAll()
+                    // 解绑即清空会话状态，避免陈旧会话继续驱动 UI 与锁定
+                    usageSessionManager.reset()
                     // 解绑后彻底释放系统级管控（挂起/隐藏应用、相机/截屏、用户限制、
                     // 自动对时、自身卸载封锁，最后 relinquish Device Owner / 设备管理员），
                     // 让本机恢复为普通应用、可被家长端或用户在设置里正常卸载。
@@ -368,6 +403,8 @@ class GuardService : Service() {
                 }
                 boundNow.set(true)
                 startTransport()
+                // 绑定成功即拉取会话：让「计时开始」确认弹窗尽快出现（若今日尚未确认）
+                runSafely("sessionSyncOnBind") { usageSessionManager.refresh() }
             }
         }
     }
@@ -441,6 +478,10 @@ class GuardService : Service() {
             // 使用情况实时同步：独立于日志上报节奏，保证家长端用量数据近实时刷新
             var nextUsageSync = SystemClock.elapsedRealtime() + USAGE_SYNC_FIRST_DELAY_MS
 
+            // 使用计时会话同步（三端一致计时）：拉取服务端权威剩余，驱动「计时开始」确认弹窗
+            // 与屏幕正上方 10 分钟倒计时浮层；节奏与采样对齐即可，无需更密。
+            var nextSessionSync = SystemClock.elapsedRealtime() + SESSION_SYNC_FIRST_DELAY_MS
+
             while (isActive) {
                 val now = SystemClock.elapsedRealtime()
                 val monitoring = policyEngine.monitoring()
@@ -498,6 +539,14 @@ class GuardService : Service() {
                     nextUsageSync = now + USAGE_SYNC_INTERVAL_MS
                 }
 
+                // ---------- 使用计时会话同步（三端一致计时） ----------
+                // 拉取服务端权威剩余：未激活 → 驱动「计时开始」确认弹窗；
+                // 剩余 ≤ 10 分钟 → 驱动屏幕正上方倒计时浮层；到期未延时 → 经 PolicyEngine 锁屏。
+                if (now >= nextSessionSync) {
+                    if (boundNow.get()) runSafely("sessionSync") { usageSessionManager.refresh() }
+                    nextSessionSync = now + SESSION_SYNC_INTERVAL_MS
+                }
+
                 updateNotification()
                 delay(MIN_TICK_MS)
             }
@@ -551,6 +600,19 @@ class GuardService : Service() {
         ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
+    /** 注册屏幕亮起 / 网络恢复的动态重启广播（见 [restartReceiver] 注释）。 */
+    private fun registerRestartReceiver() {
+        runCatching {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(ConnectivityManager.CONNECTIVITY_ACTION)
+            }
+            ContextCompat.registerReceiver(
+                this, restartReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }.onFailure { Logger.w(TAG) { "register restart receiver failed: ${it.message}" } }
+    }
+
     /**
      * 上报已安装应用台账。
      *
@@ -587,12 +649,23 @@ class GuardService : Service() {
     private suspend fun doTick(collectForegroundApp: Boolean) {
         val screenOn = snapshot.isScreenOn()
         val fg = if (collectForegroundApp) foregroundApp.current() else null
-        val tick = policyEngine.tick(foregroundPackage = fg, screenOn = screenOn)
+        // 日总时长是否已由服务端权威会话判定耗尽：三端一致的关键——
+        // 本地不再按采样累计判 DAILY_TOTAL，改由服务端会话基线派生剩余。
+        val sessionExpired = usageSessionManager.isExpired()
+        val tick = policyEngine.tick(
+            foregroundPackage = fg,
+            screenOn = screenOn,
+            dailyLimitExpired = sessionExpired
+        )
 
         // 息屏时不弹任何界面：此刻拉起 Activity 只会点亮屏幕、白耗电，
         // 而且部分 ROM 会把它记成"后台弹窗"从而限制我们后续的启动权限。
         if (!screenOn) return
 
+        // 锁定态自愈：升级链可能因 ROM 限制没能把锁定页一次顶到前台，
+        // 这里随自检重新确认一次，杜绝"家长已锁屏、平板却还能正常使用"的空洞。
+        // 已经锁好时是空操作（见 LockScreenPresenter.reenforce）。
+        lockScreenPresenter.reenforce()
         reconcileLockScreen(tick.shouldShowLockScreen, tick.lockState.primaryDetail)
         reconcileAppBlock(
             blockedPackage = tick.blockedPackage,
@@ -1140,7 +1213,9 @@ class GuardService : Service() {
             EngineEffect.StopScreenRecord -> ScreenCaptureService.stopScreenRecord(this)
 
             is EngineEffect.StartLiveView -> {
-                val captureIntent = ScreenCaptureService.liveStreamIntent(this)
+                // 画质档位随指令一路带到推流侧：家长改了「高清画面」后，
+                // 下一次续期（或重新开流）就按新档位出帧，不必退出看屏页重进。
+                val captureIntent = ScreenCaptureService.liveStreamIntent(this, effect.highDefinition)
                 val silent = dispatchCapture(captureIntent)
                 reportEffectResult(
                     effect.msgId, "liveView", silent,
@@ -1528,6 +1603,14 @@ class GuardService : Service() {
          */
         private const val USAGE_SYNC_INTERVAL_MS = 10_000L
         private const val USAGE_SYNC_FIRST_DELAY_MS = 5_000L
+
+        /**
+         * 使用计时会话同步间隔（三端一致计时）。
+         * 与采样对齐为 15s：服务端权威剩余经此刷新到本地，驱动「计时开始」确认弹窗
+         * 与屏幕正上方 10 分钟倒计时浮层；更密意义不大，更疏则浮层与锁定延迟变大。
+         */
+        private const val SESSION_SYNC_INTERVAL_MS = 15_000L
+        private const val SESSION_SYNC_FIRST_DELAY_MS = 5_000L
 
         /** 应用台账全量同步间隔：装卸是低频事件，没必要跟着 15s 的采样节奏跑 */
         private const val APP_SYNC_INTERVAL_MS = 30 * 60_000L

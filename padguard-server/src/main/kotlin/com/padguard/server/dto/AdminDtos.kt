@@ -163,7 +163,11 @@ data class ServerMetrics(
     val jvmHeapMaxMb: Int,
     val threads: Int,
     val requestsPerMin: Int,
+    /** 最近 N 分钟（默认 30）每分钟请求数，用于趋势图；服务端重启后从 0 累积 */
+    val qpmHistory: List<Int> = emptyList(),
     val errorRate: String,
+    /** 最近请求平均耗时（毫秒） */
+    val avgLatencyMs: Long = 0,
     val dbConnections: String,
     val instances: List<Instance>,
     val logs: List<LogLine>
@@ -209,6 +213,8 @@ data class AdminSettingsDto(
 
 // ---------------- 请求体 ----------------
 data class AdminLoginRequest(val username: String, val password: String)
+/** 自助修改自身密码：需当前密码；新密码至少 8 位（由服务端强制） */
+data class AdminChangePasswordRequest(val currentPassword: String, val newPassword: String)
 data class AdminCreateParentRequest(
     val phone: String,
     val name: String? = null,
@@ -246,6 +252,13 @@ data class AdminRolePrivilegesDto(
     val desc: String? = null,
     val isSystem: Boolean = true,
     val privileges: Map<String, List<String>>
+)
+/** 新建自定义角色（后台 RBAC → 新建角色）。id 由前端按 name 生成的稳定标识，小写字母/数字/下划线 */
+data class AdminRoleCreateRequest(
+    val id: String,
+    val name: String,
+    val description: String? = null,
+    val privileges: Map<String, List<String>> = emptyMap()
 )
 data class AdminSettingsSaveDto(
     val brand: String? = null,

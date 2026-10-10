@@ -114,4 +114,11 @@ object CommandKey {
     const val WITH_AUDIO = "withAudio"
     /** 布尔开关，孩子端读取后决定启用还是关闭（水印 / 挂起 / 隐藏等通用开关字段） */
     const val ENABLED = "enabled"
+    /**
+     * 实时看屏画质档位：true=高清（更宽、更高 JPEG 质量），false=标准（省带宽）。
+     *
+     * 必须随 LIVE_VIEW_START 下发：孩子端推流参数原本是写死的常量，
+     * 家长端「高清画面」开关改了以后设备端毫不知情，表现为"设了高清还是模糊"。
+     */
+    const val HIGH_DEFINITION = "highDefinition"
 }

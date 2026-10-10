@@ -49,17 +49,25 @@ class CapturePermissionActivity : ComponentActivity() {
             CaptureConsent.markGranted(this)
             CaptureConsentPrompter.clear(this)
             Logger.i(TAG) { "media projection granted, token stored" }
-            dispatch()
+            // 暖令牌模式（设备解锁/开机时由守护触发）：只把令牌就位即可，
+            // 不要据此真正起一次截屏/录屏/看屏，避免平白无故开始采集、也避免空跑前台服务。
+            if (isWarmup(captureIntent)) {
+                finish()
+            } else {
+                dispatch()
+            }
         } else {
             Logger.w(TAG) { "media projection denied, dropping pending capture" }
-            CaptureConsent.markDenied(this)
+            // 仅记"本轮拒绝"，不永久封禁：下一轮解锁/开机仍会尝试补授权，
+            // 孩子的单次"取消"不能永久剥夺家长在装机时确立的监护看屏能力。
+            CaptureConsent.markDeniedTemporarily(this)
             CaptureConsentPrompter.clear(this)
             ScreenCaptureService.pendingIntent = null
             // P1/P2：之前拒绝后只记日志，孩子和家长都不知道发生了什么，
             // 家长端只会一直"等待授权"。这里给出明确提示，说明如何恢复。
             Toast.makeText(
                 this,
-                "已拒绝屏幕采集授权，家长将无法查看实时画面；可在「我的 → 设备管理员」重新授权",
+                "已暂不授权屏幕采集，家长暂时无法查看实时画面；下次解锁平板时将再次请求",
                 Toast.LENGTH_LONG
             ).show()
         }
@@ -83,6 +91,11 @@ class CapturePermissionActivity : ComponentActivity() {
         CaptureConsent.markRequested(this)
 
         if (ScreenCaptureSession.hasToken()) {
+            // 暖令牌且凭据已就位：无需任何动作，直接收尾
+            if (isWarmup(captureIntent)) {
+                finish()
+                return
+            }
             dispatch()
             finish()
             return
@@ -113,6 +126,13 @@ class CapturePermissionActivity : ComponentActivity() {
             ScreenCaptureService.ACTION_AUDIO_RECORD ||
             target?.getStringExtra(ScreenCaptureService.EXTRA_ACTION) ==
             ScreenCaptureService.ACTION_STOP_AUDIO_RECORD
+
+    /**
+     * 是否为"暖令牌"请求（设备解锁/开机时由守护触发，仅补齐 MediaProjection 凭据，不触发采集）。
+     * 凭据缺失时由授权页顶起系统确认框；凭据已就位时直接收尾，不启动任何采集任务。
+     */
+    private fun isWarmup(target: Intent?): Boolean =
+        target?.getBooleanExtra(ScreenCaptureService.EXTRA_WARMUP, false) == true
 
     private fun dispatch() {
         val target = captureIntent ?: return

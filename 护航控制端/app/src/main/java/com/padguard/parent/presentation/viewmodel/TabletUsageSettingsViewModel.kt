@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.domain.model.TabletUsageSettings
 import com.padguard.domain.model.TimeRange
+import com.padguard.domain.model.UsageSession
 import com.padguard.domain.repository.PolicyRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,7 +20,10 @@ data class TabletUsageSettingsUiState(
     val settings: TabletUsageSettings = TabletUsageSettings(deviceId = ""),
     val isLoading: Boolean = false,
     val saved: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    /** 平板使用计时会话（三端一致的剩余时长来源）；null 表示尚未拉取 */
+    val usageSession: UsageSession? = null,
+    val sessionError: String? = null
 )
 
 @HiltViewModel
@@ -97,10 +101,29 @@ class TabletUsageSettingsViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(settings = current.copy(restDurationMinutes = minutes))
     }
 
-    fun updateTimeUpMessage(message: String) {
-        val current = _uiState.value.settings
-        _uiState.value = _uiState.value.copy(settings = current.copy(timeUpMessage = message))
+    /**
+     * 拉取平板使用计时会话（含服务端锚定的剩余时长）。
+     * 与 [load] 解耦：设置页进入时二者并行拉取，会话每隔一段时间由界面轮询刷新。
+     */
+    fun loadSession(deviceId: String) {
+        if (deviceId.isEmpty()) return
+        viewModelScope.launch {
+            policyRepository.getUsageSession(deviceId)
+                .onSuccess { session ->
+                    _uiState.value = _uiState.value.copy(usageSession = session, sessionError = null)
+                }
+                .onFailure { e ->
+                    _uiState.value = _uiState.value.copy(sessionError = e.message)
+                }
+        }
     }
+
+    /**
+     * 以本地墙钟 [now] 平滑插值，得到与服务器/孩子端一致的实时剩余毫秒。
+     * 界面每秒刷新调用，避免三端各自按本地时钟累加导致数字对不上。
+     */
+    fun liveRemainingMs(now: Long): Long =
+        _uiState.value.usageSession?.liveRemainingMs(now) ?: 0L
 
     fun save() {
         viewModelScope.launch {

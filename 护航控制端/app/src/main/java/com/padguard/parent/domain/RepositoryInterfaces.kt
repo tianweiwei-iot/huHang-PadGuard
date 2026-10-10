@@ -226,6 +226,12 @@ interface MonitorRepository {
     /** 获取屏幕监控设置 */
     suspend fun getScreenMonitorSettings(deviceId: String): Result<ScreenMonitorSettings>
 
+    /**
+     * 查询实时看屏状态（是否在线 + 实时带宽占用）。
+     * 家长端实时画面页据此显示上行/下行带宽，直接回答"实时看屏占了多少带宽"。
+     */
+    suspend fun getLiveStatus(deviceId: String): Result<ScreenLiveStatus>
+
     /** 更新屏幕监控设置并下发至被管控平板 */
     suspend fun updateScreenMonitorSettings(
         settings: ScreenMonitorSettings
@@ -501,6 +507,10 @@ interface PolicyRepository {
      * @return 同步后的设置对象
      */
     suspend fun updateTabletUsageSettings(settings: TabletUsageSettings): Result<TabletUsageSettings>
+
+    // === 平板使用计时会话（三端时间一致） ===
+    /** 读取孩子端当前使用计时会话，含服务端锚定的剩余时长（与家长端/孩子端同一份） */
+    suspend fun getUsageSession(deviceId: String): Result<UsageSession>
 
     // === 未成年人模式（P1 合规底座） ===
     /** 读取未成年人模式当前配置 */

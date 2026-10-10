@@ -23,7 +23,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -45,10 +48,12 @@ import com.padguard.child.service.GuardService
 import com.padguard.child.ui.components.GlyphBadge
 import com.padguard.child.ui.theme.PadGuardTheme
 import com.padguard.core.common.Logger
+import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.repository.UnlockRequestRepository
 import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.lock.LockController
+import com.padguard.core.engine.lock.LockReason
 import com.padguard.core.engine.lock.LockState
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collect
@@ -83,6 +88,7 @@ class LockScreenActivity : ComponentActivity() {
     @Inject lateinit var unlockRequestRepository: UnlockRequestRepository
     @Inject lateinit var lockController: LockController
     @Inject lateinit var admin: DeviceAdminBridge
+    @Inject lateinit var timeProvider: TimeProvider
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -102,6 +108,30 @@ class LockScreenActivity : ComponentActivity() {
     private var requestHint by mutableStateOf<String?>(null)
     private var submitting by mutableStateOf(false)
 
+    /**
+     * 锁屏原因（可刷新）。
+     *
+     * 家长可能连续下发不同原因的锁屏（先"该休息了"，再"作业先做完"）。
+     * 用可观察状态而不是 onCreate 里的一次性局部变量，
+     * 新的原因才能通过 [onNewIntent] 显示在已经存在的锁屏页上。
+     */
+    private var detailState by mutableStateOf("")
+
+    /**
+     * 护眼锁屏标记：主锁定原因是否为 [LockReason.EYE_CARE]。
+     * 决定锁屏页走「护眼休息」主题（薄荷绿底、护眼绿「眼」图标、大字体、护眼文案）
+     * 还是常规「锁定」主题（带锁图标、字体稍增、原有文案）。
+     * 一次锁屏会话内原因不变，onCreate 赋一次即可。
+     */
+    private var isEyeCareState by mutableStateOf(false)
+
+    /**
+     * 护眼休息数字倒计时（剩余秒数）；-1 表示不显示。
+     * 仅在主锁定原因为 [LockReason.EYE_CARE] 时刷新为正值，其余锁屏原因（时段 / 远程 /
+     * 总时长等）保持 -1，避免对"下次解锁遥遥无期"的锁也显示倒计时。
+     */
+    private var countdownSeconds by mutableStateOf(-1)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showOverLockScreen()
@@ -110,6 +140,8 @@ class LockScreenActivity : ComponentActivity() {
         // 抢占复位会反复进 onCreate，这里做成幂等的"置一次"，不会反复调用系统 API。
         applyStatusBarDisabled(true)
         pushSystemLockIfNeeded()
+        // 护眼休息倒计时：每秒刷新一次；非 EYE_CARE 锁定时 updateCountdown 会维持 -1（不显示）
+        handler.postDelayed(countdownRunnable, COUNTDOWN_INTERVAL_MS)
 
         // 无解锁入口：拦截系统返回键，禁止逃逸。
         onBackPressedDispatcher.addCallback(
@@ -123,9 +155,11 @@ class LockScreenActivity : ComponentActivity() {
 
         // 服务端下发的 reason 可能是字面量 "null"（历史上下发过 {"reason":"null"}），
         // 直接显示会在锁屏页正中摆一个刺眼的 null，这里连同空串一起滤掉。
-        val rawDetail = intent?.getStringExtra(EXTRA_DETAIL).orEmpty()
-        val detail = rawDetail.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }.orEmpty()
+        val detail = sanitizeDetail(intent?.getStringExtra(EXTRA_DETAIL))
         currentDetail = detail
+        detailState = detail
+        // 护眼强制休息锁屏采用专属主题；其余（远程/时段/总时长/限额）走通用带锁主题
+        isEyeCareState = lockController.state.value.primaryReason == LockReason.EYE_CARE
 
         // 解锁即退出：不等外部调 dismiss()。
         // 屏幕固定/抢占复位都可能让外部拿不到本实例，只靠 dismiss() 会留下
@@ -143,7 +177,7 @@ class LockScreenActivity : ComponentActivity() {
 
         setContent {
             PadGuardTheme {
-                LockScreenContent(detail = detail)
+                LockScreenContent(detail = detailState, isEyeCare = isEyeCareState)
                 if (showRequestDialog) {
                     UnlockRequestDialog()
                 }
@@ -182,6 +216,9 @@ class LockScreenActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        // 锁定页真正到达前台 —— 升级链据此停止重试，并撤掉悬浮层与常驻通知
+        visible = true
+        LockScreenNotifier.cancelFrom(this)
         // 每次回到前台都重新确认一次锁定任务：系统可能在切后台时解除了固定。
         // startLockTask 幂等，重复调用无副作用（非白名单应用会抛异常，已用 runCatching 兜住）。
         enterLockTask()
@@ -189,8 +226,23 @@ class LockScreenActivity : ComponentActivity() {
         handler.removeCallbacks(relaunchRunnable)
     }
 
+    /**
+     * 锁屏页已存在时收到新的锁屏指令（singleTask + SINGLE_TOP 会走到这里）。
+     *
+     * 必须重写：不重写的话新原因只会更新静态变量，界面上还是旧文案，
+     * 表现为"家长改了锁屏原因，孩子看到的还是上一次那句"。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val detail = sanitizeDetail(intent.getStringExtra(EXTRA_DETAIL))
+        currentDetail = detail
+        detailState = detail
+    }
+
     override fun onStop() {
         resumed = false
+        visible = false
         super.onStop()
     }
 
@@ -219,6 +271,43 @@ class LockScreenActivity : ComponentActivity() {
             show(this@LockScreenActivity, currentDetail)
             handler.postDelayed(this, RELAUNCH_RETRY_MS)
         }
+    }
+
+    /**
+     * 护眼休息数字倒计时：每秒刷新一次 [countdownSeconds]。
+     *
+     * 只给 [LockReason.EYE_CARE] 一种原因做倒计时——它的解锁时间是可预期的有限时长
+     * （即家长设定的休息时长），倒计时才有意义；时段锁 / 远程锁 / 总时长锁的"下次解锁"
+     * 可能远在数小时外，显示倒计时反而会让孩子误以为"还有 X 分钟就好"。
+     *
+     * 剩余时间用 [TimeProvider.now] 而非裸 `System.currentTimeMillis` 计算，
+     * 以抵消服务端时间偏移，与 [EyeCareEnforcer] 计算 `untilMillis` 的口径完全一致，
+     * 否则会因偏移出现"倒计时先归零、过几秒才真正解锁"的观感错位。
+     */
+    private val countdownRunnable = object : Runnable {
+        override fun run() {
+            updateCountdown()
+            handler.postDelayed(this, COUNTDOWN_INTERVAL_MS)
+        }
+    }
+
+    private fun updateCountdown() {
+        val s = lockController.state.value
+        if (s.primaryReason == LockReason.EYE_CARE && s.primaryUntilMillis > 0L) {
+            val remainingSec = ((s.primaryUntilMillis - timeProvider.now()) / 1000L)
+                .toInt()
+                .coerceAtLeast(0)
+            countdownSeconds = remainingSec
+        } else {
+            countdownSeconds = -1
+        }
+    }
+
+    /** 把剩余秒数格式化为 MM:SS（分钟超过 99 也照常显示，如 90:00） */
+    private fun formatCountdown(totalSeconds: Int): String {
+        val minutes = totalSeconds / 60
+        val seconds = totalSeconds % 60
+        return "%d:%02d".format(minutes, seconds)
     }
 
     /** 是否真正处于前台（由 onResume/onPause/onStop 维护） */
@@ -314,14 +403,24 @@ class LockScreenActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun LockScreenContent(detail: String) {
+    private fun LockScreenContent(detail: String, isEyeCare: Boolean) {
+        // 护眼主题：柔和薄荷绿渐变 + 深绿文字；其余锁屏沿用主题默认背景。
+        val eyeBgBrush = Brush.verticalGradient(
+            listOf(Color(0xFFE6F4EA), Color(0xFFCDE9D6))
+        )
+        val eyeOnSurface = Color(0xFF1B5E20)      // 深绿主文字，浅底高对比
+        val eyeOnSurfaceDim = Color(0xFF2E7D32)    // 次深绿
+        val eyeAccent = Color(0xFF43A047)          // 护眼绿图标
+
         Surface(
             modifier = Modifier.fillMaxSize(),
-            color = MaterialTheme.colorScheme.background
+            color = if (isEyeCare) Color.Transparent else MaterialTheme.colorScheme.background
         ) {
-            // 说明文案居中，「申请解锁」固定在页面底部：
-            // 底部是拇指最舒服的位置，也避免孩子误以为"按钮就是主要内容"。
-            Box(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(if (isEyeCare) Modifier.background(eyeBgBrush) else Modifier)
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -330,38 +429,75 @@ class LockScreenActivity : ComponentActivity() {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    GlyphBadge("锁", MaterialTheme.colorScheme.primary)
+                    // 图标：护眼用「眼」字（护眼绿）；其余用「锁」字（主题强调色）
+                    GlyphBadge(
+                        char = if (isEyeCare) "眼" else "锁",
+                        tint = if (isEyeCare) eyeAccent else MaterialTheme.colorScheme.primary
+                    )
                     Spacer(Modifier.height(24.dp))
+
+                    // 主提示文案：护眼专属文案 + 大字体；其余保持原文案、字体稍增
                     Text(
-                        text = "平板已锁定，需解锁后才能继续使用",
+                        text = if (isEyeCare) {
+                            "为了保护您的视力，请稍作休息后再继续使用"
+                        } else {
+                            "平板已锁定，需解锁后才能继续使用"
+                        },
                         textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.headlineMedium,
-                        color = MaterialTheme.colorScheme.onBackground
+                        style = MaterialTheme.typography.headlineLarge,
+                        color = if (isEyeCare) eyeOnSurface else MaterialTheme.colorScheme.onBackground
                     )
                     Spacer(Modifier.height(12.dp))
+
                     if (detail.isNotBlank()) {
                         Text(
                             text = detail,
                             textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onBackground
+                            style = if (isEyeCare) MaterialTheme.typography.titleMedium
+                            else MaterialTheme.typography.bodyLarge,
+                            color = if (isEyeCare) eyeOnSurfaceDim
+                            else MaterialTheme.colorScheme.onBackground
                         )
                         Spacer(Modifier.height(12.dp))
                     }
+
                     Text(
                         text = "除申请解锁外，当前无法进行其它操作。",
                         textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+                        style = if (isEyeCare) MaterialTheme.typography.titleMedium
+                        else MaterialTheme.typography.bodyLarge,
+                        color = (if (isEyeCare) eyeOnSurface else MaterialTheme.colorScheme.onBackground)
+                            .copy(alpha = if (isEyeCare) 0.85f else 0.7f)
                     )
+
+                    // 护眼休息倒计时：仅 EYE_CARE 锁定时 countdownSeconds >= 0。
+                    // 数字从家长设定的休息时长（如 15 分钟 → 15:00）开始，逐秒递减到 00:00，
+                    // 让孩子对"还要休息多久"有清晰预期，减少对抗情绪。
+                    if (countdownSeconds >= 0) {
+                        Spacer(Modifier.height(28.dp))
+                        Text(
+                            text = formatCountdown(countdownSeconds),
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.displayLarge,
+                            color = eyeAccent
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "护眼休息倒计时，结束后自动解锁",
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = eyeOnSurfaceDim
+                        )
+                    }
 
                     requestHint?.let { hint ->
                         Spacer(Modifier.height(16.dp))
                         Text(
                             text = hint,
                             textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
+                            style = if (isEyeCare) MaterialTheme.typography.titleMedium
+                            else MaterialTheme.typography.bodyLarge,
+                            color = if (isEyeCare) eyeAccent else MaterialTheme.colorScheme.primary
                         )
                     }
                 }
@@ -379,7 +515,11 @@ class LockScreenActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text(text = "申请解锁")
+                        Text(
+                            text = "申请解锁",
+                            style = if (isEyeCare) MaterialTheme.typography.titleMedium
+                            else MaterialTheme.typography.labelLarge
+                        )
                     }
                 }
             }
@@ -456,6 +596,7 @@ class LockScreenActivity : ComponentActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(relaunchRunnable)
+        handler.removeCallbacks(countdownRunnable)
         // 兜底恢复：任何退出路径（含被系统回收）都不能把家长的状态栏永远留在禁用态
         applyStatusBarDisabled(false)
         if (instance === this) instance = null
@@ -481,6 +622,9 @@ class LockScreenActivity : ComponentActivity() {
         /** 抢占未成功时的重试间隔：持续抢占直到真正回到前台 */
         private const val RELAUNCH_RETRY_MS = 500L
 
+        /** 护眼休息倒计时刷新间隔：每秒一次，足够平滑又不浪费资源 */
+        private const val COUNTDOWN_INTERVAL_MS = 1000L
+
         /** 当前运行中的实例，供 [dismiss] 直接 finish，避免再发一次 Intent */
         @Volatile
         private var instance: LockScreenActivity? = null
@@ -489,9 +633,26 @@ class LockScreenActivity : ComponentActivity() {
         @Volatile
         private var currentDetail: String = ""
 
-        fun show(context: Context, detail: String) {
-            currentDetail = detail
-            val intent = Intent(context, LockScreenActivity::class.java).apply {
+        /**
+         * 锁定页是否真的已经显示在前台。
+         *
+         * 升级链（[LockScreenPresenter]）用它判断"还要不要继续重试"：
+         * 后台启动 Activity 被 ROM 吃掉时**没有任何异常**，只有这个前台回执能证明真的锁住了。
+         */
+        @Volatile
+        var visible: Boolean = false
+            private set
+
+        /**
+         * 服务端下发的 reason 可能是字面量 "null"（历史上下发过 {"reason":"null"}），
+         * 直接显示会在锁屏页正中摆一个刺眼的 null，这里连同空串一起滤掉。
+         */
+        private fun sanitizeDetail(raw: String?): String =
+            raw?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }.orEmpty()
+
+        /** 构造锁屏页意图。全屏通知的 PendingIntent 与直接拉起共用同一份，避免两处 flags 漂移。 */
+        fun intent(context: Context, detail: String): Intent =
+            Intent(context, LockScreenActivity::class.java).apply {
                 putExtra(EXTRA_DETAIL, detail)
                 addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -499,7 +660,10 @@ class LockScreenActivity : ComponentActivity() {
                         Intent.FLAG_ACTIVITY_SINGLE_TOP
                 )
             }
-            runCatching { context.startActivity(intent) }
+
+        fun show(context: Context, detail: String) {
+            currentDetail = detail
+            runCatching { context.startActivity(intent(context, detail)) }
                 .onFailure { Logger.e(TAG, it) { "failed to show lock screen" } }
         }
 

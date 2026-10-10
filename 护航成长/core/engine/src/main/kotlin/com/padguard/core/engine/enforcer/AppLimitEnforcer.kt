@@ -116,23 +116,10 @@ class AppLimitEnforcer @Inject constructor(
         dayKey: String = usageRepository.dayKey(timeProvider.now()),
         nowElapsed: Long = timeProvider.elapsedRealtime()
     ): LimitVerdict {
-        // 每日总时长优先级最高：总额耗尽后任何应用都不该继续使用。
-        // 额度按"工作日 / 周末"取（见 [AppLimitPolicy.quotaFor]）——
-        // 只看 dailyTotalMinutes 会让家长端保存的工作日/周末额度完全不生效。
-        val quotaMinutes = policy.quotaFor(isWeekend(timeProvider.now()))
-        if (quotaMinutes > 0) {
-            val usedMs = usageRepository.getTotalUsage(dayKey)
-            val quotaMs = quotaMinutes * 60_000L
-            if (usedMs >= quotaMs) {
-                return LimitVerdict.Blocked(
-                    packageName = "",
-                    reason = LimitReason.DAILY_TOTAL,
-                    usedMinutes = (usedMs / 60_000L).toInt(),
-                    quotaMinutes = quotaMinutes
-                )
-            }
-            reminderFor(policy, "", quotaMs - usedMs)?.let { return it }
-        }
+        // 全局日总时长锁定已改由服务端权威会话驱动（UsageSessionManager + PolicyEngine.tick
+        // 的 dailyLimitExpired 入参），本地采样累计不再参与锁定判定，以换取三端时间严格一致。
+        // 本地仍持续累计 usageRepository 的总/分使用时长，供「今日使用情况」上报家长端，
+        // 因此这里不再读取 quotaFor 做全局总时长判定，也不再做全局剩余提醒。
 
         val pkg = foregroundPackage ?: return LimitVerdict.Allowed
         val rule = policy.rules.firstOrNull { it.packageName == pkg } ?: return LimitVerdict.Allowed

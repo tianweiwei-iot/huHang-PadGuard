@@ -52,8 +52,12 @@
   // 登录
   $("login-form").onsubmit = async (e) => {
     e.preventDefault();
-    const username = $("login-username").value.trim() || "admin";
-    const password = $("login-password").value || "admin123";
+    const username = $("login-username").value.trim();
+    const password = $("login-password").value;
+    if (!username || !password) {
+      PG.ui.toast("err", "请输入账号和密码", "账号与密码均为必填");
+      return;
+    }
     const btn = e.target.querySelector("button");
     btn.disabled = true; btn.textContent = "登录中…";
     try {
@@ -78,6 +82,78 @@
     $("bell-count").style.display = alerts ? "block" : "none";
     PG.router.buildSidebar();
     if (!location.hash) location.hash = "dashboard"; else PG.router.render((location.hash || "#dashboard").slice(1));
+  }
+
+  // 用户菜单（修改密码 / 退出登录）
+  (function setupUserMenu() {
+    const chip = $("user-chip");
+    if (!chip) return;
+    let menu = null;
+    chip.style.cursor = "pointer";
+    chip.onclick = (e) => {
+      e.stopPropagation();
+      if (menu) { menu.remove(); menu = null; return; }
+      const rect = chip.getBoundingClientRect();
+      menu = document.createElement("div");
+      menu.style.cssText =
+        "position:fixed;z-index:9999;right:" + (window.innerWidth - rect.right) + "px;top:" + (rect.bottom + 8) + "px;" +
+        "background:var(--bg);border:1px solid var(--border-soft);border-radius:10px;" +
+        "box-shadow:0 8px 24px rgba(0,0,0,.18);min-width:168px;overflow:hidden";
+      menu.innerHTML =
+        '<div style="padding:10px 14px;font-weight:600;border-bottom:1px solid var(--border-soft)" id="um-name"></div>' +
+        '<button class="btn btn-ghost btn-block" id="um-chgpwd" style="justify-content:flex-start;border-radius:0">修改密码</button>' +
+        '<button class="btn btn-ghost btn-block" id="um-logout" style="justify-content:flex-start;border-radius:0;color:var(--danger)">退出登录</button>';
+      document.body.appendChild(menu);
+      const a = PG.state.admin;
+      menu.querySelector("#um-name").textContent = a ? (a.name || a.username) : "";
+      menu.querySelector("#um-chgpwd").onclick = () => { menu.remove(); menu = null; openChangePassword(); };
+      menu.querySelector("#um-logout").onclick = () => {
+        if (menu) { menu.remove(); menu = null; }
+        PG.api.config.token = ""; PG.state.admin = null;
+        $("app-shell").classList.add("hidden");
+        $("login-screen").classList.remove("hidden");
+      };
+      const close = () => { if (menu) { menu.remove(); menu = null; } document.removeEventListener("click", close); };
+      setTimeout(() => document.addEventListener("click", close), 0);
+    };
+  })();
+
+  /** 自助修改当前管理员密码弹层（含显示/隐藏） */
+  function openChangePassword() {
+    const m = PG.ui.modal({
+      title: "修改我的密码", width: 420,
+      body: `
+        <div class="field"><label>当前密码</label>
+          <div style="position:relative"><input type="password" id="cp-cur" autocomplete="current-password">
+          <button type="button" class="pw-toggle" data-t="cp-cur" style="position:absolute;right:8px;top:9px;background:none;border:none;cursor:pointer;color:var(--brand)">显示</button></div></div>
+        <div class="field"><label>新密码（至少 8 位）</label>
+          <div style="position:relative"><input type="password" id="cp-new" autocomplete="new-password">
+          <button type="button" class="pw-toggle" data-t="cp-new" style="position:absolute;right:8px;top:9px;background:none;border:none;cursor:pointer;color:var(--brand)">显示</button></div></div>
+        <p class="muted" style="font-size:12px">修改后立即生效；为安全起见，修改后请使用新密码重新登录。</p>`,
+      foot: '<button class="btn btn-ghost" id="cp-cancel">取消</button><button class="btn btn-primary" id="cp-ok">确认修改</button>',
+    });
+    m.el.querySelectorAll(".pw-toggle").forEach((b) => (b.onclick = () => {
+      const inp = m.el.querySelector("#" + b.dataset.t);
+      inp.type = inp.type === "password" ? "text" : "password";
+      b.textContent = inp.type === "password" ? "显示" : "隐藏";
+    }));
+    m.el.querySelector("#cp-cancel").onclick = m.close;
+    m.el.querySelector("#cp-ok").onclick = async () => {
+      const cur = m.el.querySelector("#cp-cur").value;
+      const nw = m.el.querySelector("#cp-new").value;
+      if (!cur || !nw) { PG.ui.toast("err", "请填写当前密码和新密码"); return; }
+      if (nw.length < 8) { PG.ui.toast("err", "新密码至少 8 位"); return; }
+      try {
+        await PG.api.changeOwnPassword(cur, nw);
+        m.close();
+        PG.ui.toast("ok", "密码已修改", "请使用新密码重新登录");
+        PG.api.config.token = ""; PG.state.admin = null;
+        setTimeout(() => {
+          $("app-shell").classList.add("hidden");
+          $("login-screen").classList.remove("hidden");
+        }, 900);
+      } catch (e) { PG.ui.toast("err", "修改失败", e.message); }
+    };
   }
 
   // 已登录态恢复（演示环境默认需重新登录，保证可审计；此处仅占位）

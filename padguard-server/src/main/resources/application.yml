@@ -50,7 +50,38 @@ spring:
       # 的 MAX_IDLE_MS），因此不会导致连接永久悬挂。
       request-timeout: 600000
 
+  # ---- 邮件（密码重置通知等）----
+  # 默认关闭：未配置 SMTP 时，重置密码仍会生成新口令并在后台弹窗显示，由管理员安全转告。
+  # 配置后可向账号邮箱自动发送新密码。生产环境请通过环境变量注入凭据，不要写死在文件中：
+  #   PADGUARD_MAIL_HOST / PADGUARD_MAIL_PORT / PADGUARD_MAIL_USERNAME
+  #   PADGUARD_MAIL_PASSWORD / PADGUARD_MAIL_FROM
+  mail:
+    host: ${PADGUARD_MAIL_HOST:}
+    port: ${PADGUARD_MAIL_PORT:465}
+    username: ${PADGUARD_MAIL_USERNAME:}
+    password: ${PADGUARD_MAIL_PASSWORD:}
+    protocol: smtp
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+          ssl:
+            enable: true
+
 padguard:
+  mail:
+    # 总开关：SMTP 主机已配置且本项为 true 时才真正发信；否则仅记日志 + 后台弹窗显示明文口令
+    enabled: ${PADGUARD_MAIL_ENABLED:false}
+    from: ${PADGUARD_MAIL_FROM:no-reply@padguard.com}
+  stream:
+    # 实时看屏并发准入上限：同时推流的设备数达到此值后，新的开流请求被拒绝（已开的不受影响）。
+    # 服务端中转架构下每路都是"上行+下行"带宽，不限制时出口带宽会随并发线性打满。
+    # 按服务器出口带宽估算：单路高清约 1.5MB/s（上+下），1000 路约 1.5GB/s 出口，
+    # 请结合实际带宽与机器规格调整；家庭/小批量部署保持默认即可。
+    max-live-devices: 1000
   jwt:
     # 留空 = 首次启动自动生成随机密钥并写入 config/jwt-secret.txt（不进安装包，每次部署不同）。
     # 多实例部署时必须显式指定（建议用环境变量 PADGUARD_JWT_SECRET 注入），

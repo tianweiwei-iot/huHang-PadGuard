@@ -15,6 +15,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,35 +36,39 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.padguard.domain.model.TabletUsageSettings
 import com.padguard.domain.model.TimeRange
+import com.padguard.domain.model.UsageSession
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.TabletUsageSettingsUiState
 import com.padguard.presentation.viewmodel.TabletUsageSettingsViewModel
 
 /**
- * 平板使用时间设置页（水晶玻璃 · 科技风）
+ * 平板使用时间设置页（清爽浅色 · 舒适紧凑）
  *
  * 视觉体系（仅本页生效，不影响全局 v2.1 清爽卡片风）：
- * - 深空渐变底（深海军蓝 → 深紫）+ 青/紫双色极光辉光，营造科技感
- * - 水晶玻璃卡片：半透明叠层填充 + 渐变描边 + 顶部高光 + 大圆角深投影，模拟毛玻璃立体感
- * - 强调色：青 → 紫 渐变贯穿数值、滑条与主按钮，整体色调统一
- * - 设备为 Android 10（API 29）无 RenderEffect 模糊，玻璃质感由叠层渐变模拟
+ * - 浅色渐变底（极浅冷灰白 → 淡蓝灰）+ 极淡蓝/薰衣草氛围光，干净通透
+ * - 白色卡片：浅灰描边 + 柔和浅投影 + 16dp 圆角，清爽不刺眼
+ * - 强调色：蓝 → 紫 渐变贯穿数值、滑条与主按钮，克制点缀
+ * - 布局紧凑：卡片内边距 14dp、区块间距 10dp，信息密度适中、一眼看清
  *
  * 功能逻辑与原版一致：
  * - 「是否启用时间管控」总开关：关闭时页面所有设置项灰化、不可更改
  * - 可用时间段（可增删）/ 工作日 / 休息日使用时长 / 休息提醒 / 超时提示文案
  */
 
-// ==================== 玻璃视觉令牌 ====================
-private val BgTop = Color(0xFF0A0F24)        // 深海军蓝
-private val BgBottom = Color(0xFF1B1140)     // 深紫
-private val GlowCyan = Color(0xFF2BC8FF)     // 科技青
-private val GlowViolet = Color(0xFF8B6BFF)   // 极光紫
-private val AccentCyan = Color(0xFF3EDCFF)
-private val AccentViolet = Color(0xFF9B8CFF)
+// ==================== 浅色视觉令牌（清爽 · 舒适 · 紧凑） ====================
+private val BgTop = Color(0xFFF6F8FB)        // 极浅冷灰白
+private val BgBottom = Color(0xFFE9EFF7)     // 淡蓝灰
+private val GlowCyan = Color(0xFFA9CBF2)     // 柔和蓝（仅作极淡氛围）
+private val GlowViolet = Color(0xFFCBBEF2)   // 柔和薰衣草（仅作极淡氛围）
+private val AccentCyan = Color(0xFF2F8FE0)   // 主强调蓝（浅底可读）
+private val AccentViolet = Color(0xFF7C6CF0) // 辅助紫（浅底可读）
 private val AccentGradient = Brush.linearGradient(listOf(AccentCyan, AccentViolet))
-private val GlassText = Color(0xFFF3F6FF)
-private val GlassTextDim = Color.White.copy(alpha = 0.55f)
-private val GlassShape = RoundedCornerShape(24.dp)
+private val GlassText = Color(0xFF1F2A3D)    // 主文字（深岩蓝）
+private val GlassTextDim = Color(0xFF6B7787) // 次文字（中灰）
+private val GlassSurface = Color(0xFFFFFFFF) // 卡片表面白
+private val GlassSurfaceAlt = Color(0xFFF2F6FB) // 卡片渐变下沿
+private val GlassBorder = Color(0xFFE2E8F1)  // 卡片描边浅灰
+private val GlassShape = RoundedCornerShape(16.dp)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,7 +82,19 @@ fun TabletUsageSettingsScreen(
     val enabled = uiState.settings.enabled
 
     LaunchedEffect(deviceId) {
-        if (deviceId.isNotEmpty()) viewModel.load(deviceId)
+        if (deviceId.isNotEmpty()) {
+            viewModel.load(deviceId)
+            viewModel.loadSession(deviceId)
+        }
+    }
+
+    // 每 15 秒刷新一次剩余时长，与服务端/孩子端保持同源一致（服务端锚定 startEpoch + serverNow）
+    LaunchedEffect(deviceId) {
+        if (deviceId.isEmpty()) return@LaunchedEffect
+        while (true) {
+            delay(15_000)
+            viewModel.loadSession(deviceId)
+        }
     }
 
     LaunchedEffect(uiState.saved) {
@@ -100,7 +117,7 @@ fun TabletUsageSettingsScreen(
             val r = size.width * 0.75f
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(GlowCyan.copy(alpha = 0.16f), Color.Transparent),
+                    colors = listOf(GlowCyan.copy(alpha = 0.28f), Color.Transparent),
                     center = Offset(size.width * 0.92f, -size.height * 0.02f),
                     radius = r
                 ),
@@ -109,7 +126,7 @@ fun TabletUsageSettingsScreen(
             )
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(GlowViolet.copy(alpha = 0.20f), Color.Transparent),
+                    colors = listOf(GlowViolet.copy(alpha = 0.32f), Color.Transparent),
                     center = Offset(size.width * 0.05f, size.height * 0.88f),
                     radius = r * 1.1f
                 ),
@@ -148,8 +165,8 @@ fun TabletUsageSettingsScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 item { EnableSwitch(enabled = enabled, onToggle = viewModel::updateEnabled) }
                 item { TimeRangeSection(uiState, viewModel, enabled) }
@@ -175,11 +192,7 @@ fun TabletUsageSettingsScreen(
                 }
                 item { RestSection(settings = uiState.settings, viewModel = viewModel, enabled = enabled) }
                 item {
-                    MessageSection(
-                        message = uiState.settings.timeUpMessage,
-                        onUpdate = viewModel::updateTimeUpMessage,
-                        enabled = enabled
-                    )
+                    UsageSessionCard(session = uiState.usageSession)
                 }
             }
         }
@@ -205,29 +218,23 @@ private fun GlassCard(
         modifier = modifier
             .fillMaxWidth()
             .shadow(
-                elevation = 22.dp,
+                elevation = 6.dp,
                 shape = GlassShape,
-                spotColor = Color.Black.copy(alpha = 0.45f),
-                ambientColor = Color.Black.copy(alpha = 0.30f)
+                spotColor = Color(0xFF1F2A3D).copy(alpha = 0.10f),
+                ambientColor = Color(0xFF1F2A3D).copy(alpha = 0.06f)
             )
             .clip(GlassShape)
             .background(
                 Brush.verticalGradient(
-                    listOf(Color.White.copy(alpha = 0.13f), Color.White.copy(alpha = 0.05f))
+                    listOf(GlassSurface, GlassSurfaceAlt)
                 )
             )
             .border(
                 width = 1.dp,
-                brush = Brush.verticalGradient(
-                    listOf(
-                        Color.White.copy(alpha = 0.45f),
-                        Color.White.copy(alpha = 0.10f),
-                        Color.White.copy(alpha = 0.22f)
-                    )
-                ),
+                color = GlassBorder,
                 shape = GlassShape
             )
-            .padding(18.dp),
+            .padding(14.dp),
         content = content
     )
 }
@@ -270,8 +277,8 @@ private fun GlassIconButton(onClick: () -> Unit, content: @Composable BoxScope.(
             .padding(start = 8.dp)
             .size(40.dp)
             .clip(CircleShape)
-            .background(Color.White.copy(alpha = 0.10f))
-            .border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+            .background(GlassSurface)
+            .border(1.dp, GlassBorder, CircleShape)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) { content() }
@@ -283,7 +290,12 @@ private fun GlassSaveButton(isLoading: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(BgBottom.copy(alpha = 0.92f))
+            .shadow(
+                elevation = 8.dp,
+                spotColor = Color(0xFF1F2A3D).copy(alpha = 0.08f),
+                ambientColor = Color(0xFF1F2A3D).copy(alpha = 0.05f)
+            )
+            .background(GlassSurface)
             .padding(16.dp)
     ) {
         Box(
@@ -329,16 +341,16 @@ private fun GlassTextField(
 ) {
     var focused by remember { mutableStateOf(false) }
     val borderColor = when {
-        !enabled -> Color.White.copy(alpha = 0.12f)
+        !enabled -> GlassBorder
         focused -> AccentCyan.copy(alpha = 0.8f)
-        else -> Color.White.copy(alpha = 0.22f)
+        else -> GlassBorder
     }
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
-            .background(Color.White.copy(alpha = if (enabled) 0.07f else 0.04f))
+            .background(GlassSurfaceAlt.copy(alpha = if (enabled) 1f else 0.5f))
             .border(1.dp, borderColor, RoundedCornerShape(14.dp))
             .padding(horizontal = 12.dp, vertical = 12.dp),
         enabled = enabled,
@@ -381,8 +393,8 @@ private fun EnableSwitch(enabled: Boolean, onToggle: (Boolean) -> Unit) {
                     checkedTrackColor = AccentCyan,
                     checkedBorderColor = AccentCyan,
                     uncheckedThumbColor = GlassTextDim,
-                    uncheckedTrackColor = Color.White.copy(alpha = 0.12f),
-                    uncheckedBorderColor = Color.White.copy(alpha = 0.30f)
+                    uncheckedTrackColor = GlassBorder,
+                    uncheckedBorderColor = GlassBorder
                 )
             )
         }
@@ -411,15 +423,15 @@ private fun TimeRangeSection(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
-                        .background(if (enabled) AccentGradient else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.10f), Color.White.copy(alpha = 0.10f))))
+                        .background(if (enabled) AccentGradient else Brush.linearGradient(listOf(GlassBorder, GlassBorder)))
                         .clickable(enabled = enabled) { viewModel.addTimeRange() }
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Add, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
+                        Icon(Icons.Default.Add, contentDescription = null, tint = if (enabled) Color.White else GlassTextDim, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(3.dp))
-                        Text("添加", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                        Text("添加", color = if (enabled) Color.White else GlassTextDim, style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }
@@ -597,7 +609,7 @@ private fun DurationControlContent(
                 color = AccentCyan
             )
         }
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -637,9 +649,9 @@ private fun DurationControlContent(
                     val fraction = (sliderState.value - sliderState.valueRange.start) /
                             (sliderState.valueRange.endInclusive - sliderState.valueRange.start)
                     val baseColor = if (enabled) {
-                        Color.White.copy(alpha = 0.14f)
+                        Color(0xFFE2E8F1)
                     } else {
-                        Color.White.copy(alpha = 0.08f)
+                        Color(0xFFEDF1F6)
                     }
                     Canvas(modifier = Modifier.fillMaxWidth().height(8.dp)) {
                         val w = size.width
@@ -699,8 +711,8 @@ private fun GlassStepButton(
         modifier = Modifier
             .size(40.dp)
             .clip(CircleShape)
-            .background(if (enabled) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.04f))
-            .border(1.dp, Color.White.copy(alpha = if (enabled) 0.28f else 0.10f), CircleShape)
+            .background(if (enabled) GlassSurfaceAlt else Color(0xFFEDF1F6))
+            .border(1.dp, GlassBorder, CircleShape)
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -721,6 +733,11 @@ private fun RestSection(
 ) {
     GlassCard {
         GlassSectionHeader(icon = Icons.Default.FreeBreakfast, title = "休息提醒")
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            "连续使用达到设定时长后强制休息，休息期间平板锁定。任一项设为 0 表示不提醒",
+            style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
+        )
         Spacer(modifier = Modifier.height(14.dp))
         DurationControlContent(
             title = "使用多久后提醒休息",
@@ -728,7 +745,7 @@ private fun RestSection(
             enabled = enabled,
             onUpdate = viewModel::updateRestAfter
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         DurationControlContent(
             title = "每次休息时长",
             minutes = settings.restDurationMinutes,
@@ -738,19 +755,58 @@ private fun RestSection(
     }
 }
 
+/**
+ * 今日剩余时长卡片。
+ *
+ * 数据来自服务端锚定的使用计时会话（与服务器、孩子端同一份剩余时长），
+ * 家长端不再各自按本地时钟计算，三端数字严格一致。
+ * 卡片内部每秒本地插值刷新倒计时，服务端拉取由页面每 15 秒轮询一次。
+ */
 @Composable
-private fun MessageSection(message: String, onUpdate: (String) -> Unit, enabled: Boolean) {
+private fun UsageSessionCard(session: UsageSession?) {
     GlassCard {
-        GlassSectionHeader(icon = Icons.Default.ChatBubbleOutline, title = "超时提示文案")
-        Spacer(modifier = Modifier.height(12.dp))
-        GlassTextField(
-            value = message,
-            onValueChange = onUpdate,
-            modifier = Modifier.fillMaxWidth(),
-            enabled = enabled,
-            singleLine = false,
-            minLines = 2,
-            placeholder = "请输入提示语"
+        GlassSectionHeader(icon = Icons.Default.Schedule, title = "今日剩余时长")
+        Spacer(modifier = Modifier.height(6.dp))
+        if (session == null) {
+            Text(
+                "正在读取计时状态…",
+                style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
+            )
+            return@GlassCard
+        }
+        if (!session.active) {
+            Text(
+                "孩子端尚未确认开始计时，今日额度 ${session.quotaMinutes} 分钟（尚未开始计时）",
+                style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
+            )
+            return@GlassCard
+        }
+        // 每秒本地墙钟插值刷新，与服务端/孩子端同源派生，避免三端数字漂移
+        var tick by remember { mutableStateOf(System.currentTimeMillis()) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                tick = System.currentTimeMillis()
+                delay(1000)
+            }
+        }
+        val remaining = session.liveRemainingMs(tick)
+        val mm = (remaining / 60_000L).toInt()
+        val ss = ((remaining / 1000L) % 60L).toInt()
+        val mmText = if (mm < 10) "0$mm" else "$mm"
+        val ssText = if (ss < 10) "0$ss" else "$ss"
+        Text(
+            text = "$mmText:$ssText",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            color = AccentCyan
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        val total = session.quotaMinutes + session.extendedMinutes
+        Text(
+            text = if (session.extendedMinutes > 0)
+                "当日额度 $total 分钟（含延时 ${session.extendedMinutes} 分钟）"
+            else "当日额度 $total 分钟",
+            style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
         )
     }
 }

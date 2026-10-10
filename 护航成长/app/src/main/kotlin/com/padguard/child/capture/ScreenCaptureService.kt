@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -115,6 +116,67 @@ class ScreenCaptureService : Service() {
     @Volatile private var streamStartedAtMs = 0L
 
     /**
+     * 当前推流实际生效的画质档位（true=高清）。
+     *
+     * 由服务端随 LIVE_VIEW_START 指令下发（对应家长端「高清画面」开关）。
+     * 单独存一份"实际生效值"而不是每次读 Intent，是为了能在续期时比对：
+     * 家长在观看途中改了开关，只有把新旧档位对起来，才能判断该续期还是该重建流
+     * （见 [startLiveStream]——只续期的话，已建立的流会一直用旧档位出帧）。
+     *
+     * 默认 false：老服务端不下发该字段时按标准档推流，行为与升级前一致。
+     */
+    @Volatile private var liveHighDefinition = false
+
+    /** 当前档位的最小出帧间隔（高清帧更重，节流也略强） */
+    private val liveMinFrameIntervalMs: Long
+        get() = if (liveHighDefinition) LIVE_MIN_FRAME_INTERVAL_HD_MS else LIVE_MIN_FRAME_INTERVAL_STD_MS
+
+    /** 当前推流实际生效的宽度（自适应档位内浮动，见 [adaptQuality]） */
+    private val liveFrameMaxWidth: Int
+        get() = effWidth
+
+    /** 当前推流实际生效的 JPEG 质量 */
+    private val liveJpegQuality: Int
+        get() = effQuality
+
+    // ==================== 帧缓冲复用（消除逐帧分配导致的 GC 卡顿）====================
+    //
+    // 实时推流每帧都要"取原始帧 → 缩放 → 压 JPEG"。旧实现每一步都新建 Bitmap：
+    // 全分辨率 RGBA_8888 约 9MB，再建一张缩放图约数 MB，单帧分配 9~17MB，
+    // 每秒数帧就会频繁触发 GC，表现为家长端画面周期性"卡屏"（设备端泵线程被 GC 停顿，
+    // 服务端队列随之排空，家长端停在最后一帧）。
+    // 这里把三块缓冲常驻复用：全分辨率(padded) / 裁掉行对齐填充 / 缩放后，
+    // 整条推流只在档位切换时重建一次缩放缓冲，把逐帧分配降到只剩 JPEG 输出数组（约 100~300KB）。
+    @Volatile private var liveFullBitmap: Bitmap? = null
+    @Volatile private var liveCropBitmap: Bitmap? = null
+    @Volatile private var liveScaledBitmap: Bitmap? = null
+    @Volatile private var liveCropCanvas: Canvas? = null
+    @Volatile private var liveScaledCanvas: Canvas? = null
+    /** 复用同一块输出缓冲，避免每帧新建 ByteArrayOutputStream（其内部 byte[] 同样要扩容） */
+    private val liveStreamBaos = ByteArrayOutputStream(256 * 1024)
+
+    // ==================== 自适应码率（在家长选定的档位内上下浮动，给带宽与流畅度兜底）====================
+    //
+    // 服务端中转架构下，每一路实时看屏都是"一份上行 + 一份下行"带宽。
+    // 并发一高，若每路都按最高画质猛推，服务端出口带宽会被打满、各路一起卡。
+    // 这里按"单帧编码+上传耗时"反向调节：耗时超预算就先降质量、再降分辨率，
+    // 明显从容就恢复，把每路带宽稳定在上限附近，避免挤兑式卡顿；网络/CPU 宽裕时
+    // 又不浪费清晰度。注意：这是档位内的浮动，家长的"高清/标准"选择仍是上限。
+    @Volatile private var effWidth = LIVE_FRAME_MAX_WIDTH_STD
+    @Volatile private var effQuality = LIVE_JPEG_QUALITY_STD
+    /** 最近一帧真实帧的"取样起点"，用于测量编码+上传耗时以驱动自适应 */
+    private var realFrameStartMs = 0L
+
+    /** 释放推流复用的全部缓冲（推流停止/重建时调用，防止内存常驻） */
+    private fun releaseLiveBuffers() {
+        liveFullBitmap = null
+        liveCropBitmap = null
+        liveScaledBitmap = null
+        liveCropCanvas = null
+        liveScaledCanvas = null
+    }
+
+    /**
      * 推流专用客户端：读写超时必须为 0（无限等待）。
      * 用默认的 30s 读超时会在推流途中直接被判定超时掐断，表现为"看几秒就断"。
      */
@@ -204,6 +266,12 @@ class ScreenCaptureService : Service() {
         val action = intent?.getStringExtra(EXTRA_ACTION)
         if (action == null) {
             stopSelf()
+            return START_STICKY
+        }
+        // 暖令牌意图若意外被当作普通意图启动：凭据已在授权页就位，无需任何采集，直接收尾。
+        if (action == ACTION_WARMUP) {
+            Logger.i(TAG) { "warmup intent reached service, token already stored, no capture needed" }
+            stopIfIdle()
             return START_STICKY
         }
         // 前台类型必须与本次任务匹配（见 [enterForeground]）：
@@ -744,6 +812,8 @@ class ScreenCaptureService : Service() {
     // 服务端原样转发给正在观看的家长端 —— 端到端是一条流，不是轮询。
 
     private fun startLiveStream(intent: Intent) {
+        // 画质档位由服务端随指令下发；缺省 false 保证老服务端下行为不变
+        val requestedHd = intent.getBooleanExtra(EXTRA_HIGH_DEFINITION, false)
         // ---- 活性判定：绝不能只看协程是否还挂着 ----
         //
         // 推流用的是 OkHttp 长连接，execute() 是**阻塞调用**：帧循环一旦退出
@@ -764,11 +834,24 @@ class ScreenCaptureService : Service() {
             now - streamStartedAtMs < LIVE_START_GRACE_MS
         }
         if (fresh) {
-            // 家长端会周期性续期，重复 start 是正常现象：把截止时间往后推即可
-            streamDeadlineMs = SystemClock.elapsedRealtime() + LIVE_TTL_MS
-            Logger.i(TAG) { "live stream active, renewed" }
-            return
+            // 画质档位没变：家长端会周期性续期，重复 start 是正常现象，把截止时间往后推即可
+            if (requestedHd == liveHighDefinition) {
+                streamDeadlineMs = SystemClock.elapsedRealtime() + LIVE_TTL_MS
+                Logger.i(TAG) { "live stream active, renewed" }
+                return
+            }
+            // 档位变了：只续期的话，已建立的流会继续用旧档位出帧，
+            // 家长改了开关却看不到任何变化，等于开关失效。这里必须拆掉重建。
+            Logger.i(TAG) { "live stream quality changed: hd=$requestedHd, rebuilding" }
         }
+        liveHighDefinition = requestedHd
+        // 档位切换：把自适应状态复位到该档位上限，缩放缓冲交给 pump 按新宽度重建。
+        // 否则切换"高清/标准"后，effWidth/effQuality 还停在旧档位的浮动值，
+        // 新档位要么迟迟不生效、要么首帧仍按旧上限出帧，等于开关再次失效。
+        effWidth = if (requestedHd) LIVE_FRAME_MAX_WIDTH_HD else LIVE_FRAME_MAX_WIDTH_STD
+        effQuality = if (requestedHd) LIVE_JPEG_QUALITY_HD else LIVE_JPEG_QUALITY_STD
+        liveScaledBitmap = null
+        liveScaledCanvas = null
         // 残留推流必须彻底拆掉再重建：残留的 call 不 cancel，execute() 会一直挂着，
         // 新起的推流与旧的争抢同一个投影会话，画面依旧出不来。
         releaseStream("restart")
@@ -812,6 +895,7 @@ class ScreenCaptureService : Service() {
         streamJob?.cancel()
         streamJob = null
         streaming.set(false)
+        releaseLiveBuffers()
     }
 
     /** 帧泵：一条长连接上持续写 `4 字节长度 + JPEG` */
@@ -844,6 +928,8 @@ class ScreenCaptureService : Service() {
                 // 表现为"看屏永远黑屏/卡在某一帧"。这是实时监控能不能成立的关键。
                 var lastSent: ByteArray? = null
                 var lastRealFrameAt = 0L
+                /** 上一帧真正写出的时刻，用于按档位节流（见 [liveMinFrameIntervalMs]） */
+                var lastWriteAt = 0L
                 while (streaming.get() && SystemClock.elapsedRealtime() < streamDeadlineMs) {
                     val payload: ByteArray?
                     if (mediaRecorder != null || screenRecording.get()) {
@@ -861,16 +947,18 @@ class ScreenCaptureService : Service() {
                         SystemClock.sleep(LIVE_FRAME_INTERVAL_MS)
                     } else {
                         val jpeg = grabFrameScaled(reader, metrics.widthPixels, metrics.heightPixels)
-                        payload = if (jpeg != null) {
+                        if (jpeg != null) {
+                            // 记录"真实帧"取样起点，用于测量编码+上传耗时并驱动自适应（见 [adaptQuality]）
+                            realFrameStartMs = SystemClock.elapsedRealtime()
                             lastSent = jpeg
                             lastRealFrameAt = SystemClock.elapsedRealtime()
-                            jpeg
+                            payload = jpeg
                         } else {
                             // 无新帧：距上次重发超过保活间隔就复用上一帧，否则只写心跳。
                             // 这样既保证服务端 lastFrameAt 持续刷新（家长端判定流活着），
                             // 又不会在静止画面下把同样的 30KB 每 200ms 推一次白白吃满上行带宽。
                             val cached = lastSent
-                            if (cached != null &&
+                            payload = if (cached != null &&
                                 SystemClock.elapsedRealtime() - lastRealFrameAt >= LIVE_KEEPALIVE_MS
                             ) {
                                 lastRealFrameAt = SystemClock.elapsedRealtime()
@@ -884,12 +972,25 @@ class ScreenCaptureService : Service() {
                             // 纯心跳：告诉服务端连接还在，不计入画面
                             sink.writeInt(0)
                         } else {
+                            // 真实帧：按档位补一个最小间隔。
+                            // 取帧本身不带节流（有新帧立刻返回），屏幕连续变化时出帧速率完全
+                            // 由 SurfaceFlinger 决定；高清档单帧可达数百 KB，不压一下上行会打满。
+                            val minGap = liveMinFrameIntervalMs
+                            val since = SystemClock.elapsedRealtime() - lastWriteAt
+                            if (lastWriteAt > 0L && since < minGap) SystemClock.sleep(minGap - since)
                             sink.writeInt(payload.size)
                             sink.write(payload)
                             frames++
                         }
                         sink.flush()
+                        lastWriteAt = SystemClock.elapsedRealtime()
                         lastPushAtMs = SystemClock.elapsedRealtime()
+                        // 真实帧：用"编码+上传"耗时驱动自适应（见 [adaptQuality]）。
+                        // 仅对刚压出来的新帧计时，复用缓存帧(keepalive)不计，避免把"静止画面"误判成拥塞。
+                        if (realFrameStartMs > 0L) {
+                            adaptQuality(SystemClock.elapsedRealtime() - realFrameStartMs)
+                            realFrameStartMs = 0L
+                        }
                     } catch (t: Throwable) {
                         Logger.i(TAG) { "live stream write ended after $frames frames: ${t.message}" }
                         return
@@ -925,8 +1026,12 @@ class ScreenCaptureService : Service() {
      * 取帧并按流媒体规格压缩。
      *
      * 直接推原始分辨率（1920x1200）的帧在 Wi-Fi 上也有 200~400KB/帧，
-     * 5fps 就是 1~2MB/s，家长端必然卡顿且画面永远是几秒前的。
-     * 缩到 720 宽 + 质量 60 后单帧约 30~60KB，延迟感知明显下降，画面仍然清晰可读。
+     * 4fps 就是 1~2MB/s，家长端必然卡顿且画面永远是几秒前的。
+     * 缩放后单帧降到几十 KB，延迟感知明显下降，画面仍然清晰可读。
+     *
+     * 缩放宽度与 JPEG 质量取当前生效档位（[liveFrameMaxWidth] / [liveJpegQuality]），
+     * 由家长端「高清画面」开关决定 —— 早期版本这两个值是写死的常量，
+     * 开关改了设备端毫不知情，正是"设了高清还是模糊"的根因。
      */
     private fun grabFrameScaled(reader: ImageReader, width: Int, height: Int): ByteArray? {
         val deadline = SystemClock.elapsedRealtime() + LIVE_FRAME_TIMEOUT_MS
@@ -941,24 +1046,35 @@ class ScreenCaptureService : Service() {
                 val pixelStride = plane.pixelStride
                 val rowStride = plane.rowStride
                 val rowPadding = rowStride - pixelStride * width
-                val padded = Bitmap.createBitmap(
-                    width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888
-                )
-                padded.copyPixelsFromBuffer(plane.buffer)
-                val full = if (rowPadding == 0) padded
-                else Bitmap.createBitmap(padded, 0, 0, width, height)
-                val scale = (LIVE_FRAME_MAX_WIDTH.toFloat() / full.width).coerceAtMost(1f)
-                val frame = if (scale < 1f) {
-                    Bitmap.createScaledBitmap(
-                        full,
-                        (full.width * scale).toInt(),
-                        (full.height * scale).toInt(),
-                        true
+                val padPixels = rowPadding / pixelStride
+                val paddedW = width + padPixels
+                val (full, crop) = ensureLiveBitmaps(width, height, paddedW)
+                // 把带行对齐填充的原始帧拷进 full（无逐帧分配）
+                full.copyPixelsFromBuffer(plane.buffer)
+                // 裁掉右侧填充：padPixels==0 时 full 已是干净帧，直接以 full 为源
+                val src = if (padPixels > 0) {
+                    liveCropCanvas!!.drawBitmap(
+                        full, android.graphics.Rect(padPixels, 0, padPixels + width, height),
+                        android.graphics.Rect(0, 0, width, height), null
                     )
+                    crop
                 } else full
-                val out = ByteArrayOutputStream()
-                frame.compress(Bitmap.CompressFormat.JPEG, LIVE_JPEG_QUALITY, out)
-                return out.toByteArray()
+                val maxWidth = effWidth
+                val scale = (maxWidth.toFloat() / width).coerceAtMost(1f)
+                liveStreamBaos.reset()
+                if (scale < 1f) {
+                    val sw = (width * scale).toInt()
+                    val sh = (height * scale).toInt()
+                    val scaled = ensureLiveScaled(sw, sh)
+                    liveScaledCanvas!!.drawBitmap(
+                        src, android.graphics.Rect(0, 0, width, height),
+                        android.graphics.Rect(0, 0, sw, sh), null
+                    )
+                    scaled.compress(Bitmap.CompressFormat.JPEG, effQuality, liveStreamBaos)
+                } else {
+                    src.compress(Bitmap.CompressFormat.JPEG, effQuality, liveStreamBaos)
+                }
+                return liveStreamBaos.toByteArray()
             } catch (t: Throwable) {
                 Logger.e(TAG, t) { "live frame decode failed" }
                 return null
@@ -967,6 +1083,69 @@ class ScreenCaptureService : Service() {
             }
         }
         return null
+    }
+
+    /** 复用全分辨率(padded)与裁剪两块缓冲；尺寸变化时才重建 */
+    private fun ensureLiveBitmaps(width: Int, height: Int, paddedW: Int): Pair<Bitmap, Bitmap> {
+        var full = liveFullBitmap
+        if (full == null || full.width != paddedW || full.height != height) {
+            full = Bitmap.createBitmap(paddedW, height, Bitmap.Config.ARGB_8888)
+            liveFullBitmap = full
+        }
+        var crop = liveCropBitmap
+        if (crop == null || crop.width != width || crop.height != height) {
+            crop = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            liveCropBitmap = crop
+            liveCropCanvas = Canvas(crop)
+        }
+        return full to crop
+    }
+
+    /** 复用缩放缓冲；仅在目标尺寸变化（自适应改分辨率）时重建 */
+    private fun ensureLiveScaled(w: Int, h: Int): Bitmap {
+        var s = liveScaledBitmap
+        if (s == null || s.width != w || s.height != h) {
+            s = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            liveScaledBitmap = s
+            liveScaledCanvas = Canvas(s)
+        }
+        return s
+    }
+
+    /**
+     * 按"上一帧编码+上传耗时"反向调节画质/分辨率。
+     *
+     * [costMs] 包含取帧、缩放、压 JPEG 与网络写出（含最小间隔节流）的总耗时。
+     * - 超过预算的 [ADAPT_DOWN_RATIO] 倍：先降 JPEG 质量，降到下限仍不够再降分辨率；
+     * - 低于预算的 [ADAPT_UP_RATIO] 倍：先恢复分辨率、再恢复质量，向档位上限回升。
+     * 这样每路带宽稳定在上限附近：并发高/上行慢时自动瘦身避免挤兑式卡顿；
+     * 链路宽裕时不浪费家长选定的清晰度。这是档位内的浮动，"高清/标准"选择仍是上限。
+     */
+    private fun adaptQuality(costMs: Long) {
+        val hd = liveHighDefinition
+        val ceilW = if (hd) LIVE_FRAME_MAX_WIDTH_HD else LIVE_FRAME_MAX_WIDTH_STD
+        val ceilQ = if (hd) LIVE_JPEG_QUALITY_HD else LIVE_JPEG_QUALITY_STD
+        val floorW = if (hd) ADAPT_FLOOR_WIDTH_HD else ADAPT_FLOOR_WIDTH_STD
+        val floorQ = if (hd) ADAPT_FLOOR_QUALITY_HD else ADAPT_FLOOR_QUALITY_STD
+        val budget = if (hd) HD_BUDGET_MS else STD_BUDGET_MS
+        if (costMs > budget * ADAPT_DOWN_RATIO) {
+            if (effQuality > floorQ) {
+                effQuality = maxOf(floorQ, effQuality - ADAPT_QUALITY_STEP)
+            } else if (effWidth > floorW) {
+                effWidth = maxOf(floorW, (effWidth * ADAPT_WIDTH_STEP).toInt())
+                // 分辨率变了，缩放缓冲必须重建（尺寸不匹配 Canvas 会抛异常）
+                liveScaledBitmap = null
+                liveScaledCanvas = null
+            }
+        } else if (costMs < budget * ADAPT_UP_RATIO) {
+            if (effWidth < ceilW) {
+                effWidth = minOf(ceilW, (effWidth / ADAPT_WIDTH_STEP).toInt())
+                liveScaledBitmap = null
+                liveScaledCanvas = null
+            } else if (effQuality < ceilQ) {
+                effQuality = minOf(ceilQ, effQuality + ADAPT_QUALITY_STEP)
+            }
+        }
     }
 
     // ==================== 环境音采集 ====================
@@ -1098,7 +1277,9 @@ class ScreenCaptureService : Service() {
     private fun awaitPermission(intent: Intent) {
         pendingIntent = intent
         Logger.i(TAG) { "media projection not granted yet, requesting permission" }
-        CaptureConsentPrompter.prompt(this, intent)
+        // 走统一派发口：应用在前台时直接顶起系统确认框，后台时退化为中性通知引导。
+        // 正常情况下令牌已由"解锁/开机暖令牌"提前就位，这里只是兜底。
+        CaptureConsentPrompter.dispatch(this, intent)
     }
 
     // ==================== 前台通知 ====================
@@ -1203,11 +1384,22 @@ class ScreenCaptureService : Service() {
         const val ACTION_LIVE_START = "live_start"
         const val ACTION_LIVE_STOP = "live_stop"
 
+        /**
+         * 暖令牌动作：仅用于设备解锁/开机时补齐 MediaProjection 凭据。
+         * 该意图不会真正到达采集逻辑——授权页在拿到令牌后即收尾，
+         * 这里兜底处理（若意外被当作普通意图启动）以免空跑前台服务。
+         */
+        const val ACTION_WARMUP = "warmup"
+        /** 标记某条采集意图属于"暖令牌"请求（只补凭据、不触发采集） */
+        const val EXTRA_WARMUP = "warmup_flag"
+
         const val EXTRA_ACTION = "action"
         private const val EXTRA_SHOT_ID = "shotId"
         private const val EXTRA_TASK_ID = "taskId"
         private const val EXTRA_RESOLUTION = "resolution"
         private const val EXTRA_WITH_AUDIO = "withAudio"
+        /** 实时看屏画质档位：true=高清。由服务端随 LIVE_VIEW_START 下发（家长端「高清画面」开关） */
+        private const val EXTRA_HIGH_DEFINITION = "highDefinition"
 
         private const val DEFAULT_RESOLUTION = "HD_720P"
         private const val TRIGGER_REMOTE = "REMOTE"
@@ -1280,19 +1472,63 @@ class ScreenCaptureService : Service() {
          * 若沿用 1s 就会退化成"一秒换一张图"，被当成"在刷新图片而不是看实时画面"。
          */
         private const val LIVE_FRAME_TIMEOUT_MS = 250L
-        /** 推流宽度：640。1920 宽屏缩到 640 约 33%，文字仍可辨认，单帧体积比 720 宽小约 20% */
-        private const val LIVE_FRAME_MAX_WIDTH = 640
         /**
-         * JPEG 质量 50。60 以上对"看清文字"没有明显增益，却要多付 20%~30% 体积；
-         * 50 是肉眼可接受的质量下限，再往下文字边缘会出现明显块状噪点。
+         * 标准档推流宽度。
+         *
+         * 640 宽在平板上（典型 1200~1600 宽屏）缩放到约 40%，
+         * 小字号与图标细节会糊成一团 —— 这正是"画面根本看不清"的来源。
+         * 提到 860 后缩放比约 60%，正文文字边缘清晰，单帧体积仍可控（约 40~70KB）。
          */
-        private const val LIVE_JPEG_QUALITY = 50
+        private const val LIVE_FRAME_MAX_WIDTH_STD = 860
+        /** 高清档推流宽度：接近常见平板的物理宽度，文字与图标基本无损 */
+        private const val LIVE_FRAME_MAX_WIDTH_HD = 1440
+
+        /**
+         * 标准档 JPEG 质量。
+         *
+         * 50 是"肉眼勉强接受"的下限，文字边缘会出现明显块状噪点；
+         * 提到 70 后噪点基本消失，体积只增加约 20%——清晰度的收益远大于这点开销。
+         */
+        private const val LIVE_JPEG_QUALITY_STD = 70
+        /** 高清档 JPEG 质量：文字锐利，与 70 相比细节差异肉眼可辨 */
+        private const val LIVE_JPEG_QUALITY_HD = 92
+
+        /**
+         * 最小出帧间隔（写出真实帧时的节流下限）。
+         *
+         * 帧泵里只有"没取到新帧"时才 sleep，屏幕持续变化（播放视频、连续滑动）时
+         * 会尽可能快地推帧。标准档单帧几十 KB 尚可承受；高清档单帧约 200~300KB，
+         * 不限帧的话瞬时上行可达数 MB/s —— 家长端来不及收、设备自身编码也扛不住，
+         * 结果反而是画面更卡。因此按档位给一个下限：高清约 6fps、标准约 8fps，
+         * 都高于"看得连贯"所需的帧率，观感不受影响，上行则被稳定压住。
+         */
+        private const val LIVE_MIN_FRAME_INTERVAL_STD_MS = 120L
+        private const val LIVE_MIN_FRAME_INTERVAL_HD_MS = 160L
         /**
          * 单次推流的最长时长。
          * 家长端观看期间会周期性续期（重新下发 start），一旦家长关掉页面或掉线，
          * 续期停止，推流在这里自动结束 —— 不会有一条流永远推下去耗孩子的电和流量。
          */
         private const val LIVE_TTL_MS = 180_000L
+
+        // ---- 自适应码率参数（在家长选定的档位内浮动，见 [adaptQuality]）----
+        // 并发一高，每路都按最高画质猛推会把服务端出口带宽打满、各路一起卡。
+        // 按"单帧编码+上传耗时"反向调节：超预算就降质量/分辨率，从容就恢复。
+        // 这些下限是"档位内的地板"，保证再怎么自适应也不会糊到看不清。
+        private const val ADAPT_FLOOR_WIDTH_HD = 1024
+        private const val ADAPT_FLOOR_QUALITY_HD = 72
+        private const val ADAPT_FLOOR_WIDTH_STD = 720
+        private const val ADAPT_FLOOR_QUALITY_STD = 60
+        /** 质量步长：每次下调/恢复 6，避免画质跳变突兀 */
+        private const val ADAPT_QUALITY_STEP = 6
+        /** 分辨率步长系数：每次乘 0.85（下调）或除 0.85（恢复） */
+        private const val ADAPT_WIDTH_STEP = 0.85f
+        /** 耗时超预算的倍数即下调；低于该比例即尝试恢复 */
+        private const val ADAPT_DOWN_RATIO = 1.5f
+        private const val ADAPT_UP_RATIO = 0.55f
+        /** 单帧预算（编码+上传）：高清档略宽，标准档更紧 */
+        private const val HD_BUDGET_MS = 170L
+        private const val STD_BUDGET_MS = 120L
 
         /** 等待授权期间暂存的采集请求（进程内，仅在授权流程中短暂存在） */
         @Volatile var pendingIntent: Intent? = null
@@ -1347,20 +1583,31 @@ class ScreenCaptureService : Service() {
         }
 
         /** 开启实时看屏推流（家长端打开看屏页时调用，观看期间会周期性续期） */
-        fun startLiveStream(context: Context) {
-            start(context, liveStreamIntent(context))
+        fun startLiveStream(context: Context, highDefinition: Boolean = false) {
+            start(context, liveStreamIntent(context, highDefinition))
         }
 
         /** 仅构建实时推流 Intent（供 GuardService 在需要授权时包装成可点击通知） */
-        fun liveStreamIntent(context: Context): Intent =
+        fun liveStreamIntent(context: Context, highDefinition: Boolean = false): Intent =
             Intent(context, ScreenCaptureService::class.java)
                 .putExtra(EXTRA_ACTION, ACTION_LIVE_START)
+                .putExtra(EXTRA_HIGH_DEFINITION, highDefinition)
 
         fun stopLiveStream(context: Context) {
             val intent = Intent(context, ScreenCaptureService::class.java)
                 .putExtra(EXTRA_ACTION, ACTION_LIVE_STOP)
             start(context, intent)
         }
+
+        /**
+         * 暖令牌意图：设备解锁/开机时由 [com.padguard.child.capture.CaptureConsentPrompter]
+         * 派发，目的是在孩子端尚未持有 MediaProjection 凭据时补一次系统确认，
+         * 让令牌就位；不携带任何真实采集动作。授权页据此只存令牌、不启动采集。
+         */
+        fun warmupIntent(context: Context): Intent =
+            Intent(context, ScreenCaptureService::class.java)
+                .putExtra(EXTRA_ACTION, ACTION_WARMUP)
+                .putExtra(EXTRA_WARMUP, true)
 
         /** 授权成功后重放暂存请求 */
         fun replayPending(context: Context) {

@@ -4,7 +4,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -21,6 +23,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import kotlinx.coroutines.launch
 import com.padguard.domain.model.InstalledApp
 import com.padguard.presentation.ui.components.AppIcon
+import com.padguard.presentation.ui.components.SoftCard
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.viewmodel.AppManageUiState
 import com.padguard.presentation.viewmodel.AppManageViewModel
@@ -45,6 +48,8 @@ fun AppManageScreen(
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var pendingUninstall by remember { mutableStateOf<InstalledApp?>(null) }
+    // 管控模式下的三道密码闸门放进底部弹层，默认不占列表空间
+    var showModeSheet by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -127,12 +132,72 @@ fun AppManageScreen(
                 onShowSystemAppsChange = viewModel::setShowSystemApps
             )
 
+            // 管控模式压成一行：口径（黑名单/白名单）必须常驻，因为它决定下面每个开关的含义；
+            // 三道密码闸门属于低频设置，移入底部弹层，不再把应用列表挤出屏幕。
+            AppControlModeBar(
+                listMode = uiState.listMode,
+                guardPasswordSet = uiState.guardPasswordSet,
+                onModeChange = viewModel::setListMode,
+                onOpenPasswordSettings = { showModeSheet = true }
+            )
+
             BatchAllowBar(
                 onGrantAll = { viewModel.setAllAllowed(true) },
                 onRevokeAll = { viewModel.setAllAllowed(false) }
             )
 
-            AppListModeCard(
+            // weight(1f)：列表固定拿走"剩余全部高度"。
+            // 之前用 fillMaxSize() 时，上方卡片一旦变高，列表就被顶到可视区之外，
+            // 表现为"进去只看得见开关、看不见应用"。
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when {
+                    uiState.isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                    uiState.error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(uiState.error!!, color = PadGuardColors.WarningRed)
+                            Spacer(Modifier.height(8.dp))
+                            Button(onClick = { viewModel.load() }) { Text("重试") }
+                        }
+                    }
+                    uiState.visibleApps.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            if (uiState.apps.isEmpty()) "暂无应用台账，等待被管控端上报" else "没有匹配的应用",
+                            color = PadGuardColors.TextSecondary
+                        )
+                    }
+                    else -> LazyColumn(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(vertical = 8.dp)
+                    ) {
+                        items(uiState.visibleApps, key = { it.packageName }) { app ->
+                            InstalledAppItem(
+                                app = app,
+                                selectionMode = uiState.selectionMode,
+                                selected = app.packageName in uiState.selected,
+                                onToggleSelected = { viewModel.toggleSelected(app.packageName) },
+                                onToggleSuspended = { viewModel.setSuspended(app, !app.suspended) },
+                                onToggleAllowed = { viewModel.setAllowed(app, !app.allowed) },
+                                onDecreaseLimit = { viewModel.setAppLimit(app, (app.dailyLimitMinutes ?: 0) - 15) },
+                                onIncreaseLimit = { viewModel.setAppLimit(app, (app.dailyLimitMinutes ?: 0) + 15) },
+                                onUninstall = { pendingUninstall = app }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 管控模式·密码闸门弹层：只在家长主动点开时才占屏
+    if (showModeSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showModeSheet = false },
+            sheetState = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            AppControlModeSheet(
                 listMode = uiState.listMode,
                 requirePasswordOnLaunch = uiState.requirePasswordOnLaunch,
                 requirePasswordOnInstall = uiState.requirePasswordOnInstall,
@@ -142,46 +207,11 @@ fun AppManageScreen(
                 onRequirePasswordChange = viewModel::setRequirePasswordOnLaunch,
                 onRequireInstallChange = viewModel::setRequirePasswordOnInstall,
                 onRequireUninstallChange = viewModel::setRequirePasswordOnUninstall,
-                onNavigateToDeviceDetail = onNavigateToDeviceDetail
+                onNavigateToDeviceDetail = {
+                    showModeSheet = false
+                    onNavigateToDeviceDetail()
+                }
             )
-
-            when {
-                uiState.isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-                uiState.error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(uiState.error!!, color = PadGuardColors.WarningRed)
-                        Spacer(Modifier.height(8.dp))
-                        Button(onClick = { viewModel.load() }) { Text("重试") }
-                    }
-                }
-                uiState.visibleApps.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        if (uiState.apps.isEmpty()) "暂无应用台账，等待被管控端上报" else "没有匹配的应用",
-                        color = PadGuardColors.TextSecondary
-                    )
-                }
-                else -> LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 8.dp)
-                ) {
-                    items(uiState.visibleApps, key = { it.packageName }) { app ->
-                        InstalledAppItem(
-                            app = app,
-                            selectionMode = uiState.selectionMode,
-                            selected = app.packageName in uiState.selected,
-                            onToggleSelected = { viewModel.toggleSelected(app.packageName) },
-                            onToggleSuspended = { viewModel.setSuspended(app, !app.suspended) },
-                            onToggleAllowed = { viewModel.setAllowed(app, !app.allowed) },
-                            onDecreaseLimit = { viewModel.setAppLimit(app, (app.dailyLimitMinutes ?: 0) - 15) },
-                            onIncreaseLimit = { viewModel.setAppLimit(app, (app.dailyLimitMinutes ?: 0) + 15) },
-                            onUninstall = { pendingUninstall = app }
-                        )
-                    }
-                }
-            }
         }
     }
 
@@ -383,25 +413,95 @@ private fun BatchActionBar(
 }
 
 /**
- * 一键授权全部 / 一键取消全部。
- * 对应需求：开启管控后所有应用默认隐藏，家长可一键把全部应用开放给孩子，或一键全部收回。
+ * 管控模式概览条（常驻列表上方，单行高度）。
+ *
+ * ## 为什么口径必须常驻
+ * 下面每个应用的开关含义由这里的模式决定：黑名单下"关闭 = 受管控"，
+ * 白名单下"打开 = 可用、其余全拦"。口径藏起来，家长会遇到"我明明打开了这个应用却打不开"。
+ *
+ * ## 为什么只留一行
+ * 旧实现把三道密码闸门一并摊在这张卡里，卡片接近一屏高，
+ * 应用列表被整个顶出可视区 —— 表现为"进去只看得见开关、看不见应用"。
+ * 现在只保留"模式 + 口径说明"，密码闸门移入底部弹层 [AppControlModeSheet]。
  */
+@Composable
+private fun AppControlModeBar(
+    listMode: String,
+    guardPasswordSet: Boolean,
+    onModeChange: (String) -> Unit,
+    onOpenPasswordSettings: () -> Unit
+) {
+    SoftCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "管控模式",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                FilterChip(
+                    selected = listMode == "BLACKLIST",
+                    onClick = { onModeChange("BLACKLIST") },
+                    label = { Text("黑名单") },
+                    modifier = Modifier.height(32.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                FilterChip(
+                    selected = listMode == "WHITELIST",
+                    onClick = { onModeChange("WHITELIST") },
+                    label = { Text("白名单") },
+                    modifier = Modifier.height(32.dp)
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(onClick = onOpenPasswordSettings) {
+                    Text("密码闸门")
+                }
+            }
+            Text(
+                text = if (listMode == "WHITELIST") {
+                    "白名单：只有「打开」的应用能使用，其余一律拦截（适合孩子专用平板）"
+                } else {
+                    "黑名单：只有「关闭」的应用会被管控，其余正常使用"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f)
+            )
+            if (!guardPasswordSet) {
+                Text(
+                    text = "未设置「设备操作密码」，密码闸门暂未在孩子端生效",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = PadGuardColors.WarningRed
+                )
+            }
+        }
+    }
+}
+
 /**
- * 应用管控模式卡片。
+ * 管控模式弹层：三道密码闸门 + 生效前提说明。
  *
- * ## 为什么必须放在列表上方而不是设置页深处
- * 下面每个应用的开关，其**判定口径**由这里的模式决定：
- * 黑名单下"关闭 = 受管控"，白名单下"打开 = 可用、其余全拦"。
- * 口径藏在深处的话，家长会看到"我明明打开了这个应用却打不开"，第一反应是"应用管控有 bug"。
+ * ## 开关一律可拨（不再置灰）
+ * 旧实现把 Switch 的 `enabled` 绑在「是否已设设备操作密码」上。家长从首页直接进应用管控时，
+ * 该状态往往还没拉到（或确实未设），三道开关全部灰掉且点不动，看起来就是"功能坏了"。
+ * 现在开关始终可设置：配置照常下发服务端；未设密码时改在下方给红色提示，
+ * 如实说明"已保存，但需先设置设备操作密码才会在孩子端生效"。
  *
- * ## 必须如实说明的两点（写在界面上，不藏着）
- * 1. 平板**没有设备所有者**时，隐藏/挂起这类系统能力不可用，
- *    管控由孩子的无障碍服务 + 管理密码兜底拦截（拦安装/卸载确认页，可选拦启动）；
- * 2. 因此「打开应用也要密码」这一项**只在没有设备所有者时生效**。
+ * ## 生效范围必须如实写明
+ * 这三道闸门只在平板**没有设备所有者（DO）**时由无障碍服务兜底拦截：
+ * 有 DO 时隐藏 / 挂起由系统直接完成，根本走不到"打开"这一步。
  * 不写清楚，家长在 DO 设备上验证后会直接判定"功能是坏的"。
  */
 @Composable
-private fun AppListModeCard(
+private fun AppControlModeSheet(
     listMode: String,
     requirePasswordOnLaunch: Boolean,
     requirePasswordOnInstall: Boolean,
@@ -413,129 +513,140 @@ private fun AppListModeCard(
     onRequireUninstallChange: (Boolean) -> Unit,
     onNavigateToDeviceDetail: () -> Unit
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text("管控模式", style = MaterialTheme.typography.titleSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = listMode == "BLACKLIST",
-                    onClick = { onModeChange("BLACKLIST") },
-                    label = { Text("黑名单") }
-                )
-                FilterChip(
-                    selected = listMode == "WHITELIST",
-                    onClick = { onModeChange("WHITELIST") },
-                    label = { Text("白名单") }
-                )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 24.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            "管控模式",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = listMode == "BLACKLIST",
+                onClick = { onModeChange("BLACKLIST") },
+                label = { Text("黑名单") }
+            )
+            FilterChip(
+                selected = listMode == "WHITELIST",
+                onClick = { onModeChange("WHITELIST") },
+                label = { Text("白名单") }
+            )
+        }
+        Text(
+            text = if (listMode == "WHITELIST") {
+                "白名单：只有下面「打开」的应用能使用，其余一律拦截。适合给孩子专用平板。"
+            } else {
+                "黑名单：只有下面「关闭」的应用会被管控，其余正常使用。"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+
+        HorizontalDivider()
+
+        PasswordGateSwitch(
+            title = "打开应用也要密码",
+            subtitle = "打开任意应用都需输入管理密码（不仅限于受管控应用）。" +
+                "仅在平板未设为「设备所有者」时生效（有设备所有者时由系统直接管控）。",
+            checked = requirePasswordOnLaunch,
+            effective = guardPasswordSet,
+            onCheckedChange = onRequirePasswordChange
+        )
+        PasswordGateSwitch(
+            title = "安装应用需要密码",
+            subtitle = "孩子每次安装新应用都要在确认页输入管理密码；关闭后安装免密。",
+            checked = requirePasswordOnInstall,
+            effective = guardPasswordSet,
+            onCheckedChange = onRequireInstallChange
+        )
+        PasswordGateSwitch(
+            title = "卸载应用需要密码",
+            subtitle = "孩子每次卸载应用都要在确认页输入管理密码；关闭后卸载免密。",
+            checked = requirePasswordOnUninstall,
+            effective = guardPasswordSet,
+            onCheckedChange = onRequireUninstallChange
+        )
+
+        if (!guardPasswordSet) {
+            OutlinedButton(onClick = onNavigateToDeviceDetail) {
+                Icon(Icons.Default.Lock, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text("去设置「设备操作密码」")
             }
             Text(
-                text = if (listMode == "WHITELIST") {
-                    "白名单：只有下面「打开」的应用能使用，其余一律拦截。适合给孩子专用平板。"
-                } else {
-                    "黑名单：只有下面「关闭」的应用会被管控，其余正常使用。"
-                },
+                text = "开关可正常设置并保存，但三道闸门依赖「设备操作密码」，当前未设置，" +
+                    "因此暂不会在孩子端生效。设置并同步到平板后即自动生效。",
+                style = MaterialTheme.typography.bodySmall,
+                color = PadGuardColors.WarningRed
+            )
+        }
+
+        Text(
+            text = "提示：以上密码开关仅在没有「设备所有者」的存量平板上由无障碍服务兜底生效。" +
+                "若管控无效，请确认孩子端已开启本应用的「无障碍服务」。",
+            style = MaterialTheme.typography.bodySmall,
+            color = PadGuardColors.TextSecondary
+        )
+    }
+}
+
+/**
+ * 单道密码闸门开关。
+ *
+ * @param effective 前置条件（已设置「设备操作密码」）是否满足。
+ * 不满足时开关**依然可拨**，只在下方补一行红色说明，避免"灰着点不动"被当成功能故障。
+ */
+@Composable
+private fun PasswordGateSwitch(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    effective: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
             )
-
-            HorizontalDivider()
-
-            // —— 无 DO 降级下的三道密码闸门：仅设备未设为「设备所有者」时生效 ——
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("打开应用也要密码", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        text = "打开任意应用都需输入管理密码（不仅限于受管控应用）。" +
-                            "仅在平板未设为「设备所有者」时生效（有设备所有者时由系统直接管控）。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                // 未设「设备操作密码」时强制显示关闭态：默认 requirePasswordOnXxx=true 会让禁用开关
-                // 渲染成绿色"开"，家长易误以为已生效。禁用即未生效，如实显示关闭。
-                Switch(
-                    checked = guardPasswordSet && requirePasswordOnLaunch,
-                    onCheckedChange = onRequirePasswordChange,
-                    enabled = guardPasswordSet
-                )
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("安装应用需要密码", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        text = "孩子每次安装新应用都要在确认页输入管理密码。" +
-                            "默认开启；关闭后安装免密（安装/卸载的确认拦截同样仅在非设备所有者时生效）。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Switch(
-                    checked = guardPasswordSet && requirePasswordOnInstall,
-                    onCheckedChange = onRequireInstallChange,
-                    enabled = guardPasswordSet
-                )
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("卸载应用需要密码", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        text = "孩子每次卸载应用都要在确认页输入管理密码。" +
-                            "默认开启；关闭后卸载免密。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Switch(
-                    checked = guardPasswordSet && requirePasswordOnUninstall,
-                    onCheckedChange = onRequireUninstallChange,
-                    enabled = guardPasswordSet
-                )
-            }
-
-            // 双向引导：未设「设备操作密码」时，三道闸门开关无意义，置灰并给出明确去向。
-            if (!guardPasswordSet) {
-                OutlinedButton(onClick = onNavigateToDeviceDetail) {
-                    Icon(Icons.Default.Lock, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("先去设备详情设置「设备操作密码」")
-                }
+            if (checked && !effective) {
                 Text(
-                    text = "以上密码开关均依赖「设备操作密码」。当前未设置，三道开关显示为「关闭（未生效）」，" +
-                        "并非已开启。请先到设备详情页设置并同步到孩子端，返回本页后开关会按你的配置亮起。",
+                    text = "已开启，但尚未生效：需先设置「设备操作密码」",
                     style = MaterialTheme.typography.bodySmall,
                     color = PadGuardColors.WarningRed
                 )
             }
-
-            Text(
-                text = "提示：以上密码开关仅在没有「设备所有者」的存量平板上由无障碍服务兜底生效，" +
-                    "且需先在设备详情页设置「设备操作密码」。若管控无效，请确认孩子端已开启本应用的「无障碍服务」。",
-                style = MaterialTheme.typography.bodySmall,
-                color = PadGuardColors.TextSecondary
-            )
         }
+        Spacer(Modifier.width(8.dp))
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
+/**
+ * 一键授权全部 / 一键取消全部。
+ * 对应需求：开启管控后所有应用默认隐藏，家长可一键把全部应用开放给孩子，或一键全部收回。
+ */
 @Composable
 private fun BatchAllowBar(
     onGrantAll: () -> Unit,
     onRevokeAll: () -> Unit
 ) {
+    // 压到单行高度：这行只是批量入口，撑高了会继续挤压下方应用列表
     Surface(tonalElevation = 1.dp) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
@@ -544,16 +655,24 @@ private fun BatchAllowBar(
                 color = PadGuardColors.TextSecondary
             )
             Spacer(modifier = Modifier.weight(1f))
-            OutlinedButton(onClick = onRevokeAll) { Text("一键取消全部") }
+            OutlinedButton(
+                onClick = onRevokeAll,
+                modifier = Modifier.height(36.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp)
+            ) { Text("一键取消全部", style = MaterialTheme.typography.labelMedium) }
             Spacer(modifier = Modifier.width(8.dp))
-            Button(onClick = onGrantAll) { Text("一键授权全部") }
+            Button(
+                onClick = onGrantAll,
+                modifier = Modifier.height(36.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp)
+            ) { Text("一键授权全部", style = MaterialTheme.typography.labelMedium) }
         }
     }
 }
 
 private fun statusText(app: InstalledApp): String = when {
     !app.installed -> "已卸载（历史记录）"
-    app.hidden -> "权限已关闭（孩子端不显示）"
+    app.hidden -> "权限已关闭（打开需管理密码）"
     app.suspended -> "已挂起（打开即拦截）"
     app.blocked -> "已禁用（打开即拦截）"
     app.dailyLimitMinutes != null -> "限时 ${app.dailyLimitMinutes} 分钟 / 天"
@@ -564,7 +683,7 @@ private fun statusText(app: InstalledApp): String = when {
 @Composable
 private fun statusColor(app: InstalledApp): Color = when {
     !app.installed -> PadGuardColors.TextSecondary
-    app.suspended || app.blocked -> PadGuardColors.WarningRed
+    app.suspended || app.blocked || app.hidden -> PadGuardColors.WarningRed
     app.dailyLimitMinutes != null -> MaterialTheme.colorScheme.primary
     else -> PadGuardColors.SuccessGreen
 }

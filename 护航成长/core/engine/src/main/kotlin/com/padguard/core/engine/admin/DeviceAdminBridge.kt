@@ -459,6 +459,23 @@ class DeviceAdminBridge @Inject constructor(
     }
 
     /**
+     * 记录"家长关闭/开启某应用使用权限"的意图，与设备是否 Device Owner 无关。
+     *
+     * 非 DO 设备无法真正隐藏应用（[setApplicationHidden] 会回 UNSUPPORTED），
+     * 但"关闭权限 = 打开需密码"这条软拦截闸门不依赖 DO，必须在此落地，
+     * 否则非 DO 设备上"关闭权限"会既不隐藏、也不弹密码（完全失效）。
+     * 因此无论 DO 是否可用都把意图记到账本，供 [AppGuardPolicyStore.isHiddenControlled] 判定。
+     */
+    fun persistHidden(packageName: String, hidden: Boolean) {
+        recordHidden(packageName, hidden)
+    }
+
+    /** 家长是否关闭了该应用的使用权限（本地意图记账，不依赖 DO 隐藏能力） */
+    fun isHidden(packageName: String): Boolean = runCatching {
+        hiddenPrefs.getBoolean(packageName, false)
+    }.getOrDefault(false)
+
+    /**
      * 应用当前是否被隐藏。
      *
      * 台账采集需要它：被隐藏的应用 `getLaunchIntentForPackage` 为 null，

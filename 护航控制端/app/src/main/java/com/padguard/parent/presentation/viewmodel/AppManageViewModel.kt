@@ -341,7 +341,7 @@ class AppManageViewModel @Inject constructor(
                         apps = _uiState.value.apps.map {
                             if (it.packageName == app.packageName) it.copy(hidden = !allowed) else it
                         },
-                        toast = if (allowed) "已开启权限：${app.appName}" else "已关闭权限：${app.appName}（孩子端不再显示）"
+                        toast = if (allowed) "已开启权限：${app.appName}" else "已关闭权限：${app.appName}（打开需管理密码）"
                     )
                 }
                 .onFailure { e ->

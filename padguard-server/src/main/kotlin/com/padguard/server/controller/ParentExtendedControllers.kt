@@ -121,7 +121,10 @@ class ParentLocationController(private val geofenceService: GeofenceService) {
 // ==================== 策略扩展（时段/应用/上网/模板） ====================
 @RestController
 @RequestMapping("/v1/policies")
-class ParentPolicyExtendedController(private val policyExtensionService: PolicyExtensionService) {
+class ParentPolicyExtendedController(
+    private val policyExtensionService: PolicyExtensionService,
+    private val usageSessionService: UsageSessionService
+) {
 
     @GetMapping("/{deviceId}/time-restrictions")
     fun timeRestrictions(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
@@ -217,6 +220,18 @@ class ParentPolicyExtendedController(private val policyExtensionService: PolicyE
     @GetMapping("/{deviceId}/tablet-usage-settings")
     fun tabletUsageSettings(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
         ApiResponse.ok(policyExtensionService.getTabletUsageSettings(userId, deviceId))
+
+    /**
+     * 家长端读取孩子端当前使用计时会话（三端时间一致的来源）。
+     *
+     * 返回服务端锚定的 startEpoch 与 serverNow，家长端据此显示与孩子端完全一致的剩余时长，
+     * 不再各自按本地时钟计算导致三端数字对不上。
+     */
+    @GetMapping("/{deviceId}/usage-session")
+    fun getUsageSession(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String
+    ) = ApiResponse.ok(usageSessionService.get(deviceId))
 
     @PutMapping("/{deviceId}/tablet-usage-settings")
     fun updateTabletUsageSettings(

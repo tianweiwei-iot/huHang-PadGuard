@@ -9,6 +9,7 @@ import com.padguard.child.capture.ScreenCaptureSession
 import com.padguard.child.permission.DeviceAdminRequest
 import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.permission.SpecialPermission
+import com.padguard.child.consent.ConsentReturnPresenter
 import com.padguard.core.common.Logger
 import com.padguard.core.data.model.policy.ControlMode
 import com.padguard.core.data.repository.AuthRepository
@@ -60,7 +61,8 @@ class OneTimeConsentViewModel @Inject constructor(
     private val permissionGranter: PermissionGranter,
     private val admin: DeviceAdminBridge,
     private val authRepository: AuthRepository,
-    private val deviceAdminRequest: DeviceAdminRequest
+    private val deviceAdminRequest: DeviceAdminRequest,
+    private val consentReturn: ConsentReturnPresenter
 ) : ViewModel() {
 
     enum class Phase {
@@ -152,6 +154,8 @@ class OneTimeConsentViewModel @Inject constructor(
      */
     fun onReturnedToApp() {
         if (!started || _phase.value != Phase.WAITING_PARENT) return
+        // 授权页已回到前台：撤掉"返回引导"通知，并停掉后台盯守（advance 会按需重新挂上）
+        consentReturn.cancelNotification()
         advance("returned-to-app")
     }
 
@@ -172,6 +176,8 @@ class OneTimeConsentViewModel @Inject constructor(
         _currentKey.value = key
         _phase.value = Phase.WAITING_PARENT
         tryEmit(ConsentLaunch.Settings(key, intent))
+        // 盯着这项：家长拨完开关，后台守护会自动把授权页拉回前台（免手动返回）
+        consentReturn.watch(setOf(perm))
     }
 
     /**
@@ -185,6 +191,8 @@ class OneTimeConsentViewModel @Inject constructor(
             consent()
             return
         }
+        // 重新发起前先清掉上一轮盯守，避免旧目标误触发回前台
+        consentReturn.stop()
         val key = _currentKey.value
         if (key == null) {
             advance("retry-without-current")
@@ -222,6 +230,8 @@ class OneTimeConsentViewModel @Inject constructor(
      */
     private fun advance(from: String) {
         if (!started) return
+        // 进入新一轮前先清掉上一轮盯守；若本轮会再次跳设置页，下面会重新挂上
+        consentReturn.stop()
         admin.refreshControlMode()
         refreshItemStates()
         Logger.i(TAG) { "advance(from=$from): mode=${admin.controlMode.value}" }
@@ -273,6 +283,8 @@ class OneTimeConsentViewModel @Inject constructor(
                 return
             }
             tryEmit(ConsentLaunch.Settings(next.key, intent))
+            // 盯着这项：家长拨完开关，后台守护自动把授权页拉回前台并跳下一项（免手动返回）
+            consentReturn.watch(setOf(next))
             return
         }
 
@@ -303,6 +315,9 @@ class OneTimeConsentViewModel @Inject constructor(
 
     private fun finish() {
         _currentKey.value = null
+        // 授权收尾：停掉后台盯守、撤掉返回引导通知，避免残留
+        consentReturn.stop()
+        consentReturn.cancelNotification()
         viewModelScope.launch {
             runCatching { authRepository.saveConsentDone() }
                 .onFailure { Logger.e(TAG, it) { "save consent failed" } }

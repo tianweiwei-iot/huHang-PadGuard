@@ -301,6 +301,8 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <!-- 设备解锁：暖令牌最自然的触发点（应用此时在前台，可合法顶起系统确认框） -->
+                <action android:name="android.intent.action.USER_PRESENT" />
                 <!-- 部分国产 ROM 快速开机替代广播 -->
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />

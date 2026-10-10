@@ -30,6 +30,8 @@ import com.padguard.core.transport.http.LogUploadResponse
 import com.padguard.core.transport.http.PolicyFetchResult
 import com.padguard.core.transport.http.ScreenshotAck
 import com.padguard.core.transport.http.MediaAck
+import com.padguard.core.transport.http.UsageSessionDto
+import com.padguard.core.transport.http.UsageDelayRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -104,6 +106,12 @@ class MockRemoteDataSource @Inject constructor(
     private var policyVersion: Int = 1
     private var scene: SceneType = SceneType.FAMILY
     private var started = false
+
+    /** 使用计时会话状态：Mock 服务端侧权威计时（三端一致的唯一来源） */
+    private var sessionActive = false
+    private var sessionStartEpoch: Long? = null
+    private var sessionQuotaMinutes = 120
+    private var sessionExtendedMinutes = 0
 
     private val heartbeatCounter = AtomicInteger()
 
@@ -213,6 +221,61 @@ class MockRemoteDataSource @Inject constructor(
         val raw = json.encodeToString(PolicyPackage.serializer(), policy)
         Logger.i(TAG) { "policy delivered: v$currentVersion -> v$version, scene=$currentScene, ${raw.length}B" }
         return ApiResult.Success(PolicyFetchResult.Updated(policy, raw), timeProvider.now())
+    }
+
+    override suspend fun getUsageSession(): ApiResult<UsageSessionDto> {
+        simulateNetwork<UsageSessionDto>()?.let { return it }
+        val now = timeProvider.now()
+        val start = sessionStartEpoch
+        val totalMs = (sessionQuotaMinutes + sessionExtendedMinutes) * 60_000L
+        val usedMs = if (start != null && sessionActive) (now - start) else 0L
+        val remainingMs = if (sessionActive && start != null) maxOf(0L, totalMs - usedMs) else 0L
+        val dto = UsageSessionDto(
+            deviceId = deviceId,
+            serverNow = now,
+            active = sessionActive,
+            dayKey = dayKeyOf(now),
+            startEpoch = start,
+            quotaMinutes = sessionQuotaMinutes,
+            extendedMinutes = sessionExtendedMinutes,
+            remainingMinutes = (remainingMs / 60_000L).toInt(),
+            remainingMs = remainingMs,
+            countdownThresholdMs = 10 * 60_000L,
+            delayOptions = listOf(15, 30, 45, 60),
+            maxDailyExtendMinutes = 120,
+            lastDelayEpoch = null
+        )
+        Logger.d(TAG) { "usage-session get: active=$sessionActive remainingMs=$remainingMs" }
+        return ApiResult.Success(dto, now)
+    }
+
+    override suspend fun startUsageSession(): ApiResult<UsageSessionDto> {
+        simulateNetwork<UsageSessionDto>()?.let { return it }
+        val now = timeProvider.now()
+        // 幂等：今日已确认则沿用原起点，不重置计时
+        stateMutex.withLock {
+            if (!sessionActive) {
+                sessionActive = true
+                sessionStartEpoch = now
+                sessionExtendedMinutes = 0
+            }
+        }
+        Logger.i(TAG) { "usage-session start: startEpoch=$sessionStartEpoch quota=$sessionQuotaMinutes" }
+        return getUsageSession()
+    }
+
+    override suspend fun extendUsageSession(minutes: Int): ApiResult<UsageSessionDto> {
+        simulateNetwork<UsageSessionDto>()?.let { return it }
+        val valid = listOf(15, 30, 45, 60).contains(minutes)
+        if (!valid) {
+            return ApiResult.BizError(ApiCode.BAD_REQUEST, "延时档位非法：$minutes，可选 ${listOf(15, 30, 45, 60)}")
+        }
+        if (sessionExtendedMinutes + minutes > 120) {
+            return ApiResult.BizError(ApiCode.BAD_REQUEST, "单日累计延时不得超过 120 分钟")
+        }
+        stateMutex.withLock { sessionExtendedMinutes += minutes }
+        Logger.i(TAG) { "usage-session extend: +$minutes -> extended=$sessionExtendedMinutes" }
+        return getUsageSession()
     }
 
     // ==================== 上行 ====================
@@ -538,6 +601,16 @@ class MockRemoteDataSource @Inject constructor(
     }
 
     private fun rollFailure(): Boolean = failureRate > 0f && Random.nextFloat() < failureRate
+
+    /** 与客户端 / 服务端一致的 dayKey 计算（本地时区当日日期 yyyy-MM-dd），用于会话幂等判定 */
+    private fun dayKeyOf(epochMs: Long): String {
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = epochMs
+        val y = cal.get(java.util.Calendar.YEAR)
+        val m = cal.get(java.util.Calendar.MONTH) + 1
+        val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
+        return "%04d-%02d-%02d".format(y, m, d)
+    }
 
     companion object {
         private const val TAG = "MockRemote"

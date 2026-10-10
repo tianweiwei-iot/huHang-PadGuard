@@ -34,11 +34,11 @@ class PolicyRepository @Inject constructor(
 
     /** 观察当前生效策略（未绑定时返回默认策略） */
     fun observePolicy(): Flow<PolicyPackage> = dao.observe().map { entity ->
-        entity?.let { decode(it) } ?: PolicyPackage.default()
+        (entity?.let { decode(it) } ?: PolicyPackage.default()).deriveTimeControl()
     }
 
     suspend fun getPolicy(): PolicyPackage =
-        dao.get()?.let { decode(it) } ?: PolicyPackage.default()
+        (dao.get()?.let { decode(it) } ?: PolicyPackage.default()).deriveTimeControl()
 
     suspend fun currentVersion(): Int = dao.get()?.version ?: 0
 
@@ -47,7 +47,7 @@ class PolicyRepository @Inject constructor(
      * @return 实际落地的策略（可能与传入不同，说明发生了局部合并）
      */
     suspend fun save(policy: PolicyPackage, rawJson: String? = null): PolicyPackage {
-        val merged = getPolicy().mergeWith(policy)
+        val merged = getPolicy().mergeWith(policy).deriveTimeControl()
         val payload = rawJson ?: json.encodeToString(PolicyPackage.serializer(), policy)
         dao.upsert(
             PolicyEntity(

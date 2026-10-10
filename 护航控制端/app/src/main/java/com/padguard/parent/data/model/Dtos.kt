@@ -266,6 +266,24 @@ data class ScreenMonitorSettingsDto(
     val allowRemoteLock: Boolean
 )
 
+/**
+ * 实时看屏状态（含带宽遥测）。
+ * 对应服务端 [StreamStatusDto]；字段名逐字符对齐，便于 Moshi 直解。
+ *
+ * 注意：[upstreamBps] / [downstreamBps] 是服务端按 1s 滚动窗口统计的**字节**速率
+ * （上行=孩子端推流占带宽，下行=服务端转发给家长端占带宽），不是比特率（bit/s）。
+ */
+@JsonClass(generateAdapter = true)
+data class ScreenStatusDto(
+    val deviceId: String,
+    val lastFrameAt: Long,
+    val frameAgeMs: Long,
+    val live: Boolean,
+    val upstreamBps: Long,
+    val downstreamBps: Long,
+    val totalBytes: Long
+)
+
 // ==================== 信息发布相关 DTO ====================
 
 @JsonClass(generateAdapter = true)
@@ -462,8 +480,30 @@ data class TabletUsageSettingsDto(
     val weekendLimitMinutes: Int,
     val restAfterMinutes: Int,
     val restDurationMinutes: Int,
-    val timeUpMessage: String,
     val syncToDevice: Boolean
+)
+
+/**
+ * 平板使用计时会话响应（与服务端 UsageSessionDto 字段一一对应）。
+ *
+ * 三端一律用 [serverNow] - [startEpoch] 计算已用时长，剩余 = (quotaMinutes + extendedMinutes) 分钟 - 已用，
+ * 因此家长端显示与孩子端、服务端同一份数字，不再各自按本地时钟计算导致对不上。
+ */
+@JsonClass(generateAdapter = true)
+data class UsageSessionDto(
+    val deviceId: String = "",
+    val serverNow: Long = 0L,
+    val active: Boolean = false,
+    val dayKey: String = "",
+    val startEpoch: Long? = null,
+    val quotaMinutes: Int = 0,
+    val extendedMinutes: Int = 0,
+    val remainingMinutes: Int = 0,
+    val remainingMs: Long = 0L,
+    val countdownThresholdMs: Long = 10 * 60_000L,
+    val delayOptions: List<Int> = listOf(15, 30, 45, 60),
+    val maxDailyExtendMinutes: Int = 120,
+    val lastDelayEpoch: Long? = null
 )
 
 // ==================== 指令回执（P0-5 可观测性） ====================

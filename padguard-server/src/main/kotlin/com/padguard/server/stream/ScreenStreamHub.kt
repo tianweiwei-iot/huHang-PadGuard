@@ -56,12 +56,83 @@ class ScreenStreamHub {
     private val lastFrames = ConcurrentHashMap<String, ByteArray>()
     private val lastFrameAt = ConcurrentHashMap<String, AtomicLong>()
 
+    // ==================== 带宽遥测 ====================
+    // 实时看屏是服务端中转架构，每一路都是"一份上行 + 一份下行"带宽。
+    // 不把带宽亮出来，就永远不知道"卡/贵"究竟卡在哪、花了多少 —— 这也是此前
+    // 线上"还不知道带宽占用情况"的根因。这里按设备累计字节，并维护一个滚动 1s 窗口算速率。
+    private val upWindowBytes = ConcurrentHashMap<String, AtomicLong>()
+    private val upWindowStart = ConcurrentHashMap<String, AtomicLong>()
+    private val downWindowBytes = ConcurrentHashMap<String, AtomicLong>()
+    private val downWindowStart = ConcurrentHashMap<String, AtomicLong>()
+    private val upTotalBytes = ConcurrentHashMap<String, AtomicLong>()
+    private val downTotalBytes = ConcurrentHashMap<String, AtomicLong>()
+
+    // 正在推流的设备集合：服务端出口带宽的主要来源，也是并发准入（见 MonitorService）的依据
+    private val publishers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     fun publish(deviceId: String, frame: ByteArray) {
         lastFrames[deviceId] = frame
         lastFrameAt.computeIfAbsent(deviceId) { AtomicLong() }.set(System.currentTimeMillis())
         subscribers[deviceId]?.forEach { sub ->
             runCatching { sub.offer(frame) }
         }
+        addUplink(deviceId, frame.size.toLong())
+    }
+
+    /** 上行字节入账（孩子端推来的每一帧） */
+    fun addUplink(deviceId: String, n: Long) {
+        upTotalBytes.computeIfAbsent(deviceId) { AtomicLong() }.addAndGet(n)
+        upWindowBytes.computeIfAbsent(deviceId) { AtomicLong() }.addAndGet(n)
+        upWindowStart.computeIfAbsent(deviceId) { AtomicLong(System.currentTimeMillis()) }
+    }
+
+    /** 下行字节入账（家长端拉走的每一帧）。下行与上行 1:1，这里单独计是为了在端点上分别呈现 */
+    fun addDownlink(deviceId: String, n: Long) {
+        downTotalBytes.computeIfAbsent(deviceId) { AtomicLong() }.addAndGet(n)
+        downWindowBytes.computeIfAbsent(deviceId) { AtomicLong() }.addAndGet(n)
+        downWindowStart.computeIfAbsent(deviceId) { AtomicLong(System.currentTimeMillis()) }
+    }
+
+    /** 滚动 1s 窗口的速率（字节/秒）。窗口不足 500ms 时用累计估算，达到窗口则结算并重置 */
+    private fun rollingBps(bytesMap: ConcurrentHashMap<String, AtomicLong>, startMap: ConcurrentHashMap<String, AtomicLong>, deviceId: String): Long {
+        val w = bytesMap[deviceId] ?: return 0L
+        val s = startMap[deviceId] ?: return 0L
+        val now = System.currentTimeMillis()
+        val elapsed = now - s.get()
+        if (elapsed < 500) return if (elapsed <= 0) 0L else w.get() * 1000 / elapsed
+        val bytes = w.getAndSet(0)
+        s.set(now)
+        return bytes * 1000 / elapsed
+    }
+
+    fun upstreamBps(deviceId: String): Long = rollingBps(upWindowBytes, upWindowStart, deviceId)
+    fun downstreamBps(deviceId: String): Long = rollingBps(downWindowBytes, downWindowStart, deviceId)
+    fun totalUpBytes(deviceId: String): Long = upTotalBytes[deviceId]?.get() ?: 0L
+    fun totalDownBytes(deviceId: String): Long = downTotalBytes[deviceId]?.get() ?: 0L
+
+    /** 注册/注销推流设备（在 ChildStreamController 的推流长连接起止处调用） */
+    fun registerPublisher(deviceId: String) = publishers.add(deviceId)
+    fun unregisterPublisher(deviceId: String) = publishers.remove(deviceId)
+    fun publisherCount(): Int = publishers.size
+    /** 推流中设备的快照（用于 /metrics 聚合，避免直接暴露并发集合） */
+    fun publishersSnapshot(): List<String> = publishers.toList()
+
+    /** 周期性打印各路实时看屏带宽，直接回答"带宽到底占了多少"（见 [padguard.stream] 运维） */
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelay = 10_000L)
+    fun logAggregateBandwidth() {
+        if (publishers.isEmpty()) return
+        val sb = StringBuilder("stream bandwidth: devices=${publishers.size}")
+        var upSum = 0L
+        var downSum = 0L
+        publishers.forEach { d ->
+            val up = upstreamBps(d)
+            val down = downstreamBps(d)
+            upSum += up
+            downSum += down
+            sb.append(" | $d up=${up / 1024}KB/s down=${down / 1024}KB/s")
+        }
+        sb.append(" || total up=${upSum / 1024}KB/s down=${downSum / 1024}KB/s")
+        log.info(sb.toString())
     }
 
     /**
@@ -82,7 +153,16 @@ class ScreenStreamHub {
         }
         val sub = Subscriber()
         list.add(sub)
-        lastFrames[deviceId]?.let { sub.offer(it) }
+        // 仅当设备近期仍在推流（最后一帧未过期）才把缓存帧立即推给新订阅者。
+        // 否则（设备已离线 / 卸载重装、长期无新帧）缓存的是失效前的旧画面，
+        // 若立刻回放，家长端会停在一张「卸载前的旧屏」上、并误以为在直播——
+        // 而孩子端因重装后无 MediaProjection 令牌推不出新帧，画面永远不更新。
+        // 离线设备直接走「无信号」更诚实。阈值与 ParentStreamController.MAX_IDLE_MS(30s) 对齐：
+        // 只有 30s 内还推过帧的设备才视为「仍在线」，可立即出画。
+        val lastAt = lastFrameAt[deviceId]?.get() ?: 0L
+        if (lastAt != 0L && System.currentTimeMillis() - lastAt <= STALE_FRAME_MS) {
+            lastFrames[deviceId]?.let { sub.offer(it) }
+        }
         log.info("stream subscriber added: device=$deviceId total=${list.size}")
         return sub
     }
@@ -100,6 +180,12 @@ class ScreenStreamHub {
         const val MAX_QUEUE = 3
         /** 单设备并发观看上限：正常业务远小于此，超过即视为异常并发 */
         const val MAX_SUBSCRIBERS = 3
+        /**
+         * 缓存帧回放的新鲜度窗口，与 ParentStreamController.MAX_IDLE_MS(30s) 保持一致：
+         * 仅设备 30s 内还推过帧，新订阅者才立即看到上一帧；超过则视为设备已离线，
+         * 缓存帧是失效前的旧画面，不再回放（见 [subscribe]）。
+         */
+        const val STALE_FRAME_MS = 30_000L
         val log = LoggerFactory.getLogger(ScreenStreamHub::class.java)
     }
 }

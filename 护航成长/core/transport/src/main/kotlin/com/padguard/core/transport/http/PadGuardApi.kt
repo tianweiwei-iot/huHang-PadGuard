@@ -50,6 +50,18 @@ interface PadGuardApi {
     @GET("device/time")
     suspend fun serverTime(): Response<ApiEnvelope<TimeResponse>>
 
+    /** 使用计时会话：拉取当前剩余（三端一致的来源） */
+    @GET("device/usage/session")
+    suspend fun usageSession(): Response<ApiEnvelope<UsageSessionDto>>
+
+    /** 使用计时会话：孩子端确认"计时开始"，服务端锁定今日起点与额度 */
+    @POST("device/usage/session/start")
+    suspend fun startUsageSession(): Response<ApiEnvelope<UsageSessionDto>>
+
+    /** 使用计时会话：孩子端申请延时（minutes 落档位） */
+    @POST("device/usage/session/extend")
+    suspend fun extendUsageSession(@Body body: UsageDelayRequest): Response<ApiEnvelope<UsageSessionDto>>
+
     /**
      * §5.3 拉取策略包。
      * 返回 JsonElement 而不是 PolicyPackage：既要判断 `upToDate`，
