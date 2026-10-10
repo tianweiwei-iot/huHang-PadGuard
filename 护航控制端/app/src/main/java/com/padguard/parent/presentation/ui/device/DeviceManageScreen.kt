@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -178,6 +179,81 @@ fun DeviceManageScreen(
             }
         )
     }
+
+    // S11：绑定成功后的操作密码补设弹窗
+    uiState.postBindDevice?.let { device ->
+        PostBindPasswordDialog(
+            device = device,
+            busy = uiState.postBindBusy,
+            onConfirm = { pw -> viewModel.confirmPostBindPassword(device, pw) },
+            onSkip = viewModel::dismissPostBindPassword
+        )
+    }
+}
+
+/**
+ * 绑定后强制引导：为新接入的设备设置操作密码（S11）。
+ *
+ * 校验口径与设备详情页 GuardPasswordCard 一致（4~32 位）。
+ * 「跳过」保留但不隐匿：文案直接说明跳过的后果，避免家长误以为绑定即管控完成。
+ */
+@Composable
+private fun PostBindPasswordDialog(
+    device: Device,
+    busy: Boolean,
+    onConfirm: (String) -> Unit,
+    onSkip: () -> Unit
+) {
+    var pw by remember(device.id) { mutableStateOf("") }
+    var pw2 by remember(device.id) { mutableStateOf("") }
+    val canSubmit = pw.length in 4..32 && pw == pw2
+
+    AlertDialog(
+        onDismissRequest = { /* 不点按钮不关闭：这是一次显式的引导步骤 */ },
+        title = { Text("设置操作密码") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "「${device.name}」接入成功。建议立即设置操作密码：设置后，孩子在平板上进入系统设置、" +
+                        "卸载/安装应用都必须输入此密码。",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                OutlinedTextField(
+                    value = pw,
+                    onValueChange = { if (it.length <= 32) pw = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("家长密码（4~32 位）") },
+                    visualTransformation = PasswordVisualTransformation()
+                )
+                OutlinedTextField(
+                    value = pw2,
+                    onValueChange = { if (it.length <= 32) pw2 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("确认密码") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    supportingText = {
+                        if (pw2.isNotEmpty() && pw != pw2) Text("两次输入不一致", color = PadGuardColors.WarningRed)
+                    }
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(pw) },
+                enabled = !busy && canSubmit,
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text(if (busy) "同步中…" else "设置并同步")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onSkip, enabled = !busy) {
+                Text("暂不设置", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            }
+        }
+    )
 }
 
 // ==================== 汇总概览 ====================

@@ -10,6 +10,7 @@ import com.padguard.domain.model.DeviceImportRow
 import com.padguard.domain.model.DeviceImportResult
 import com.padguard.domain.model.LanDevice
 import com.padguard.domain.repository.DeviceRepository
+import com.padguard.domain.repository.PolicyRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,12 +42,16 @@ data class DeviceManageUiState(
     val importError: String? = null,
     // 编辑 / 删除
     val editingDevice: Device? = null,
-    val deletingDevice: Device? = null
+    val deletingDevice: Device? = null,
+    // S11：绑定成功后弹出「设置操作密码」步骤（设备尚未设置操作密码时）
+    val postBindDevice: Device? = null,
+    val postBindBusy: Boolean = false
 )
 
 @HiltViewModel
 class DeviceManageViewModel @Inject constructor(
     private val deviceRepository: DeviceRepository,
+    private val policyRepository: PolicyRepository,
     private val importFileParser: DeviceImportFileParser,
     @ApplicationContext private val appContext: Context
 ) : ViewModel() {
@@ -91,6 +96,7 @@ class DeviceManageViewModel @Inject constructor(
                 .onSuccess {
                     showToast("已接入：${it.name}")
                     closeAccessSheet()
+                    maybePromptPostBindPassword(it)
                 }
                 .onFailure { showToast(it.message ?: "扫码接入失败") }
         }
@@ -102,6 +108,7 @@ class DeviceManageViewModel @Inject constructor(
                 .onSuccess {
                     showToast("已接入：${it.name}")
                     closeAccessSheet()
+                    maybePromptPostBindPassword(it)
                 }
                 .onFailure { showToast(it.message ?: "配对码接入失败") }
         }
@@ -127,6 +134,7 @@ class DeviceManageViewModel @Inject constructor(
                     _uiState.value = _uiState.value.copy(
                         lanDevices = _uiState.value.lanDevices.filterNot { d -> d.deviceId == lanDevice.deviceId }
                     )
+                    maybePromptPostBindPassword(it)
                 }
                 .onFailure { showToast(it.message ?: "接入失败") }
         }
@@ -209,6 +217,51 @@ class DeviceManageViewModel @Inject constructor(
                 .onSuccess { showToast("设备已解绑"); dismissDelete() }
                 .onFailure { showToast(it.message ?: "解绑失败") }
         }
+    }
+
+    // ==================== S11：绑定后强制设密码步骤 ====================
+
+    /**
+     * 绑定成功后的「操作密码」补设引导（S11 家长侧）。
+     *
+     * 为什么是"引导"而不是硬闸：密码设置走服务端下发，若设备离线/接口失败，
+     * 硬闸会把家长卡死在流程里。这里的"强制"体现在：绑定成功即打断当前操作弹出对话框，
+     * 明确给出「跳过」按钮但文案说明后果 —— 既有仪式感，又不制造死路。
+     * 已设密码的设备（重新接入/换绑）不重复打扰。
+     */
+    private fun maybePromptPostBindPassword(device: Device) {
+        if (device.guardPasswordSet) return
+        _uiState.value = _uiState.value.copy(postBindDevice = device)
+    }
+
+    /** 在绑定后弹窗里确认设置操作密码（口径与设备详情页 GuardPasswordCard 一致：4~32 位） */
+    fun confirmPostBindPassword(device: Device, password: String) {
+        if (password.length !in 4..32) return
+        _uiState.value = _uiState.value.copy(postBindBusy = true)
+        viewModelScope.launch {
+            policyRepository.setGuardPassword(device.id, password, clear = false)
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        postBindBusy = false,
+                        postBindDevice = null,
+                        toast = "操作密码已设置，已同步到孩子端"
+                    )
+                }
+                .onFailure {
+                    _uiState.value = _uiState.value.copy(
+                        postBindBusy = false,
+                        toast = it.message ?: "设置失败，请稍后在设备详情页重试"
+                    )
+                }
+        }
+    }
+
+    /** 跳过补设：只关闭弹窗并说明后果，设备保持「未设密码」状态（设备详情页可随时补） */
+    fun dismissPostBindPassword() {
+        _uiState.value = _uiState.value.copy(
+            postBindDevice = null,
+            toast = "已跳过。未设操作密码前，孩子端设置页仅能顶回、无法验证家长身份"
+        )
     }
 
     fun clearToast() {

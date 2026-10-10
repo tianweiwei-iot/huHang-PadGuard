@@ -81,11 +81,17 @@ class UsagePushClient @Inject constructor(
     @Synchronized
     private fun connect() {
         if (webSocket != null) return
+        // token 拿不到（登录态刚被清 / 刷新尚未完成）→ 不连也不排重连：
+        // 登录态 collector（isLoggedInFlow）在重新登录时会再次驱动 connect()，
+        // 在这里硬排重连只会对着空 token 无限空转。
         val token = runBlocking { tokenManager.getAccessToken() } ?: return
         val url = buildWsUrl(token) ?: return
         val request = Request.Builder().url(url).build()
         webSocket = wsClient.newWebSocket(request, listener)
-        reconnectAttempts = 0
+        // P2'：不要在这里复位 reconnectAttempts。
+        // connect() 也是断线退避重连的入口，在这里复位会让每次重连都从 1s 重新起算，
+        // 指数退避形同虚设（服务端长时间宕机时变成 1s 一次的固定频率打点）。
+        // 复位只属于 onOpen —— 连接真正建立才算"恢复健康"。
     }
 
     @Synchronized
