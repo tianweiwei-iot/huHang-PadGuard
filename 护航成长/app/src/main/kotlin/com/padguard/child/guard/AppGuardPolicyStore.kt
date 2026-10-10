@@ -13,10 +13,15 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.padguard.core.common.Logger
 import com.padguard.core.data.model.policy.AppListMode
 import com.padguard.core.data.model.policy.AppPolicy
+import com.padguard.core.engine.admin.DeviceAdminBridge
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
@@ -52,11 +57,29 @@ private val Context.appGuardDataStore: DataStore<Preferences> by preferencesData
  */
 @Singleton
 class AppGuardPolicyStore @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val admin: DeviceAdminBridge
 ) {
 
     private val store = context.appGuardDataStore
     private val packageManager: PackageManager get() = context.packageManager
+
+    /**
+     * 后台收集作用域：常驻订阅 DataStore，把最新策略快照写入 [cache]。
+     * 这样主线程读 [snapshot] 是零阻塞的易变字段读取（见下方说明）。
+     */
+    private val policyScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    init {
+        // 一次订阅，终身生效：DataStore 每次写入都会重新发射，[cache] 始终是最新值。
+        // 首帧在进程刚启动、收集器尚未发射时可能为 null（等价于"尚未下发策略"），
+        // 属安全的放行态；收集器发射后即恢复正常。
+        store.data
+            .map { computeSnapshot(it) }
+            .catch { emit(null) }
+            .onEach { cache = it }
+            .launchIn(policyScope)
+    }
 
     private val KEY_MODE = stringPreferencesKey("guard_mode")
     private val KEY_WHITELIST = stringPreferencesKey("guard_whitelist")
@@ -119,29 +142,37 @@ class AppGuardPolicyStore @Inject constructor(
         Logger.i(TAG) { "app policy mirror cleared" }
     }
 
-    /** 同步读取当前策略；从未下发过策略返回 null（= 不做任何拦截） */
-    fun snapshot(): Snapshot? {
-        cache?.let { return it }
-        return runCatching {
-            runBlocking(Dispatchers.IO) {
-                val prefs = store.data.first()
-                if (!(prefs[KEY_HAS_POLICY] ?: false)) return@runBlocking null
-                val rules = runCatching {
-                    val obj = JSONObject(prefs[KEY_SYSTEM_RULES] ?: "{}")
-                    obj.keys().asSequence().associateWith { obj.getString(it).uppercase() }
-                }.getOrDefault(emptyMap())
-                Snapshot(
-                    mode = runCatching { AppListMode.valueOf(prefs[KEY_MODE] ?: "BLACKLIST") }
-                        .getOrDefault(AppListMode.BLACKLIST),
-                    whitelist = decodeList(prefs[KEY_WHITELIST]),
-                    blacklist = decodeList(prefs[KEY_BLACKLIST]),
-                    systemAppRules = rules,
-                    requirePasswordOnLaunch = prefs[KEY_LAUNCH_BLOCK] ?: false,
-                    requirePasswordOnInstall = prefs[KEY_REQUIRE_INSTALL] ?: true,
-                    requirePasswordOnUninstall = prefs[KEY_REQUIRE_UNINSTALL] ?: true
-                ).also { cache = it }
-            }
-        }.getOrNull()
+    /**
+     * 同步读取当前策略；从未下发过策略返回 null（= 不做任何拦截）。
+     *
+     * ## 关键修复（应用管控闪退根因）
+     * 旧实现用 `runBlocking(Dispatchers.IO) { store.data.first() }` 在**主线程**同步读盘。
+     * 无障碍服务的 `onAccessibilityEvent` 每次界面切换都会调用本方法，等于在主线程频繁
+     * 阻塞磁盘读取——系统会把无障碍服务判定为无响应并杀掉进程，表现为
+     * "打开任意应用都闪退 / 正常使用也闪退"（授权与否都走这条热路径，所以全都崩）。
+     *
+     * 改为：后台 [policyScope] 常驻订阅 DataStore，最新快照始终在 [cache] 里；
+     * 本方法只做无锁的易变字段读取，主线程零阻塞。
+     */
+    fun snapshot(): Snapshot? = cache
+
+    /** 由后台收集器调用的纯函数：把一次 DataStore 快照换算成内存策略副本 */
+    private fun computeSnapshot(prefs: Preferences): Snapshot? {
+        if (!(prefs[KEY_HAS_POLICY] ?: false)) return null
+        val rules = runCatching {
+            val obj = JSONObject(prefs[KEY_SYSTEM_RULES] ?: "{}")
+            obj.keys().asSequence().associateWith { obj.getString(it).uppercase() }
+        }.getOrDefault(emptyMap())
+        return Snapshot(
+            mode = runCatching { AppListMode.valueOf(prefs[KEY_MODE] ?: "BLACKLIST") }
+                .getOrDefault(AppListMode.BLACKLIST),
+            whitelist = decodeList(prefs[KEY_WHITELIST]),
+            blacklist = decodeList(prefs[KEY_BLACKLIST]),
+            systemAppRules = rules,
+            requirePasswordOnLaunch = prefs[KEY_LAUNCH_BLOCK] ?: false,
+            requirePasswordOnInstall = prefs[KEY_REQUIRE_INSTALL] ?: true,
+            requirePasswordOnUninstall = prefs[KEY_REQUIRE_UNINSTALL] ?: true
+        )
     }
 
     /**
@@ -160,7 +191,12 @@ class AppGuardPolicyStore @Inject constructor(
      */
     fun isControlled(pkg: String): Boolean {
         val s = snapshot() ?: return false
-        // 全局启动闸门优先：开关一开，任意非系统应用打开都要密码
+        // 已授权应用一律放行：这是「授权的可以正常使用」的底线。
+        // 任何全局闸门（含「打开应用也要密码」）都不得误伤已授权应用，
+        // 否则会退化成「无论授权与否打开都被弹回/闪退」的现场故障。
+        if (isAuthorized(s, pkg)) return false
+        // 全局启动闸门：仅对已授权之外的应用（即未授权应用）生效，
+        // 让「打开应用也要密码」变成「未授权应用打开要密码」，而非「所有应用都要密码」。
         if (s.requirePasswordOnLaunch && !isSystemCritical(pkg)) return true
         // 精细规则优先：家长显式标了 ALLOW/BLOCK 时，名单口径让位于精细规则
         s.systemAppRules[pkg]?.let { return it == "BLOCK" }
@@ -168,6 +204,40 @@ class AppGuardPolicyStore @Inject constructor(
             AppListMode.WHITELIST -> pkg !in s.whitelist
             AppListMode.BLACKLIST -> pkg in s.blacklist
         }
+    }
+
+    /**
+     * 家长是否"关闭了该应用的使用权限"（hidden）。
+     *
+     * 与 [isControlled] 的区别：这是"关闭权限"的专属语义，不依赖 [snapshot] 里的
+     * 名单/黑名单，也**不受「打开应用也要密码」开关（[launchBlockEnabled]）约束**——
+     * 关闭权限 = 打开就必须输管理密码，是无条件底线（DO 设备额外把图标真隐藏）。
+     *
+     * 数据来源是 [DeviceAdminBridge] 的本地意图记账（[DeviceAdminBridge.persistHidden]），
+     * 由 [com.padguard.core.engine.command.CommandExecutor] 在收到 `SET_APP_HIDDEN` 命令时
+     * 写入——非 DO 设备无法真隐藏，但意图照记，软拦截闸门据此生效。
+     * 系统关键包（防砖名单）一律返回 false，避免把桌面/输入法/拨号器锁死。
+     */
+    fun isHiddenControlled(pkg: String): Boolean {
+        if (isSystemCritical(pkg)) return false
+        return admin.isHidden(pkg)
+    }
+
+    /**
+     * 应用是否已授权（可正常使用）。
+     *
+     * - 白名单模式：在白名单内即授权；
+     * - 黑名单模式：不在黑名单内即授权。
+     *
+     * 与 [isControlled] 共用，确保「授权放行 / 未授权拦截」口径在
+     * 桌面可视网关（[com.padguard.child.KidHomeViewModel.needsLaunchGuard]）、
+     * 无障碍软拦截（[OperationGuardAccessibilityService.decide]）、
+     * DO 隐藏/挂起（[com.padguard.core.engine.enforcer.AppPolicyEnforcer]）三处完全一致，
+     * 不会出现"App 里显示已授权、设备上却仍被拦"。
+     */
+    private fun isAuthorized(s: Snapshot, pkg: String): Boolean = when (s.mode) {
+        AppListMode.WHITELIST -> pkg in s.whitelist
+        AppListMode.BLACKLIST -> pkg !in s.blacklist
     }
 
     /**
@@ -185,6 +255,23 @@ class AppGuardPolicyStore @Inject constructor(
     fun uninstallNeedsPassword(): Boolean = snapshot()?.requirePasswordOnUninstall ?: true
 
     fun launchBlockEnabled(): Boolean = snapshot()?.requirePasswordOnLaunch ?: false
+
+    /**
+     * 非 DO 设备的「防卸载兜底」是否应启用。
+     *
+     * ## 行业做法对齐
+     * 普通设备管理员(DEVICE_ADMIN)无法调用 `setUninstallBlocked`(那需要 DO/PO)，
+     * 但 Android 在卸载本应用前必须先「取消设备管理员」——而
+     * [com.padguard.child.receiver.PadGuardDeviceAdminReceiver.onDisableRequested] 返回警告
+     * 会**实际阻止**该取消步骤(系统不显示确认按钮)，形成系统级双保险。
+     * 本方法就是这层双保险的「启用判定」：仅在「非 Device Owner(否则 DISALLOW_APPS_CONTROL 已封)
+     * + 设备管理器已激活(否则 onDisableRequested 不被调用)」时为 true。
+     *
+     * 无障碍服务据此再补一层「拦截设置 → 应用信息/卸载页」，让孩子即使没开操作密码也进不去卸载入口。
+     * 未激活设备管理器(LEGACY)时返回 false —— 此时只能靠操作密码开启后的 [decide] 的 REASON_SETTINGS 兜底，
+     * 所以部署/激活流程必须引导孩子激活设备管理器(既有引导已覆盖)。
+     */
+    fun selfProtectApplies(): Boolean = !admin.isDeviceOwner() && admin.isAdminActive()
 
     /**
      * 必须永远放行的包（防砖）。

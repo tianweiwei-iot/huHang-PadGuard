@@ -79,17 +79,15 @@ class SecurityEnforcer @Inject constructor(
      * `DISALLOW_APPS_CONTROL` 是唯一能让设置页里"强行停止""清除数据"变灰的公开 API。
      * 除此之外的常见做法（监听 onTaskRemoved 自拉起、双进程守护）在 Android 8+ 已基本失效，
      * 且属于对抗系统的黑科技，上架与稳定性风险都高，本项目不采用。
+     *
+     * ## 关键修正：DO/PO 下无条件开启
+     * 旧实现把"置灰强制停止"绑在 [SecurityPolicy.antiForceStop] 开关上；一旦该开关被误关，
+     * 或策略未下发此字段，受管控设备就会回到"设置里能强停"的状态 —— 这正是「孩子能结束管控」
+     * 的体感来源。对任何受管控设备，阻止被强行停止都是底线能力，不应由可关的开关决定，
+     * 因此 DO/PO 下**始终**下发 `DISALLOW_APPS_CONTROL=true`；解绑走服务端授权流程，
+     * 不需要在孩子端留这个口。（非 DO 设备无此能力，如实降级并告警。）
      */
     private fun applyAntiForceStop(policy: SecurityPolicy, report: EnforceReport) {
-        if (!policy.antiForceStop) {
-            if (admin.can(Capability.USER_RESTRICTIONS)) {
-                report.record(
-                    "security.antiForceStop=off",
-                    admin.setUserRestriction(UserManager.DISALLOW_APPS_CONTROL, false)
-                )
-            }
-            return
-        }
         if (!admin.can(Capability.USER_RESTRICTIONS)) {
             report.markUnsupported(
                 "security.antiForceStop",
@@ -98,7 +96,7 @@ class SecurityEnforcer @Inject constructor(
             return
         }
         report.record(
-            "security.antiForceStop(副作用:设置内应用管理整体受限)",
+            "security.antiForceStop(置灰强制停止/清除数据)",
             admin.setUserRestriction(UserManager.DISALLOW_APPS_CONTROL, true)
         )
     }
@@ -127,16 +125,26 @@ class SecurityEnforcer @Inject constructor(
      *
      * 无法阻止已 root 的设备，只能：① 封住系统内的重置与调试入口；② 检测并告警。
      * 检测逻辑放在 [com.padguard.core.engine.guard.TamperDetector]，本类只负责下发限制。
+     *
+     * ## 关键修正：安全模式 / 恢复出厂默认封死
+     * 旧实现把 `DISALLOW_SAFE_BOOT` / `DISALLOW_FACTORY_RESET` 绑在 [SecurityPolicy.blockRoot]
+     * 开关上；该开关一关，孩子就能从底层（恢复出厂 / 安全模式）绕过管控。
+     * 这两条限制对任何受管控 DO 设备都属于底线，改为 **DO/PO 下始终下发**，
+     * 不依赖可关的开关；`blockRoot` 仅控制「root 检测告警」的额外策略联动。
      */
     private fun applyRootHardening(policy: SecurityPolicy, report: EnforceReport) {
-        if (!policy.blockRoot) return
         if (!admin.can(Capability.USER_RESTRICTIONS)) {
-            report.markUnsupported("security.blockRoot", "需要 Device Owner / Profile Owner")
+            report.markUnsupported("security.blockReset", "需要 Device Owner / Profile Owner")
             return
         }
+        // 安全模式 / 恢复出厂：DO 下默认封死，避免从底层绕过管控
         report.record(
             "security.disallowFactoryReset",
             admin.setUserRestriction(UserManager.DISALLOW_FACTORY_RESET, true)
+        )
+        report.record(
+            "security.disallowSafeBoot",
+            admin.setUserRestriction(UserManager.DISALLOW_SAFE_BOOT, true)
         )
         if (admin.isDebuggableBuild) {
             // debug 构建豁免：DO 设置 DISALLOW_DEBUGGING_FEATURES 时，UserRestrictions 特殊处理
@@ -148,10 +156,6 @@ class SecurityEnforcer @Inject constructor(
                 admin.setUserRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, true)
             )
         }
-        report.record(
-            "security.disallowSafeBoot",
-            admin.setUserRestriction(UserManager.DISALLOW_SAFE_BOOT, true)
-        )
         report.note("security.rootDetection=检测告警（无法阻止已 root 设备）")
     }
 

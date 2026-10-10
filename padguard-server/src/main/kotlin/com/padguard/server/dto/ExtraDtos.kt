@@ -194,12 +194,50 @@ data class TabletUsageSettingsDto(
     val weekendLimitMinutes: Int = 180,
     val restAfterMinutes: Int = 60,
     val restDurationMinutes: Int = 15,
-    val timeUpMessage: String = "",
     val syncToDevice: Boolean = false
 )
 
 /** 救援通道开关请求：解除被管控平板的调试 / 侧载限制，用于远程升级或 adb 救援。 */
 data class SystemLockRelaxedRequest(val relaxed: Boolean = false)
+
+// ============ 平板使用计时会话（三端时间一致） ============
+
+/**
+ * 使用计时会话响应（三端共用，携带服务端墙钟）。
+ *
+ * 三端一律用 [serverNow] - [startEpoch] 计算已用时长，剩余 = (quotaMinutes + extendedMinutes) 分钟 - 已用，
+ * 因此家长端、孩子端、服务端显示同一份数字。
+ */
+data class UsageSessionDto(
+    val deviceId: String = "",
+    /** 服务端墙钟毫秒：三端一律用它与 startEpoch 相减，避免本地时钟漂移 */
+    val serverNow: Long = 0L,
+    /** 今日是否已确认开始计时（startEpoch 非空且 dayKey 为当天） */
+    val active: Boolean = false,
+    /** 本地日期键（Asia/Shanghai），用于跨日判断 */
+    val dayKey: String = "",
+    /** 计时起点（孩子端确认"计时开始"的服务端墙钟）；未开始为 null */
+    val startEpoch: Long? = null,
+    /** 当日额度（分钟），开始计时时锁定 */
+    val quotaMinutes: Int = 0,
+    /** 累计延时（分钟） */
+    val extendedMinutes: Int = 0,
+    /** 剩余分钟（整数，向下取整） */
+    val remainingMinutes: Int = 0,
+    /** 剩余毫秒（用于倒计时精确到秒） */
+    val remainingMs: Long = 0L,
+    /** 进入"倒计时提示"的剩余阈值（毫秒）：剩余 <= 此值才在屏幕正上方弹出倒计时框 */
+    val countdownThresholdMs: Long = 10 * 60_000L,
+    /** 延时档位（分钟）：孩子端可申请的等级 */
+    val delayOptions: List<Int> = listOf(15, 30, 45, 60),
+    /** 单日累计延时上限（分钟） */
+    val maxDailyExtendMinutes: Int = 120,
+    /** 最近一次延时申请的服务端墙钟 */
+    val lastDelayEpoch: Long? = null
+)
+
+/** 延时申请请求：minutes 必须落在 delayOptions 内 */
+data class UsageDelayRequest(val minutes: Int = 0)
 
 // ============ 统计 ============
 /**

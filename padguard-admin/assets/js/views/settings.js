@@ -19,9 +19,21 @@
         </div>
         <div class="card">
           <div class="card-head"><h3>安全策略</h3></div>
-          <div class="field"><label>密码强度策略</label><select id="st-pwd"><option value="low">宽松</option><option value="medium" ${s.passwordPolicy === "medium" ? "selected" : ""}>中等</option><option value="high">强</option></select></div>
-          <label class="row" style="gap:10px;align-items:center;cursor:pointer"><input type="checkbox" id="st-mfa" ${s.mfaRequired ? "checked" : ""} style="width:18px"> 管理员强制开启 MFA（双因素认证）</label>
+          <div class="field"><label>密码强度策略</label>
+            <select id="st-pwd">
+              <option value="low" ${s.passwordPolicy === "low" ? "selected" : ""}>宽松（8 位，无符号）</option>
+              <option value="medium" ${s.passwordPolicy === "medium" ? "selected" : ""}>中等（12 位 + 符号）</option>
+              <option value="high" ${s.passwordPolicy === "high" ? "selected" : ""}>强（16 位 + 符号）</option>
+            </select>
+            <p class="muted" style="font-size:12px;margin-top:6px">作用于服务端生成的初始密码与重置密码（新建/重置家长、管理员账号）。</p>
+          </div>
+          <label class="row" style="gap:10px;align-items:center;cursor:not-allowed;opacity:.6"><input type="checkbox" id="st-mfa" disabled ${s.mfaRequired ? "checked" : ""} style="width:18px"> 管理员强制开启 MFA（双因素认证）</label>
+          <p class="muted" style="font-size:12px;margin:6px 0 0 28px">
+            暂未强制生效：服务端登录流程尚未接入 TOTP 校验，此处仅保存配置项。
+            在此之前请勿把它当作已生效的安全控制。
+          </p>
           <label class="row" style="gap:10px;align-items:center;cursor:pointer;margin-top:10px"><input type="checkbox" id="st-mock" ${s.mockPay ? "checked" : ""} style="width:18px"> 启用模拟支付（仅测试环境，生产必须关闭）</label>
+          <p class="muted" style="font-size:12px;margin:6px 0 0 28px">保存后即时生效于支付渠道与模拟支付接口，无需重启服务端。</p>
         </div>
       </div>
       <div class="card" style="margin-top:16px">
@@ -35,7 +47,10 @@
   });
 
   async function save(root) {
-    const plans = PG.Mock.PLANS.map(p => ({ id: p.id, priceFen: parseInt(root.querySelector('[data-price="' + p.id + '"]').value) || 0 }));
+    // 直接按页面上实际渲染的套餐行取 id 与价格，避免与服务端返回的 plans 不一致
+    const plans = [...root.querySelectorAll('[data-price]')].map(el => ({
+      id: el.dataset.price, priceFen: parseInt(el.value) || 0,
+    }));
     const body = {
       brand: root.querySelector("#st-brand").value, currency: root.querySelector("#st-cur").value,
       trialDays: parseInt(root.querySelector("#st-trial").value) || 14, passwordPolicy: root.querySelector("#st-pwd").value,

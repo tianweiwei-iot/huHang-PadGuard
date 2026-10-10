@@ -131,6 +131,7 @@ class DeviceManageViewModel @Inject constructor(
             deviceRepository.bindLanDevice(lanDevice, alias = null)
                 .onSuccess {
                     showToast("已接入：${it.name}")
+                    closeAccessSheet()
                     _uiState.value = _uiState.value.copy(
                         lanDevices = _uiState.value.lanDevices.filterNot { d -> d.deviceId == lanDevice.deviceId }
                     )

@@ -43,7 +43,8 @@ import org.springframework.web.multipart.MultipartFile
 @RequestMapping("/v1/files")
 class FilesController(
     private val fileStorageService: FileStorageService,
-    private val uploadedFileRepository: com.padguard.server.repository.UploadedFileRepository
+    private val uploadedFileRepository: com.padguard.server.repository.UploadedFileRepository,
+    private val deviceRepository: com.padguard.server.repository.DeviceRepository
 ) {
 
     private val log = LoggerFactory.getLogger(FilesController::class.java)
@@ -82,6 +83,15 @@ class FilesController(
      * 2. 请求没带任何可识别凭证（孩子端图片库加载 URL）→ 放行，否则素材图全 404；
      * 3. 归属匹配 → 放行。
      * 除此之外一律 403：家长不能下载别人家设备的截图，别的设备也不能拿走本机的录音录屏。
+     *
+     * ## 为什么必须额外加"家长拥有该设备"这条判定
+     * 孩子端上报截图 / 录屏 / 录音时只认设备令牌，**拿不到家长 userId**，
+     * 因此这些文件的 `owner_user_id` 恒为 null，只有 `device_id` 有值。
+     * 而家长下载时带的是家长 JWT，识别出来的是 `viewerUserId`、没有 `viewerDeviceId`。
+     * 于是三条规则全部落空（规则 1 因 device_id 非空不成立、规则 2 有凭证、规则 3 比对的是 null 与家长 ID），
+     * 结果是**家长下载自家孩子设备的截图/录屏必定被 403** ——
+     * 表现为"录屏成功、回放入口也在，但保存图片/视频时提示 HTTP 403"。
+     * 这条判定把"设备归属该家长"补上，既修好了功能，也没有放宽跨用户越权。
      */
     private fun ownershipDenied(
         request: jakarta.servlet.http.HttpServletRequest,
@@ -99,6 +109,8 @@ class FilesController(
             ownerUserId.isNullOrBlank() && ownerDeviceId.isNullOrBlank() -> true
             viewerUserId != null && ownerUserId == viewerUserId -> true
             viewerDeviceId != null && ownerDeviceId == viewerDeviceId -> true
+            // 家长下载自家设备上行的文件（截图/录屏/录音归属只记了 deviceId）
+            viewerUserId != null && !ownerDeviceId.isNullOrBlank() && ownsDevice(viewerUserId, ownerDeviceId) -> true
             else -> false
         }
         if (allow) return null
@@ -107,6 +119,18 @@ class FilesController(
             .contentType(MediaType.APPLICATION_JSON)
             .body(ApiResponse.fail<Any>(ParentErr.FORBIDDEN, "无权访问该文件"))
     }
+
+    /**
+     * 设备是否属于该家长。
+     *
+     * 用 [com.padguard.server.repository.DeviceRepository.findByUserId] 而不是再加一个 exists 查询：
+     * 单个家长的设备数是十以内的量级，全量取出比对与一次点查开销相当，
+     * 且这里只在"归属字段对不上"时才走到，不是下载主路径。
+     */
+    private fun ownsDevice(userId: String, deviceId: String): Boolean =
+        runCatching { deviceRepository.findByUserId(userId).any { it.id == deviceId } }
+            .onFailure { log.warn("device ownership check failed: user={} device={} err={}", userId, deviceId, it.message) }
+            .getOrDefault(false)
 
     /**
      * 客户端未声明 Content-Type 时按扩展名兜底。

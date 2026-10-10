@@ -93,6 +93,18 @@ data class PolicyPackage(
         )
     }
 
+    /**
+     * 「时间管控」页的休息设置 → [EyeCarePolicy] 的兜底派生。
+     *
+     * 统一在**读取策略**时做（见 `PolicyRepository`），而不是在某条执行链路上做：
+     * 端上有多处消费 `eyeCare`（引擎周期判定、首页倒计时、护眼页开关回显），
+     * 只在一处派生会出现"引擎提醒了、UI 却显示未开启"的口径不一致。
+     */
+    fun deriveTimeControl(): PolicyPackage {
+        val derived = appLimit.deriveEyeCare(eyeCare)
+        return if (derived == eyeCare) this else copy(eyeCare = derived)
+    }
+
     companion object {
         /** 出厂默认策略：未绑定时的兜底，避免空指针与"未绑定即失控" */
         fun default() = PolicyPackage()
@@ -251,7 +263,14 @@ data class AppLimitPolicy(
     @SerialName("weekendTotalMinutes") val weekendTotalMinutes: Int = 0,
     @SerialName("rules") val rules: List<AppLimitRule> = emptyList(),
     /** 临近耗尽时提醒的剩余分钟数阈值 */
-    @SerialName("reminderMinutes") val reminderMinutes: List<Int> = listOf(5, 1)
+    @SerialName("reminderMinutes") val reminderMinutes: List<Int> = listOf(5, 1),
+    /**
+     * 连续使用多少分钟后提醒休息（家长端「时间管控」页的「休息提醒」）。
+     * 0 = 不提醒。
+     */
+    @SerialName("restAfterMinutes") val restAfterMinutes: Int = 0,
+    /** 每次休息多少分钟（家长端「每次休息时长」）。0 = 不提醒。 */
+    @SerialName("restDurationMinutes") val restDurationMinutes: Int = 0
 ) {
     /**
      * 当日真正生效的总时长上限。
@@ -272,6 +291,33 @@ data class AppLimitPolicy(
             !isWeekend && weekdayTotalMinutes > 0 -> weekdayTotalMinutes
             else -> dailyTotalMinutes
         }
+    }
+
+    /**
+     * 由「休息提醒 / 每次休息时长」派生护眼休息策略（[EyeCarePolicy]）。
+     *
+     * ## 为什么要派生而不是各自独立
+     * 这两项在家长端属于「时间管控」页，随 `appLimit` 段下发；而端上真正执行
+     * "连续用满 N 分钟 → 强制休息 M 分钟（可锁屏）"的是 [EyeCarePolicy] +
+     * `EyeCareEnforcer`，它由 `eyeCare` 段驱动。两条链路不同源，
+     * 于是这两项长期"下发成功但设备无感"。
+     * 派生把两者接起来：服务端已同步写入 eyeCare 段时二者一致（不重复生效），
+     * 老策略包 / 服务端未同步时由这里兜底，保证升级后立刻生效。
+     *
+     * ## 何时不覆盖既有 eyeCare
+     * `eyeCare.enabled` 为真且 `continuousMinutes > 0` 时视为家长已有明确配置，
+     * 原样返回 —— 避免把分龄基线（未成年人模式派生的更严格值）覆盖掉。
+     */
+    fun deriveEyeCare(current: EyeCarePolicy): EyeCarePolicy {
+        if (restAfterMinutes <= 0 || restDurationMinutes <= 0) return current
+        if (current.enabled && current.continuousMinutes > 0) return current
+        return EyeCarePolicy(
+            enabled = true,
+            continuousMinutes = restAfterMinutes,
+            restMinutes = restDurationMinutes,
+            // 休息期间强制锁屏：否则提醒可以被立刻划掉，家长要的强制休息落空
+            forceLockDuringRest = true
+        )
     }
 }
 

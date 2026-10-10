@@ -77,7 +77,11 @@ data class ScreenMonitorUiState(
     val lastRecordSavedPath: String? = null,
     val isLoading: Boolean = false,
     val toast: String? = null,
-    val error: String? = null
+    val error: String? = null,
+    /** 实时看屏上行带宽（KB/s）：服务端 1s 滚动窗口统计的字节速率 ÷ 1024 */
+    val liveUpKbps: Double = 0.0,
+    /** 实时看屏下行带宽（KB/s）：服务端转发给本家长端占用的带宽 */
+    val liveDownKbps: Double = 0.0
 ) {
     val isRecording: Boolean get() = recording != null
 }
@@ -158,6 +162,22 @@ class ScreenMonitorViewModel @Inject constructor(
                     }
                 }
 
+                // 带宽遥测：每 2s 拉一次 /stream/{deviceId}/status，
+                // 让家长端实时显示"上行 / 下行"带宽占用，
+                // 直接回答"实时看屏占了多少带宽、并发高时会不会被打满"。
+                val bandwidthPoller = launch {
+                    while (coroutineContext.isActive) {
+                        delay(LIVE_BANDWIDTH_POLL_MS)
+                        monitorRepository.getLiveStatus(deviceId)
+                            .onSuccess { st ->
+                                _uiState.value = _uiState.value.copy(
+                                    liveUpKbps = st.upstreamBps / 1024.0,
+                                    liveDownKbps = st.downstreamBps / 1024.0
+                                )
+                            }
+                    }
+                }
+
                 var gotFrame = false
                 try {
                     // 首帧迟迟不来时把真实原因告诉家长，而不是让他对着转圈干等。
@@ -181,7 +201,7 @@ class ScreenMonitorViewModel @Inject constructor(
                                 error = "实时画面中断：${e.message ?: "网络异常"}"
                             )
                         }
-                        .onCompletion { keepAlive.cancel(); firstFrameHint.cancel() }
+                        .onCompletion { keepAlive.cancel(); firstFrameHint.cancel(); bandwidthPoller.cancel() }
                         .collect { bitmap ->
                             gotFrame = true
                             firstFrameHint.cancel()
@@ -195,9 +215,16 @@ class ScreenMonitorViewModel @Inject constructor(
                         }
                 } finally {
                     keepAlive.cancel()
+                    bandwidthPoller.cancel()
                 }
 
-                _uiState.value = _uiState.value.copy(liveConnected = false, fetchingFrame = false)
+                _uiState.value = _uiState.value.copy(
+                    liveConnected = false,
+                    fetchingFrame = false,
+                    // 断流后清空画面：离线/停止推流时不应再显示最后一帧（可能已是很久以前的旧画面），
+                    // 否则家长会误以为仍在看实时画面。清空后页面回到「等待平板上传实时画面」占位态。
+                    liveImage = null
+                )
                 // 正常退出页面 / 被主动停止：不再重连
                 if (!coroutineContext.isActive) break
                 // 断流后短暂等待再重连，避免孩子端离线时空转刷屏
@@ -518,6 +545,8 @@ class ScreenMonitorViewModel @Inject constructor(
 
         /** 实时流续期间隔：孩子端推流 TTL 180s，这里 2 分钟续一次。 */
         const val LIVE_KEEPALIVE_MS = 120_000L
+        /** 带宽遥测轮询间隔：每 2s 拉一次状态，既能反映实时带宽又不至于刷屏 */
+        const val LIVE_BANDWIDTH_POLL_MS = 2_000L
 
         /** 已出画后断流的重连等待 */
         const val LIVE_RECONNECT_MS = 1_500L

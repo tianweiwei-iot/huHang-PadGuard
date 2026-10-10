@@ -10,7 +10,7 @@
         <div class="row wrap" style="margin-bottom:14px">
           <div class="search-box" style="flex:1;min-width:220px"><input id="p-kw" placeholder="手机号 / 姓名 / 账号ID" style="width:100%"></div>
           <select id="p-status" class="btn" style="height:40px;width:130px"><option value="">全部状态</option><option value="active">正常</option><option value="suspended">已冻结</option><option value="pending">待激活</option></select>
-          <select id="p-plan" class="btn" style="height:40px;width:150px"><option value="">全部套餐</option><option value="free">免费版</option><option value="monthly">月度会员</option><option value="yearly">年度会员</option></select>
+          <select id="p-plan" class="btn" style="height:40px;width:150px"><option value="">全部套餐</option><option value="free">免费版</option><option value="monthly">月度/季度会员</option><option value="yearly">年度会员</option><option value="permanent">永久会员</option></select>
           <button class="btn" id="p-reset">重置</button>
         </div>
         <div class="table-wrap"><table class="tbl"><thead><tr>
@@ -139,8 +139,11 @@
     });
   }
 
-  function openCreate() {
-    const plans = PG.Mock.PLANS.map(p => '<option value="' + p.id + '">' + p.name + (p.priceFen ? '（' + U.money(p.priceFen) + '/期）' : '') + '</option>').join("");
+  async function openCreate() {
+    // 套餐取自服务端真实可购套餐（Mock 已清空，用 PG.Mock.PLANS 会得到空下拉）
+    const list = (await PG.api.listPlans()) || [];
+    const plans = '<option value="TRIAL">免费版（试用）</option>' +
+      list.map(p => '<option value="' + p.id + '">' + p.name + (p.priceFen ? '（' + U.money(p.priceFen) + '/期）' : '') + '</option>').join("");
     const m = PG.ui.modal({
       title: "新建家长账号", width: 480,
       body: `<div class="field"><label>家长姓名</label><input id="c-name" placeholder="如 张伟"></div>

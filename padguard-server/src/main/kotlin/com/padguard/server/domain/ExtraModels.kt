@@ -223,7 +223,6 @@ class DeviceSetting(
     @Column(name = "weekend_limit_minutes") var weekendLimitMinutes: Int? = 180,
     @Column(name = "rest_after_minutes") var restAfterMinutes: Int? = 60,
     @Column(name = "rest_duration_minutes") var restDurationMinutes: Int? = 15,
-    @Column(name = "time_up_message", columnDefinition = "text") var timeUpMessage: String? = null,
     /** 可用时间段 JSON：[{"startTime":"08:00","endTime":"18:00"}]，null 表示未设置 */
     @Column(name = "enabled_time_ranges", columnDefinition = "text") var enabledTimeRangesJson: String? = null,
     /**

@@ -16,7 +16,8 @@ class ChildDeviceController(
     private val deviceService: DeviceService,
     private val policyService: PolicyService,
     private val policyExtensionService: PolicyExtensionService,
-    private val rateLimit: RateLimit
+    private val rateLimit: RateLimit,
+    private val usageSessionService: UsageSessionService
 ) {
     @PostMapping("/bind")
     fun bind(@RequestBody req: BindRequest, httpRequest: jakarta.servlet.http.HttpServletRequest) =
@@ -41,6 +42,33 @@ class ChildDeviceController(
 
     @GetMapping("/time")
     fun time() = DeviceApiResponse.ok(mapOf("serverTime" to System.currentTimeMillis()))
+
+    /**
+     * 孩子端拉取当前使用计时会话（三端时间一致的来源）。
+     *
+     * 携带服务端墙钟 serverNow，孩子端据此显示与家长端完全一致的剩余时长。
+     */
+    @GetMapping("/usage/session")
+    fun usageSession(
+        @RequestAttribute("deviceId") deviceId: String
+    ) = DeviceApiResponse.ok(usageSessionService.get(deviceId))
+
+    /**
+     * 孩子端确认"计时开始"：服务端锁定今日计时起点与额度。幂等。
+     */
+    @PostMapping("/usage/session/start")
+    fun startUsageSession(
+        @RequestAttribute("deviceId") deviceId: String
+    ) = DeviceApiResponse.ok(usageSessionService.start(deviceId))
+
+    /**
+     * 孩子端申请延时：minutes 必须落在 15/30/45/60 档位内，单日累计不超上限。
+     */
+    @PostMapping("/usage/session/extend")
+    fun extendUsageSession(
+        @RequestAttribute("deviceId") deviceId: String,
+        @RequestBody req: com.padguard.server.dto.UsageDelayRequest
+    ) = DeviceApiResponse.ok(usageSessionService.extend(deviceId, req.minutes))
 
     @GetMapping("/policy")
     fun policy(

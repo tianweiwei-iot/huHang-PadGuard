@@ -49,8 +49,12 @@ class AdminService(
     private val jwt: JwtTokenProvider,
     private val adminPerm: AdminPermissionService,
     private val auditService: AuditService,
+    private val mailService: MailService,
     private val objectMapper: ObjectMapper,
-    private val dataSource: DataSource
+    private val dataSource: DataSource,
+    private val serverProfileService: ServerProfileService,
+    private val requestMetrics: com.padguard.server.observability.RequestMetrics,
+    private val runtimeLogRing: com.padguard.server.observability.RuntimeLogRing
 ) {
     private val log = LoggerFactory.getLogger(AdminService::class.java)
 
@@ -105,10 +109,18 @@ class AdminService(
     }
 
     /** 把套餐键归一到前端下拉值（free/monthly/yearly） */
+    /**
+     * 套餐归类（用于后台筛选与分布统计）。
+     *
+     * 修复：PERMANENT（永久会员）此前落到 else 分支被当成 "free"，
+     * 后台列表与首页分布图都把它显示成「免费版」——运营会误判为"付了钱没生效"。
+     * 现在单独成类，前端筛选与分布统计同步支持。
+     */
     private fun planCategory(planKey: String?): String = when ((planKey ?: "").uppercase()) {
         "TRIAL" -> "free"
         "MONTHLY", "QUARTERLY" -> "monthly"
         "YEARLY" -> "yearly"
+        "PERMANENT" -> "permanent"
         else -> "free"
     }
 
@@ -132,10 +144,25 @@ class AdminService(
         mfa = a.mfaEnabled, createdAt = a.createdAt, lastLoginAt = a.lastLoginAt
     )
 
-    private fun genPassword(len: Int = 12): String {
+    /**
+     * 按后台「系统设置 → 密码策略」生成初始密码 / 重置密码。
+     *
+     * 为什么改：passwordPolicy 此前只被存进 system_settings、没有任何地方读取，
+     * 运营在后台把策略调成 high，实际发下去的还是固定 12 位 —— 属于典型的"设了没用"。
+     * 现在新建家长、重置家长密码、新建管理员、重置管理员密码四处统一按策略生成。
+     * 策略读取失败时回落 medium，绝不因配置损坏导致建号失败。
+     */
+    private fun genPassword(): String {
+        val policy = runCatching { loadSettingsStore().passwordPolicy }.getOrDefault("medium")
+        val (len, withSymbol) = when (policy) {
+            "low" -> 8 to false
+            "high" -> 16 to true
+            else -> 12 to true
+        }
         val chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
         val rnd = SecureRandom()
-        return (1..len).joinToString("") { chars[rnd.nextInt(chars.length)].toString() } + "!"
+        val core = (1..len).joinToString("") { chars[rnd.nextInt(chars.length)].toString() }
+        return if (withSymbol) core + "!" else core
     }
 
     /**
@@ -190,11 +217,18 @@ class AdminService(
         val revenueSeries = lastMonthsRevenue(6).map { it.amount }
         val planDist = subs.groupBy { planCategory(it.plan) }
             .map { (cat, list) -> NameCount(planLabel(if (cat == "free") "TRIAL" else cat.uppercase()), list.size) }
-        val regionDist = emptyList<NameCount>() // 家长无 region 字段，预留
+        // users.region 字段存在（V13 起可维护），此前恒返回空数组导致首页柱状图永远空白。
+        // 按真实 region 分组；未填写的归入「未填写」，避免运营看到空图却查不出原因。
+        val regionDist = userRepository.findAll()
+            .groupBy { it.region?.takeIf { r -> r.isNotBlank() } ?: "未填写" }
+            .map { (region, list) -> NameCount(region, list.size) }
+            .sortedByDescending { it.count }
 
         val alertsOpen = alertRepository.countByStatus("ACTIVE")
 
-        val recent = auditInternal(null).take(6)
+        // 首页最近操作：必须尊重 audit:read —— 没有审计查看权限的角色不应在首页看到操作流，
+        // 否则 adminPerm.require(id,"audit","read") 这道闸门会被仪表盘从旁路掏空。
+        val recent = if (adminPerm.can(adminId, "audit", "read")) audit(adminId, null).take(6) else emptyList()
 
         return DashboardResponse(
             kpis = Kpis(
@@ -251,11 +285,22 @@ class AdminService(
         }
     }.getOrDefault(false)
 
+    /**
+     * 读操作的权限闸门。
+     *
+     * 此前服务端只对写操作 require，全系统**没有任何一处**校验过 read —— 因此在 RBAC 矩阵里
+     * 给某角色勾选或取消「查看」在服务端毫无区别，"只读角色"实际上并不成立：
+     * 任何能进后台的管理员都能拉取全部列表数据（含财务营收、家长手机号、审计日志）。
+     *
+     * 现在所有返回业务列表的 Service 方法都在首行过这道闸门，
+     * 矩阵里的「查看」列才真正等价于"能不能打开这个页面"。
+     */
+    private fun requireRead(adminId: String, area: String) = adminPerm.require(adminId, area, "read")
+
     // ============================ 家长账号 ============================
 
     fun listParents(adminId: String, keyword: String?, status: String?, plan: String?): List<ParentRow> {
-        // S13：读操作同样过 RBAC 闸门 —— 列表里含家长手机号等敏感数据，只读角色之外不应可见
-        adminPerm.require(adminId, "parents", "read")
+        requireRead(adminId, "parents")
         var users = userRepository.findAll()
         if (!status.isNullOrBlank()) users = users.filter { (it.status ?: "active") == status }
         if (!plan.isNullOrBlank()) {
@@ -289,7 +334,7 @@ class AdminService(
     }
 
     fun parentDetail(adminId: String, id: String): ParentDetail? {
-        adminPerm.require(adminId, "parents", "read")
+        requireRead(adminId, "parents")
         val u = userRepository.findById(id).orElse(null) ?: return null
         val sub = subscriptionRepository.findByUserId(id)
         val devices = deviceRepository.findByUserId(id).map {
@@ -331,11 +376,13 @@ class AdminService(
     fun resetParentPassword(adminId: String, id: String): Map<String, Any> {
         adminPerm.require(adminId, "parents", "reset_pwd")
         val u = userRepository.findById(id).orElse(null) ?: throw BizException(ParentErr.PARAM_ERROR, "家长不存在", Audience.PARENT)
-        val newPwd = genPassword(10)
+        val newPwd = genPassword()
         u.passwordHash = Passwords.encode(newPwd)
         userRepository.save(u)
         auditService.record(adminId, null, AdminAudit.PARENTS_RESET_PWD, targetType = "parent", targetId = id, detail = "重置密码 ${u.phone}")
-        return mapOf("ok" to true, "newPwd" to newPwd)
+        // 重置生效后立即邮件通知对方（若已登记邮箱且已配置 SMTP）；否则退回后台弹窗明文转告
+        val emailed = mailService.sendPasswordReset(u.email, u.phone, "家长账号", newPwd)
+        return mapOf("ok" to true, "newPwd" to newPwd, "emailed" to emailed)
     }
 
     @Transactional
@@ -344,7 +391,7 @@ class AdminService(
         if (userRepository.existsByPhone(req.phone)) {
             throw BizException(ParentErr.PARAM_ERROR, "手机号已注册", Audience.PARENT)
         }
-        val pwd = genPassword(10)
+        val pwd = genPassword()
         val now = System.currentTimeMillis()
         val u = User(
             id = "U" + UUID.randomUUID().toString().replace("-", "").take(20),
@@ -357,7 +404,25 @@ class AdminService(
         )
         userRepository.save(u)
         auditService.record(adminId, null, AdminAudit.PARENTS_CREATE, targetType = "parent", targetId = u.id, detail = "新建家长 ${u.phone}")
-        return mapOf("ok" to true, "id" to u.id, "password" to pwd)
+
+        // 「创建并开通」必须真的开通：此前前端传的 plan 被服务端完全忽略，
+        // 运营选了「年度会员」点创建，建出来的号仍是免费版 —— 界面承诺与后台行为不一致。
+        // 现在按所选套餐直接落一条 ACTIVE 订阅；永久会员按 100 年计（不做过期处理）。
+        val planKey = req.plan?.takeIf { it.isNotBlank() }
+        val activated = if (planKey != null && planKey.uppercase() !in setOf("FREE", "TRIAL")) {
+            adminPerm.require(adminId, "billing", "manual")
+            val planEnum = Plan.of(planKey)
+                ?: throw BizException(ParentErr.PARAM_ERROR, "套餐不存在：$planKey", Audience.PARENT)
+            val days = if (planEnum == Plan.PERMANENT) 36_500 else planEnum.months * 30
+            manualActivate(adminId, AdminManualSubscriptionRequest(parentPhone = u.phone, plan = planEnum.key, days = days))
+            planEnum.label
+        } else null
+
+        return if (activated != null) {
+            mapOf("ok" to true, "id" to u.id, "password" to pwd, "plan" to activated)
+        } else {
+            mapOf("ok" to true, "id" to u.id, "password" to pwd)
+        }
     }
 
     @Transactional
@@ -392,7 +457,7 @@ class AdminService(
     // ============================ 设备 ============================
 
     fun listDevices(adminId: String, keyword: String?, online: String?): List<DeviceRow> {
-        adminPerm.require(adminId, "devices", "read")
+        requireRead(adminId, "devices")
         val users = userRepository.findAll()
         val userMap = users.associateBy { it.id }
         var devs = deviceRepository.findAll()
@@ -447,7 +512,7 @@ class AdminService(
     // ============================ 订阅计费 ============================
 
     fun listPlans(adminId: String): List<AdminPlanDto> {
-        adminPerm.require(adminId, "billing", "read")
+        requireRead(adminId, "billing")
         return billingService.plans().map { p ->
             AdminPlanDto(
                 id = p.key, name = p.label, priceFen = p.amountFen, deviceLimit = p.deviceLimit,
@@ -457,7 +522,7 @@ class AdminService(
     }
 
     fun listSubscriptions(adminId: String, status: String?): List<SubRow> {
-        adminPerm.require(adminId, "billing", "read")
+        requireRead(adminId, "billing")
         var subs = subscriptionRepository.findAllByOrderByExpiredAtDesc()
         if (!status.isNullOrBlank()) subs = subs.filter { subStatusLower(it.status) == status.lowercase() }
         val userMap = userRepository.findAll().associateBy { it.id }
@@ -473,7 +538,7 @@ class AdminService(
     }
 
     fun listOrders(adminId: String, status: String?): List<OrderRow> {
-        adminPerm.require(adminId, "billing", "read")
+        requireRead(adminId, "billing")
         var orders = paymentOrderRepository.findAllByOrderByCreatedAtDesc()
         if (!status.isNullOrBlank()) orders = orders.filter { orderStatusLower(it.status) == status.lowercase() }
         val userMap = userRepository.findAll().associateBy { it.id }
@@ -541,15 +606,45 @@ class AdminService(
     }
 
     fun revenue(adminId: String): List<RevenueMonth> {
-        adminPerm.require(adminId, "billing", "read")
+        requireRead(adminId, "billing")
         return lastMonthsRevenue(12)
     }
 
     // ============================ RBAC ============================
 
-    fun listRoles(adminId: String): List<AdminRoles.RoleDef> {
-        adminPerm.require(adminId, "rbac", "read")
+    /** 权限元数据（领域/动作中文名 + 危险等级 + 系统锁定角色），供前端渲染矩阵 */
+    fun permissionSchema(adminId: String): Map<String, Any> {
+        requireRead(adminId, "rbac")
+        return adminPerm.permissionSchema()
+    }
+
+    fun listRoles(adminId: String): List<com.padguard.server.domain.AdminRoles.RoleDef> {
+        requireRead(adminId, "rbac")
         return adminPerm.listRoles()
+    }
+
+    /**
+     * 新建自定义角色。
+     *
+     * 此前后台「新建角色」只在前端内存 push 一条，刷新即丢、服务端不存在该角色，
+     * 一旦被指派给管理员，权限解析为空、该管理员什么都做不了。现在落库并参与权限判定。
+     */
+    @Transactional
+    fun createRole(adminId: String, req: AdminRoleCreateRequest): Map<String, Any> {
+        adminPerm.require(adminId, "rbac", "write")
+        adminPerm.createRole(req.id, req.name, req.description, req.privileges)
+        auditService.record(adminId, null, "RBAC_ROLE_CREATE", targetType = "role", targetId = req.id, detail = "新建角色 ${req.name}")
+        val created = adminPerm.listRoles().firstOrNull { it.id == req.id }
+        return if (created != null) mapOf<String, Any>("ok" to true, "role" to created)
+        else mapOf<String, Any>("ok" to true)
+    }
+
+    @Transactional
+    fun deleteRole(adminId: String, roleId: String): Map<String, Any> {
+        adminPerm.require(adminId, "rbac", "write")
+        adminPerm.deleteRole(roleId)
+        auditService.record(adminId, null, "RBAC_ROLE_DELETE", targetType = "role", targetId = roleId, detail = "删除角色 $roleId")
+        return mapOf("ok" to true)
     }
 
     @Transactional
@@ -560,8 +655,22 @@ class AdminService(
         return mapOf("ok" to true)
     }
 
+    /**
+     * 还原角色权限到系统默认值。
+     *
+     * 存在的意义：内置角色的权限一旦在矩阵里被改乱（典型是误取消某个领域的「查看」，
+     * 导致该角色的菜单全打不开），此前没有任何自助恢复手段，只能改代码或直接改数据库。
+     */
+    @Transactional
+    fun resetRolePrivileges(adminId: String, roleId: String): Map<String, Any> {
+        adminPerm.require(adminId, "rbac", "write")
+        adminPerm.resetRolePrivileges(roleId)
+        auditService.record(adminId, null, "RBAC_ROLE_RESET", targetType = "role", targetId = roleId, detail = "还原角色权限 $roleId")
+        return mapOf("ok" to true)
+    }
+
     fun listAdmins(adminId: String): List<AdminDto> {
-        adminPerm.require(adminId, "rbac", "read")
+        requireRead(adminId, "rbac")
         return adminRepository.findAll().map { toAdminDto(it) }
     }
 
@@ -572,10 +681,11 @@ class AdminService(
         if (adminRepository.existsByUsername(req.username)) {
             throw BizException(ParentErr.PARAM_ERROR, "登录账号已存在", Audience.PARENT)
         }
-        if (!AdminRoles.ROLES.any { it.id == req.roleId }) {
+        // 内置角色 + 运营自建角色（V24 admin_roles）都可被指派
+        if (!adminPerm.allRoleKeys().contains(req.roleId)) {
             throw BizException(ParentErr.PARAM_ERROR, "角色不存在", Audience.PARENT)
         }
-        val pwd = genPassword(12)
+        val pwd = genPassword()
         val admin = Admin(
             id = "A" + UUID.randomUUID().toString().replace("-", ""),
             username = req.username, passwordHash = Passwords.encode(pwd),
@@ -592,7 +702,7 @@ class AdminService(
     fun assignRole(adminId: String, targetAdminId: String, roleId: String): Map<String, Any> {
         adminPerm.require(adminId, "rbac", "assign")
         ensureNotEscalatingToSuper(adminId, roleId)
-        if (!AdminRoles.ROLES.any { it.id == roleId }) {
+        if (!adminPerm.allRoleKeys().contains(roleId)) {
             throw BizException(ParentErr.PARAM_ERROR, "角色不存在", Audience.PARENT)
         }
         val target = adminRepository.findById(targetAdminId).orElse(null)
@@ -649,11 +759,35 @@ class AdminService(
         adminPerm.require(adminId, "rbac", "reset_pwd")
         val target = adminRepository.findById(targetAdminId).orElse(null)
             ?: throw BizException(ParentErr.PARAM_ERROR, "管理员不存在", Audience.PARENT)
-        val newPwd = genPassword(12)
+        val newPwd = genPassword()
         target.passwordHash = Passwords.encode(newPwd)
         adminRepository.save(target)
         auditService.record(adminId, target.id, AdminAudit.RBAC_RESET_PWD, targetType = "admin", targetId = target.id, detail = "重置管理员密码 ${target.username}")
-        return mapOf("ok" to true, "newPwd" to newPwd)
+        // 重置生效后立即邮件通知对方（若已登记邮箱且已配置 SMTP）；否则退回后台弹窗明文转告
+        val emailed = mailService.sendPasswordReset(target.email, target.username, "管理员账号", newPwd)
+        return mapOf("ok" to true, "newPwd" to newPwd, "emailed" to emailed)
+    }
+
+    /**
+     * 管理员自助修改自己的密码。
+     *
+     * 与「重置他人密码」区分：此处必须校验当前密码（证明是本人），且不涉及 RBAC 权限闸门——
+     * 任何已登录的管理员都可修改自己的密码。新密码强制至少 8 位。
+     */
+    @Transactional
+    fun changeOwnPassword(adminId: String, currentPassword: String, newPassword: String): Map<String, Any> {
+        if (newPassword.length < 8) {
+            throw BizException(ParentErr.PARAM_ERROR, "新密码至少 8 位", Audience.PARENT)
+        }
+        val admin = adminRepository.findById(adminId).orElse(null)
+            ?: throw BizException(ParentErr.UNAUTHORIZED, "管理员不存在", Audience.PARENT)
+        if (!Passwords.matches(currentPassword, admin.passwordHash)) {
+            throw BizException(ParentErr.UNAUTHORIZED, "当前密码错误", Audience.PARENT)
+        }
+        admin.passwordHash = Passwords.encode(newPassword)
+        adminRepository.save(admin)
+        auditService.record(adminId, null, "RBAC_SELF_CHG_PWD", targetType = "admin", targetId = adminId, detail = "修改自身密码")
+        return mapOf("ok" to true)
     }
 
     /** 统计处于启用状态的超级管理员数量（用于防锁死护栏） */
@@ -663,7 +797,7 @@ class AdminService(
     // ============================ 服务端监控 ============================
 
     fun serverMetrics(adminId: String): ServerMetrics {
-        adminPerm.require(adminId, "server", "read")
+        requireRead(adminId, "server")
         val rt = Runtime.getRuntime()
         val usedMb = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024)
         val maxMb = rt.maxMemory() / (1024 * 1024)
@@ -676,25 +810,55 @@ class AdminService(
             jvmHeapUsedMb = usedMb.toInt(),
             jvmHeapMaxMb = maxMb.toInt(),
             threads = ManagementFactory.getThreadMXBean().threadCount,
-            requestsPerMin = 0,
-            errorRate = "0.00",
-            dbConnections = "—",
+            // 以下三项此前是硬编码的 0 / "0.00" / "—"，运营看到的是永远不变的假数字。
+            // 现在取自 [com.padguard.server.observability.RequestMetrics] 的 60 秒滑动窗口真值。
+            requestsPerMin = requestMetrics.requestsPerMin(),
+            qpmHistory = requestMetrics.qpmHistory(),
+            errorRate = requestMetrics.errorRate(),
+            avgLatencyMs = requestMetrics.avgLatencyMs(),
+            dbConnections = dbConnections(),
             instances = listOf(
-                ServerMetrics.Instance(name = "padguard-server", host = "192.168.1.10:8090", status = if (up) "UP" else "DOWN", cpu = "—", mem = "—")
+                ServerMetrics.Instance(
+                    name = "padguard-server",
+                    // 主机地址取自后台可维护的「服务器基本信息」，此前写死 192.168.1.10:8090，
+                    // 改了对外地址后台却仍显示旧值，排查时会误导。
+                    host = runCatching { serverProfileService.getServerProfile() }
+                        .getOrNull()?.let { "${it.publicHost}:${it.port}" } ?: "—",
+                    status = if (up) "UP" else "DOWN",
+                    cpu = "—",
+                    mem = "${usedMb.toInt()} / ${maxMb.toInt()} MB"
+                )
             ),
-            logs = emptyList()
+            logs = runtimeLogRing.recent()
         )
+    }
+
+    /**
+     * 数据库连接池使用情况。
+     *
+     * 取 HikariCP 的池指标（Spring Boot 默认连接池）；若部署换成其他 DataSource
+     * 或 MXBean 不可用，返回明确说明而非占位符 "—"，避免"看不懂是没数据还是没接"。
+     */
+    private fun dbConnections(): String = runCatching {
+        val hikari = dataSource as? com.zaxxer.hikari.HikariDataSource
+        val mx = hikari?.hikariPoolMXBean
+        if (mx != null) {
+            "${mx.activeConnections} 活跃 / ${mx.idleConnections} 空闲 / ${mx.totalConnections} 总数"
+        } else {
+            "${dataSource.javaClass.simpleName}（未暴露池指标）"
+        }
+    }.getOrDefault("不可用")
+
+    /** 后台「实时日志」：直接透传进程内日志环形缓冲 */
+    fun serverLogs(adminId: String): List<ServerMetrics.LogLine> {
+        requireRead(adminId, "server")
+        return runtimeLogRing.recent()
     }
 
     // ============================ 审计 / 告警 ============================
 
-    /** 对外审计查询：过 audit:read 闸门后委托内部实现（S13 读闸门） */
     fun audit(adminId: String, area: String?): List<AuditItem> {
-        adminPerm.require(adminId, "audit", "read")
-        return auditInternal(area)
-    }
-
-    private fun auditInternal(area: String?): List<AuditItem> {
+        requireRead(adminId, "audit")
         val admins = adminRepository.findAll().associateBy { it.id }
         val users = userRepository.findAll().associateBy { it.id }
         val rows = auditLogRepository.findAllByOrderByCreatedAtDesc().take(200)
@@ -745,8 +909,7 @@ class AdminService(
     }
 
     fun alerts(adminId: String): List<AlertItem> {
-        // 告警归属 audit 领域（与 closeAlert 的 audit:write 同域），读侧只需 audit:read
-        adminPerm.require(adminId, "audit", "read")
+        requireRead(adminId, "audit")
         val users = userRepository.findAll().associateBy { it.id }
         return alertRepository.findAll().map { a ->
             val level = when (a.level.uppercase()) {
@@ -778,7 +941,17 @@ class AdminService(
     // ============================ 系统设置 ============================
 
     fun settings(adminId: String): AdminSettingsDto {
-        adminPerm.require(adminId, "settings", "read")
+        requireRead(adminId, "settings")
+        return settingsInternal()
+    }
+
+    /**
+     * 读取设置的内部实现，不带闸门。
+     *
+     * 供 [saveSettings] 在保存成功后回读最新值：那里已通过更严格的 `settings:write` 校验，
+     * 若此处再要求 read，会让"有写无读"的配置（虽然我们已在保存前拦截）把保存接口卡在回读环节。
+     */
+    private fun settingsInternal(): AdminSettingsDto {
         val store = loadSettingsStore()
         val plans = billingService.plans().map { p ->
             val price = store.planPrices[p.key] ?: p.amountFen
@@ -808,7 +981,7 @@ class AdminService(
         )
         systemSettingRepository.save(SystemSetting("admin.settings", objectMapper.writeValueAsString(next)))
         auditService.record(adminId, null, AdminAudit.SETTINGS_WRITE, targetType = "settings", targetId = "admin.settings", detail = "修改系统设置")
-        return settings(adminId)
+        return settingsInternal()
     }
 
     private data class SettingsStore(

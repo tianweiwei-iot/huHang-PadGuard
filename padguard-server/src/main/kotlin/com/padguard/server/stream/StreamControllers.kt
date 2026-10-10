@@ -53,6 +53,8 @@ class ChildStreamController(
         var frames = 0L
         var bytes = 0L
         val startedAt = System.currentTimeMillis()
+        // 标记该设备正在推流：供并发准入（MonitorService）与带宽聚合日志使用
+        hub.registerPublisher(deviceId)
         try {
             request.inputStream.use { input ->
                 while (true) {
@@ -66,6 +68,8 @@ class ChildStreamController(
         } catch (e: Throwable) {
             // 客户端断开、进程被杀都会走到这里，是正常结束路径，不是故障
             log.info("screen stream upload ended: device=$deviceId frames=$frames reason=${e.javaClass.simpleName}")
+        } finally {
+            hub.unregisterPublisher(deviceId)
         }
         val cost = System.currentTimeMillis() - startedAt
         log.info("screen stream upload finished: device=$deviceId frames=$frames bytes=${bytes / 1024}KB ${cost}ms")
@@ -149,11 +153,11 @@ class ParentStreamController(
                 while (!sub.closed) {
                     val frame = sub.poll(POLL_TIMEOUT_MS)
                     if (frame != null && frame.isNotEmpty()) {
-                        writeFrame(out, frame)
+                        writeFrame(out, frame, deviceId)
                         idle = 0L
                     } else {
                         // 心跳：既保活，也让家长端能区分"没帧"和"连接断了"
-                        writeFrame(out, ByteArray(0))
+                        writeFrame(out, ByteArray(0), deviceId)
                         // 断流判定要看**设备是否还在推**，而不是本订阅者队列空了多久。
                         // 队列空只是说明这一瞬间没新帧（订阅者刚连上、帧被丢旧、瞬时抖动），
                         // 用它累计计时会在设备明明正常推流时把连接掐掉 ——
@@ -197,26 +201,83 @@ class ParentStreamController(
         val last = hub.lastFrameAt(deviceId)
         val ageMs = if (last == 0L) -1 else System.currentTimeMillis() - last
         return ApiResponse.ok(
-            mapOf(
-                "deviceId" to deviceId,
-                "lastFrameAt" to last,
-                "frameAgeMs" to ageMs,
-                "live" to (ageMs in 0..LIVE_THRESHOLD_MS)
+            StreamStatusDto(
+                deviceId = deviceId,
+                lastFrameAt = last,
+                frameAgeMs = ageMs,
+                live = ageMs in 0..LIVE_THRESHOLD_MS,
+                upstreamBps = hub.upstreamBps(deviceId),
+                downstreamBps = hub.downstreamBps(deviceId),
+                totalBytes = hub.totalUpBytes(deviceId) + hub.totalDownBytes(deviceId)
             )
         )
     }
 
-    private fun writeFrame(out: OutputStream, frame: ByteArray) {
-        val header = ByteBuffer.allocate(4).putInt(frame.size).array()
-        out.write(header)
-        if (frame.isNotEmpty()) out.write(frame)
+    /**
+     * 实时看屏带宽总览（运维/排查用）。
+     *
+     * 返回当前正在推流的设备数、全局上行/下行速率、各设备明细。
+     * 直接回答"服务端实时看屏到底占了多少带宽、并发高时会不会被打满"。
+     */
+    @GetMapping("/metrics")
+    fun metrics(): Any {
+        val devices = hub.publishersSnapshot()
+        var upSum = 0L
+        var downSum = 0L
+        val per = devices.map { d ->
+            val up = hub.upstreamBps(d)
+            val down = hub.downstreamBps(d)
+            upSum += up
+            downSum += down
+            mapOf(
+                "deviceId" to d,
+                "upstreamBps" to up,
+                "downstreamBps" to down,
+                "totalBytes" to (hub.totalUpBytes(d) + hub.totalDownBytes(d))
+            )
+        }
+        return ApiResponse.ok(
+            mapOf(
+                "activeDevices" to devices.size,
+                "totalUpstreamBps" to upSum,
+                "totalDownstreamBps" to downSum,
+                "devices" to per
+            )
+        )
     }
 
-    private companion object {
-        const val POLL_TIMEOUT_MS = 1_000L
+    private fun writeFrame(out: OutputStream, frame: ByteArray, deviceId: String) {
+        val header = ByteBuffer.allocate(4).putInt(frame.size).array()
+        out.write(header)
+        if (frame.isNotEmpty()) {
+            out.write(frame)
+            hub.addDownlink(deviceId, frame.size.toLong())
+        }
+    }
+
+        private companion object {
+        /**
+         * 拉流轮询超时：从 1000ms 降到 200ms。
+         *
+         * 旧值 1s 意味着家长端在队列空时最多阻塞 1s 才取到下一帧，
+         * 端到端延迟被直接抬高近 1s（正是线上"1~2 秒延时"的主要来源之一）。
+         * 200ms 既把这部分延迟压到肉眼无感，又不至于让拉流线程空转过频。
+         */
+        const val POLL_TIMEOUT_MS = 200L
         /** 同一个设备 30 秒没有任何帧就收流：孩子端已经停了，没必要继续吊着连接 */
         const val MAX_IDLE_MS = 30_000L
         const val LIVE_THRESHOLD_MS = 5_000L
         val log = LoggerFactory.getLogger(ParentStreamController::class.java)
     }
 }
+
+/** 实时看屏状态（含带宽遥测）：家长端拉流页据此显示画面是否在线与实时带宽占用 */
+data class StreamStatusDto(
+    val deviceId: String,
+    val lastFrameAt: Long,
+    val frameAgeMs: Long,
+    val live: Boolean,
+    val upstreamBps: Long,
+    val downstreamBps: Long,
+    val totalBytes: Long
+)

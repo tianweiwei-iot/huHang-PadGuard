@@ -133,26 +133,26 @@ class CommandExecutor @Inject constructor(
     /**
      * 远程锁屏。
      *
-     * 两步都要做：① 我们自己的全屏锁定页（任何权限模式都能显示，且能解释原因）；
-     * ② 系统级 `lockNow()`（灭屏并要求解锁凭据）。
+     * 这里**只做一件事**：置锁定态 + 抛出"显示锁定页"的副作用。
+     * 把界面真正顶到前台的职责完全交给 [LockScreenPresenter] 的升级链
+     * （悬浮层 → 直接拉起 → 全屏 intent 由系统代拉 → 持续重试 → 系统级 lockNow 兜底）。
      *
-     * 只做 ② 的话，孩子解锁后立刻恢复自由使用；只做 ① 的话，
-     * 在无障碍未开启的降级模式下可能被"最近任务"切走。两者叠加才有实际约束力。
+     * ## 为什么这里不再立刻调 `lockNow()`
+     * `lockNow()` 会**立刻灭屏**。而我们的锁定页要靠全屏 intent 由系统拉起、
+     * 并显示在 keyguard 之上（[LockScreenActivity] 的 setShowWhenLocked / setTurnScreenOn）。
+     * 先灭屏再拉起，孩子看到的是一次黑屏闪烁；个别 ROM 还会把紧随其后的启动一并吃掉，
+     * 结果是"锁屏指令回执成功、平板只剩一片黑"。
+     *
+     * 系统级锁屏并没有被放弃，只是挪到了正确的时机：
+     * - 升级链重试若干轮仍拉不起锁定页 → 立刻补 `lockNow()`（应用层的最后兜底）；
+     * - 非 Device Owner 机型上锁定页一旦出现，自身也会压一次 `lockNow()`，
+     *   借 keyguard 封住手势导航（否则孩子上滑就能回桌面）。
      */
     private fun lockScreen(command: Command, deviceId: String): CommandAck {
         val reasonText = command.payloadString(KEY_REASON, "家长已远程锁定设备")
         lockController.requestLock(LockReason.REMOTE, detail = reasonText)
         _effects.tryEmit(EngineEffect.ShowLockScreen(reasonText))
-
-        val result = admin.lockNow()
-        return when {
-            result.isOk -> ack(command, deviceId, AckStatus.SUCCESS)
-            // 系统锁屏失败但应用内锁定页已生效 —— 属于降级成功，如实标注
-            else -> ack(
-                command, deviceId, AckStatus.SUCCESS,
-                "PARTIAL", "应用内锁定已生效，系统级锁屏失败：${result.reasonOrEmpty()}"
-            )
-        }
+        return ack(command, deviceId, AckStatus.SUCCESS)
     }
 
     private fun unlock(command: Command, deviceId: String): CommandAck {
@@ -350,7 +350,14 @@ class CommandExecutor @Inject constructor(
      * 这里照常回执 SUCCESS，让家长端拿到确定结果。
      */
     private fun startLiveView(command: Command, deviceId: String): CommandAck {
-        _effects.tryEmit(EngineEffect.StartLiveView(command.msgId))
+        _effects.tryEmit(
+            EngineEffect.StartLiveView(
+                msgId = command.msgId,
+                // 画质档位由服务端随指令下发。老服务端不下发该字段时按标准档位推流，
+                // 与"从未开过高清"的表现一致，不会因缺字段而中断看屏。
+                highDefinition = command.payloadBoolean("highDefinition", false)
+            )
+        )
         return ack(command, deviceId, AckStatus.SUCCESS)
     }
 
@@ -480,10 +487,17 @@ class CommandExecutor @Inject constructor(
         if (pkg == admin.selfPackageName) {
             return ack(command, deviceId, AckStatus.FAILED, "SELF_HIDE_DENIED", "不能隐藏管控应用自身")
         }
-        if (!admin.can(Capability.HIDE_PACKAGES)) {
-            return ack(command, deviceId, AckStatus.UNSUPPORTED, "NO_DEVICE_OWNER", "隐藏应用需要 Device Owner / Profile Owner")
-        }
         val hidden = command.payloadBoolean(KEY_HIDDEN, true)
+        // 先把"关闭/开启使用权限"的意图记到账本：非 DO 设备无法真正隐藏应用，
+        // 但"关闭权限 = 打开需密码"的软拦截闸门不依赖 DO，必须在此落地，
+        // 否则非 DO 设备上"关闭权限"会既不隐藏、也不弹密码（完全失效）。
+        admin.persistHidden(pkg, hidden)
+        if (!admin.can(Capability.HIDE_PACKAGES)) {
+            // 非 DO 设备：真实隐藏不可用，但密码闸门已通过 persistHidden 生效；
+            // 视为成功，避免家长端把 "UNSUPPORTED" 误读成开关没生效。
+            _effects.tryEmit(EngineEffect.SyncAppInventory)
+            return ack(command, deviceId, AckStatus.SUCCESS)
+        }
         val result = admin.setApplicationHidden(pkg, hidden)
         return when (result) {
             is OpResult.Ok -> {
@@ -693,7 +707,7 @@ sealed interface EngineEffect {
     ) : EngineEffect
     data object StopScreenRecord : EngineEffect
     /** 开始实时看屏推流（孩子端持续上传屏幕帧） */
-    data class StartLiveView(val msgId: String) : EngineEffect
+    data class StartLiveView(val msgId: String, val highDefinition: Boolean = false) : EngineEffect
     /** 停止实时看屏推流 */
     data object StopLiveView : EngineEffect
     data class StartAudioRecord(val msgId: String, val taskId: String) : EngineEffect

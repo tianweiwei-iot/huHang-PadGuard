@@ -37,6 +37,14 @@ class AdminController(
             }
         )
 
+    // ---------- 自助修改当前管理员密码（需当前密码，免 RBAC 闸门） ----------
+    @PostMapping("/me/password")
+    fun changeOwnPassword(
+        @RequestAttribute("adminId") adminId: String,
+        @RequestBody req: AdminChangePasswordRequest
+    ): ApiResponse<Map<String, Any>> =
+        ApiResponse.ok(adminService.changeOwnPassword(adminId, req.currentPassword, req.newPassword))
+
     // ---------- 仪表盘 ----------
     @GetMapping("/dashboard")
     fun dashboard(@RequestAttribute("adminId") adminId: String): ApiResponse<DashboardResponse> =
@@ -148,6 +156,21 @@ class AdminController(
         ApiResponse.ok(adminService.revenue(adminId))
 
     // ---------- RBAC ----------
+    /**
+     * 权限元数据（领域 + 动作的中文名、危险等级、系统锁定角色）。
+     *
+     * 前端矩阵据此渲染，不再自带白名单副本 —— 这是"前端有 monitor 列、服务端却不敢认"
+     * 这类静默失效的根治手段：新增权限只需改服务端一处。
+     *
+     * 注：原前端自带的 `monitor` 领域已移除。家长端的实时监控接口服务于「家长查看自己绑定的
+     * 设备」，后台无对应视图；设备在运营侧的管控已由 `devices` 领域的 lock/unlock 覆盖。
+     * 保留一个无端点支撑的领域只会让"配了不生效"重演。
+     * （此处不可书写含连续斜杠与星号的路径：Kotlin 块注释不支持嵌套。）
+     */
+    @GetMapping("/rbac/permissions")
+    fun permissionSchema(@RequestAttribute("adminId") adminId: String): ApiResponse<*> =
+        ApiResponse.ok(adminService.permissionSchema(adminId))
+
     @GetMapping("/rbac/roles")
     fun listRoles(@RequestAttribute("adminId") adminId: String): ApiResponse<*> =
         ApiResponse.ok(adminService.listRoles(adminId))
@@ -157,6 +180,27 @@ class AdminController(
         @RequestAttribute("adminId") adminId: String,
         @RequestBody role: AdminRolePrivilegesDto
     ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.saveRole(adminId, role))
+
+    /** 还原某角色的权限到系统默认值（清除后台调整记录） */
+    @DeleteMapping("/rbac/roles/{roleId}/privileges")
+    fun resetRolePrivileges(
+        @RequestAttribute("adminId") adminId: String,
+        @PathVariable roleId: String
+    ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.resetRolePrivileges(adminId, roleId))
+
+    /** 新建自定义角色（落库 admin_roles，立即可用于指派） */
+    @PostMapping("/rbac/roles")
+    fun createRole(
+        @RequestAttribute("adminId") adminId: String,
+        @RequestBody req: AdminRoleCreateRequest
+    ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.createRole(adminId, req))
+
+    /** 删除自定义角色（内置角色 / 仍有成员的角色会被拒绝） */
+    @DeleteMapping("/rbac/roles/{roleId}")
+    fun deleteRole(
+        @RequestAttribute("adminId") adminId: String,
+        @PathVariable roleId: String
+    ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.deleteRole(adminId, roleId))
 
     @GetMapping("/rbac/admins")
     fun listAdmins(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AdminDto>> =
@@ -198,6 +242,11 @@ class AdminController(
     @GetMapping("/server/metrics")
     fun serverMetrics(@RequestAttribute("adminId") adminId: String): ApiResponse<ServerMetrics> =
         ApiResponse.ok(adminService.serverMetrics(adminId))
+
+    /** 运行日志（进程内环形缓冲，最近的 WARN/ERROR 与本服务 INFO 业务事件） */
+    @GetMapping("/server/logs")
+    fun serverLogs(@RequestAttribute("adminId") adminId: String): ApiResponse<List<ServerMetrics.LogLine>> =
+        ApiResponse.ok(adminService.serverLogs(adminId))
 
     // ---------- 审计 / 告警 ----------
     @GetMapping("/audit")

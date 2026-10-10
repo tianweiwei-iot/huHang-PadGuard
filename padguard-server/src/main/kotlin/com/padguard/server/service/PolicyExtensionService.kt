@@ -296,7 +296,6 @@ class PolicyExtensionService(
             weekendLimitMinutes = s.weekendLimitMinutes ?: 60,
             restAfterMinutes = s.restAfterMinutes ?: 60,
             restDurationMinutes = s.restDurationMinutes ?: 15,
-            timeUpMessage = s.timeUpMessage ?: "",
             syncToDevice = false
         )
     }
@@ -308,7 +307,6 @@ class PolicyExtensionService(
         s.weekendLimitMinutes = req.weekendLimitMinutes.coerceIn(0, 24 * 60)
         s.restAfterMinutes = req.restAfterMinutes.coerceAtLeast(0)
         s.restDurationMinutes = req.restDurationMinutes.coerceAtLeast(0)
-        s.timeUpMessage = req.timeUpMessage.ifBlank { null }
         s.enabledTimeRangesJson = req.enabledTimeRanges
             ?.takeIf { it.isNotEmpty() }
             ?.let { objectMapper.writeValueAsString(it) }
@@ -319,7 +317,8 @@ class PolicyExtensionService(
         if (req.syncToDevice) rebuildPolicy(deviceId)
         auditService.record(userId, deviceId, AuditAction.POLICY_TABLET_USAGE_UPDATE,
             targetType = "device", targetId = deviceId,
-            detail = "weekday=${s.weekdayLimitMinutes} weekend=${s.weekendLimitMinutes} restAfter=${s.restAfterMinutes} sync=${req.syncToDevice}")
+            detail = "weekday=${s.weekdayLimitMinutes} weekend=${s.weekendLimitMinutes} " +
+                "restAfter=${s.restAfterMinutes} sync=${req.syncToDevice}")
         return getTabletUsageSettings(userId, deviceId)
     }
 
@@ -521,7 +520,6 @@ class PolicyExtensionService(
                 "weekendTotalMinutes" to (settings.weekendLimitMinutes ?: 60),
                 "restAfterMinutes" to (settings.restAfterMinutes ?: 60),
                 "restDurationMinutes" to (settings.restDurationMinutes ?: 15),
-                "timeUpMessage" to settings.timeUpMessage,
                 "rules" to limitRules
             ),
             "schedule" to mapOf(
@@ -572,7 +570,38 @@ class PolicyExtensionService(
         )
         // 同样没有子表落点的 eyeCare / kiosk / security 一并继承，避免被重建清空
         latestPackageFields(deviceId, "eyeCare", "kiosk", "security").forEach { (k, v) -> pkg.putIfAbsent(k, v) }
+        //
+        // 但 eyeCare 必须**由「时间管控」页的休息设置覆盖**，不能只靠继承：
+        // 家长在该页设的「休息提醒 / 每次休息时长」原先只写进 appLimit（孩子端旧模型没有这两个字段，
+        // 反序列化时静默丢弃），而 eyeCare 段又没有子表落点、只能从旧包继承 ——
+        // 于是这两项"保存成功、下发成功、设备毫无反应"，是典型的静默断链。
+        // 时间管控页是家长设置休息节奏的**唯一入口**，这里就是 eyeCare 的权威来源。
+        pkg["eyeCare"] = buildEyeCareSegment(settings)
         return objectMapper.writeValueAsString(pkg)
+    }
+
+    /**
+     * 由「时间管控」页的休息设置构建护眼休息（eyeCare）段。
+     *
+     * 语义映射（与孩子端 [com.padguard.core.engine.enforcer.EyeCareEnforcer] 一致）：
+     * - `restAfterMinutes`（使用多久后提醒休息） → `continuousMinutes`（连续使用多久强制休息）
+     * - `restDurationMinutes`（每次休息时长）   → `restMinutes`
+     * - `forceLockDuringRest` 置 true：休息期间直接锁屏，
+     *   否则"提醒了但孩子可以马上划掉继续玩"，家长要的强制休息落空。
+     *
+     * 任一项为 0、或时间管控总开关关闭时显式下发 `enabled=false`：
+     * 这既表达"家长没设休息"，也避免旧包里残留的 enabled=true 被一直继承下去。
+     */
+    private fun buildEyeCareSegment(s: DeviceSetting): Map<String, Any?> {
+        val after = (s.restAfterMinutes ?: 0).coerceAtLeast(0)
+        val rest = (s.restDurationMinutes ?: 0).coerceAtLeast(0)
+        val on = s.timeControlEnabled && after > 0 && rest > 0
+        return mapOf(
+            "enabled" to on,
+            "continuousMinutes" to if (on) after else 0,
+            "restMinutes" to if (on) rest else 0,
+            "forceLockDuringRest" to on
+        )
     }
 
     /** 从当前最新策略包里取未成年人模式配置；没有则返回 null */

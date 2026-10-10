@@ -26,33 +26,39 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ScreenShare
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -79,9 +85,16 @@ private val REFRESH_SECONDS_RANGE = 1f..30f
 /**
  * 实时管控 · 屏幕监控
  *
- * 实时显示被管控平板画面（Mock 占位渲染），支持截屏、录屏、锁屏与相关设置。
+ * 布局：**整屏预览 + 屏幕下方三个主操作**。
+ * 预览区用 weight(1f) 吃掉顶部栏以外的全部高度，远程采集到的画面按原始比例最大化呈现，
+ * 不再是固定 240dp 的小缩略图（小图 + 比例失真会让家长根本看不清孩子在做什么）。
+ *
+ * 录屏回放 / 监控设置 / 截屏历史属于低频操作，移入底部弹层，
+ * 由预览下方的「监控设置与截屏历史」唤出，避免挤压预览区。
+ *
  * deviceId 由导航路由参数经 SavedStateHandle 注入 ViewModel，页面无需自行透传。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScreenMonitorScreen(
     onBack: () -> Unit,
@@ -91,6 +104,11 @@ fun ScreenMonitorScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = androidx.compose.ui.platform.LocalContext.current
     val toast = uiState.toast
+
+    // 画面缩放模式：默认「适应」（等比完整、不变形），可一键切「铺满」（无黑边、按屏幕拉伸）
+    var stretchToFill by remember { mutableStateOf(false) }
+    // 低频面板（设置 / 历史）只在家长主动唤出时占屏
+    var showMoreSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(toast) {
         if (toast != null) {
@@ -111,22 +129,32 @@ fun ScreenMonitorScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            LiveScreenCard(
-                liveImage = uiState.liveImage?.asImageBitmap(),
-                fetchingFrame = uiState.fetchingFrame,
-                liveConnected = uiState.liveConnected,
-                liveHint = uiState.liveHint,
-                updatedAtMillis = uiState.screenshot?.capturedAt,
-                resolutionText = uiState.liveImage?.let { b -> "${b.width}×${b.height}" },
-                isRecording = uiState.isRecording,
-                recordingSeconds = uiState.recordingSeconds,
-                onRefresh = viewModel::refreshScreenshot
-            )
+            // 预览区：占满顶部栏以下、操作栏以上的全部空间
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .background(Color(0xFF0B0B12))
+            ) {
+                LiveScreenStage(
+                    liveImage = uiState.liveImage?.asImageBitmap(),
+                    fetchingFrame = uiState.fetchingFrame,
+                    liveConnected = uiState.liveConnected,
+                    liveHint = uiState.liveHint,
+                    updatedAtMillis = uiState.screenshot?.capturedAt,
+                    resolutionText = uiState.liveImage?.let { b -> "${b.width}×${b.height}" },
+                    isRecording = uiState.isRecording,
+                    recordingSeconds = uiState.recordingSeconds,
+                    stretchToFill = stretchToFill,
+                    onToggleScale = { stretchToFill = !stretchToFill },
+                    onRefresh = viewModel::refreshScreenshot,
+                    uploadKbps = uiState.liveUpKbps,
+                    downloadKbps = uiState.liveDownKbps
+                )
+            }
 
+            // 屏幕下方的三个主操作：截屏 / 录屏 / 锁屏
             ScreenActionRow(
                 isRecording = uiState.isRecording,
                 remoteLocked = uiState.remoteLocked,
@@ -136,48 +164,85 @@ fun ScreenMonitorScreen(
                 onLock = viewModel::toggleRemoteLock
             )
 
-            uiState.lastRecordSummary?.let { summary ->
-                Row(
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
-                ) {
-                    Text(
-                        text = summary,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
-                        modifier = Modifier.weight(1f)
-                    )
-                    // 录屏文件由孩子端异步上传，url 到位后才给出回放入口。
-                    // /v1/files/{id} 无需鉴权，可直接交给系统播放器（浏览器/视频应用）。
-                    if (!uiState.lastRecordUrl.isNullOrBlank()) {
-                        OutlinedButton(onClick = { openUrl(context, uiState.lastRecordUrl!!) }) {
-                            Icon(
-                                Icons.Filled.PlayArrow,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text("回放")
+            // 低频面板入口：只占一行，保证预览区始终是主角
+            TextButton(
+                onClick = { showMoreSheet = true },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    Icons.Default.Tune,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("监控设置与截屏历史")
+            }
+        }
+    }
+
+    if (showMoreSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showMoreSheet = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 24.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                uiState.lastRecordSummary?.let { summary ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
+                    ) {
+                        Text(
+                            text = summary,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+                            modifier = Modifier.weight(1f)
+                        )
+                        // 录屏文件由孩子端异步上传，url 到位后才给出回放入口。
+                        // /v1/files/{id} 无需鉴权，可直接交给系统播放器（浏览器/视频应用）。
+                        if (!uiState.lastRecordUrl.isNullOrBlank()) {
+                            OutlinedButton(onClick = { openUrl(context, uiState.lastRecordUrl!!) }) {
+                                Icon(
+                                    Icons.Filled.PlayArrow,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("回放")
+                            }
                         }
                     }
                 }
+
+                ScreenSettingsCard(
+                    settings = uiState.settings,
+                    dirty = uiState.settingsDirty,
+                    onEdit = viewModel::editSettings,
+                    onSave = viewModel::saveSettings
+                )
+
+                ScreenshotHistoryCard(history = uiState.screenshotHistory)
             }
-
-            ScreenSettingsCard(
-                settings = uiState.settings,
-                dirty = uiState.settingsDirty,
-                onEdit = viewModel::editSettings,
-                onSave = viewModel::saveSettings
-            )
-
-            ScreenshotHistoryCard(history = uiState.screenshotHistory)
         }
     }
 }
 
-/** 实时画面卡：有画面时渲染被控端最新截图，否则显示占位引导。 */
+/**
+ * 全屏画面舞台：有画面时铺满预览区，否则显示占位引导。
+ *
+ * 缩放策略（解决"小画面 + 比例不匹配"）：
+ * - 默认 [ContentScale.Fit]：按平板原始比例等比放大到可用区域的最大尺寸，画面完整、不变形；
+ * - 家长可一键切到 [ContentScale.FillBounds]：真正铺满、不留黑边，代价是按屏幕比例拉伸。
+ * 两种模式都填充满预览区容器，不再出现"中间一小块图"。
+ */
 @Composable
-private fun LiveScreenCard(
+private fun LiveScreenStage(
     liveImage: ImageBitmap?,
     fetchingFrame: Boolean,
     liveConnected: Boolean,
@@ -186,153 +251,188 @@ private fun LiveScreenCard(
     resolutionText: String?,
     isRecording: Boolean,
     recordingSeconds: Int,
-    onRefresh: () -> Unit
+    stretchToFill: Boolean,
+    onToggleScale: () -> Unit,
+    onRefresh: () -> Unit,
+    /** 实时看屏上行带宽（KB/s），来自 ViewModel 每 2s 轮询的服务端遥测 */
+    uploadKbps: Double = 0.0,
+    /** 实时看屏下行带宽（KB/s） */
+    downloadKbps: Double = 0.0
 ) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(240.dp),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A2E))
-    ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            if (liveImage != null) {
-                Image(
-                    bitmap = liveImage,
-                    contentDescription = "平板实时画面",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
-                // 采集中的半透明遮罩，给家长"正在取新画面"的反馈
-                if (fetchingFrame) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.35f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(
-                            color = Color.White,
-                            modifier = Modifier.size(32.dp)
-                        )
-                    }
-                }
-            } else {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(64.dp)
-                            .background(
-                                brush = Brush.linearGradient(listOf(Color(0xFF4A90D9), Color(0xFF07C160))),
-                                shape = RoundedCornerShape(16.dp)
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ScreenShare,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(36.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "平板实时画面",
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    // 卡住时优先显示真实原因，而不是让家长对着"正在连接…"干等
-                    Text(
-                        text = liveHint
-                            ?: if (fetchingFrame) "正在连接实时画面…" else "等待平板上传实时画面",
-                        color = Color.White.copy(alpha = 0.75f),
-                        style = MaterialTheme.typography.bodySmall,
-                        textAlign = if (liveHint != null) TextAlign.Center else TextAlign.Unspecified,
-                        modifier = Modifier.padding(horizontal = 20.dp)
-                    )
-                    if (updatedAtMillis != null && updatedAtMillis > 0) {
-                        Text(
-                            text = "更新于 ${TimeFormat.formatClockFromMillis(updatedAtMillis)}",
-                            color = Color.White.copy(alpha = 0.6f),
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                }
-            }
-
-            // 左上角状态角标：录屏中（含计时） / 实时在线 / 连接中
-            // 呼吸闪烁：绿点与录屏 REC·计时共用同一节奏，未连接时不闪，便于一眼识别"实时进行中"
-            val blinkTransition = rememberInfiniteTransition(label = "statusBlink")
-            val blinkAlpha by blinkTransition.animateFloat(
-                initialValue = 1f,
-                targetValue = 0.3f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(durationMillis = 700, easing = LinearEasing),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "statusBlinkAlpha"
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (liveImage != null) {
+            Image(
+                bitmap = liveImage,
+                contentDescription = "平板实时画面",
+                contentScale = if (stretchToFill) ContentScale.FillBounds else ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
             )
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(12.dp),
-                color = when {
-                    isRecording -> PadGuardColors.WarningRed
-                    liveConnected -> PadGuardColors.OnlineGreen
-                    else -> Color(0x88000000)
-                },
-                shape = RoundedCornerShape(6.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+            // 采集中的半透明遮罩，给家长"正在取新画面"的反馈
+            if (fetchingFrame) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f)),
+                    contentAlignment = Alignment.Center
                 ) {
-                    if (isRecording || liveConnected) {
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(PadGuardColors.OnlineGreen.copy(alpha = blinkAlpha))
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                    }
-                    if (isRecording) {
-                        Text(
-                            text = "REC",
-                            color = PadGuardColors.OnlineGreen.copy(alpha = blinkAlpha),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = TimeFormat.formatDuration(recordingSeconds),
-                            color = PadGuardColors.OnlineGreen.copy(alpha = blinkAlpha),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                    } else {
-                        Text(
-                            text = if (liveConnected) "LIVE" else "连接中",
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
                 }
             }
-
-            IconButton(
-                onClick = onRefresh,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(4.dp)
+            // 画面信息条：分辨率与更新时间，铺在底部不遮挡操作按钮
+            val meta = buildList {
+                resolutionText?.let { add(it) }
+                if (updatedAtMillis != null && updatedAtMillis > 0) {
+                    add("更新于 ${TimeFormat.formatClockFromMillis(updatedAtMillis)}")
+                }
+                // 实时带宽占用：直接回答家长"实时看屏占了多少带宽"。
+                // 上行=孩子端推流，下行=服务端转发给本端；两者都接近 0 时不显示，避免无流时刷出 "0.0 KB/s"。
+                if (uploadKbps > 0.05 || downloadKbps > 0.05) {
+                    add("上行 ${"%.1f".format(uploadKbps)} KB/s · 下行 ${"%.1f".format(downloadKbps)} KB/s")
+                }
+            }.joinToString(" · ")
+            if (meta.isNotBlank()) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(12.dp),
+                    color = Color(0x66000000),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = meta,
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .background(
+                            brush = Brush.linearGradient(listOf(Color(0xFF4A90D9), Color(0xFF07C160))),
+                            shape = RoundedCornerShape(16.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ScreenShare,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(36.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "平板实时画面",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                // 卡住时优先显示真实原因，而不是让家长对着"正在连接…"干等
+                Text(
+                    text = liveHint
+                        ?: if (fetchingFrame) "正在连接实时画面…" else "等待平板上传实时画面",
+                    color = Color.White.copy(alpha = 0.75f),
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = if (liveHint != null) TextAlign.Center else TextAlign.Unspecified,
+                    modifier = Modifier.padding(horizontal = 20.dp)
+                )
+                if (updatedAtMillis != null && updatedAtMillis > 0) {
+                    Text(
+                        text = "更新于 ${TimeFormat.formatClockFromMillis(updatedAtMillis)}",
+                        color = Color.White.copy(alpha = 0.6f),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+        }
+
+        // 左上角状态角标：录屏中（含计时） / 实时在线 / 连接中
+        // 呼吸闪烁：绿点与录屏 REC·计时共用同一节奏，未连接时不闪，便于一眼识别"实时进行中"
+        val blinkTransition = rememberInfiniteTransition(label = "statusBlink")
+        val blinkAlpha by blinkTransition.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.3f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 700, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "statusBlinkAlpha"
+        )
+        Surface(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(12.dp),
+            color = when {
+                isRecording -> PadGuardColors.WarningRed
+                liveConnected -> PadGuardColors.OnlineGreen
+                else -> Color(0x88000000)
+            },
+            shape = RoundedCornerShape(6.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                if (isRecording || liveConnected) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(PadGuardColors.OnlineGreen.copy(alpha = blinkAlpha))
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                if (isRecording) {
+                    Text(
+                        text = "REC",
+                        color = PadGuardColors.OnlineGreen.copy(alpha = blinkAlpha),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = TimeFormat.formatDuration(recordingSeconds),
+                        color = PadGuardColors.OnlineGreen.copy(alpha = blinkAlpha),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                } else {
+                    Text(
+                        text = if (liveConnected) "LIVE" else "连接中",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        // 右上角：重连 + 画面缩放模式切换（适应 / 铺满）
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(4.dp)
+        ) {
+            IconButton(onClick = onToggleScale) {
+                Icon(
+                    Icons.Default.FitScreen,
+                    contentDescription = if (stretchToFill) "切换为原始比例" else "切换为铺满",
+                    tint = if (stretchToFill) Color(0xFF7FD1FF) else Color.White.copy(alpha = 0.9f)
+                )
+            }
+            IconButton(onClick = onRefresh) {
                 Icon(
                     Icons.Default.Refresh,
                     contentDescription = "刷新画面",
@@ -352,7 +452,12 @@ private fun ScreenActionRow(
     onToggleRecord: () -> Unit,
     onLock: () -> Unit
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         Button(
             onClick = onCapture,
             modifier = Modifier.weight(1f),

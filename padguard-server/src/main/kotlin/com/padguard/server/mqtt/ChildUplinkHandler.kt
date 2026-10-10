@@ -235,4 +235,9 @@ class ChildUplinkHandler(
     override fun connectComplete(reconnect: Boolean, serverURI: String?) {
         log.info("MQTT connectComplete reconnect=$reconnect uri=$serverURI")
     }
+
+    private companion object {
+        /** 与孩子端 RiskType.TIME_LIMIT_EXCEEDED 逐字符一致 */
+        const val EVENT_TIME_LIMIT_EXCEEDED = "TIME_LIMIT_EXCEEDED"
+    }
 }

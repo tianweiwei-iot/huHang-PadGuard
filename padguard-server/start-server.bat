@@ -69,6 +69,32 @@ REM (found by listening port, force-stopped via a PowerShell one-liner)
 powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8090 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 timeout /t 1 >nul
 echo.
+REM ---------------------------------------------------------------------
+REM Locate a Java 17 runtime automatically (no hard-coded absolute path).
+REM Priority: 1) %JAVA_HOME%  2) Gradle toolchain cache  3) common install
+REM dirs  4) PATH. Falls back with a clear error instead of a broken
+REM hard-coded path (e.g. E:/dev/jdk-17) that does not exist everywhere.
+REM ---------------------------------------------------------------------
+set "JAVA_EXE="
+if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" set "JAVA_EXE=%JAVA_HOME%\bin\java.exe"
+if not defined JAVA_EXE for /d %%a in ("%USERPROFILE%\.gradle\jdks\*") do (
+    if not defined JAVA_EXE for /d %%b in ("%%a\*") do (
+        if exist "%%b\bin\java.exe" set "JAVA_EXE=%%b\bin\java.exe"
+    )
+)
+if not defined JAVA_EXE for %%p in (
+    "C:\Program Files\Eclipse Adoptium\jdk-17*\bin\java.exe"
+    "C:\Program Files\Java\jdk-17*\bin\java.exe"
+    "C:\Program Files\Amazon Corretto\jdk17*\bin\java.exe"
+) do ( if not defined JAVA_EXE set "JAVA_EXE=%%~p" )
+if not defined JAVA_EXE for /f "delims=" %%i in ('where java 2^>nul') do ( if not defined JAVA_EXE set "JAVA_EXE=%%i" )
+if not defined JAVA_EXE (
+    echo ERROR: no Java 17 runtime found. Set JAVA_HOME or install JDK 17.
+    pause
+    exit /b 1
+)
+echo Using Java runtime: %JAVA_EXE%
+
 REM JVM flags:
 REM  -XX:+ExitOnOutOfMemoryError
 REM      Without this, an OOM leaves the JVM alive but broken: the port still
@@ -86,4 +112,4 @@ REM --spring.mvc.async.request-timeout=600000
 REM      Fixes the live screen being cut every 30 seconds: the live stream is a
 REM      long-lived connection, and Spring MVC's default 30s async timeout kills
 REM      it even while frames are flowing normally.
-E:/dev/jdk-17/bin/java.exe -Xmx512m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -Dlogging.register-bridge-handler=false -jar deploy/app.jar --spring.profiles.active=local --server.port=8090 --spring.datasource.url="jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE" --spring.mvc.async.request-timeout=600000 > server_restart.log 2>&1
+"%JAVA_EXE%" -Xmx512m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -Dlogging.register-bridge-handler=false -jar deploy/app.jar --spring.profiles.active=local --server.port=8090 --spring.datasource.url="jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE" --spring.mvc.async.request-timeout=600000 > server_restart.log 2>&1

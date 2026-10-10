@@ -9,7 +9,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -140,9 +142,9 @@ fun DeviceManageScreen(
         }
     }
 
-    // 接入新设备底部弹层
+    // 接入新设备（全屏覆盖，替代原底部弹层）
     if (uiState.accessSheetVisible) {
-        AccessMethodSheet(
+        AccessMethodScreen(
             uiState = uiState,
             onClose = viewModel::closeAccessSheet,
             onBindByQr = viewModel::bindByQrPayload,
@@ -399,11 +401,11 @@ private fun ManagedDeviceCard(
     }
 }
 
-// ==================== 接入方式弹层 ====================
+// ==================== 接入方式（全屏） ====================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AccessMethodSheet(
+private fun AccessMethodScreen(
     uiState: com.padguard.presentation.viewmodel.DeviceManageUiState,
     onClose: () -> Unit,
     onBindByQr: (String) -> Unit,
@@ -415,31 +417,50 @@ private fun AccessMethodSheet(
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
 
-    ModalBottomSheet(onDismissRequest = onClose) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("接入新设备", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-
-            TabRow(selectedTabIndex = selectedTab) {
-                listOf("扫码", "配对码", "局域网", "Excel").forEachIndexed { index, label ->
-                    Tab(
-                        selected = selectedTab == index,
-                        onClick = { selectedTab = index },
-                        text = { Text(label) }
-                    )
+    // 全屏覆盖：直接铺满整个屏幕，承载接入新设备的全部内容（替代原底部弹层）。
+    // 自带顶栏与关闭按钮；绑定成功后由 ViewModel 直接 closeAccessSheet 退出，无需二次确认。
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            TopAppBar(
+                title = { Text("接入新设备") },
+                navigationIcon = {
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    titleContentColor = Color.White,
+                    navigationIconContentColor = Color.White
+                )
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                TabRow(selectedTabIndex = selectedTab) {
+                    listOf("扫码", "配对码", "局域网", "Excel").forEachIndexed { index, label ->
+                        Tab(
+                            selected = selectedTab == index,
+                            onClick = { selectedTab = index },
+                            text = { Text(label) }
+                        )
+                    }
                 }
-            }
 
-            when (selectedTab) {
-                0 -> QrAccessPanel(uiState, onBindByQr)
-                1 -> PairingCodeAccessPanel(uiState, onBindByPairingCode)
-                2 -> LanAccessPanel(uiState, onScanLan, onBindLan)
-                3 -> ExcelImportPanel(uiState, onFilePicked, onConfirmImport)
+                when (selectedTab) {
+                    0 -> QrAccessPanel(uiState, onBindByQr)
+                    1 -> PairingCodeAccessPanel(uiState, onBindByPairingCode)
+                    2 -> LanAccessPanel(uiState, onScanLan, onBindLan)
+                    3 -> ExcelImportPanel(uiState, onFilePicked, onConfirmImport)
+                }
             }
         }
     }

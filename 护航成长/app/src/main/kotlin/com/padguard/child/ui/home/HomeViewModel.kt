@@ -15,6 +15,7 @@ import com.padguard.core.data.model.policy.ScheduleAction
 import com.padguard.core.engine.PolicyEngine
 import com.padguard.core.common.TimeProvider
 import com.padguard.core.common.Logger
+import com.padguard.child.usagesession.UsageSessionManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,7 +47,8 @@ class HomeViewModel @Inject constructor(
     private val usageRepository: UsageRepository,
     private val logRepository: LogRepository,
     private val policyEngine: PolicyEngine,
-    private val timeProvider: TimeProvider
+    private val timeProvider: TimeProvider,
+    private val usageSessionManager: UsageSessionManager
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(HomeUiState())
@@ -58,8 +60,9 @@ class HomeViewModel @Inject constructor(
                 authRepository.studentName,
                 policyRepository.observePolicy(),
                 usageRepository.observeTodayUsageMinutes(),
-                logRepository.observeRecentBlocks(limit = 5)
-            ) { studentName, rawPolicy, usedMinutes, blocks ->
+                logRepository.observeRecentBlocks(limit = 5),
+                usageSessionManager.state
+            ) { studentName, rawPolicy, usedMinutes, blocks, session ->
                 val nowMillis = timeProvider.now()
                 // 时间轴是「策略时区」的一天：游标、读数、时段判定必须同一时区，
                 // 否则会出现“图例说进行中、游标却停在别处”的自相矛盾
@@ -76,14 +79,26 @@ class HomeViewModel @Inject constructor(
 
                 // 额度必须与锁机判定取同一档位（工作日 / 周末），
                 // 否则首页显示的"剩余时长"和实际锁屏时机对不上。
-                val dailyQuota = policy.appLimit.quotaFor(isWeekend(nowMillis, zone))
-                val remaining = (dailyQuota - usedMinutes).coerceAtLeast(0)
+                // 服务端权威会话激活时，首页直接采用会话派生值，保证三端一致；
+                // 会话未激活（孩子尚未确认计时 / 离线）时回退到本地策略值，避免首页空白。
+                val dailyQuota: Int
+                val remaining: Int
+                val used: Int
+                if (session.active) {
+                    dailyQuota = session.quotaMinutes
+                    remaining = (session.remainingMs / 60_000L).toInt().coerceAtLeast(0)
+                    used = (dailyQuota - remaining).coerceAtLeast(0)
+                } else {
+                    dailyQuota = policy.appLimit.quotaFor(isWeekend(nowMillis, zone))
+                    remaining = (dailyQuota - usedMinutes).coerceAtLeast(0)
+                    used = usedMinutes
+                }
 
                 HomeUiState(
                     studentName = studentName,
                     statusLabel = "在线",
                     isOnline = true,
-                    usedMinutes = usedMinutes,
+                    usedMinutes = used,
                     quotaMinutes = dailyQuota,
                     remainingMinutes = remaining,
                     nowLabel = formatNow(nowMillis, zone),

@@ -32,6 +32,8 @@ import com.padguard.core.transport.http.DeviceProfileRequest
 import com.padguard.core.transport.http.PadGuardApi
 import com.padguard.core.transport.http.PolicyFetchResult
 import com.padguard.core.transport.http.ScreenshotAck
+import com.padguard.core.transport.http.UsageSessionDto
+import com.padguard.core.transport.http.UsageDelayRequest
 import com.padguard.core.transport.mqtt.MqttInbound
 import com.padguard.core.transport.mqtt.MqttTopics
 import com.padguard.core.transport.mqtt.MqttTransport
@@ -204,6 +206,27 @@ class RealRemoteDataSource @Inject constructor(
             }
         }
     }
+
+    override suspend fun getUsageSession(): ApiResult<UsageSessionDto> =
+        when (val r = caller.callEnvelope("usage-session") { api.usageSession() }) {
+            is ApiResult.Success -> ApiResult.Success(r.value.data ?: UsageSessionDto(), r.serverTime)
+            is ApiResult.BizError -> r
+            is ApiResult.Failure -> r
+        }
+
+    override suspend fun startUsageSession(): ApiResult<UsageSessionDto> =
+        when (val r = caller.callEnvelope("usage-session-start") { api.startUsageSession() }) {
+            is ApiResult.Success -> ApiResult.Success(r.value.data ?: UsageSessionDto(), r.serverTime)
+            is ApiResult.BizError -> r
+            is ApiResult.Failure -> r
+        }
+
+    override suspend fun extendUsageSession(minutes: Int): ApiResult<UsageSessionDto> =
+        when (val r = caller.callEnvelope("usage-session-extend") { api.extendUsageSession(UsageDelayRequest(minutes)) }) {
+            is ApiResult.Success -> ApiResult.Success(r.value.data ?: UsageSessionDto(), r.serverTime)
+            is ApiResult.BizError -> r
+            is ApiResult.Failure -> r
+        }
 
     // ==================== 上行 ====================
 

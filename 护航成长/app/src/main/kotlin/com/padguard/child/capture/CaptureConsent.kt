@@ -37,6 +37,15 @@ object CaptureConsent {
     private const val PREFS = "padguard_capture"
     private const val KEY_REQUESTED = "consent_requested"
     private const val KEY_GRANTED = "consent_granted"
+    /**
+     * 本轮解锁/开机内的"拒绝"标记。
+     *
+     * 与历史实现的关键区别：历史版本把孩子点一次"取消"写成 [KEY_GRANTED]=false 的**永久禁用**，
+     * 结果就是"孩子拒绝一次 → 家长端实时看屏从此再也无法恢复"。
+     * 这里只记"本轮拒绝"，由 [clearDenyCooldown] 在下次设备解锁/开机时清除，
+     * 重新给一次补授权的机会——监护看屏是家长装机时确立的持久能力，不能被孩子一次点击永久剥夺。
+     */
+    private const val KEY_DENIED_SESSION = "consent_denied_session"
 
     /** 同一进程内两次拉起授权页的最小间隔，避免授权页把自己反复拉起 */
     private const val PROMPT_THROTTLE_MS = 60_000L
@@ -53,9 +62,11 @@ object CaptureConsent {
      */
     fun shouldRequest(context: Context): Boolean {
         if (ScreenCaptureSession.hasToken()) return false
-        // 只有"明确拒绝过"才不再打扰；其余情况（含历史版本遗留的"只记了已申请"）
-        // 一律允许复权 —— 否则设备一重启采集就永久失效。
-        if (denied(context)) return false
+        // 仅在本轮解锁/开机后"刚被孩子在系统框里拒绝"时短暂不打扰，避免循环弹窗；
+        // 绝不再把一次拒绝写成"永久禁用"——否则孩子点一次拒授权，监护看屏就再也无法恢复。
+        // 下一轮设备解锁（USER_PRESENT）/ 开机（BOOT_COMPLETED）会由 [clearDenyCooldown]
+        // 清空该标记并再次尝试，由孩子在下次解锁时的系统确认来恢复监护能力。
+        if (deniedThisSession(context)) return false
         return !throttled()
     }
 
@@ -71,9 +82,15 @@ object CaptureConsent {
      */
     fun granted(context: Context): Boolean = prefs(context).getBoolean(KEY_GRANTED, true)
 
-    /** 是否被明确拒绝过（仅 [markDenied] 会写入 false，据此区分"拒绝"与"未知"） */
-    fun denied(context: Context): Boolean =
-        prefs(context).contains(KEY_GRANTED) && !prefs(context).getBoolean(KEY_GRANTED, true)
+    /**
+     * 本轮回绝冷却是否生效。
+     *
+     * 这里刻意**不**做"永久封禁"：一次拒绝只是"这次不想授权"，
+     * 由 [clearDenyCooldown] 在下次设备解锁/开机时清除，重新给一次补授权的机会。
+     * 监护看屏是家长在装机时确立的持久能力，不能因为孩子临时点了"取消"就永久失效。
+     */
+    fun deniedThisSession(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_DENIED_SESSION, false)
 
     fun markRequested(context: Context) {
         lastPromptMs = SystemClock.elapsedRealtime()
@@ -87,10 +104,22 @@ object CaptureConsent {
         Logger.i(TAG) { "capture consent granted" }
     }
 
-    /** 用户拒绝：停止主动引导，只在家长真正下发采集指令时再提示一次 */
-    fun markDenied(context: Context) {
-        prefs(context).edit().putBoolean(KEY_GRANTED, false).apply()
-        Logger.w(TAG) { "capture consent denied, stop auto prompting" }
+    /**
+     * 用户（孩子）在系统授权框点了"取消"：仅记一笔"本轮拒绝"，
+     * 不顺手把 [KEY_GRANTED] 写成 false —— 那样会变成永久禁用看屏。
+     * 下一轮解锁/开机 [clearDenyCooldown] 会清掉它，重新尝试补授权。
+     */
+    fun markDeniedTemporarily(context: Context) {
+        prefs(context).edit().putBoolean(KEY_DENIED_SESSION, true).apply()
+        Logger.w(TAG) { "capture consent denied this session, will retry on next unlock" }
+    }
+
+    /** 新一轮设备解锁/开机：清除上一轮的拒绝冷却，重新给一次补授权机会 */
+    fun clearDenyCooldown(context: Context) {
+        if (prefs(context).getBoolean(KEY_DENIED_SESSION, false)) {
+            prefs(context).edit().putBoolean(KEY_DENIED_SESSION, false).apply()
+            Logger.i(TAG) { "capture consent deny cooldown cleared on device interactive" }
+        }
     }
 
     private fun throttled(): Boolean {

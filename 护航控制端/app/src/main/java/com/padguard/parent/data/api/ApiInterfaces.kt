@@ -379,6 +379,16 @@ interface MonitorApi {
         @Path("deviceId") deviceId: String,
         @Body settings: ScreenMonitorSettingsDto
     ): Response<ApiResponse<ScreenMonitorSettingsDto>>
+
+    /**
+     * 查询实时看屏状态（是否在线 + 实时带宽占用）。
+     * 家长端实时画面页每 2s 轮询一次，用于显示上行/下行带宽，
+     * 直接回答"实时看屏占了多少带宽、并发高时会不会被打满"。
+     */
+    @GET("stream/{deviceId}/status")
+    suspend fun getLiveStatus(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<ScreenStatusDto>>
 }
 
 /**

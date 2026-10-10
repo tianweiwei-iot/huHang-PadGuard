@@ -1,5 +1,6 @@
 package com.padguard.child.ui.nav
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Icon
@@ -24,6 +25,7 @@ import com.padguard.child.ui.message.MessageListScreen
 import com.padguard.child.ui.profile.PermissionGuideScreen
 import com.padguard.child.ui.profile.ProfileScreen
 import com.padguard.child.ui.unlock.UnlockRequestScreen
+import com.padguard.child.usagesession.UsageSessionHost
 
 /**
  * App 顶层骨架：3 Tab + 嵌套子页面。
@@ -52,11 +54,12 @@ fun PadGuardApp() {
             }
         }
     ) { padding ->
-        NavHost(
-            navController = navController,
-            startDestination = Route.Home.path,
-            modifier = Modifier.padding(padding)
-        ) {
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            NavHost(
+                navController = navController,
+                startDestination = Route.Home.path,
+                modifier = Modifier.fillMaxSize()
+            ) {
             composable(Route.Home.path) {
                 HomeScreen(
                     onRequestUnlock = { navController.navigate(Route.UnlockRequest.path) }
@@ -97,6 +100,10 @@ fun PadGuardApp() {
                     onBack = { navController.popBackStack() }
                 )
             }
+        }
+        // 全局会话浮层：覆盖在 Tab 之上，承载“计时开始确认”对话框与“剩余10分钟倒计时”横幅。
+        // 放置在 NavHost 之后，确保其在所有路由页面之上渲染，且不受底栏显隐影响。
+        UsageSessionHost()
         }
     }
 }

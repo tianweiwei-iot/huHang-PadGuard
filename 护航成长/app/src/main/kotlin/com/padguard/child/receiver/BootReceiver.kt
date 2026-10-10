@@ -3,6 +3,7 @@ package com.padguard.child.receiver
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.padguard.child.capture.CaptureConsentPrompter
 import com.padguard.child.service.GuardService
 import com.padguard.core.common.Logger
 
@@ -32,8 +33,16 @@ class BootReceiver : BroadcastReceiver() {
         }
 
         Logger.i(TAG) { "received $action, starting guard service" }
-        val reason = if (action == Intent.ACTION_MY_PACKAGE_REPLACED) "packageReplaced" else "boot"
+        val reason = when (action) {
+            Intent.ACTION_MY_PACKAGE_REPLACED -> "packageReplaced"
+            Intent.ACTION_USER_PRESENT -> "userPresent"
+            else -> "boot"
+        }
         GuardService.start(context, reason = reason)
+        // 设备解锁 / 开机后主动补齐屏幕采集凭据（暖令牌）：
+        // 把"必须确认一次 MediaProjection"收拢到此刻，而不是等家长日后点开实时看屏时
+        // 才向孩子弹确认框——那样孩子一旦不点确认，监护就会失败。
+        CaptureConsentPrompter.onDeviceInteractive(context)
     }
 
     companion object {
@@ -43,10 +52,14 @@ class BootReceiver : BroadcastReceiver() {
          * QUICKBOOT_POWERON 是部分国产 ROM（MIUI、EMUI 等）在"快速开机"时
          * 替代 BOOT_COMPLETED 发出的私有广播。不监听它，这些设备开机后服务不会起，
          * 表现为"重启一次就脱管"，而日志里什么都看不到。
+         *
+         * USER_PRESENT 在设备解锁（有锁屏）时发出，是暖令牌最合适的触发点：
+         * 此刻孩子本就在操作平板，应用处于前台，可合法地把系统确认框顶起来。
          */
         private val HANDLED_ACTIONS = setOf(
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED,
+            Intent.ACTION_USER_PRESENT,
             "android.intent.action.QUICKBOOT_POWERON",
             "com.htc.intent.action.QUICKBOOT_POWERON"
         )

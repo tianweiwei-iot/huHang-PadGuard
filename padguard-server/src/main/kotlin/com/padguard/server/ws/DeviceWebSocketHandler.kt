@@ -1,5 +1,7 @@
 package com.padguard.server.ws
 
+import com.padguard.server.domain.UserStatus
+import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.JwtTokenProvider
 import org.slf4j.LoggerFactory
 import org.springframework.web.socket.CloseStatus
@@ -13,12 +15,20 @@ import org.springframework.stereotype.Component
 @Component
 class DeviceWebSocketHandler(
     private val jwt: JwtTokenProvider,
-    private val users: com.padguard.server.repository.UserRepository,
+    private val users: UserRepository,
     private val webSocketPush: WebSocketPushService
 ) : WebSocketHandler {
 
     private val log = LoggerFactory.getLogger(DeviceWebSocketHandler::class.java)
 
+    /**
+     * 握手鉴权：只验签是不够的。
+     *
+     * WebSocket 握手被 [com.padguard.server.config.WebConfig] 从家长端拦截器里排除
+     * （token 走 query 参数而非 Authorization 头），因此这里必须自己把拦截器做的事补齐：
+     * 校验账号存在 + 账号状态可用。否则后台冻结家长后，
+     * 该家长的长连接仍能收到告警、上下线、解锁申请等推送 —— 冻结出现一条绕过口子。
+     */
     override fun afterConnectionEstablished(session: WebSocketSession) {
         val token = session.uri?.query?.let { parseToken(it) }
         // 必须是 access token（refresh/管理员令牌不得建立家长推送通道），
@@ -30,13 +40,15 @@ class DeviceWebSocketHandler(
             } catch (e: Exception) { null }
         } else null
 
-        if (userId == null) {
+        val user = userId?.let { runCatching { users.findById(it).orElse(null) }.getOrNull() }
+        if (user == null || !UserStatus.isUsable(user.status)) {
+            log.info("WS rejected: userId={}, reason=unknown-or-not-usable", userId)
             session.close(CloseStatus.NOT_ACCEPTABLE)
             return
         }
-        session.attributes["userId"] = userId
-        webSocketPush.register(userId, session)
-        log.info("WS connected: user=$userId")
+        session.attributes["userId"] = user.id
+        webSocketPush.register(user.id, session)
+        log.info("WS connected: user=${user.id}")
     }
 
     override fun handleMessage(session: WebSocketSession, message: WebSocketMessage<*>) {

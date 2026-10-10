@@ -49,10 +49,13 @@ class GuardWatchdogService : JobService() {
         private const val JOB_ID = 2026_1007
 
         /**
-         * 看门狗周期。15 分钟是折中：太短徒增系统调度与耗电（且国产 ROM 会因此限流），
-         * 太长则"设备脱管"的窗口过大 —— 家长最长要等一刻钟才恢复控制。
+         * 看门狗周期。5 分钟是权衡结果：太短徒增系统调度与耗电（且国产 ROM 会因此限流），
+         * 太长则"设备脱管"的窗口过大 —— 家长最长要等五分钟才恢复控制。
+         * 注：看门狗只在「应用进程已死、但系统仍调度 JobScheduler」时起作用（被设置强制停止
+         * 进入停止态时它同样失效）。更常见的「后台清理 / 灭屏被杀」已由 [GuardService] 的
+         * 屏幕亮起/网络恢复动态广播在秒级内自愈，本周期仅作最后兜底。
          */
-        private val INTERVAL_MS = java.util.concurrent.TimeUnit.MINUTES.toMillis(15)
+        private val INTERVAL_MS = java.util.concurrent.TimeUnit.MINUTES.toMillis(5)
 
         /** 幂等注册：已排过同 ID 的作业就不再重复排（系统会自动续期）。 */
         fun schedule(context: Context) {

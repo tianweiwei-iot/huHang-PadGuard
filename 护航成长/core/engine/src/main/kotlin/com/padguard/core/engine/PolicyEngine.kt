@@ -214,8 +214,15 @@ class PolicyEngine @Inject constructor(
      *
      * @param foregroundPackage 当前前台应用；null 表示取不到（无使用情况访问权限时会这样）
      * @param screenOn 屏幕是否点亮；息屏不计时
+     * @param dailyLimitExpired 日总时长是否已由服务端权威会话判定为耗尽
+     *        （true 时统一经 [LockReason.DAILY_LIMIT] 锁屏；本地采样累计不再参与日总时长判定，
+     *         以换取三端（家长端 / 孩子端 / 服务端）时间严格一致）
      */
-    suspend fun tick(foregroundPackage: String?, screenOn: Boolean): EngineTick {
+    suspend fun tick(
+        foregroundPackage: String?,
+        screenOn: Boolean,
+        dailyLimitExpired: Boolean = false
+    ): EngineTick {
         // 未成年人模式的分龄基线在这里派生一次，让下面的限额/护眼判定
         // 与 applyAll 走的是同一份口径。若各自读原始策略，会出现
         // "策略已下发但限额还按旧额度算"的错位。
@@ -253,13 +260,17 @@ class PolicyEngine @Inject constructor(
             val tempReleased = limit.packageName.isNotBlank() &&
                 lockController.isTempUnlockActive(limit.packageName)
             if (limit.reason == LimitReason.DAILY_TOTAL) {
-                if (!tempReleased) autoReasons[LockReason.DAILY_LIMIT] = LockDetail(limit.message())
+                // 日总时长锁定已改由服务端权威会话驱动（见 [dailyLimitExpired] 入参），
+                // 本地采样累计不再参与 DAILY_TOTAL 判定，以换取三端时间严格一致。
+                // 此处仅在极端兜底路径下收到该判定时记一条日志，不做任何锁定动作
+                // （避免与下方会话驱动的 DAILY_LIMIT 重复/冲突）。
+                Logger.v(TAG) { "local DAILY_TOTAL verdict ignored: server session is authoritative" }
             } else {
                 blockedPackage = if (tempReleased) null else limit.packageName
             }
             if (tempReleased) {
                 Logger.i(TAG) { "limit(${limit.reason}) skipped: ${limit.packageName} temp-unlocked by parent" }
-            } else {
+            } else if (limit.reason != LimitReason.DAILY_TOTAL) {
                 raiseOnce(
                     key = "limit:${limit.reason}:${limit.packageName}",
                     type = RiskType.TIME_LIMIT_EXCEEDED,
@@ -311,6 +322,24 @@ class PolicyEngine @Inject constructor(
             autoReasons[LockReason.EYE_CARE] = LockDetail(
                 text = "护眼休息中，剩余约 $minutes 分钟",
                 untilMillis = eyeCare.untilMillis
+            )
+        }
+
+        // ---------- 3.5 日总时长（服务端权威会话驱动） ----------
+        // 旧实现依据本地采样累计判定 DAILY_TOTAL，三端各自按本地时钟算，必然对不上。
+        // 现改为服务端锁定计时起点与额度，三端用同一 serverNow - startEpoch 派生剩余，
+        // 到期未延时即经此处挂 DAILY_LIMIT，并经 syncAutoReasons 统一管理生命周期
+        // （临时解锁期内会被 LockController 自动抑制，避免家长放行被立刻锁回）。
+        // dailyLimitExpired 由 GuardService 从会话管理器算出后传入，本地不依赖采样。
+        if (dailyLimitExpired) {
+            autoReasons[LockReason.DAILY_LIMIT] = LockDetail(
+                text = "今日使用时间已用完"
+            )
+            raiseOnce(
+                key = "limit:DAILY_TOTAL:session",
+                type = RiskType.TIME_LIMIT_EXCEEDED,
+                level = RiskLevel.NORMAL,
+                detail = mapOf("source" to "server-session")
             )
         }
 

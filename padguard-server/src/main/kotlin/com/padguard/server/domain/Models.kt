@@ -28,6 +28,31 @@ class User(
     @Column(name = "created_at") var createdAt: Long = 0
 )
 
+/**
+ * 家长账号状态的**唯一事实源**。
+ *
+ * 为什么要收敛成一处：冻结账号的判定分散在登录、令牌刷新、接口鉴权、订阅闸门四处，
+ * 只要有一处漏判，冻结就是"后台显示已冻结、实际完全不生效"的摆设 ——
+ * 家长端照常登录、照常使用全部权益。这正是本次修复的问题本身。
+ * 四处判定现在统一调用 [isUsable]，口径不可能漂移。
+ *
+ * 空值按 active 兜底：`status` 列是后加的，存量行被 ddl-auto=update 补成 NULL，
+ * 直接判等会把所有老账号都当成非活跃而集体锁死。
+ */
+object UserStatus {
+    const val ACTIVE = "active"
+    const val SUSPENDED = "suspended"
+    const val PENDING = "pending"
+
+    /** 归一化：空值 → active，其余转小写（历史数据里存在 "Active" 这类写法） */
+    fun of(raw: String?): String = (raw?.takeIf { it.isNotBlank() } ?: ACTIVE).lowercase()
+
+    /** 是否允许登录并使用权益 */
+    fun isUsable(raw: String?): Boolean = of(raw) == ACTIVE
+
+    fun isSuspended(raw: String?): Boolean = of(raw) == SUSPENDED
+}
+
 @Entity
 @Table(name = "devices")
 class Device(

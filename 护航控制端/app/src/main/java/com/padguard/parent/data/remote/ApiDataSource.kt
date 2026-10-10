@@ -71,6 +71,7 @@ import com.padguard.data.model.PublishedMessageDto
 import com.padguard.data.model.RenameDeviceRequest
 import com.padguard.data.model.UpdateBlacklistRequest
 import com.padguard.data.model.ScreenMonitorSettingsDto
+import com.padguard.data.model.ScreenStatusDto
 import com.padguard.data.model.SendSmsRequest
 import com.padguard.data.model.ScreenshotDto
 import com.padguard.data.model.StartRecordRequest
@@ -82,6 +83,7 @@ import com.padguard.data.model.ViolationStatsDto
 import com.padguard.data.model.WebActivityStatsDto
 import com.padguard.data.model.WebPolicyDto
 import com.padguard.data.model.TabletUsageSettingsDto
+import com.padguard.data.model.UsageSessionDto
 import com.padguard.data.model.TimeRangeDto
 import com.padguard.data.model.MinorModeDto
 import com.padguard.data.model.MinorModeRequestDto
@@ -115,6 +117,7 @@ import com.padguard.domain.model.RecordResolution
 import com.padguard.domain.model.ReportPeriod
 import com.padguard.domain.model.SceneType
 import com.padguard.domain.model.ScreenMonitorSettings
+import com.padguard.domain.model.ScreenLiveStatus
 import com.padguard.domain.model.ScreenshotData
 import com.padguard.domain.model.StatisticsReport
 import com.padguard.domain.model.TimeRestriction
@@ -122,6 +125,7 @@ import com.padguard.domain.model.UsageStats
 import com.padguard.domain.model.User
 import com.padguard.domain.model.UserRole
 import com.padguard.domain.model.TabletUsageSettings
+import com.padguard.domain.model.UsageSession
 import com.padguard.domain.model.TimeRange
 import com.padguard.domain.repository.ViolationStats
 import com.padguard.domain.repository.WebActivityStats
@@ -214,11 +218,32 @@ class ApiDataSource @Inject constructor(
                 }
             } else {
                 val err = runCatching { resp.errorBody()?.string() }.getOrNull()
-                Result.failure(Exception("HTTP ${resp.code()}: ${err ?: resp.message()}"))
+                Result.failure(
+                    Exception("HTTP ${resp.code()}: ${err?.let(::readableError) ?: resp.message()}")
+                )
             }
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * 把服务端错误响应体还原成人能读的一句话。
+     *
+     * 服务端对鉴权类失败会带 HTTP 401/403 + `{code,message}` 响应体（例如冻结账号的 1004）。
+     * 直接把整个 JSON 抛给上层，家长看到的是一长串花括号，等于没有提示；
+     * 这里取出 message（带错误码），让"账号已被冻结，无法登录"这类可执行的提示真正显示出来。
+     */
+    private fun readableError(raw: String): String = try {
+        val o = org.json.JSONObject(raw)
+        val message = o.optString("message").orEmpty()
+        if (message.isBlank()) raw
+        else {
+            val code = o.optInt("code", -1)
+            if (code > 0) "[$code] $message" else message
+        }
+    } catch (e: Exception) {
+        raw
     }
 
     /** 只关心"指令有没有被服务端接受"的写操作（返回体无需解析） */
@@ -660,6 +685,9 @@ class ApiDataSource @Inject constructor(
     override suspend fun getScreenMonitorSettings(deviceId: String): Result<ScreenMonitorSettings> =
         exec { monitorApi.getScreenMonitorSettings(deviceId) }.map { it.data?.toDomain() ?: throw Exception("读取监控设置失败") }
 
+    override suspend fun getLiveStatus(deviceId: String): Result<ScreenLiveStatus> =
+        exec { monitorApi.getLiveStatus(deviceId) }.map { it.data?.toDomain() ?: throw Exception("读取实时带宽失败") }
+
     override suspend fun updateScreenMonitorSettings(settings: ScreenMonitorSettings): Result<ScreenMonitorSettings> =
         exec { monitorApi.updateScreenMonitorSettings(settings.deviceId, settings.toDto()) }
             .map { it.data?.toDomain() ?: throw Exception("更新监控设置失败") }
@@ -958,6 +986,14 @@ class ApiDataSource @Inject constructor(
         exec { policyApi.updateTabletUsageSettings(settings.deviceId, settings.toDto()) }
             .map { resp -> resp.data?.toDomain() ?: throw Exception("保存时间管控设置失败") }
 
+    /**
+     * 平板使用计时会话：拉取服务端锚定的剩余时长（三端一致来源）。
+     * 返回 null data 视为读取失败，让上层给出可执行的提示。
+     */
+    override suspend fun getUsageSession(deviceId: String): Result<UsageSession> =
+        exec { policyApi.getUsageSession(deviceId) }
+            .map { resp -> resp.data?.toDomain() ?: throw Exception("读取使用会话失败") }
+
     override suspend fun getMinorMode(deviceId: String): Result<MinorMode> =
         exec { policyApi.getMinorMode(deviceId) }
             .map { resp -> resp.data?.toDomain(deviceId) ?: throw Exception("读取未成年人模式失败") }
@@ -1198,6 +1234,11 @@ private fun ScreenMonitorSettingsDto.toDomain(): ScreenMonitorSettings = ScreenM
     recordWithAudio = recordWithAudio, allowRemoteLock = allowRemoteLock
 )
 
+private fun ScreenStatusDto.toDomain(): ScreenLiveStatus = ScreenLiveStatus(
+    deviceId = deviceId, live = live, frameAgeMs = frameAgeMs,
+    upstreamBps = upstreamBps, downstreamBps = downstreamBps, totalBytes = totalBytes
+)
+
 private fun ScreenMonitorSettings.toDto(): ScreenMonitorSettingsDto = ScreenMonitorSettingsDto(
     deviceId = deviceId, autoRefreshSeconds = autoRefreshSeconds, highDefinition = highDefinition,
     recordResolution = recordResolution.name, recordWithAudio = recordWithAudio, allowRemoteLock = allowRemoteLock
@@ -1236,7 +1277,6 @@ private fun TabletUsageSettingsDto.toDomain(): TabletUsageSettings = TabletUsage
     weekendLimitMinutes = weekendLimitMinutes,
     restAfterMinutes = restAfterMinutes,
     restDurationMinutes = restDurationMinutes,
-    timeUpMessage = timeUpMessage,
     // 回读时不再带 syncToDevice（那是下发瞬间的动作标志），保持页面状态干净
     syncToDevice = false
 )
@@ -1302,8 +1342,23 @@ private fun TabletUsageSettings.toDto(): TabletUsageSettingsDto = TabletUsageSet
     weekendLimitMinutes = weekendLimitMinutes,
     restAfterMinutes = restAfterMinutes,
     restDurationMinutes = restDurationMinutes,
-    timeUpMessage = timeUpMessage,
     syncToDevice = true
+)
+
+private fun UsageSessionDto.toDomain(): UsageSession = UsageSession(
+    deviceId = deviceId,
+    serverNow = serverNow,
+    active = active,
+    dayKey = dayKey,
+    startEpoch = startEpoch,
+    quotaMinutes = quotaMinutes,
+    extendedMinutes = extendedMinutes,
+    remainingMinutes = remainingMinutes,
+    remainingMs = remainingMs,
+    countdownThresholdMs = countdownThresholdMs,
+    delayOptions = delayOptions,
+    maxDailyExtendMinutes = maxDailyExtendMinutes,
+    lastDelayEpoch = lastDelayEpoch
 )
 
 private fun InstalledAppDto.toDomain(): InstalledApp = InstalledApp(

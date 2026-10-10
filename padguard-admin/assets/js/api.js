@@ -67,8 +67,11 @@
     adminUpdate: "PUT /v1/admin/rbac/admins/{id}",
     adminDelete: "DELETE /v1/admin/rbac/admins/{id}",
     adminResetPwd: "POST /v1/admin/rbac/admins/{id}/reset-password",
+    createRole: "POST /v1/admin/rbac/roles",
+    deleteRole: "DELETE /v1/admin/rbac/roles/{id}",
     serverHealth: "GET /health",
     serverMetrics: "GET /v1/admin/server/metrics",
+    serverLogs: "GET /v1/admin/server/logs",
     serverProfile: "GET /v1/admin/server-profile",
     saveServerProfile: "PUT /v1/admin/server-profile",
     audit: "GET /v1/admin/audit",
@@ -255,8 +258,37 @@
     async revenue() { return liveOrMock(() => http("GET", "/v1/admin/billing/revenue"), () => clone(M.revenue)); },
 
     // RBAC
+    // 权限元数据（领域/动作中文名 + 危险等级 + 系统锁定角色）由服务端下发，
+    // 前端不再自带白名单副本 —— 避免"前端有列、服务端不认"导致的勾选存不进去。
+    async permissionSchema() {
+      const fallback = {
+        areas: [
+          ["parents", "家长账号", [["read", "查看"], ["write", "编辑"], ["create", "新建"], ["suspend", "冻结/启用", 1], ["reset_pwd", "重置密码", 1], ["delete", "删除", 1]]],
+        ],
+        lockedRoles: ["super"],
+      };
+      return liveOrMock(() => http("GET", "/v1/admin/rbac/permissions"), () => ({
+        areas: fallback.areas.map(([key, name, acts]) => ({
+          key, name, actions: acts.map(([k, n, d]) => ({ key: k, name: n, danger: !!d })),
+        })),
+        lockedRoles: ["super"],
+      }));
+    },
     async listRoles() { return liveOrMock(() => http("GET", "/v1/admin/rbac/roles"), () => clone(M.ROLES)); },
+    // 新建/删除自定义角色：此前只在前端内存里 push，刷新即丢且服务端不存在该角色。
+    // 现在落库（V24 admin_roles），立即可用于指派。
+    async createRole(role) {
+      return liveOrMock(() => http("POST", "/v1/admin/rbac/roles", role), () => { M.ROLES.push(clone(role)); return { ok: true, role: clone(role) }; });
+    },
+    async deleteRole(id) {
+      return liveOrMock(() => http("DELETE", "/v1/admin/rbac/roles/" + encodeURIComponent(id)), () => { const i = M.ROLES.findIndex(r => r.id === id); if (i >= 0) M.ROLES.splice(i, 1); return { ok: true }; });
+    },
     async saveRole(role) { return liveOrMock(() => http("PUT", "/v1/admin/rbac/roles", role), () => { const i = M.ROLES.findIndex(r => r.id === role.id); if (i >= 0) M.ROLES[i] = Object.assign(M.ROLES[i], role); return { ok: true }; }); },
+    // 还原为系统默认权限：内置角色一旦在矩阵里被改乱（典型是误取消「查看」导致菜单全打不开），
+    // 没有这个功能就只能改代码或直接改数据库。
+    async resetRolePrivileges(id) {
+      return liveOrMock(() => http("DELETE", "/v1/admin/rbac/roles/" + encodeURIComponent(id) + "/privileges"), () => ({ ok: true }));
+    },
     async listAdmins() { return liveOrMock(() => http("GET", "/v1/admin/rbac/admins"), () => clone(M.admins)); },
     async createAdmin(body) {
       return liveOrMock(() => http("POST", "/v1/admin/rbac/admins", body), () => {
@@ -281,6 +313,10 @@
     async resetAdminPwd(adminId) {
       return liveOrMock(() => http("POST", "/v1/admin/rbac/admins/" + adminId + "/reset-password"), () => ({ ok: true, newPwd: "ADM" + Math.floor(100000 + rnd6()) }));
     },
+    /** 自助修改当前登录管理员密码（需当前密码；新密码至少 8 位，服务端强制） */
+    async changeOwnPassword(currentPassword, newPassword) {
+      return http("POST", "/v1/admin/me/password", { currentPassword, newPassword });
+    },
 
     // 服务端
     async serverHealth() {
@@ -289,6 +325,8 @@
       catch (e) { PG.toast && PG.toast("warn", "健康检查失败", "已用空指标：" + e.message); return clone(M.server); }
     },
     async serverMetrics() { return liveOrMock(() => http("GET", "/v1/admin/server/metrics"), () => clone(M.server)); },
+    // 运行日志：进程内环形缓冲的真实日志（WARN/ERROR + 本服务 INFO 业务事件），不再返回空列表
+    async serverLogs() { return liveOrMock(() => http("GET", "/v1/admin/server/logs"), () => []); },
 
     // 服务器基本信息（后台可配置：对外 IP / 端口 / 协议等）
     async serverProfile() {

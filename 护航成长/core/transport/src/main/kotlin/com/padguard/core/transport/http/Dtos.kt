@@ -35,6 +35,37 @@ data class TimeResponse(
     @SerialName("serverTime") val serverTime: Long
 )
 
+// ==================== 平板使用计时会话（三端时间一致） ====================
+
+/**
+ * 使用计时会话响应（与服务端 UsageSessionDto 字段一一对应）。
+ *
+ * 三端一律用 [serverNow] - [startEpoch] 计算已用时长，剩余 = (quotaMinutes + extendedMinutes) 分钟 - 已用，
+ * 因此家长端 / 孩子端 / 服务端显示同一份数字，不再各自按本地时钟计算导致对不上。
+ */
+@Serializable
+data class UsageSessionDto(
+    @SerialName("deviceId") val deviceId: String = "",
+    @SerialName("serverNow") val serverNow: Long = 0L,
+    @SerialName("active") val active: Boolean = false,
+    @SerialName("dayKey") val dayKey: String = "",
+    @SerialName("startEpoch") val startEpoch: Long? = null,
+    @SerialName("quotaMinutes") val quotaMinutes: Int = 0,
+    @SerialName("extendedMinutes") val extendedMinutes: Int = 0,
+    @SerialName("remainingMinutes") val remainingMinutes: Int = 0,
+    @SerialName("remainingMs") val remainingMs: Long = 0L,
+    @SerialName("countdownThresholdMs") val countdownThresholdMs: Long = 10 * 60_000L,
+    @SerialName("delayOptions") val delayOptions: List<Int> = listOf(15, 30, 45, 60),
+    @SerialName("maxDailyExtendMinutes") val maxDailyExtendMinutes: Int = 120,
+    @SerialName("lastDelayEpoch") val lastDelayEpoch: Long? = null
+)
+
+/** 延时申请请求：minutes 必须落在 delayOptions 内 */
+@Serializable
+data class UsageDelayRequest(
+    @SerialName("minutes") val minutes: Int = 0
+)
+
 // ==================== 策略 ====================
 
 /**

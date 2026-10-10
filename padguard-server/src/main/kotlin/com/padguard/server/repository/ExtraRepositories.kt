@@ -131,6 +131,11 @@ interface TimeRestrictionRepository : JpaRepository<TimeRestriction, String> {
 }
 
 @Repository
+interface UsageSessionRepository : JpaRepository<UsageSession, String> {
+    fun findByDeviceId(deviceId: String): UsageSession?
+}
+
+@Repository
 interface DeviceSettingRepository : JpaRepository<DeviceSetting, String> {
     /**
      * 设备设置以 deviceId 为主键（含密码哈希、护眼/应用管控开关等）。
