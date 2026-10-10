@@ -4,10 +4,17 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
+import com.padguard.child.di.ApplicationScope
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.core.common.Logger
+import com.padguard.core.data.model.RiskLevel
+import com.padguard.core.data.model.RiskType
+import com.padguard.core.data.repository.AuthRepository
+import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
@@ -50,12 +57,26 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     @Inject
     lateinit var lockController: LockController
 
+    /** S11：密码未设置提醒走风险告警通道（append 只进行为流水，家长端看不见） */
+    @Inject
+    lateinit var logRepository: LogRepository
+
+    @Inject
+    lateinit var authRepository: AuthRepository
+
+    @Inject
+    @ApplicationScope
+    lateinit var scope: CoroutineScope
+
     /** 去抖：同一受保护窗口 1.5s 内只拦截一次，避免 performGlobalAction 导致事件风暴。 */
     private var lastTriggerAt = 0L
     private var lastTriggerPkg = ""
 
     /** 锁屏抢占复位去抖：避免每次窗口切换都重拉锁屏造成事件风暴 / 反复重启锁屏页 */
     private var lastLockRelaunchAt = 0L
+
+    /** S11：密码未设置告警的 24h 一次闸 */
+    private var lastPasswordNotSetReportedAt = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -92,16 +113,34 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             return
         }
 
-        // 密码未启用 → 闸门关闭，不做任何事
-        if (!manager.isEnabledNow()) return
+        // 当前前台不在管控范围 → 放行。
+        // S11：判定提前到密码闸状态检查之前 —— 拦不拦是「这个界面是否要保护」的问题，
+        // 怎么拦是「密码闸处于什么状态」的问题，两者解耦后，密码未设置时设置页仍有兜底拦截。
+        val reason = decide(pkg) ?: return
+
+        // S11 拆层：密码未设置时的降级拦截。
+        // 设置页必须拦：它正是关闭本无障碍服务的入口，放行等于允许"先关无障碍、
+        // 再解除一切管控"。但密码未设时拉不出验证框（没有可比对的凭据），
+        // 所以只顶回 + 提醒家长尽快补设密码（24h 至多一次）。
+        // 安装器/受管控应用的拦截依赖密码闸验证身份，未设密码时维持放行。
+        if (!manager.isEnabledNow()) {
+            if (reason != REASON_SETTINGS) return
+            val now = System.currentTimeMillis()
+            // 与主路径共用按包名去抖：顶回引发的事件风暴同样需要抑制
+            if (pkg == lastTriggerPkg && now - lastTriggerAt < DEBOUNCE_MS) return
+            lastTriggerAt = now
+            lastTriggerPkg = pkg
+            Logger.i(TAG) { "guarded foreground: $pkg reason=$reason, guard password not set, bouncing back" }
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            reportPasswordNotSet()
+            return
+        }
+
         // 处于解锁窗口内 → 放行
         if (manager.isUnlockedNow()) return
         // 是否在「试错锁定」冷却期：锁定期间仍要顶回（否则等于开闸），
         // 但不再拉起密码框——孩子此刻无论如何验不过，弹框只会被狂点。
         val lockedOut = manager.isLockedOutNow()
-
-        // 当前前台不在管控范围 → 放行
-        val reason = decide(pkg) ?: return
 
         val now = System.currentTimeMillis()
         // 去抖按「包名」而非全局：顶回后用户可能立刻点另一个应用，那次要拦
@@ -131,6 +170,33 @@ class OperationGuardAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         Logger.w(TAG) { "operation guard accessibility service interrupted" }
+    }
+
+    /**
+     * S11：密码未设置提醒，24h 至多一次。
+     *
+     * 这是给**家长**看的告警：无障碍拦截在位、守护基建齐备，密码闸却没启用，
+     * 说明初始配置没做完（或被清除后未补设）。走 raise 而非 append 的原因与
+     * S15（PadGuardDeviceAdminReceiver）相同：告警通道才会出现在家长端，
+     * 行为流水永远无人看。24h 闸与 TamperDetector 的闩锁语义同理 ——
+     * 孩子每次进设置页都报，只会把这条提醒刷成噪音。
+     */
+    private fun reportPasswordNotSet() {
+        val now = System.currentTimeMillis()
+        if (now - lastPasswordNotSetReportedAt < PASSWORD_NOT_SET_INTERVAL_MS) return
+        lastPasswordNotSetReportedAt = now
+        scope.launch {
+            runCatching {
+                logRepository.raise(
+                    type = RiskType.GUARD_PASSWORD_NOT_SET,
+                    level = RiskLevel.NORMAL,
+                    detail = mapOf(
+                        "note" to "操作密码尚未设置，设置页仅能顶回无法验证家长身份，请尽快在控制端补设密码"
+                    ),
+                    deviceId = authRepository.getDeviceId()
+                )
+            }.onFailure { Logger.w(TAG, it) { "failed to raise password-not-set alert" } }
+        }
     }
 
     /**
@@ -167,6 +233,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         private const val REASON_SETTINGS = "settings"
         private const val REASON_INSTALLER = "installer"
         private const val REASON_CONTROLLED_APP = "controlled-app"
+
+        /** S11：密码未设置告警的最小间隔：24h */
+        private const val PASSWORD_NOT_SET_INTERVAL_MS = 24 * 60 * 60 * 1000L
 
         /** 受保护的系统设置包名（AOSP + 主流国产 ROM）。 */
         private val GUARDED_SETTINGS_PACKAGES = setOf(

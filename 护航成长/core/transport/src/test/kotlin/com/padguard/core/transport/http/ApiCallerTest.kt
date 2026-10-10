@@ -56,7 +56,10 @@ class ApiCallerTest {
     fun `successful response syncs server time via TimeProvider`() = runBlocking {
         val tp = TimeProvider()
         val caller = ApiCaller(tp)
-        val serverTime = 1_700_000_000_000L
+        // serverTime 用「当前墙钟 + 60s」构造而非固定历史时间戳：
+        // TimeProvider 有 24h 脏样本拒收（防时钟被改到离谱值，正确行为），
+        // 固定 2023 年的值随日历前进终将跨过阈值 —— 测试在某一天后必然失败。
+        val serverTime = System.currentTimeMillis() + 60_000L
         caller.call("t") { Response.success(ApiEnvelope(code = ApiCode.OK, data = "x", serverTime = serverTime)) }
         assertTrue("now() 应约等于 serverTime", kotlin.math.abs(tp.now() - serverTime) < 5000)
     }

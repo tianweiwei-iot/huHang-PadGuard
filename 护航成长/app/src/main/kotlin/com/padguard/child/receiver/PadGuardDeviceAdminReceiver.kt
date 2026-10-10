@@ -7,7 +7,6 @@ import android.content.Intent
 import com.padguard.child.di.ApplicationScope
 import com.padguard.child.service.GuardService
 import com.padguard.core.common.Logger
-import com.padguard.core.data.model.LogType
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
 import com.padguard.core.data.repository.AuthRepository
@@ -64,13 +63,23 @@ class PadGuardDeviceAdminReceiver : DeviceAdminReceiver() {
      *
      * 返回的文案不是装饰：这是唯一一次能让家长/学生看到后果的机会。
      * 写清"会做什么"而不是空喊警告，实际劝退效果更好。
+     *
+     * S15：停用尝试必须走 raise（高危告警通道），不能只 append 普通日志。
+     * append 只进行为流水、不进告警流，家长端永远看不到"孩子在尝试脱管"——
+     * 而停用尝试恰恰是最值得家长立即介入的信号。复用 UNINSTALL_ATTEMPT 类型
+     * （语义同为"尝试解除管控"，不再扩枚举），detail 里用 action 区分具体动作。
      */
     override fun onDisableRequested(context: Context, intent: Intent): CharSequence {
         Logger.w(TAG) { "device admin disable requested" }
         recordAsync {
-            logRepository.append(
-                type = LogType.SETTING_CHANGE_ATTEMPT,
-                payload = mapOf("action" to "disableDeviceAdminRequested")
+            logRepository.raise(
+                type = RiskType.UNINSTALL_ATTEMPT,
+                level = RiskLevel.HIGH,
+                detail = mapOf(
+                    "action" to "disableDeviceAdminRequested",
+                    "note" to "正在尝试停用设备管理器（管控能力将大幅降级）"
+                ),
+                deviceId = authRepository.getDeviceId()
             )
         }
         return context.getString(com.padguard.child.R.string.admin_disable_warning)

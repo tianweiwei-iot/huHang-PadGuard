@@ -20,6 +20,19 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
+ * take/mark 的精确配对载体（C2'）。
+ *
+ * [entityIds] 是 Room 自增主键 —— take 时从实体上直接带出，mark 时按它精确回写。
+ * 此前 mark* 是"重查一次 pending 前 N 条"当刚上报批次：take 与 mark 之间若有并发
+ * 插入/并发 take（uploadPending 有 5 条触发路径），重查窗口会包含**不属于本批**的新行，
+ * 把从未上传的日志错标成已上传，且这类丢失静默无声 —— 告警"永不丢弃"的承诺就此破产。
+ */
+data class PendingBatch<T>(val items: List<T>, val entityIds: List<Long>) {
+    val isEmpty: Boolean get() = items.isEmpty()
+    val size: Int get() = items.size
+}
+
+/**
  * 行为日志与告警事件仓库（对应说明书「全量行为日志采集」）。
  *
  * 两级队列：
@@ -76,24 +89,27 @@ class LogRepository @Inject constructor(
 
     suspend fun pendingCount(): Int = logDao.pendingCount()
 
-    suspend fun takePendingLogs(limit: Int = UPLOAD_BATCH_SIZE): List<BehaviorLog> =
-        logDao.pending(limit).map { entity ->
-            BehaviorLog(
-                logId = entity.logId,
-                type = runCatching { LogType.valueOf(entity.type) }.getOrDefault(LogType.APP_USAGE),
-                timestamp = entity.timestamp,
-                payload = decodePayload(entity.payloadJson),
-                uploaded = false
-            )
-        }
+    suspend fun takePendingLogs(limit: Int = UPLOAD_BATCH_SIZE): PendingBatch<BehaviorLog> {
+        val entities = logDao.pending(limit)
+        return PendingBatch(
+            items = entities.map { entity ->
+                BehaviorLog(
+                    logId = entity.logId,
+                    type = runCatching { LogType.valueOf(entity.type) }.getOrDefault(LogType.APP_USAGE),
+                    timestamp = entity.timestamp,
+                    payload = decodePayload(entity.payloadJson),
+                    uploaded = false
+                )
+            },
+            entityIds = entities.map { it.id }
+        )
+    }
 
-    suspend fun markLogsUploaded(logs: List<BehaviorLog>) {
-        if (logs.isEmpty()) return
-        // takePendingLogs 按时间正序取，这里重取同样窗口的自增 id 即为刚上报的那批。
-        // 配合服务端 logId 幂等去重，即使标记范围略有偏差也不会造成数据丢失或重复统计。
-        val ids = logDao.pending(logs.size).map { it.id }
-        logDao.markUploaded(ids)
-        Logger.v("LogRepository") { "marked ${ids.size} logs uploaded" }
+    /** 按 take 时带出的自增主键精确标记 —— 与 [PendingBatch] 成对使用，无重查窗口 */
+    suspend fun markLogsUploaded(batch: PendingBatch<BehaviorLog>) {
+        if (batch.entityIds.isEmpty()) return
+        logDao.markUploaded(batch.entityIds)
+        Logger.v("LogRepository") { "marked ${batch.entityIds.size} logs uploaded" }
     }
 
     // ==================== 告警事件 ====================
@@ -124,21 +140,26 @@ class LogRepository @Inject constructor(
         return event
     }
 
-    suspend fun takePendingAlerts(limit: Int = ALERT_BATCH_SIZE): List<RiskEvent> =
-        riskDao.pending(limit).map { entity ->
-            RiskEvent(
-                eventId = entity.eventId,
-                deviceId = "",
-                type = runCatching { RiskType.valueOf(entity.type) }.getOrDefault(RiskType.POLICY_APPLY_FAILED),
-                level = runCatching { RiskLevel.valueOf(entity.level) }.getOrDefault(RiskLevel.NORMAL),
-                timestamp = entity.timestamp,
-                detail = decodePayload(entity.detailJson)
-            )
-        }
+    suspend fun takePendingAlerts(limit: Int = ALERT_BATCH_SIZE): PendingBatch<RiskEvent> {
+        val entities = riskDao.pending(limit)
+        return PendingBatch(
+            items = entities.map { entity ->
+                RiskEvent(
+                    eventId = entity.eventId,
+                    deviceId = "",
+                    type = runCatching { RiskType.valueOf(entity.type) }.getOrDefault(RiskType.POLICY_APPLY_FAILED),
+                    level = runCatching { RiskLevel.valueOf(entity.level) }.getOrDefault(RiskLevel.NORMAL),
+                    timestamp = entity.timestamp,
+                    detail = decodePayload(entity.detailJson)
+                )
+            },
+            entityIds = entities.map { it.id }
+        )
+    }
 
-    suspend fun markAlertsUploaded(events: List<RiskEvent>) {
-        val uploaded = riskDao.pending(events.size).map { it.id }
-        riskDao.markUploaded(uploaded)
+    suspend fun markAlertsUploaded(batch: PendingBatch<RiskEvent>) {
+        if (batch.entityIds.isEmpty()) return
+        riskDao.markUploaded(batch.entityIds)
     }
 
     suspend fun pendingAlertCount(): Int = riskDao.pendingCount()
@@ -233,6 +254,9 @@ class LogRepository @Inject constructor(
         RiskType.USB_DEBUG_ENABLED -> "检测到 USB 调试被打开"
         RiskType.PERMISSION_REVOKED -> "管控权限被削弱"
         RiskType.POLICY_APPLY_FAILED -> "部分管控项需重新下发"
+        RiskType.ACCESSIBILITY_DISABLED -> "无障碍服务被关闭"
+        RiskType.USAGE_ACCESS_LOST -> "使用情况权限被关闭"
+        RiskType.GUARD_PASSWORD_NOT_SET -> "操作密码尚未设置"
         RiskType.INVALID_SIGNATURE -> "指令签名校验失败"
         RiskType.HEARTBEAT_TIMEOUT -> "与服务端通信超时"
     }
@@ -250,9 +274,16 @@ class LogRepository @Inject constructor(
     }
 
     private suspend fun trimIfOverflow() {
-        if (logDao.pendingCount() > MAX_PENDING_LOGS) {
-            // 极端离线场景下的兜底：丢弃最旧的已上传日志释放空间
-            logDao.deleteUploadedBefore(System.currentTimeMillis())
+        val pending = logDao.pendingCount()
+        if (pending <= MAX_PENDING_LOGS) return
+        // 离线数日的极端兜底：pending 超限时**丢弃最旧的未上传普通日志**，防表无限膨胀。
+        // 此前实现删的是"已上传"日志 —— 已上传的本就有 purge 兜着，pending 却永不清，
+        // 与"未上传数据永不清理"的承诺拼起来 = 超限保护形同虚设（R6 登记项）。
+        // 告警（risk_event）不在本清理范围内：告警永不因容量而丢弃。
+        val excess = pending - MAX_PENDING_LOGS
+        val removed = logDao.deleteOldestPending(excess)
+        if (removed > 0) {
+            Logger.w("LogRepository") { "pending logs overflow: dropped $removed oldest unsent logs" }
         }
     }
 

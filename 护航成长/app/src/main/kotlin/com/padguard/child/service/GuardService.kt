@@ -56,12 +56,14 @@ import com.padguard.core.engine.PolicyEngine
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.command.EngineEffect
 import com.padguard.core.engine.enforcer.LimitVerdict
+import com.padguard.core.engine.enforcer.MonitoringRuntime
 import com.padguard.core.engine.lock.LockController
 import com.padguard.core.transport.Downlink
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
 import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
+import kotlinx.coroutines.sync.withLock
 import com.padguard.core.transport.http.CommandsResponse
 import com.padguard.core.transport.http.CredentialStore
 import com.padguard.core.transport.http.PolicyFetchResult
@@ -443,7 +445,13 @@ class GuardService : Service() {
 
             while (isActive) {
                 val now = SystemClock.elapsedRealtime()
-                val monitoring = policyEngine.monitoring()
+                // C1'：monitoring() 与其余 7 个子任务同列，必须 runSafely 包裹。
+                // 它读的是 MonitoringEnforcer 的内存快照，正常不会抛 —— 但主循环的死法
+                // 永远来自"现在不会抛的代码将来会抛"，一次异常 = 服务活着但
+                // 采样/心跳/自检/上报全停摆（类注释自述的最危险失效形态）。
+                // 降级值用 MonitoringRuntime() 本身：它与 enforcer 的初始 runtime 同一构造，默认值单源。
+                val monitoring = runSafely("monitoring") { policyEngine.monitoring() }
+                    ?: MonitoringRuntime()
 
                 // ---------- 每轮必做：采样 + 锁定判定 ----------
                 // 未绑定时跳过：没有家长就没有管控依据，
@@ -719,6 +727,9 @@ class GuardService : Service() {
         }
     }
 
+    /** 上行串行闸（C2'）：uploadPending 有多条触发路径（周期/flushNow/回执/重连），并发跑会重复 take 同一批。 */
+    private val uploadMutex = kotlinx.coroutines.sync.Mutex()
+
     /** 日志与告警分开上报：告警是高危信号，不能被大批量普通日志的失败拖住 */
     private suspend fun uploadPending() {
         if (!credentials.isBound) return
@@ -730,18 +741,22 @@ class GuardService : Service() {
         // 家长端的"使用时长统计"永远是 0 —— 这是最容易被忽略的一条断链。
         runSafely("appUsageReport") { reportAppUsage() }
 
-        val alerts = logRepository.takePendingAlerts()
-        if (alerts.isNotEmpty()) {
-            val r = remote.uploadEvents(deviceId, alerts.map { it.copy(deviceId = deviceId) })
-            if (r.isSuccess) logRepository.markAlertsUploaded(alerts)
-            else Logger.w(TAG) { "alert upload failed, keep ${alerts.size} pending" }
-        }
+        // Mutex 串行化是双保险（C2'）：即使并发进入，损失也只是重复发送同批数据
+        // （服务端按 logId/eventId 幂等去重），精确标记本身已保证不错标。
+        uploadMutex.withLock {
+            val alerts = logRepository.takePendingAlerts()
+            if (alerts.items.isNotEmpty()) {
+                val r = remote.uploadEvents(deviceId, alerts.items.map { it.copy(deviceId = deviceId) })
+                if (r.isSuccess) logRepository.markAlertsUploaded(alerts)
+                else Logger.w(TAG) { "alert upload failed, keep ${alerts.size} pending" }
+            }
 
-        val logs = logRepository.takePendingLogs()
-        if (logs.isNotEmpty()) {
-            val r = remote.uploadLogs(deviceId, logs)
-            if (r.isSuccess) logRepository.markLogsUploaded(logs)
-            else Logger.w(TAG) { "log upload failed, keep ${logs.size} pending" }
+            val logs = logRepository.takePendingLogs()
+            if (logs.items.isNotEmpty()) {
+                val r = remote.uploadLogs(deviceId, logs.items)
+                if (r.isSuccess) logRepository.markLogsUploaded(logs)
+                else Logger.w(TAG) { "log upload failed, keep ${logs.size} pending" }
+            }
         }
 
         // 兜底：任何"已落库但没入队上行"的临时解锁申请，在每次上报后补一次入队，

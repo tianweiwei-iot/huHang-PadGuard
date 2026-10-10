@@ -43,4 +43,7 @@ dependencies {
 
     // 纯逻辑（ScheduleEvaluator）的 JVM 单元测试，无需 Robolectric
     testImplementation(libs.junit)
+    // TamperDetector 依赖 final 类 DeviceAdminBridge / Context，
+    // Mockito 5 默认 inline mockmaker 可直接 mock final 类
+    testImplementation(libs.mockito.core)
 }

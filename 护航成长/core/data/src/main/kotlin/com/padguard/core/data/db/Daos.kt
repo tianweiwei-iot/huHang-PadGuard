@@ -60,6 +60,21 @@ interface BehaviorLogDao {
     @Query("DELETE FROM behavior_log WHERE uploaded = 1 AND timestamp < :before")
     suspend fun deleteUploadedBefore(before: Long)
 
+    /**
+     * pending 超限兜底（C2'）：丢弃最旧的 N 条**未上传**普通日志。
+     * 只在 behavior_log 堆积超过软上限时由 [com.padguard.core.data.repository.LogRepository] 触发，
+     * 属于极端离线场景的容量保护 —— 告警表（risk_event）没有对应方法，永不因容量丢弃。
+     */
+    @Query(
+        """
+        DELETE FROM behavior_log WHERE id IN (
+            SELECT id FROM behavior_log WHERE uploaded = 0
+            ORDER BY timestamp ASC LIMIT :count
+        )
+        """
+    )
+    suspend fun deleteOldestPending(count: Int): Int
+
     @Query("DELETE FROM behavior_log")
     suspend fun clear()
 }

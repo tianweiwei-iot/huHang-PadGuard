@@ -95,7 +95,20 @@ enum class RiskType {
     PERMISSION_REVOKED,
     POLICY_APPLY_FAILED,
     INVALID_SIGNATURE,
-    HEARTBEAT_TIMEOUT
+    HEARTBEAT_TIMEOUT,
+
+    /** S12：无障碍服务被关闭 —— 设置页拦截 / 锁屏抢占依赖它，失活 = 拦截层整体失效 */
+    ACCESSIBILITY_DISABLED,
+
+    /** S12：使用情况访问权限被关闭 —— 应用用量采集失明，家长端时长统计失真 */
+    USAGE_ACCESS_LOST,
+
+    /**
+     * S11：操作密码尚未设置 —— 闸门"建好了但没有锁芯"。
+     * 无障碍拦截会把孩子顶离设置页（防先关无障碍再脱管），但没有密码就无法验证
+     * 家长身份，家长自己改设置也要靠密码。这是配置未完成的信号，需提醒家长补设。
+     */
+    GUARD_PASSWORD_NOT_SET
 }
 
 @Serializable

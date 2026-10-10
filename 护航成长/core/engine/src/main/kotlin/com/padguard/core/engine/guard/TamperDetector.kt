@@ -42,6 +42,7 @@ import kotlin.math.abs
 class TamperDetector @Inject constructor(
     @ApplicationContext private val context: Context,
     private val admin: DeviceAdminBridge,
+    private val probe: GuardInfraProbe,
     private val timeProvider: TimeProvider
 ) {
 
@@ -49,6 +50,11 @@ class TamperDetector @Inject constructor(
     private var lastElapsed: Long = 0L
     private var lastControlMode: ControlMode? = null
     private var rootReported = false
+
+    // 守护基建告警的一次性闩锁：只在「由好变坏」的那一刻报一次，
+    // 恢复后复位 —— 若每轮自检都报，家长端会被同一条告警刷屏。
+    private var accessibilityLostReported = false
+    private var usageLostReported = false
 
     /**
      * 执行一轮检测。
@@ -64,6 +70,7 @@ class TamperDetector @Inject constructor(
         detectDebugChannels(findings)
         if (policy.blockRoot) detectRoot(findings)
         detectRestrictionLoss(policy, systemLock, findings)
+        detectGuardInfra(findings)
 
         if (findings.isNotEmpty()) {
             Logger.w(TAG) { "tamper findings: ${findings.map { it.type }}" }
@@ -245,6 +252,48 @@ class TamperDetector @Inject constructor(
                 "note" to "限制项已丢失（ROM 升级或系统清理导致），需重新下发"
             )
         )
+    }
+
+    /**
+     * 守护基建存活检测（S12）。
+     *
+     * 无障碍服务（操作密码闸门的系统级拦截硬依赖）与 Usage Access
+     * （应用管控探不到前台包名的直接原因）被用户在设置里关掉后，
+     * 终端不会崩溃、心跳照常 —— 不主动核对，家长会以为管控仍在生效。
+     *
+     * 闩锁语义：丢失的那一刻报一次，之后每轮扫描保持静默；
+     * 权限恢复后复位，再次丢失会重新报。设备重启不复位（重启不会自动恢复权限，
+     * 复位只会造成重启后同一条告警再刷一次）。
+     */
+    private fun detectGuardInfra(findings: MutableList<TamperFinding>) {
+        val a11yEnabled = runCatching { probe.isAccessibilityServiceEnabled() }.getOrDefault(false)
+        val usageGranted = runCatching { probe.isUsageAccessGranted() }.getOrDefault(false)
+
+        if (a11yEnabled) {
+            accessibilityLostReported = false
+        } else if (!accessibilityLostReported) {
+            accessibilityLostReported = true
+            findings += TamperFinding(
+                type = RiskType.ACCESSIBILITY_DISABLED,
+                level = RiskLevel.HIGH,
+                detail = mapOf(
+                    "note" to "操作闸门的系统级拦截已失效，孩子可在设置中绕过密码闸门，请引导孩子重新开启"
+                )
+            )
+        }
+
+        if (usageGranted) {
+            usageLostReported = false
+        } else if (!usageLostReported) {
+            usageLostReported = true
+            findings += TamperFinding(
+                type = RiskType.USAGE_ACCESS_LOST,
+                level = RiskLevel.NORMAL,
+                detail = mapOf(
+                    "note" to "使用情况访问权限被关闭，应用管控与时长统计将静默失效，请引导孩子重新授权"
+                )
+            )
+        }
     }
 
     private fun isInstalled(packageName: String): Boolean = runCatching {
