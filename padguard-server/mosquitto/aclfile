@@ -1,0 +1,8 @@
+# 临时 ACL：过渡期（批次 D S1 之前的 M4 方案）
+# 现阶段 pgserver + pgdevice 统一凭据均放开 pg/v1/# 读写；
+# S1 落地后改为 per-device 主题（pg/v1/device/{deviceId}/#），此处收紧。
+user pgserver
+topic readwrite pg/v1/#
+
+user pgdevice
+topic readwrite pg/v1/#

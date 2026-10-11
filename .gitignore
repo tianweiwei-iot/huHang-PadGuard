@@ -86,6 +86,9 @@ huHang-PadGuard/
 # JWT 签名密钥与授权私钥：一旦入库等于把签发令牌的能力交出去
 padguard-server/config/
 padguard-server/tools/*.key
+# 生产环境变量（DB/JWT/MQTT 强密码）与 mosquitto 凭据哈希
+.env
+padguard-server/mosquitto/passwd
 
 # ===================== 服务端运行副本（59MB jar，构建产物不入��） =====================
 padguard-server/deploy/

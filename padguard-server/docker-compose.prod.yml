@@ -1,0 +1,61 @@
+# 生产编排（阿里云轻量 8.148.68.183，武汉）——与 test 用 docker-compose.yml 相互独立。
+# 差异：postgres 无宿主端口映射（仅 compose 内网）、broker 换 Mosquitto（password_file 认证）、
+#       app 8090 对外、uploads/admin 目录挂载持久化、密码与 JWT 走 .env。
+# 前置（一次性，见 docs/控制端手机适配与云服务器迁移计划.md M3）：
+#   1) cp .env.prod.example .env 并填入强密码
+#   2) 生成 mosquitto/passwd（mosquitto_passwd，见计划文档）
+# 用法：cd padguard-server && docker compose -f docker-compose.prod.yml up -d postgres mosquitto
+#       docker compose -f docker-compose.prod.yml up -d --build app
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PG_DB:-padguard}
+      POSTGRES_USER: ${PG_USER:-padguard}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD 必须在 .env 中设置强密码}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-padguard} -d ${PG_DB:-padguard}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # 孩子端 MQTT 直连入口（M6 防火墙放行；8883 TLS 未启用不映射）
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/aclfile:/mosquitto/config/aclfile:ro
+      - ./mosquitto/passwd:/mosquitto/config/passwd:ro
+      - mosquitto-data:/mosquitto/data
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8090:8080"   # 容器内 8080（application.yml 默认），宿主 8090 对外，全链路约定不变
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${PG_DB:-padguard}
+      SPRING_DATASOURCE_USERNAME: ${PG_USER:-padguard}
+      SPRING_DATASOURCE_PASSWORD: ${PG_PASSWORD}
+      PADGUARD_JWT_SECRET: ${PADGUARD_JWT_SECRET:?PADGUARD_JWT_SECRET 必须在 .env 中设置强随机值}
+      PADGUARD_MQTT_BROKER_URL: tcp://mosquitto:1883
+      PADGUARD_MQTT_USERNAME: ${PADGUARD_MQTT_USERNAME:?PADGUARD_MQTT_USERNAME 必须在 .env 中设置}
+      PADGUARD_MQTT_PASSWORD: ${PADGUARD_MQTT_PASSWORD:?PADGUARD_MQTT_PASSWORD 必须在 .env 中设置}
+      PADGUARD_DEV_CHILDSIMULATOR: "false"
+    volumes:
+      - ../padguard-admin:/app/padguard-admin:ro   # 后台 SPA 同源托管 /admin/
+      - ./uploads:/app/uploads                     # 用户录屏/截图，容器重建不丢
+
+volumes:
+  pgdata:
+  mosquitto-data:
