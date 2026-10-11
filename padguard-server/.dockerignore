@@ -5,3 +5,11 @@ build
 out
 .kotlin
 .git
+
+# 环境凭据（生产 .env）绝不进构建上下文/镜像层
+.env
+*.log
+tomcat-work
+data
+uploads
+logs

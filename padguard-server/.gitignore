@@ -16,3 +16,8 @@ dev.json
 out_*.json
 server.err
 guard.*
+
+# 生产环境凭据（云部署，见 .env.prod.example），绝不入库
+.env
+# mosquitto 口令文件（服务器上生成，含凭据哈希）
+mosquitto/passwd
