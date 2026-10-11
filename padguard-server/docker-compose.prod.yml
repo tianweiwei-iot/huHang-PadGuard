@@ -44,6 +44,9 @@ services:
       mosquitto:
         condition: service_started
     environment:
+      # JVM 默认时区：temurin 镜像默认 UTC，导致后台时间显示/统计日切/订单号时间戳全部偏 8 小时。
+      # 显式锁定 Asia/Shanghai 一次修复全部 ZoneId.systemDefault() 消费点，docker logs 时间戳同步归位。
+      TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${PG_DB:-padguard}
       SPRING_DATASOURCE_USERNAME: ${PG_USER:-padguard}
       SPRING_DATASOURCE_PASSWORD: ${PG_PASSWORD}
