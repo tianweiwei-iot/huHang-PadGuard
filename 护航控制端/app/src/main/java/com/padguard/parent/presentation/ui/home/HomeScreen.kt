@@ -39,7 +39,7 @@ import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.HomeUiState
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 

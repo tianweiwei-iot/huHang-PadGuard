@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BrandingWatermark
+import androidx.compose.material.icons.automirrored.filled.BrandingWatermark
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -73,7 +73,7 @@ fun WatermarkCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.BrandingWatermark,
+                        imageVector = Icons.AutoMirrored.Filled.BrandingWatermark,
                         contentDescription = null,
                         tint = PadGuardColors.PrimaryBlue,
                         modifier = Modifier.size(20.dp)

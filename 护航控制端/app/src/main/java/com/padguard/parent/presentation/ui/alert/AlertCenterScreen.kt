@@ -17,7 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material3.Button
@@ -87,7 +87,7 @@ fun AlertCenterScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "返回", tint = PadGuardColors.TextPrimary)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = PadGuardColors.TextPrimary)
                     }
                     Text(
                         text = "消息中心",

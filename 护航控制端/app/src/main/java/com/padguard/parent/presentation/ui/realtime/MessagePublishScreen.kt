@@ -22,7 +22,7 @@ import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -437,5 +437,5 @@ private fun messageTypeIcon(type: MessageContentType): ImageVector = when (type)
     MessageContentType.TEXT -> Icons.Default.TextFields
     MessageContentType.IMAGE -> Icons.Default.Image
     MessageContentType.VIDEO -> Icons.Default.Videocam
-    MessageContentType.AUDIO -> Icons.Default.VolumeUp
+    MessageContentType.AUDIO -> Icons.AutoMirrored.Filled.VolumeUp
 }
