@@ -614,7 +614,9 @@ class LocalDataSource @Inject constructor(
 
     // ==================== LocationRepository 实现 (Mock) ====================
 
-    private val geofenceStore = mutableMapOf<String, GeofenceConfig>()
+    // 多围栏 Mock：每个设备维护一组围栏
+    private val geofenceStore = mutableMapOf<String, MutableList<GeofenceConfig>>()
+    private var zoneSeq = 0
 
     override suspend fun getDeviceLocation(deviceId: String): Result<LocationInfo> =
         Result.success(LocationInfo(
@@ -625,30 +627,43 @@ class LocalDataSource @Inject constructor(
             timestamp = System.currentTimeMillis()
         ))
 
-    override suspend fun getGeofence(deviceId: String): Result<GeofenceConfig> =
+    override suspend fun getGeofences(deviceId: String): Result<List<GeofenceConfig>> =
         Result.success(
-            geofenceStore[deviceId] ?: GeofenceConfig(
-                deviceId = deviceId,
-                enabled = true,
-                name = "学校周边安全区域",
-                centerLatitude = 22.5431,
-                centerLongitude = 114.0579,
-                radiusMeters = 800
+            geofenceStore[deviceId] ?: listOf(
+                GeofenceConfig(
+                    id = "mock-zone-1", deviceId = deviceId, enabled = true,
+                    name = "学校周边安全区域",
+                    centerLatitude = 22.5431, centerLongitude = 114.0579, radiusMeters = 800
+                )
             )
         )
 
-    override suspend fun updateGeofence(config: GeofenceConfig): Result<GeofenceConfig> {
-        geofenceStore[config.deviceId] = config
-        return Result.success(config)
+    override suspend fun createGeofence(zone: GeofenceConfig): Result<GeofenceConfig> {
+        val created = zone.copy(id = "mock-zone-${++zoneSeq}")
+        val list = geofenceStore.getOrPut(zone.deviceId) { mutableListOf() }
+        list.add(created)
+        return Result.success(created)
+    }
+
+    override suspend fun updateGeofence(zone: GeofenceConfig): Result<GeofenceConfig> {
+        val list = geofenceStore[zone.deviceId] ?: return Result.success(zone)
+        val idx = list.indexOfFirst { it.id == zone.id }
+        if (idx >= 0) list[idx] = zone else list.add(zone)
+        return Result.success(zone)
+    }
+
+    override suspend fun deleteGeofence(deviceId: String, id: String): Result<Unit> {
+        geofenceStore[deviceId]?.removeIf { it.id == id }
+        return Result.success(Unit)
     }
 
     // Mock：假装指令已下发（位置随后由 getDeviceLocation 的假数据返回）
     override suspend fun requestLocate(deviceId: String): Result<Unit> = Result.success(Unit)
 
-    override suspend fun getTrackHistory(deviceId: String): Result<List<LocationInfo>> {
+    override suspend fun getTrackHistory(deviceId: String, days: Int, limit: Int): Result<List<LocationInfo>> {
         val now = System.currentTimeMillis()
         val minute = 60_000L
-        // Mock：模拟设备越界后的一段移动轨迹（按时间正序）
+        // Mock：模拟设备一段移动轨迹（按时间正序），跨两个自然日，便于验证"按日分组"时间线
         val track = listOf(
             LocationInfo(22.5431, 114.0579, "深圳市南山区科技园", 10f, now - 40 * minute),
             LocationInfo(22.5452, 114.0605, "科苑南路辅路", 12f, now - 30 * minute),
@@ -658,6 +673,9 @@ class LocalDataSource @Inject constructor(
         )
         return Result.success(track)
     }
+
+    // Mock：返回固定电量，便于无服务端联调时也能看到电量展示
+    override suspend fun getDeviceBattery(deviceId: String): Result<Int?> = Result.success(82)
 
     // ==================== PolicyRepository 实现 (Mock) ====================
 

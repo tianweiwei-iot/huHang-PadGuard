@@ -157,6 +157,34 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             return
         }
 
+        // 3a) 取消授权的应用：硬拦截（最严），与全局启动闸门、是否设了家长密码都无关。
+        // 设了家长密码 → 弹密码门禁（输对后自动打开目标应用）；
+        // 没设密码 → 同样顶回、并提示"需家长设置密码"，绝不漏放（严格做到授权管控）。
+        // 放在「未设密码降级拦截」分支之前：保证取消授权的应用在任何情况下都先被拦下。
+        if (reason == REASON_HIDDEN_APP) {
+            val now = System.currentTimeMillis()
+            // 去抖按「包名」：顶回后用户可能立刻再点一次，那次同样要拦
+            if (pkg == lastTriggerPkg && now - lastTriggerAt < DEBOUNCE_MS) return
+            lastTriggerAt = now
+            lastTriggerPkg = pkg
+            // 受管控（取消授权）应用用「回桌面」而不是 BACK：部分应用被 BACK 后会立即重新抢焦点，
+            // 表现为"点开游戏闪一下又回来"，像坏了而不是像被管控。
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            if (manager.isEnabledNow()) {
+                runCatching {
+                    startActivity(
+                        Intent(this, GuardUnlockActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            .putExtra(GuardUnlockActivity.EXTRA_LAUNCH_PACKAGE, pkg)
+                    )
+                }.onFailure { Logger.e(TAG, it) { "failed to launch guard unlock (hidden app)" } }
+            } else {
+                // 未设家长密码：硬拦截 + 提示，绝不直接放行（见 reportHiddenAppNeedsPassword）
+                reportHiddenAppNeedsPassword(pkg)
+            }
+            return
+        }
+
         // S11 拆层：密码未设置时的降级拦截。
         // 设置页必须拦：它正是关闭本无障碍服务的入口，放行等于允许"先关无障碍、
         // 再解除一切管控"。但密码未设时拉不出验证框（没有可比对的凭据），
@@ -239,6 +267,26 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * 取消授权的应用在无「设备操作密码」时被硬拦截后的提示。
+     *
+     * ## 为什么只能提示、不能弹密码框
+     * 密码门禁依赖服务端下发的哈希校验身份；未设密码时本地没有任何可比对凭据，
+     * 弹框也验不过，所以这里只顶回应用 + 告知家长"需先设置设备操作密码"。
+     * 硬拦截本身已满足"严格做到授权管控"——孩子无论如何都打不开该应用，
+     * 直到家长在控制端设置好操作密码。
+     */
+    private fun reportHiddenAppNeedsPassword(pkg: String) {
+        Logger.i(TAG) { "hidden app $pkg blocked: guard password not set, hard-blocked" }
+        runCatching {
+            android.widget.Toast.makeText(
+                this,
+                "该应用已取消授权，需家长设置「设备操作密码」后才能打开",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    /**
      * 当前前台是否是「设置 → 应用信息 / 应用详情」页。
      *
      * 该页是卸载 / 停用本应用的唯一入口。无障碍事件拿不到 intent data
@@ -269,10 +317,11 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         if (AppGuardPolicyStore.isInstallerPackage(pkg) &&
             (appGuard.installNeedsPassword() || appGuard.uninstallNeedsPassword())
         ) return@runCatching REASON_INSTALLER
-        // 3a) 关闭权限的应用（hidden）：无论"打开应用也要密码"开关是否开启，打开都必须输密码。
-        //     这是"权限已关闭"的底线语义——它不能依赖全局启动闸门（默认关闭会导致完全失效），
-        //     也不能依赖 DO 隐藏（存量设备多为非 DO）。isHiddenControlled 已排除系统关键包。
-        if (appGuard.isHiddenControlled(pkg)) return@runCatching REASON_CONTROLLED_APP
+        // 3a) 取消授权的应用（hidden）：无论"打开应用也要密码"开关是否开启、无论是否已设家长密码，
+        //     打开都必须先经过门禁（输对家长密码才放行）。这是"授权已取消"的底线语义——
+        //     它不依赖全局启动闸门（默认关闭会完全失效），也不因未设密码而漏放（最严）。
+        //     isHiddenControlled 已排除系统关键包（防砖名单）。
+        if (appGuard.isHiddenControlled(pkg)) return@runCatching REASON_HIDDEN_APP
         // 3b) 打开受管控应用 —— 家长开关控制
         //    注意：isControlled 已保证「已授权应用一律放行」，此处不会误伤授权应用。
         if (appGuard.launchBlockEnabled() &&
@@ -298,6 +347,8 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         private const val REASON_SETTINGS = "settings"
         private const val REASON_INSTALLER = "installer"
         private const val REASON_CONTROLLED_APP = "controlled-app"
+        /** 取消授权的应用（hidden）：无条件硬拦截，需家长密码门禁（最严） */
+        private const val REASON_HIDDEN_APP = "hidden-app"
 
         /** S11：密码未设置告警的最小间隔：24h */
         private const val PASSWORD_NOT_SET_INTERVAL_MS = 24 * 60 * 60 * 1000L

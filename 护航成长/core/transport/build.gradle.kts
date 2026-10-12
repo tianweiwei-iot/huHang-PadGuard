@@ -16,8 +16,8 @@ android {
 
         // 与 app 模块保持一致：本项目为局域网/私有化部署，默认用内网示例地址，
         // 不使用虚构公网域名（DNS 解析不了会导致无法诊断的"连不上"）。
-        buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://192.168.1.10:1883\"")
-        buildConfigField("String", "DEFAULT_BASE_URL", "\"http://192.168.1.10:8090/api/v1/\"")
+        buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://8.148.68.183:1883\"")
+        buildConfigField("String", "DEFAULT_BASE_URL", "\"http://8.148.68.183:8090/api/v1/\"")
 
         // 服务端未就绪期间用本地 Mock 跑通全链路；release 强制走真实服务端。
         buildConfigField("boolean", "USE_MOCK_SERVER", "false")
@@ -27,8 +27,8 @@ android {
         debug {
             // 本地真机联调：关闭 Mock，直连局域网真实服务端
             buildConfigField("boolean", "USE_MOCK_SERVER", "false")
-            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://192.168.1.10:8090/api/v1/\"")
-            buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://192.168.1.10:1883\"")
+            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://8.148.68.183:8090/api/v1/\"")
+            buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://8.148.68.183:1883\"")
         }
     }
 

@@ -34,3 +34,11 @@
 # Compose
 -keep class androidx.compose.** { *; }
 -dontwarn androidx.compose.**
+
+# 高德地图 SDK
+-keep class com.amap.api.** { *; }
+-keep class com.autonavi.** { *; }
+-keep class com.loc.** { *; }
+-dontwarn com.amap.api.**
+-dontwarn com.autonavi.**
+-dontwarn com.loc.**

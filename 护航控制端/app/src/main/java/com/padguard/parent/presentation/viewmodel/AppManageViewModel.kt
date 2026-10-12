@@ -319,14 +319,14 @@ class AppManageViewModel @Inject constructor(
     }
 
     /**
-     * 使用权限开关。
+     * 使用权限开关（授权 / 取消授权）。
      *
-     * 关闭 = 在孩子端隐藏（桌面不再显示）；开启 = 恢复显示。
+     * 关闭（取消授权）= 孩子端打开该应用必须输入家长设定的「设备操作密码」；开启（授权）= 正常使用。
      * 刻意不做"卸载"：开关是要能反复拨的简单操作，
      * 而卸载不可逆，一旦孩子数据丢了就没法挽回。
      */
     fun setAllowed(app: InstalledApp, allowed: Boolean) {
-        // 已卸载的应用只剩历史台账，不存在"隐藏 / 显示"的意义；
+        // 已卸载的应用只剩历史台账，不存在"授权 / 取消授权"的意义；
         // 直接提示而非打服务端接口，否则会收到"设备上没有这个应用"的报错，表现为"无法授权"。
         if (!app.installed) {
             _uiState.value = _uiState.value.copy(
@@ -341,7 +341,7 @@ class AppManageViewModel @Inject constructor(
                         apps = _uiState.value.apps.map {
                             if (it.packageName == app.packageName) it.copy(hidden = !allowed) else it
                         },
-                        toast = if (allowed) "已开启权限：${app.appName}" else "已关闭权限：${app.appName}（打开需管理密码）"
+                        toast = if (allowed) "已授权：${app.appName}" else "已取消授权：${app.appName}（打开需家长密码）"
                     )
                 }
                 .onFailure { e ->

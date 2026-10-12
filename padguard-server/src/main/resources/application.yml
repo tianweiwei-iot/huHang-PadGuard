@@ -20,58 +20,11 @@ server:
       # 恰恰是"最新的几条请求"最关键，攒着看不到等于没有，必须关掉。
       buffered: false
 
-spring:
-  datasource:
-    url: jdbc:postgresql://postgres:5432/padguard
-    username: padguard
-    password: padguard
-    driver-class-name: org.postgresql.Driver
-  jpa:
-    hibernate:
-      ddl-auto: none
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.PostgreSQLDialect
-        format_sql: false
-    open-in-view: false
-  flyway:
-    enabled: true
-    locations: classpath:db/migration
-  servlet:
-    multipart:
-      max-file-size: 200MB
-      max-request-size: 200MB
-  mvc:
-    async:
-      # 实时看屏 /v1/stream/{deviceId}/live 是长时间挂起、持续推帧的流。
-      # Spring MVC 异步请求默认 30s 超时，会在画面正常推送时把连接掐断，
-      # 表现为家长端每 30 秒闪一次"连接中"、观感就是"实时屏幕总断开"。
-      # 调大到 10 分钟；流本身另有"设备 30s 无帧即收流"的自保护（见 ParentStreamController
-      # 的 MAX_IDLE_MS），因此不会导致连接永久悬挂。
-      request-timeout: 600000
-
-  # ---- 邮件（密码重置通知等）----
-  # 默认关闭：未配置 SMTP 时，重置密码仍会生成新口令并在后台弹窗显示，由管理员安全转告。
-  # 配置后可向账号邮箱自动发送新密码。生产环境请通过环境变量注入凭据，不要写死在文件中：
-  #   PADGUARD_MAIL_HOST / PADGUARD_MAIL_PORT / PADGUARD_MAIL_USERNAME
-  #   PADGUARD_MAIL_PASSWORD / PADGUARD_MAIL_FROM
-  mail:
-    host: ${PADGUARD_MAIL_HOST:}
-    port: ${PADGUARD_MAIL_PORT:465}
-    username: ${PADGUARD_MAIL_USERNAME:}
-    password: ${PADGUARD_MAIL_PASSWORD:}
-    protocol: smtp
-    properties:
-      mail:
-        smtp:
-          auth: true
-          starttls:
-            enable: true
-            required: true
-          ssl:
-            enable: true
-
 padguard:
+  amap:
+    # 高德 Web 服务 Key（逆地理编码用）。默认空 = 不做地址反查，定位坐标照常上报与展示。
+    # 私有化部署时由运维通过环境变量 PADGUARD_AMAP_WEB_KEY 注入，绝不写进代码仓库。
+    web-key: ${PADGUARD_AMAP_WEB_KEY:}
   mail:
     # 总开关：SMTP 主机已配置且本项为 true 时才真正发信；否则仅记日志 + 后台弹窗显示明文口令
     enabled: ${PADGUARD_MAIL_ENABLED:false}
@@ -129,10 +82,61 @@ padguard:
     dir: "./uploads"
     # 对外 base-url，用于拼接可访问的文件/资源 URL；留空则使用相对路径 /v1/files/{id}
     # 例如： http://localhost:8080
-    base-url: ""
+    base-url: "http://8.148.68.183:8090"
   dev:
     # 无真实被管控端时，开启内置"孩子端模拟器"自动回执指令，便于演示主链路闭环
     child-simulator: false
+
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/padguard
+    username: padguard
+    password: padguard
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: false
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
+  mvc:
+    async:
+      # 实时看屏 /v1/stream/{deviceId}/live 是长时间挂起、持续推帧的流。
+      # Spring MVC 异步请求默认 30s 超时，会在画面正常推送时把连接掐断，
+      # 表现为家长端每 30 秒闪一次"连接中"、观感就是"实时屏幕总断开"。
+      # 调大到 10 分钟；流本身另有"设备 30s 无帧即收流"的自保护（见 ParentStreamController
+      # 的 MAX_IDLE_MS），因此不会导致连接永久悬挂。
+      request-timeout: 600000
+
+  # ---- 邮件（密码重置通知等）----
+  # 默认关闭：未配置 SMTP 时，重置密码仍会生成新口令并在后台弹窗显示，由管理员安全转告。
+  # 配置后可向账号邮箱自动发送新密码。生产环境请通过环境变量注入凭据，不要写死在文件中：
+  #   PADGUARD_MAIL_HOST / PADGUARD_MAIL_PORT / PADGUARD_MAIL_USERNAME
+  #   PADGUARD_MAIL_PASSWORD / PADGUARD_MAIL_FROM
+  mail:
+    host: ${PADGUARD_MAIL_HOST:}
+    port: ${PADGUARD_MAIL_PORT:465}
+    username: ${PADGUARD_MAIL_USERNAME:}
+    password: ${PADGUARD_MAIL_PASSWORD:}
+    protocol: smtp
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+          ssl:
+            enable: true
 
 ---
 spring:
@@ -197,6 +201,7 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update
+
     properties:
       hibernate:
         dialect: org.hibernate.dialect.H2Dialect

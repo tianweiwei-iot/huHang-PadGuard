@@ -14,7 +14,7 @@
       let p;
       try { p = await PG.api.serverProfile(); }
       catch (e) { U.toast && U.toast("err", "加载失败", e.message); return; }
-      if (!p) p = { publicHost: "192.168.1.12", port: 8090, scheme: "http", serverName: "PadGuard 管控服务端", remark: "" };
+      if (!p) p = { publicHost: "8.148.68.183", port: 8090, scheme: "http", serverName: "PadGuard 管控服务端", remark: "" };
 
       const row = (label, inner) =>
         '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid var(--bg-2)">' +
@@ -23,7 +23,7 @@
 
       root.querySelector("#sp-body").innerHTML = `
       <div class="card" style="max-width:680px">
-        ${row("对外地址 (域名/IP)", '<input id="sp-host" style="' + inputStyle + '" placeholder="如 192.168.1.12" value="' + esc(p.publicHost) + '">')}
+        ${row("对外地址 (域名/IP)", '<input id="sp-host" style="' + inputStyle + '" placeholder="如 8.148.68.183" value="' + esc(p.publicHost) + '">')}
         ${row("端口", '<input id="sp-port" type="number" style="' + inputStyle + '" placeholder="8090" value="' + esc(p.port) + '">')}
         ${row("协议", '<select id="sp-scheme" style="' + inputStyle + '"><option value="http"' + (p.scheme === "http" ? " selected" : "") + '>http</option><option value="https"' + (p.scheme === "https" ? " selected" : "") + '>https</option></select>')}
         ${row("服务器名称", '<input id="sp-name" style="' + inputStyle + '" placeholder="PadGuard 管控服务端" value="' + esc(p.serverName) + '">')}

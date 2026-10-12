@@ -30,7 +30,8 @@ class StatisticsService(
     private val alertRepository: AlertRepository,
     private val installedAppRepository: InstalledAppRepository,
     private val fileStorageService: FileStorageService,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    private val usageSessionService: UsageSessionService
 ) {
     private val zone = ZoneId.of("Asia/Shanghai")
 
@@ -62,7 +63,12 @@ class StatisticsService(
         val (start, end) = dayRange(0)
         val logs = usageLogRepository.findByDeviceIdAndTimestampBetween(deviceId, start, end)
         val idx = PayloadIndex(logs, ::parsePayload)
-        val totalMin = sumMinutes(logs, idx)
+        // 头条「今日已用」唯一权威口径：
+        // 设备当日存在进行中的使用会话时，必须取 UsageSession 服务端派生的已用时长
+        // （= 墙钟流逝、封顶到额度），与孩子端首页、锁机判定三端同源；
+        // 否则（未开始计时 / 离线）才回退到上报累计用量的当天 MAX，避免两端数字定义不一致
+        // 而长期对不上（详见 [com.padguard.server.service.UsageSessionService.usedMinutesIfActive]）。
+        val totalMin = usageSessionService.usedMinutesIfActive(deviceId) ?: sumMinutes(logs, idx)
         val appUsages = topApps(logs, idx, 50)
         val dto = UsageStatsDto(deviceId, todayStr(), totalMin, appUsages)
         todayCache[deviceId] = CachedToday(dto, System.currentTimeMillis())

@@ -85,8 +85,13 @@ class HomeViewModel @Inject constructor(
                 val remaining: Int
                 val used: Int
                 if (session.active) {
+                    // 权威口径：剩余由服务端锚点 (startEpoch / serverNow) 派生，本地仅用单调时钟做平滑插值。
+                    // timeProvider.now() = 本地墙钟 + offset，而 baselineServerNow 也是同一 offset 系，
+                    // 作差时 offset 相互抵消，不会因平板与服务端存在时钟偏移而漂移 ——
+                    // 这样首页倒计时与锁机判定 (UsageSessionManager.isExpired) 始终同源，且与家长端头条一致。
+                    val liveRemaining = usageSessionManager.liveRemainingMs(timeProvider.now())
                     dailyQuota = session.quotaMinutes
-                    remaining = (session.remainingMs / 60_000L).toInt().coerceAtLeast(0)
+                    remaining = (liveRemaining / 60_000L).toInt().coerceAtLeast(0)
                     used = (dailyQuota - remaining).coerceAtLeast(0)
                 } else {
                     dailyQuota = policy.appLimit.quotaFor(isWeekend(nowMillis, zone))
@@ -193,13 +198,16 @@ class HomeViewModel @Inject constructor(
     }
 
     private fun formatNow(millis: Long, zone: ZoneId): String {
-        val time = LocalTime.ofInstant(Instant.ofEpochMilli(millis), zone)
+        // 注意：LocalTime.ofInstant 是 Java 9 才新增的方法，minSdk=26 设备运行时并不存在，
+        // 会触发 NoSuchMethodError（首页直接闪退）。改用 Java 8 原生等价的 atZone().toLocalTime()。
+        val time = Instant.ofEpochMilli(millis).atZone(zone).toLocalTime()
         return "%02d:%02d".format(time.hour, time.minute)
     }
 
     /** 当天已过的分钟数（0..1439），与 [formatNow] 用同一时区，保证读数与游标刻度一致 */
     private fun minutesOfDay(millis: Long, zone: ZoneId): Int =
-        LocalTime.ofInstant(Instant.ofEpochMilli(millis), zone).toSecondOfDay() / 60
+        // 同上：避免 LocalTime.ofInstant（Java 9+），用 atZone().toLocalTime() 取代
+        Instant.ofEpochMilli(millis).atZone(zone).toLocalTime().toSecondOfDay() / 60
 
     private fun formatRelative(millis: Long): String {
         val diffMin = ((timeProvider.now() - millis) / 60_000L).coerceAtLeast(0)

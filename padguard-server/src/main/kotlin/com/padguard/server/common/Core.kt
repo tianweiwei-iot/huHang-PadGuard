@@ -36,6 +36,8 @@ object ParentErr {
     const val LIVE_DEVICES_FULL = 2006
     const val POLICY_NOT_FOUND = 3001
     const val POLICY_CONFLICT = 3002
+    /** 围栏不存在（或不属于当前设备，按"不存在"处理以避免泄漏归属） */
+    const val GEOFENCE_NOT_FOUND = 3003
     // 订阅：4xxx
     /** 未订阅 / 订阅已过期，功能不可用 */
     const val SUBSCRIPTION_REQUIRED = 4001

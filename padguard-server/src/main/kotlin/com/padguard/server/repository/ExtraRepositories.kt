@@ -37,10 +37,20 @@ interface ScreenshotRepository : JpaRepository<Screenshot, String> {
 interface LocationTrackRepository : JpaRepository<LocationTrack, String> {
     fun findByDeviceIdOrderByTsDesc(deviceId: String, pageable: Pageable): List<LocationTrack>
 
+    /** 全量轨迹时间线：取最近 [since]（毫秒时间戳）之后的定位点，按时间倒序。 */
+    fun findByDeviceIdAndTsGreaterThanEqualOrderByTsDesc(
+        deviceId: String, since: Long, pageable: Pageable
+    ): List<LocationTrack>
+
     /** 移动轨迹属儿童行踪隐私，设备易主 / 解绑时必须随设备一起清除。 */
     @Modifying
     @Query("delete from LocationTrack t where t.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+
+    /** 仅更新单条轨迹的文字地址，供 [com.padguard.server.service.LocationAddressBackfill] 异步回填，不触动经纬度/时间。 */
+    @Modifying
+    @Query("update LocationTrack t set t.address = :address where t.id = :id")
+    fun updateAddressById(@Param("id") id: String, @Param("address") address: String)
 }
 
 @Repository
@@ -82,13 +92,16 @@ interface PublishedMessageRepository : JpaRepository<PublishedMessage, String> {
 }
 
 @Repository
-interface GeofenceRepository : JpaRepository<Geofence, String> {
+interface GeofenceZoneRepository : JpaRepository<GeofenceZone, String> {
+    /** 一台设备下的全部围栏，按创建时间正序（保证列表稳定、绘制顺序一致）。 */
+    fun findByDeviceIdOrderByCreatedAtAsc(deviceId: String): List<GeofenceZone>
+
     /**
-     * 围栏以 deviceId 为主键。易主时必须删除：把"上一个孩子的学校"留成新孩子的围栏，
+     * 围栏按 deviceId 归属。易主时必须删除：把"上一个孩子的学校"留成新孩子的围栏，
      * 会让新家长收到完全错误的越界告警。重绑后由家长重新配置。
      */
     @Modifying
-    @Query("delete from Geofence g where g.deviceId = :deviceId")
+    @Query("delete from GeofenceZone g where g.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
 

@@ -66,6 +66,8 @@ class LocationTrack(
     var accuracy: Double? = null,
     var provider: String? = null,
     var ts: Long? = null,
+    /** 逆地理编码得到的文字地址（WGS-84 坐标经高德 Web 接口反查）。缺 Key 或反查失败时为空。 */
+    @Column(name = "address", length = 255) var address: String? = null,
     @Column(name = "received_at") var receivedAt: Long = 0
 )
 
@@ -110,16 +112,28 @@ class PublishedMessage(
     @Column(name = "published_at") var publishedAt: Long = 0
 )
 
+/**
+ * 电子围栏（多围栏，一对多：一台设备可配置多个安全区域）。
+ *
+ * 主键改用自增 UUID（[id]），[deviceId] 仅为归属字段并建索引；这样同一设备能存多条围栏。
+ * 旧版单围栏表 `geofences`（PK=device_id）已在迁移脚本 `V2026101202__geofence_zones.sql`
+ * 中整表迁移到本表并删除。
+ */
 @Entity
-@Table(name = "geofences")
-class Geofence(
-    @Id @Column(name = "device_id") var deviceId: String = "",
+@Table(name = "geofence_zones")
+class GeofenceZone(
+    @Id var id: String = java.util.UUID.randomUUID().toString(),
+    @Column(name = "device_id") var deviceId: String = "",
     var enabled: Boolean = false,
     var name: String? = null,
     @Column(name = "center_lat") var centerLat: Double? = null,
     @Column(name = "center_lng") var centerLng: Double? = null,
     @Column(name = "radius_meters") var radiusMeters: Int? = null,
-    @Column(name = "alert_on_exit") var alertOnExit: Boolean = true
+    /** 离开安全区时告警（默认开，与旧版行为一致）。 */
+    @Column(name = "alert_on_exit") var alertOnExit: Boolean = true,
+    /** 进入安全区时告警（默认关，P-L2 新增；多数家庭仅在"离家/离校"时关心）。 */
+    @Column(name = "alert_on_enter") var alertOnEnter: Boolean = false,
+    @Column(name = "created_at") var createdAt: Long = 0
 )
 
 @Entity

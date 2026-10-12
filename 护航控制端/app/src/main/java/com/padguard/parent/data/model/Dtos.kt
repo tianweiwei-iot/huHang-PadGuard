@@ -311,15 +311,19 @@ data class PublishedMessageDto(
 
 // ==================== 定位 / 电子围栏相关 DTO ====================
 
+/** 电子围栏（多围栏）。[id] 为 null 表示"新建"，由服务端生成。 */
 @JsonClass(generateAdapter = true)
-data class GeofenceDto(
+data class GeofenceZoneDto(
+    val id: String? = null,
     val deviceId: String,
     val enabled: Boolean,
     val name: String?,
     val centerLatitude: Double,
     val centerLongitude: Double,
     val radiusMeters: Int,
-    val alertOnExit: Boolean
+    val alertOnExit: Boolean,
+    val alertOnEnter: Boolean = false,
+    val createdAt: Long = 0
 )
 
 @JsonClass(generateAdapter = true)

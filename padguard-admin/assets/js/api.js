@@ -13,7 +13,7 @@
   // 此时 fetch("/v1/admin/...") 与页面同源，浏览器不会拦截，最稳妥。
   // 若以本地文件方式（file://）打开，浏览器会禁止页面直接请求 http 接口，
   // 这也是「Failed to fetch / 实时接口不可用」的根因，这里给出明确提示。
-  const DEFAULT_ORIGIN = "http://192.168.1.10:8090";
+  const DEFAULT_ORIGIN = "http://8.148.68.183:8090";
   const IS_FILE = (typeof location !== "undefined") && location.protocol === "file:";
 
   function resolveBaseUrl() {
@@ -332,7 +332,7 @@
     async serverProfile() {
       return liveOrMock(
         () => http("GET", "/v1/admin/server-profile"),
-        () => ({ publicHost: "192.168.1.12", port: 8090, scheme: "http", serverName: "PadGuard 管控服务端", remark: "" })
+        () => ({ publicHost: "8.148.68.183", port: 8090, scheme: "http", serverName: "PadGuard 管控服务端", remark: "" })
       );
     },
     async saveServerProfile(body) {

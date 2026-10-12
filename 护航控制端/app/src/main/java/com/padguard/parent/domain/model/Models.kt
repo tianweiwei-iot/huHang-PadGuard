@@ -510,16 +510,21 @@ enum class MapViewMode(val label: String) {
 }
 
 /**
- * 电子围栏配置
+ * 电子围栏配置（多围栏：一台设备可有多条）。
+ *
+ * [id] 为空字符串代表"尚未创建 / 本地新增草稿"；来自服务端时带真实 id。
+ * [alertOnEnter] 为 P-L2 新增：进入安全区时是否告警（默认关）。
  */
 data class GeofenceConfig(
+    val id: String = "",
     val deviceId: String,
     val enabled: Boolean = false,
     val name: String = "安全区域",
     val centerLatitude: Double = 0.0,
     val centerLongitude: Double = 0.0,
     val radiusMeters: Int = 500,
-    val alertOnExit: Boolean = true      // 越界后记录移动轨迹并触发告警
+    val alertOnExit: Boolean = true,     // 离开安全区时告警
+    val alertOnEnter: Boolean = false    // 进入安全区时告警
 )
 
 // ==================== 设备管理：接入 / 台账 / 权限 / 功能 / 分发 / 升级 ====================
@@ -668,11 +673,11 @@ data class InstalledApp(
     /** 应用图标地址（孩子端采集上报） */
     val iconUrl: String? = null,
     /**
-     * 是否已被隐藏（家长关闭了使用权限）。
-     * 隐藏的应用在孩子端桌面不显示，但仍是已安装状态。
+     * 使用权限是否已取消（家长取消了授权）。
+     * 取消授权的应用：孩子端打开时必须输入家长设定的「设备操作密码」，输对才放行；仍保留在桌面。
      */
     val hidden: Boolean = false
 ) {
-    /** 使用权限是否开启：未隐藏即视为允许使用 */
+    /** 使用权限是否开启：未取消授权即视为允许使用 */
     val allowed: Boolean get() = !hidden
 }

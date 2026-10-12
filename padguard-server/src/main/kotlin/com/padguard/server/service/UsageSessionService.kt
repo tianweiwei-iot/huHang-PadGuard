@@ -85,6 +85,29 @@ class UsageSessionService(
     }
 
     /**
+     * 当日进行中的会话若存在，返回服务端权威「已用分钟」。
+     *
+     * 公式：`已用 = 墙钟流逝(now - startEpoch)`，**封顶到当日总额度**（额度耗尽即视为已用满）。
+     * 这是「今日已用」头条数字在三端的**唯一权威口径**：孩子端首页、家长端看板、服务端锁机判定
+     * （[toDto] 的 remaining 派生、[com.padguard.child.usagesession.UsageSessionManager.isExpired]）
+     * 全部以此为准。
+     *
+     * 之所以需要这个方法：家长端统计页此前用「孩子端上报的累计前台用量」作头条
+     * （[com.padguard.server.service.StatisticsService.sumMinutes]），它与本值之间隔着
+     * 「息屏 / 锁屏 / 切后台」的空闲时长，云端真实使用场景下会差出数分钟，表现为
+     * 「家长端与孩子端时间对不上」。统一走本方法即可从定义上消除该差异。
+     */
+    fun usedMinutesIfActive(deviceId: String): Int? {
+        val now = System.currentTimeMillis()
+        val entity = usageSessionRepository.findByDeviceId(deviceId) ?: return null
+        val startEpoch = entity.startEpoch ?: return null
+        if (entity.dayKey != dayKey(now)) return null
+        val totalMinutes = resolveQuota(deviceId, now) + entity.extendedMinutes
+        val elapsedMin = ((now - startEpoch) / 60_000L).coerceAtLeast(0L).toInt()
+        return minOf(elapsedMin, totalMinutes)
+    }
+
+    /**
      * 孩子端申请延时。
      *
      * 校验：档位必须落在 [UsageSession.DELAY_OPTIONS]；单日累计延时不超过

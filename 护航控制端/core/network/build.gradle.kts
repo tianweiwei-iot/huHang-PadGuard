@@ -9,15 +9,15 @@ android {
 
     defaultConfig {
         minSdk = 26
-        buildConfigField("String", "BASE_URL", "\"https://api.padguard.com/v1/\"")
+        buildConfigField("String", "BASE_URL", "\"http://8.148.68.183:8090/v1/\"")
     }
 
     buildTypes {
         release {
-            buildConfigField("String", "BASE_URL", "\"https://api.padguard.com/v1/\"")
+            buildConfigField("String", "BASE_URL", "\"http://8.148.68.183:8090/v1/\"")
         }
         debug {
-            buildConfigField("String", "BASE_URL", "\"http://192.168.1.12:8090/v1/\"")
+            buildConfigField("String", "BASE_URL", "\"http://8.148.68.183:8090/v1/\"")
         }
     }
 

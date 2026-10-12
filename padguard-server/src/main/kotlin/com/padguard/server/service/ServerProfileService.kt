@@ -27,7 +27,7 @@ class ServerProfileService(
 ) {
     companion object {
         const val KEY = "server.profile"
-        const val DEFAULT_HOST = "192.168.1.12"
+        const val DEFAULT_HOST = "8.148.68.183"
         const val DEFAULT_PORT = 8090
         const val DEFAULT_SCHEME = "http"
         const val DEFAULT_NAME = "PadGuard 管控服务端"

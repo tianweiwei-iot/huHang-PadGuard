@@ -470,13 +470,18 @@ class CommandExecutor @Inject constructor(
     /**
      * 隐藏 / 显示应用（家长端的"使用权限"开关）。
      *
-     * 为什么隐藏而不是挂起：见 [CommandType.SET_APP_HIDDEN] 的说明。
+     * ## 取消授权 = 密码门禁，而非隐藏（关键变更）
+     * 旧实现把"关闭使用权限"做成系统级隐藏（图标消失、无法打开）。但产品要求"取消授权后
+     * 访问该应用必须输入家长密码才能访问"——图标消失等于访问不到，与"输入密码才能访问"矛盾，
+     * 且在 DO 设备上会跳过密码门禁。因此本命令只把"取消/恢复授权"的**意图**记到账本
+     * （[DeviceAdminBridge.persistHidden]），由无障碍服务统一实施密码门禁；DO/PO 设备上
+     * 不再真正隐藏图标（反而要确保它可见，否则孩子点不到、门禁也无从触发）。
      *
      * 两条硬性保护：
-     * 1. **绝不允许隐藏自己** —— 把自己藏起来等于管控端彻底失联：
+     * 1. **绝不允许操作自己** —— 把自己藏起来/锁起来等于管控端彻底失联；
      *    桌面没有入口、家长下发的指令也没有 Activity 可承载，只能靠 adb 救砖。
      *    这类"自杀式配置"必须在本层挡掉，不能指望上层永远传对参数。
-     * 2. **隐藏后同步一次台账** —— 否则家长端列表要等下一个 30 分钟周期才反映出来，
+     * 2. **记账后同步一次台账** —— 否则家长端列表要等下一个 30 分钟周期才反映出来，
      *    家长会以为开关没生效。
      */
     private fun setAppHidden(command: Command, deviceId: String): CommandAck {
@@ -485,12 +490,11 @@ class CommandExecutor @Inject constructor(
             return ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "packageName 不能为空")
         }
         if (pkg == admin.selfPackageName) {
-            return ack(command, deviceId, AckStatus.FAILED, "SELF_HIDE_DENIED", "不能隐藏管控应用自身")
+            return ack(command, deviceId, AckStatus.FAILED, "SELF_HIDE_DENIED", "不能取消管控应用自身的使用权限")
         }
         val hidden = command.payloadBoolean(KEY_HIDDEN, true)
-        // 先把"关闭/开启使用权限"的意图记到账本：非 DO 设备无法真正隐藏应用，
-        // 但"关闭权限 = 打开需密码"的软拦截闸门不依赖 DO，必须在此落地，
-        // 否则非 DO 设备上"关闭权限"会既不隐藏、也不弹密码（完全失效）。
+        // 先把"取消/恢复授权"的意图记到账本：这是无障碍密码门禁的唯一事实来源，不依赖 DO 隐藏能力；
+        // 非 DO 设备无法真正隐藏应用，但门禁照样生效；DO 设备也不再隐藏，让门禁能拦下并弹密码。
         admin.persistHidden(pkg, hidden)
         if (!admin.can(Capability.HIDE_PACKAGES)) {
             // 非 DO 设备：真实隐藏不可用，但密码闸门已通过 persistHidden 生效；
@@ -498,16 +502,20 @@ class CommandExecutor @Inject constructor(
             _effects.tryEmit(EngineEffect.SyncAppInventory)
             return ack(command, deviceId, AckStatus.SUCCESS)
         }
-        val result = admin.setApplicationHidden(pkg, hidden)
+        // DO/PO 设备：取消授权改为"密码门禁"模型，不再隐藏图标
+        // ——保证孩子点开被取消授权的应用时能被无障碍服务拦下并弹密码，而不是图标直接消失。
+        // 无论 hidden 取何值，都确保应用可见（若此前因旧逻辑被隐藏，这里揭示回来）。
+        // 真正需要系统级隐藏的场景（黑/白名单模式的整组管控）由 AppPolicyEnforcer 另行处理。
+        val result = admin.setApplicationHidden(pkg, false)
         return when (result) {
             is OpResult.Ok -> {
-                // 立刻同步一次台账：否则家长端要等下一个 30 分钟周期才看到"已隐藏"，
+                // 立刻同步一次台账：否则家长端要等下一个 30 分钟周期才看到"已取消授权"，
                 // 家长会以为开关没生效而反复点击。
                 _effects.tryEmit(EngineEffect.SyncAppInventory)
                 ack(command, deviceId, AckStatus.SUCCESS)
             }
             is OpResult.Unsupported -> ack(command, deviceId, AckStatus.UNSUPPORTED, "UNSUPPORTED", result.reason)
-            is OpResult.Failed -> ack(command, deviceId, AckStatus.FAILED, "HIDE_FAILED", result.reason)
+            is OpResult.Failed -> ack(command, deviceId, AckStatus.FAILED, "REVEAL_FAILED", result.reason)
         }
     }
 

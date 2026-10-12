@@ -25,20 +25,25 @@ import javax.inject.Inject
 /**
  * 定位 ViewModel（实时管控 > 定位）
  *
- * 职责：实时位置、地图服务与视图模式切换、电子围栏配置、越界判定与移动轨迹。
+ * 职责：实时位置、地图服务与视图模式切换、电子围栏（多围栏）配置、越界判定与移动轨迹。
  * 地图渲染为占位实现（Mock 阶段），接入百度 / 高德 SDK 时只需替换绘制层，状态层无需改动。
  */
 data class LocationUiState(
-    val provider: MapProvider = MapProvider.BAIDU,
+    val provider: MapProvider = MapProvider.AMAP,
     val viewMode: MapViewMode = MapViewMode.MODE_2D,
     val location: LocationInfo? = null,
-    val geofence: GeofenceConfig = GeofenceConfig(deviceId = ""),
+    /** 电子围栏列表（一对多，一台设备可有多条安全区域）。 */
+    val geofences: List<GeofenceConfig> = emptyList(),
     val geofenceDirty: Boolean = false,
     val track: List<LocationInfo> = emptyList(),
-    /** 当前位置是否位于围栏内；围栏未启用时恒为 true（不告警）。 */
+    /** 设备当前电量（0-100，null 表示未知）。与位置并列展示，解释"为何位置有滞后"。 */
+    val batteryLevel: Int? = null,
+    /** 当前位置是否位于「任一启用围栏」内；无启用围栏时恒为 true（不告警）。 */
     val insideGeofence: Boolean = true,
-    /** 当前位置到围栏中心的直线距离（米）。 */
+    /** 当前位置到「最近启用围栏中心」的直线距离（米）。 */
     val distanceMeters: Int = 0,
+    /** 最近启用围栏的半径（米），用于"超出 X 米"展示；无启用围栏时为 0。 */
+    val nearestRadiusMeters: Int = 0,
     val isLoading: Boolean = false,
     /** 是否已下发「立即定位」指令、正在等待孩子端回传新坐标。 */
     val isLocating: Boolean = false,
@@ -65,30 +70,29 @@ class LocationViewModel @Inject constructor(
         if (deviceId.isBlank()) return
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, error = null)
-            locationRepository.getGeofence(deviceId)
-                .onSuccess { fence ->
-                    _uiState.value = _uiState.value.copy(geofence = fence, geofenceDirty = false)
-                }
+            locationRepository.getGeofences(deviceId)
+                .onSuccess { zones -> _uiState.value = _uiState.value.copy(geofences = zones) }
                 .onFailure { _uiState.value = _uiState.value.copy(error = it.message) }
-            locationRepository.getTrackHistory(deviceId)
+            locationRepository.getTrackHistory(deviceId, 30, TRACK_HISTORY_LIMIT)
                 .onSuccess { _uiState.value = _uiState.value.copy(track = it) }
             refreshLocationInternal()
-            _uiState.value = _uiState.value.copy(isLoading = false)
+            refreshBatteryInternal()
+            _uiState.value = applyGeofenceStatus(_uiState.value.copy(isLoading = false))
         }
     }
 
     /** 刷新设备实时位置，并重算越界状态。 */
     fun refreshLocation() {
         if (deviceId.isBlank()) return
-        viewModelScope.launch { refreshLocationInternal() }
+        viewModelScope.launch {
+            refreshLocationInternal()
+            refreshBatteryInternal()
+            _uiState.value = applyGeofenceStatus(_uiState.value)
+        }
     }
 
     /**
      * 立即定位：向被管控平板下发 LOCATE 指令，由孩子端当场采集一次新坐标并上报。
-     *
-     * 指令下发后延时回拉两次（约 3 秒、再 5 秒），覆盖端侧 GPS / 网络定位与上报耗时，
-     * 避免立刻回拉读到上一次的旧坐标。孩子此刻未使用平板时，端侧受 Android 10+ 后台
-     * 定位限制无法采集，会在孩子解锁平板后自动补传，此时家长端看到的是补传后的位置。
      */
     fun locateNow() {
         if (deviceId.isBlank()) return
@@ -121,6 +125,13 @@ class LocationViewModel @Inject constructor(
             .onFailure { _uiState.value = _uiState.value.copy(error = it.message) }
     }
 
+    /** 刷新设备电量（与位置并列，反映设备当前是否在身边 / 是否低电）。 */
+    private suspend fun refreshBatteryInternal() {
+        locationRepository.getDeviceBattery(deviceId)
+            .onSuccess { battery -> _uiState.value = _uiState.value.copy(batteryLevel = battery) }
+            .onFailure { /* 电量非关键，失败仅留 null，不影响定位主流程 */ }
+    }
+
     fun selectProvider(provider: MapProvider) {
         _uiState.value = _uiState.value.copy(provider = provider)
     }
@@ -129,41 +140,78 @@ class LocationViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(viewMode = mode)
     }
 
-    /** 修改围栏草稿（仅改表单，不立即下发）。围栏参数变化会实时重算越界状态。 */
-    fun editGeofence(transform: (GeofenceConfig) -> GeofenceConfig) {
-        val next = _uiState.value.copy(
-            geofence = transform(_uiState.value.geofence),
-            geofenceDirty = true
+    /** 新增一条围栏草稿：以设备当前位置为圆心，便于家长快速圈定安全区域。 */
+    fun addGeofence() {
+        if (deviceId.isBlank()) return
+        val location = _uiState.value.location ?: run {
+            // 尚未获取到设备位置时禁止建围栏：否则圆心会落在 (0,0)（非洲外海），导致越界判定失真。
+            _uiState.value = _uiState.value.copy(toast = "尚未获取到设备位置")
+            return
+        }
+        val seq = _uiState.value.geofences.size + 1
+        val draft = GeofenceConfig(
+            id = "", deviceId = deviceId, enabled = true,
+            name = "安全区域 $seq",
+            centerLatitude = location.latitude,
+            centerLongitude = location.longitude,
+            radiusMeters = 500, alertOnExit = true, alertOnEnter = false
         )
-        _uiState.value = applyGeofenceStatus(next)
+        viewModelScope.launch {
+            locationRepository.createGeofence(draft)
+                .onSuccess { saved -> _uiState.value = _uiState.value.copy(geofences = _uiState.value.geofences + saved, toast = "已新增围栏") }
+                .onFailure { _uiState.value = _uiState.value.copy(toast = "新增围栏失败：${it.message}") }
+        }
     }
 
-    /** 以设备当前位置作为围栏圆心。 */
-    fun setGeofenceCenterToDevice() {
+    /** 编辑某条围栏草稿（仅改列表内存，不立即下发；保存时调用 [saveZone]）。 */
+    fun updateZoneDraft(id: String, transform: (GeofenceConfig) -> GeofenceConfig) {
+        _uiState.value = applyGeofenceStatus(
+            _uiState.value.copy(
+                geofences = _uiState.value.geofences.map { if (it.id == id) transform(it) else it },
+                geofenceDirty = true
+            )
+        )
+    }
+
+    /** 以设备当前位置作为某条围栏的圆心。 */
+    fun setZoneCenterToDevice(id: String) {
         val location = _uiState.value.location ?: run {
             _uiState.value = _uiState.value.copy(toast = "尚未获取到设备位置")
             return
         }
-        editGeofence {
-            it.copy(
-                centerLatitude = location.latitude,
-                centerLongitude = location.longitude,
-                enabled = true
-            )
+        updateZoneDraft(id) {
+            it.copy(centerLatitude = location.latitude, centerLongitude = location.longitude, enabled = true)
         }
     }
 
-    /** 保存围栏配置并下发至被管控平板。 */
-    fun saveGeofence() {
+    /** 保存某条围栏（id 为空按新建，否则按更新）。 */
+    fun saveZone(zone: GeofenceConfig) {
         if (deviceId.isBlank()) return
         viewModelScope.launch {
-            locationRepository.updateGeofence(_uiState.value.geofence)
+            val task = if (zone.id.isBlank()) locationRepository.createGeofence(zone)
+            else locationRepository.updateGeofence(zone)
+            task
                 .onSuccess { saved ->
-                    _uiState.value = applyGeofenceStatus(
-                        _uiState.value.copy(geofence = saved, geofenceDirty = false, toast = "围栏配置已下发")
+                    _uiState.value = _uiState.value.copy(
+                        geofences = _uiState.value.geofences.replaceOrAppend(saved) { it.id == zone.id },
+                        geofenceDirty = false, toast = "围栏已保存"
                     )
                 }
-                .onFailure { _uiState.value = _uiState.value.copy(toast = "围栏下发失败：${it.message}") }
+                .onFailure { _uiState.value = _uiState.value.copy(toast = "围栏保存失败：${it.message}") }
+        }
+    }
+
+    /** 删除某条围栏。 */
+    fun deleteZone(id: String) {
+        if (deviceId.isBlank() || id.isBlank()) return
+        viewModelScope.launch {
+            locationRepository.deleteGeofence(deviceId, id)
+                .onSuccess {
+                    _uiState.value = applyGeofenceStatus(
+                        _uiState.value.copy(geofences = _uiState.value.geofences.filter { it.id != id }, toast = "围栏已删除")
+                    )
+                }
+                .onFailure { _uiState.value = _uiState.value.copy(toast = "删除围栏失败：${it.message}") }
         }
     }
 
@@ -172,14 +220,22 @@ class LocationViewModel @Inject constructor(
     }
 
     private fun applyGeofenceStatus(state: LocationUiState): LocationUiState {
-        val location = state.location ?: return state.copy(insideGeofence = true, distanceMeters = 0)
-        val geofence = state.geofence
-        if (!geofence.enabled) return state.copy(insideGeofence = true, distanceMeters = 0)
-        val distance = distanceMeters(
-            geofence.centerLatitude, geofence.centerLongitude,
-            location.latitude, location.longitude
+        val location = state.location ?: return state.copy(insideGeofence = true, distanceMeters = 0, nearestRadiusMeters = 0)
+        val enabled = state.geofences.filter { it.enabled }
+        if (enabled.isEmpty()) return state.copy(insideGeofence = true, distanceMeters = 0, nearestRadiusMeters = 0)
+        var nearest = Int.MAX_VALUE
+        var nearestRadius = 0
+        var insideAny = false
+        for (g in enabled) {
+            val d = distanceMeters(g.centerLatitude, g.centerLongitude, location.latitude, location.longitude)
+            if (d <= g.radiusMeters) insideAny = true
+            if (d < nearest) { nearest = d; nearestRadius = g.radiusMeters }
+        }
+        return state.copy(
+            insideGeofence = insideAny,
+            distanceMeters = if (nearest == Int.MAX_VALUE) 0 else nearest,
+            nearestRadiusMeters = nearestRadius
         )
-        return state.copy(insideGeofence = distance <= geofence.radiusMeters, distanceMeters = distance)
     }
 
     /** 球面距离（Haversine），返回米。 */
@@ -194,9 +250,18 @@ class LocationViewModel @Inject constructor(
 
     private companion object {
         const val EARTH_RADIUS_METERS = 6_371_000.0
+        /** 历史轨迹拉取上限：覆盖 30 天 @5 分钟间隔（约 8640 点），避免服务端截断。 */
+        const val TRACK_HISTORY_LIMIT = 9000
         /** 下发定位指令后首次回拉位置的延时（毫秒）。 */
         const val LOCATE_FIRST_PULL_DELAY_MS = 3_000L
         /** 首次回拉后再次补拉一次的延时（毫秒）。 */
         const val LOCATE_SECOND_PULL_DELAY_MS = 5_000L
     }
+}
+
+/** 以 [matcher] 命中则替换，否则追加到列表末尾。 */
+private fun List<GeofenceConfig>.replaceOrAppend(zone: GeofenceConfig, matcher: (GeofenceConfig) -> Boolean): List<GeofenceConfig> {
+    val idx = indexOfFirst(matcher)
+    return if (idx >= 0) mapIndexed { i, it -> if (i == idx) zone else it }
+    else this + zone
 }

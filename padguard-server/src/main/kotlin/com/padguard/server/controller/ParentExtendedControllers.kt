@@ -96,7 +96,7 @@ class ParentMessageController(private val messageService: MessageService) {
         ApiResponse.ok(messageService.listMessages(userId, deviceId, limit))
 }
 
-// ==================== 定位 / 电子围栏 ====================
+// ==================== 定位 / 电子围栏（多围栏） ====================
 @RestController
 @RequestMapping("/v1/location")
 class ParentLocationController(private val geofenceService: GeofenceService) {
@@ -105,17 +105,41 @@ class ParentLocationController(private val geofenceService: GeofenceService) {
     fun current(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
         ApiResponse.ok(geofenceService.currentLocation(userId, deviceId))
 
-    @GetMapping("/{deviceId}/geofence")
-    fun geofence(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
-        ApiResponse.ok(geofenceService.getGeofence(userId, deviceId))
+    /** 设备下全部电子围栏（一对多）。 */
+    @GetMapping("/{deviceId}/geofences")
+    fun geofences(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+        ApiResponse.ok(geofenceService.listZones(userId, deviceId))
 
-    @PutMapping("/{deviceId}/geofence")
-    fun updateGeofence(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: GeofenceDto) =
-        ApiResponse.ok(geofenceService.updateGeofence(userId, deviceId, req))
+    /** 新建电子围栏（[GeofenceZoneDto.id] 留空）。 */
+    @PostMapping("/{deviceId}/geofences")
+    fun createGeofence(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String,
+        @RequestBody req: GeofenceZoneDto
+    ) = ApiResponse.ok(geofenceService.createZone(userId, deviceId, req))
 
+    /** 更新指定电子围栏。 */
+    @PutMapping("/{deviceId}/geofences/{id}")
+    fun updateGeofence(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @PathVariable id: String,
+        @RequestBody req: GeofenceZoneDto
+    ) = ApiResponse.ok(geofenceService.updateZone(userId, deviceId, id, req))
+
+    /** 删除指定电子围栏。 */
+    @DeleteMapping("/{deviceId}/geofences/{id}")
+    fun deleteGeofence(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @PathVariable id: String
+    ) = ApiResponse.ok<Any?>(run { geofenceService.deleteZone(userId, deviceId, id); null })
+
+    /**
+     * 全量历史轨迹时间线：最近 [days] 天内的定位点（默认 7 天），按时间倒序。
+     * 与旧版"越界轨迹"不同，这里返回的是全部上报点，由前端按日分组回放。
+     */
     @GetMapping("/{deviceId}/track")
-    fun track(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestParam(required = false, defaultValue = "200") limit: Int) =
-        ApiResponse.ok(geofenceService.trackHistory(userId, deviceId, limit))
+    fun track(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String,
+        @RequestParam(required = false, defaultValue = "5000") limit: Int,
+        @RequestParam(required = false, defaultValue = "30") days: Int
+    ) = ApiResponse.ok(geofenceService.trackHistory(userId, deviceId, limit, days))
 }
 
 // ==================== 策略扩展（时段/应用/上网/模板） ====================

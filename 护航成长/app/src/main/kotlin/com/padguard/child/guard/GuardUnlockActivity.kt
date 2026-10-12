@@ -50,14 +50,19 @@ class GuardUnlockActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 未启用密码时本界面无意义，直接结束。
-        if (!manager.isEnabledNow()) {
-            finish()
-            return
-        }
         // 可选：孩子从桌面点开「受管控且需密码」的应用时传入，
         // 解锁成功后自动打开该应用（避免"输完密码还要再点一次"）。
         val launchPackage = intent.getStringExtra(EXTRA_LAUNCH_PACKAGE)
+        if (!manager.isEnabledNow()) {
+            // 未设置「设备操作密码」：取消授权的应用仍硬拦截，这里只告知家长需先设置密码，
+            // 不直接放行（严格做到授权管控）。设置/安装等其它入口无密码可验，直接关闭。
+            if (launchPackage != null) {
+                setContent { NeedPasswordNoticeScreen(onClose = { finish() }) }
+            } else {
+                finish()
+            }
+            return
+        }
         setContent {
             GuardUnlockScreen(
                 manager = manager,
@@ -157,6 +162,39 @@ private fun GuardUnlockScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("取消")
+            }
+        }
+    }
+}
+
+/**
+ * 未设置「设备操作密码」时，孩子点开"取消授权"应用的提示页（硬拦截，不直接放行）。
+ *
+ * 严格做到授权管控：应用已取消授权，但本地没有可比对密码，无法核验身份；
+ * 因此不能放行，只能提示家长先在控制端设置「设备操作密码」后才会真正生效。
+ */
+@Composable
+private fun NeedPasswordNoticeScreen(onClose: () -> Unit) {
+    PadGuardTheme {
+        Column(
+            modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("应用已取消授权", style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "该应用已被家长取消使用授权，需输入家长设定的「设备操作密码」才能打开。\n" +
+                    "当前尚未设置设备操作密码，请家长在控制端「设备详情」中先设置，方可生效。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+            Spacer(Modifier.height(20.dp))
+            Button(
+                onClick = onClose,
+                modifier = Modifier.fillMaxWidth().height(52.dp)
+            ) {
+                Text("我知道了")
             }
         }
     }

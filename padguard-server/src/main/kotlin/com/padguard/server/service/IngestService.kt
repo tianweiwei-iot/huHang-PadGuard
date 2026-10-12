@@ -26,7 +26,9 @@ class IngestService(
     private val unlockService: UnlockService,
     private val statisticsService: StatisticsService,
     private val webSocketPush: WebSocketPushService,
-    private val locationTrackRepository: LocationTrackRepository
+    private val locationTrackRepository: LocationTrackRepository,
+    private val geoCoderService: GeoCoderService,
+    private val locationAddressBackfill: LocationAddressBackfill
 ) {
     private val log = LoggerFactory.getLogger(IngestService::class.java)
 
@@ -147,18 +149,34 @@ class IngestService(
             .firstOrNull()
 
         // 批量落库：单次 saveAll 取代逐点 save，配合 hibernate.jdbc.batch_size 把 DB 往返从 N 降到 N/batch_size。
-        locationTrackRepository.saveAll(
+        // 落库阶段**不做**逆地理编码：逆地理是外部 HTTP 调用，若直接嵌在写入路径，一旦配置高德 Web Key，
+        // 每批可达数百个点会变成数百次同步请求，频控 / 超时将直接拖慢入库。
+        // 坐标先以纯数据落库（address 暂留空），地址反查交由 [LocationAddressBackfill] 在后台异步回填。
+        val saved = locationTrackRepository.saveAll(
             points.map { p ->
                 LocationTrack(
                     id = UUID.randomUUID().toString(), deviceId = req.deviceId,
                     lat = p.lat, lng = p.lng, accuracy = p.accuracy,
-                    provider = p.provider, ts = p.ts, receivedAt = System.currentTimeMillis()
+                    provider = p.provider, ts = p.ts, address = null,
+                    receivedAt = System.currentTimeMillis()
                 )
             }
         )
 
-        // 围栏越界检测（内存批处理，仅一次回查）
-        geofenceService.detectGeofenceExits(req.deviceId, points, prevPoint)
+        // 仅当配置了高德 Web Key 才需要回填地址；默认（无 Key）不发起任何异步任务，零开销。
+        if (geoCoderService.isConfigured()) {
+            val toGeocode = saved.mapNotNull { e ->
+                if (e.lat != null && e.lng != null) {
+                    LocationTrackAddressInput(e.id, e.lat!!, e.lng!!)
+                } else null
+            }
+            if (toGeocode.isNotEmpty()) {
+                locationAddressBackfill.backfill(toGeocode)
+            }
+        }
+
+        // 围栏进入/离开检测（多围栏，内存批处理，仅一次回查）
+        geofenceService.detectTransitions(req.deviceId, points, prevPoint)
 
         // 更新设备最新位置（取本批中 ts 最大者，而非简单取列表末项，避免乱序上报）
         val last = points.maxByOrNull { it.ts ?: 0L } ?: points.last()

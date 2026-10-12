@@ -283,14 +283,23 @@ interface LocationRepository {
     /** 获取设备实时位置 */
     suspend fun getDeviceLocation(deviceId: String): Result<LocationInfo>
 
-    /** 获取电子围栏配置 */
-    suspend fun getGeofence(deviceId: String): Result<GeofenceConfig>
+    /** 获取设备下全部电子围栏（一对多） */
+    suspend fun getGeofences(deviceId: String): Result<List<GeofenceConfig>>
 
-    /** 保存电子围栏配置并下发至被管控平板 */
-    suspend fun updateGeofence(config: GeofenceConfig): Result<GeofenceConfig>
+    /** 新建电子围栏 */
+    suspend fun createGeofence(zone: GeofenceConfig): Result<GeofenceConfig>
 
-    /** 获取设备越界后的移动轨迹（按时间正序） */
-    suspend fun getTrackHistory(deviceId: String): Result<List<LocationInfo>>
+    /** 更新指定电子围栏 */
+    suspend fun updateGeofence(zone: GeofenceConfig): Result<GeofenceConfig>
+
+    /** 删除指定电子围栏 */
+    suspend fun deleteGeofence(deviceId: String, id: String): Result<Unit>
+
+    /** 获取全量历史轨迹时间线（最近 days 天，按时间倒序）。[limit] 上限需覆盖 30 天全量轨迹。 */
+    suspend fun getTrackHistory(deviceId: String, days: Int = 30, limit: Int = 9000): Result<List<LocationInfo>>
+
+    /** 获取设备当前电量（0-100，null 表示未知）。取自设备详情心跳上报的 batteryLevel。 */
+    suspend fun getDeviceBattery(deviceId: String): Result<Int?>
 
     /**
      * 请求设备立即定位（下发 LOCATE 指令）。

@@ -7,7 +7,7 @@ import com.padguard.server.repository.CommandRepository
 import com.padguard.server.repository.DeviceFeaturePolicyRepository
 import com.padguard.server.repository.DevicePermissionPolicyRepository
 import com.padguard.server.repository.DeviceSettingRepository
-import com.padguard.server.repository.GeofenceRepository
+import com.padguard.server.repository.GeofenceZoneRepository
 import com.padguard.server.repository.InstalledAppRepository
 import com.padguard.server.repository.LocationTrackRepository
 import com.padguard.server.repository.MediaTaskRepository
@@ -47,7 +47,7 @@ class DeviceDataPurgeService(
     private val commandRepository: CommandRepository,
     private val alertRepository: AlertRepository,
     private val locationTrackRepository: LocationTrackRepository,
-    private val geofenceRepository: GeofenceRepository,
+    private val geofenceRepository: GeofenceZoneRepository,
     private val publishedMessageRepository: PublishedMessageRepository,
     private val mediaTaskRepository: MediaTaskRepository,
     private val unlockTicketRepository: UnlockTicketRepository,
@@ -83,7 +83,7 @@ class DeviceDataPurgeService(
         removed += purgeOne("unlock_tickets", deviceId) { unlockTicketRepository.deleteByDeviceId(it) }
         removed += purgeOne("app_policies", deviceId) { appPolicyRepository.deleteByDeviceId(it) }
         removed += purgeOne("time_restrictions", deviceId) { timeRestrictionRepository.deleteByDeviceId(it) }
-        removed += purgeOne("geofences", deviceId) { geofenceRepository.deleteByDeviceId(it) }
+        removed += purgeOne("geofence_zones", deviceId) { geofenceRepository.deleteByDeviceId(it) }
         removed += purgeOne("device_settings", deviceId) { deviceSettingRepository.deleteByDeviceId(it) }
         removed += purgeOne("app_distributions", deviceId) { appDistributionRepository.deleteByDeviceId(it) }
         removed += purgeOne("device_permission_policy", deviceId) { devicePermissionPolicyRepository.deleteByDeviceId(it) }

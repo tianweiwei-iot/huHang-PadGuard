@@ -58,7 +58,7 @@ import com.padguard.data.model.DailyViolationDto
 import com.padguard.data.model.DeviceDto
 import com.padguard.data.model.DeviceGroupDto
 import com.padguard.data.model.DomainVisitDto
-import com.padguard.data.model.GeofenceDto
+import com.padguard.data.model.GeofenceZoneDto
 import com.padguard.data.model.LocationDto
 import com.padguard.data.model.LocationTrackPointDto
 import com.padguard.data.model.LoginPasswordRequest
@@ -720,15 +720,26 @@ class ApiDataSource @Inject constructor(
     override suspend fun getDeviceLocation(deviceId: String): Result<LocationInfo> =
         exec { locationApi.getDeviceLocation(deviceId) }.map { it.data?.toDomain() ?: throw Exception("获取位置失败") }
 
-    override suspend fun getGeofence(deviceId: String): Result<com.padguard.domain.model.GeofenceConfig> =
-        exec { locationApi.getGeofence(deviceId) }.map { it.data?.toDomain() ?: throw Exception("读取围栏失败") }
+    override suspend fun getGeofences(deviceId: String): Result<List<com.padguard.domain.model.GeofenceConfig>> =
+        exec { locationApi.getGeofences(deviceId) }.map { it.data.orEmpty().map { z -> z.toDomain() } }
 
-    override suspend fun updateGeofence(config: com.padguard.domain.model.GeofenceConfig): Result<com.padguard.domain.model.GeofenceConfig> =
-        exec { locationApi.updateGeofence(config.deviceId, config.toDto()) }
+    override suspend fun createGeofence(zone: com.padguard.domain.model.GeofenceConfig): Result<com.padguard.domain.model.GeofenceConfig> =
+        exec { locationApi.createGeofence(zone.deviceId, zone.toDto()) }
+            .map { it.data?.toDomain() ?: throw Exception("创建围栏失败") }
+
+    override suspend fun updateGeofence(zone: com.padguard.domain.model.GeofenceConfig): Result<com.padguard.domain.model.GeofenceConfig> =
+        exec { locationApi.updateGeofence(zone.deviceId, zone.id, zone.toDto()) }
             .map { it.data?.toDomain() ?: throw Exception("更新围栏失败") }
 
-    override suspend fun getTrackHistory(deviceId: String): Result<List<LocationInfo>> =
-        exec { locationApi.getTrackHistory(deviceId) }.map { it.data.orEmpty().map { p -> p.toDomain() } }
+    override suspend fun deleteGeofence(deviceId: String, id: String): Result<Unit> =
+        exec { locationApi.deleteGeofence(deviceId, id) }.map { Unit }
+
+    override suspend fun getTrackHistory(deviceId: String, days: Int, limit: Int): Result<List<LocationInfo>> =
+        exec { locationApi.getTrackHistory(deviceId, days, limit) }.map { it.data.orEmpty().map { p -> p.toDomain() } }
+
+    // 电量经设备详情心跳上报的 batteryLevel 字段暴露；取不到时返回 null（页面显示"未知"）。
+    override suspend fun getDeviceBattery(deviceId: String): Result<Int?> =
+        exec { deviceApi.getDeviceDetail(deviceId) }.map { it.data?.toDomain()?.batteryLevel }
 
     // 只回"指令已受理"，位置要等孩子端上报后由 getDeviceLocation 拉取。
     // 端点挂在 monitor 前缀下（与服务端 /v1/monitor/{deviceId}/locate 对齐），故走 monitorApi 而非 locationApi。
@@ -1248,14 +1259,16 @@ private fun LocationDto.toDomain(): LocationInfo = LocationInfo(
     latitude = latitude, longitude = longitude, address = address, accuracy = accuracy, timestamp = timestamp
 )
 
-private fun GeofenceDto.toDomain(): GeofenceConfig = GeofenceConfig(
-    deviceId = deviceId, enabled = enabled, name = name ?: "安全区域", centerLatitude = centerLatitude,
-    centerLongitude = centerLongitude, radiusMeters = radiusMeters, alertOnExit = alertOnExit
+private fun GeofenceZoneDto.toDomain(): GeofenceConfig = GeofenceConfig(
+    id = id ?: "", deviceId = deviceId, enabled = enabled, name = name ?: "安全区域",
+    centerLatitude = centerLatitude, centerLongitude = centerLongitude, radiusMeters = radiusMeters,
+    alertOnExit = alertOnExit, alertOnEnter = alertOnEnter
 )
 
-private fun GeofenceConfig.toDto(): GeofenceDto = GeofenceDto(
-    deviceId = deviceId, enabled = enabled, name = name, centerLatitude = centerLatitude,
-    centerLongitude = centerLongitude, radiusMeters = radiusMeters, alertOnExit = alertOnExit
+private fun GeofenceConfig.toDto(): GeofenceZoneDto = GeofenceZoneDto(
+    id = id.ifEmpty { null }, deviceId = deviceId, enabled = enabled, name = name,
+    centerLatitude = centerLatitude, centerLongitude = centerLongitude, radiusMeters = radiusMeters,
+    alertOnExit = alertOnExit, alertOnEnter = alertOnEnter
 )
 
 private fun TimeRestrictionDto.toDomain(): TimeRestriction = TimeRestriction(

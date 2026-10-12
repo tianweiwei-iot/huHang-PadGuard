@@ -13,12 +13,16 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shield
@@ -47,6 +51,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -59,9 +64,17 @@ import com.padguard.domain.model.MapViewMode
 import com.padguard.presentation.ui.theme.PadGuardColors
 import com.padguard.presentation.util.TimeFormat
 import com.padguard.presentation.viewmodel.LocationViewModel
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
+import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 private val GEOFENCE_RADIUS_RANGE = 100f..5000f
 private const val METERS_PER_LAT_DEGREE = 111_320.0
@@ -70,8 +83,8 @@ private const val DEFAULT_VIEW_RADIUS_METERS = 800.0
 /**
  * 实时管控 · 定位
  *
- * 实时获取被管控平板位置并在地图上展示，支持百度 / 高德地图与 2D / 3D 视图，
- * 支持设置电子围栏；设备越界后记录移动轨迹。
+ * 实时获取被管控平板位置并在地图上展示，支持百度 / 高德地图与 2D / 3D 视图；
+ * 支持多电子围栏（一对多）；设备越界 / 进入安全区均记录轨迹。
  * deviceId 由导航路由参数经 SavedStateHandle 注入 ViewModel。
  */
 @Composable
@@ -105,10 +118,10 @@ fun LocationScreen(
         ) {
             DeviceLocationCard(
                 location = uiState.location,
-                geofence = uiState.geofence,
-                track = uiState.track,
+                geofences = uiState.geofences,
                 provider = uiState.provider,
                 viewMode = uiState.viewMode,
+                batteryLevel = uiState.batteryLevel,
                 onProviderChange = viewModel::selectProvider,
                 onViewModeChange = viewModel::selectViewMode,
                 onRefresh = viewModel::refreshLocation,
@@ -118,20 +131,21 @@ fun LocationScreen(
 
             GeofenceStatusBanner(
                 inside = uiState.insideGeofence,
-                enabled = uiState.geofence.enabled,
+                hasEnabled = uiState.geofences.any { it.enabled },
                 distanceMeters = uiState.distanceMeters,
-                radiusMeters = uiState.geofence.radiusMeters
+                nearestRadiusMeters = uiState.nearestRadiusMeters
             )
 
-            GeofenceConfigCard(
-                geofence = uiState.geofence,
-                dirty = uiState.geofenceDirty,
-                onEdit = viewModel::editGeofence,
-                onUseCurrentLocation = viewModel::setGeofenceCenterToDevice,
-                onSave = viewModel::saveGeofence
+            GeofenceListCard(
+                geofences = uiState.geofences,
+                onAdd = viewModel::addGeofence,
+                onUpdateDraft = viewModel::updateZoneDraft,
+                onSetCenter = viewModel::setZoneCenterToDevice,
+                onSave = viewModel::saveZone,
+                onDelete = viewModel::deleteZone
             )
 
-            TrackHistoryCard(track = uiState.track)
+            TrackHistoryCard(track = uiState.track, geofences = uiState.geofences)
         }
     }
 }
@@ -139,10 +153,10 @@ fun LocationScreen(
 @Composable
 private fun DeviceLocationCard(
     location: LocationInfo?,
-    geofence: GeofenceConfig,
-    track: List<LocationInfo>,
+    geofences: List<GeofenceConfig>,
     provider: MapProvider,
     viewMode: MapViewMode,
+    batteryLevel: Int?,
     onProviderChange: (MapProvider) -> Unit,
     onViewModeChange: (MapViewMode) -> Unit,
     onRefresh: () -> Unit,
@@ -177,20 +191,33 @@ private fun DeviceLocationCard(
         )
 
         Spacer(modifier = Modifier.height(12.dp))
+        val context = LocalContext.current
+        // 仅在「已配置高德 Key 且用户选中高德」时使用真实底图，否则回退等距投影占位图。
+        val useRealMap = remember(provider) { readAmapKey(context).isNotBlank() && provider == MapProvider.AMAP }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(240.dp)
                 .clip(RoundedCornerShape(12.dp))
         ) {
-            GeofenceMapCanvas(
-                location = location,
-                geofence = geofence,
-                track = track,
-                provider = provider,
-                viewMode = viewMode,
-                modifier = Modifier.fillMaxSize()
-            )
+            if (useRealMap) {
+                AmapMapView(
+                    location = location,
+                    geofences = geofences,
+                    track = emptyList(),
+                    viewMode = viewMode,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                GeofenceMapCanvas(
+                    location = location,
+                    geofences = geofences,
+                    track = emptyList(),
+                    provider = provider,
+                    viewMode = viewMode,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
             Surface(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -207,7 +234,11 @@ private fun DeviceLocationCard(
             }
         }
         Text(
-            text = "地图为占位渲染（Mock），接入百度 / 高德地图 SDK 后显示真实底图。",
+            text = if (useRealMap) {
+                "地图由高德提供，坐标为 GCJ-02；设备 GPS（WGS-84）已做偏移转换后绘制；绿色圆圈为各安全区域。"
+            } else {
+                "未配置高德地图 Key，当前为示意占位图；配置 Key 后将显示真实底图。"
+            },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
             modifier = Modifier.padding(top = 8.dp)
@@ -240,6 +271,41 @@ private fun DeviceLocationCard(
             )
         }
 
+        // 设备电量（与位置并列，低电/关机能解释"为何位置有滞后"）
+        Spacer(modifier = Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "设备电量",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            if (batteryLevel == null) {
+                Text(
+                    text = "未知",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            } else {
+                val battColor = when {
+                    batteryLevel <= 15 -> PadGuardColors.WarningRed
+                    batteryLevel <= 30 -> Color(0xFFE6A23C)
+                    else -> PadGuardColors.SuccessGreen
+                }
+                Surface(
+                    color = battColor.copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = "$batteryLevel%",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = battColor,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(12.dp))
         Button(
             onClick = onLocate,
@@ -267,28 +333,29 @@ private fun DeviceLocationCard(
 @Composable
 private fun GeofenceStatusBanner(
     inside: Boolean,
-    enabled: Boolean,
+    hasEnabled: Boolean,
     distanceMeters: Int,
-    radiusMeters: Int
+    nearestRadiusMeters: Int
 ) {
     val style = when {
-        !enabled -> GeofenceBannerStyle(
+        !hasEnabled -> GeofenceBannerStyle(
             background = Color(0xFFF0F2F5),
             foreground = Color(0xFF666666),
             icon = Icons.Default.Shield,
-            message = "电子围栏未启用，设备位置不受范围限制"
+            message = "未启用任何安全区域，设备位置不受范围限制"
         )
         inside -> GeofenceBannerStyle(
             background = Color(0xFFE8F5E9),
             foreground = PadGuardColors.SuccessGreen,
             icon = Icons.Default.CheckCircle,
-            message = "设备在安全区域内（距中心 ${distanceMeters}米 / 半径 ${radiusMeters}米）"
+            message = "设备在安全区域内（距最近安全区中心 ${distanceMeters}米）"
         )
         else -> GeofenceBannerStyle(
             background = PadGuardColors.WarningRed.copy(alpha = 0.1f),
             foreground = PadGuardColors.WarningRed,
             icon = Icons.Default.Warning,
-            message = "设备已越出安全区域（距中心 ${distanceMeters}米 / 超出 ${(distanceMeters - radiusMeters).coerceAtLeast(0)}米），已记录移动轨迹"
+            message = "设备已越出安全区域（距最近中心 ${distanceMeters}米 / 超出 " +
+                "${(distanceMeters - nearestRadiusMeters).coerceAtLeast(0)}米）"
         )
     }
     Surface(color = style.background, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
@@ -308,153 +375,223 @@ private fun GeofenceStatusBanner(
 }
 
 @Composable
-private fun GeofenceConfigCard(
-    geofence: GeofenceConfig,
-    dirty: Boolean,
-    onEdit: ((GeofenceConfig) -> GeofenceConfig) -> Unit,
-    onUseCurrentLocation: () -> Unit,
-    onSave: () -> Unit
+private fun GeofenceListCard(
+    geofences: List<GeofenceConfig>,
+    onAdd: () -> Unit,
+    onUpdateDraft: (String, (GeofenceConfig) -> GeofenceConfig) -> Unit,
+    onSetCenter: (String) -> Unit,
+    onSave: (GeofenceConfig) -> Unit,
+    onDelete: (String) -> Unit
 ) {
-    RealtimeCard(title = "电子围栏") {
+    RealtimeCard(title = "电子围栏（安全区域）") {
+        if (geofences.isEmpty()) {
+            Text(
+                text = "尚未设置安全区域，点击下方按钮新增。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+        geofences.forEachIndexed { index, zone ->
+            if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+            GeofenceZoneItem(
+                zone = zone,
+                onUpdateDraft = onUpdateDraft,
+                onSetCenter = onSetCenter,
+                onSave = onSave,
+                onDelete = onDelete
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+        OutlinedButton(
+            onClick = onAdd,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("新增安全区域")
+        }
+        Text(
+            text = "可设置多个安全区域（家 / 学校 / 补习班等），进入或离开任一区域均可选择是否告警。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            modifier = Modifier.padding(top = 6.dp)
+        )
+    }
+}
+
+@Composable
+private fun GeofenceZoneItem(
+    zone: GeofenceConfig,
+    onUpdateDraft: (String, (GeofenceConfig) -> GeofenceConfig) -> Unit,
+    onSetCenter: (String) -> Unit,
+    onSave: (GeofenceConfig) -> Unit,
+    onDelete: (String) -> Unit
+) {
+    Column(modifier = Modifier.padding(vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "区域 ${zone.name.ifBlank { "未命名" }}",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = { onDelete(zone.id) }) {
+                Icon(Icons.Default.Delete, contentDescription = "删除区域", tint = PadGuardColors.WarningRed)
+            }
+        }
+
         SettingSwitchRow(
-            title = "启用电子围栏",
-            subtitle = "设备越界后自动记录移动轨迹并告警",
-            checked = geofence.enabled,
-            onCheckedChange = { value -> onEdit { it.copy(enabled = value) } }
+            title = "启用",
+            checked = zone.enabled,
+            onCheckedChange = { v: Boolean -> onUpdateDraft(zone.id) { it.copy(enabled = v) } }
         )
 
         OutlinedTextField(
-            value = geofence.name,
-            onValueChange = { value -> onEdit { it.copy(name = value) } },
+            value = zone.name,
+            onValueChange = { v: String -> onUpdateDraft(zone.id) { it.copy(name = v) } },
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 8.dp),
             singleLine = true,
-            enabled = geofence.enabled,
-            label = { Text("围栏名称") }
+            enabled = zone.enabled,
+            label = { Text("区域名称") }
         )
 
         Spacer(modifier = Modifier.height(8.dp))
         SettingSliderRow(
             title = "围栏半径",
-            valueText = "${geofence.radiusMeters}米",
-            value = geofence.radiusMeters.toFloat(),
+            valueText = "${zone.radiusMeters}米",
+            value = zone.radiusMeters.toFloat(),
             valueRange = GEOFENCE_RADIUS_RANGE,
             steps = 48,
-            enabled = geofence.enabled,
-            onValueChange = { value -> onEdit { it.copy(radiusMeters = value.roundToInt()) } }
+            enabled = zone.enabled,
+            onValueChange = { v: Float -> onUpdateDraft(zone.id) { it.copy(radiusMeters = v.roundToInt()) } }
         )
 
         SettingSwitchRow(
-            title = "越界后告警",
-            checked = geofence.alertOnExit,
-            enabled = geofence.enabled,
-            onCheckedChange = { value -> onEdit { it.copy(alertOnExit = value) } }
+            title = "离开该区域时告警",
+            checked = zone.alertOnExit,
+            enabled = zone.enabled,
+            onCheckedChange = { v: Boolean -> onUpdateDraft(zone.id) { it.copy(alertOnExit = v) } }
+        )
+
+        SettingSwitchRow(
+            title = "进入该区域时告警",
+            checked = zone.alertOnEnter,
+            enabled = zone.enabled,
+            onCheckedChange = { v: Boolean -> onUpdateDraft(zone.id) { it.copy(alertOnEnter = v) } }
         )
 
         Spacer(modifier = Modifier.height(4.dp))
-        OutlinedButton(
-            onClick = onUseCurrentLocation,
-            enabled = geofence.enabled,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("以设备当前位置为中心")
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (dirty) {
-                Text(
-                    text = "围栏已修改，待下发",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = PadGuardColors.WarningRed
-                )
+            OutlinedButton(
+                onClick = { onSetCenter(zone.id) },
+                enabled = zone.enabled,
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.MyLocation, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("以当前位置为中心")
             }
             Spacer(modifier = Modifier.weight(1f))
-            Button(onClick = onSave, enabled = dirty, shape = RoundedCornerShape(12.dp)) {
-                Text("保存并下发")
+            Button(onClick = { onSave(zone) }, enabled = zone.enabled, shape = RoundedCornerShape(12.dp)) {
+                Text("保存")
             }
         }
     }
 }
 
 @Composable
-private fun TrackHistoryCard(track: List<LocationInfo>) {
-    RealtimeCard(title = "移动轨迹") {
+private fun TrackHistoryCard(track: List<LocationInfo>, geofences: List<GeofenceConfig>) {
+    RealtimeCard(title = "历史轨迹时间线") {
         if (track.isEmpty()) {
             Text(
-                text = "暂无越界轨迹记录",
+                text = "暂无轨迹记录",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
             )
             return@RealtimeCard
         }
+        val enabled = geofences.filter { it.enabled }
         Text(
-            text = "设备越界后共记录 ${track.size} 个轨迹点",
+            text = "最近 ${track.size} 个定位点（按日分组，绿色＝处于某安全区内）",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
         Spacer(modifier = Modifier.height(8.dp))
-        track.forEachIndexed { index, point ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
+
+        val groups = remember(track) {
+            track.groupBy { dayKey(it.timestamp) }.toSortedMap(reverseOrder())
+        }
+        groups.forEach { (key, points) ->
+            Text(
+                text = dayLabel(key),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 6.dp)
+            )
+            points.forEach { point ->
+                val inside = enabled.isEmpty() || enabled.any {
+                    haversine(it.centerLatitude, it.centerLongitude, point.latitude, point.longitude) <= it.radiusMeters
+                }
+                Row(
                     modifier = Modifier
-                        .size(22.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "${index + 1}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(if (inside) PadGuardColors.SuccessGreen else PadGuardColors.WarningRed)
                     )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = point.address ?: "未知位置",
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = TimeFormat.formatClockFromMillis(point.timestamp),
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        Text(
+                            text = if (inside) "安全区" else "区域外",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (inside) PadGuardColors.SuccessGreen else PadGuardColors.WarningRed
+                        )
+                    }
                 }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = point.address ?: "未知位置",
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = TimeFormat.formatClockFromMillis(point.timestamp),
-                    style = MaterialTheme.typography.labelMedium
-                )
             }
-            if (index != track.lastIndex) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
-            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
         }
     }
 }
 
 /**
- * 电子围栏地图占位渲染。
+ * 电子围栏地图占位渲染（多围栏）。
  *
- * 以「围栏中心（或设备当前位置）」为参考点做等距投影，绘制围栏范围、设备标记与移动轨迹。
- * 3D 模式对纵向做透视压扁，模拟俯角视角。接入真实地图 SDK 时仅需替换本组件。
+ * 以「任一启用围栏中心（或设备当前位置）」为参考点做等距投影，绘制各安全区域范围、设备标记。
+ * 真实底图由 [AmapMapView] 承载；接入真实地图 SDK 时仅需替换本组件。
  */
 @Composable
 private fun GeofenceMapCanvas(
     location: LocationInfo?,
-    geofence: GeofenceConfig,
+    geofences: List<GeofenceConfig>,
     track: List<LocationInfo>,
     provider: MapProvider,
     viewMode: MapViewMode,
@@ -474,12 +611,13 @@ private fun GeofenceMapCanvas(
         val squash = if (viewMode == MapViewMode.MODE_3D) 0.55f else 1f
         val center = Offset(size.width / 2f, size.height / 2f)
 
-        val refLat = if (geofence.enabled) geofence.centerLatitude else location?.latitude ?: 0.0
-        val refLng = if (geofence.enabled) geofence.centerLongitude else location?.longitude ?: 0.0
-
-        val radiusMeters = if (geofence.enabled) geofence.radiusMeters.toDouble() else DEFAULT_VIEW_RADIUS_METERS
+        val enabled = geofences.filter { it.enabled }
+        val refLat = enabled.firstOrNull()?.centerLatitude ?: location?.latitude ?: 0.0
+        val refLng = enabled.firstOrNull()?.centerLongitude ?: location?.longitude ?: 0.0
+        val maxRadius = enabled.maxOfOrNull { it.radiusMeters } ?: 0
+        val viewRadius = if (maxRadius > 0) maxRadius.toDouble() else DEFAULT_VIEW_RADIUS_METERS
         val radiusPx = (minOf(size.width, size.height) / 2f) * 0.7f
-        val metersPerPx = (radiusMeters / radiusPx).coerceAtLeast(0.01)
+        val metersPerPx = (viewRadius / radiusPx).coerceAtLeast(0.01)
 
         fun toOffset(lat: Double, lng: Double): Offset {
             val dxMeters = (lng - refLng) * METERS_PER_LAT_DEGREE * cos(Math.toRadians(refLat))
@@ -503,29 +641,15 @@ private fun GeofenceMapCanvas(
             y += gridStep
         }
 
-        // 电子围栏范围
-        if (geofence.enabled) {
-            drawCircle(color = accent.copy(alpha = 0.10f), radius = radiusPx, center = center)
+        // 各安全区域范围
+        enabled.forEach { zone ->
+            val rPx = (zone.radiusMeters / metersPerPx).toFloat()
+            drawCircle(color = accent.copy(alpha = 0.10f), radius = rPx, center = center)
             drawCircle(
                 color = accent.copy(alpha = 0.65f),
-                radius = radiusPx,
+                radius = rPx,
                 center = center,
                 style = Stroke(width = 2.dp.toPx())
-            )
-        }
-
-        // 移动轨迹
-        if (track.size >= 2) {
-            val points = track.map { toOffset(it.latitude, it.longitude) }
-            points.zipWithNext { start, end ->
-                drawLine(accent, start, end, strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
-            }
-        }
-        track.forEach { point ->
-            drawCircle(
-                color = accent.copy(alpha = 0.55f),
-                radius = 3.dp.toPx(),
-                center = toOffset(point.latitude, point.longitude)
             )
         }
 
@@ -546,3 +670,28 @@ private data class GeofenceBannerStyle(
 )
 
 private fun formatCoordinate(value: Double): String = String.format(Locale.CHINA, "%.5f", value)
+
+/**
+ * 按"东八区（Asia/Shanghai）自然日"分组轨迹点（键：yyyy-MM-dd，倒序用）。
+ * 必须固定时区而非依赖设备默认时区：出国或改过时区的设备若用本地时区，
+ * 会出现跨日分组错位（如 23:30 与 00:10 被分到不同"天"），轨迹时间线割裂。
+ */
+private fun dayKey(ts: Long): String =
+    SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).apply { timeZone = TimeZone.getTimeZone("Asia/Shanghai") }.format(Date(ts))
+
+/** 由 yyyy-MM-dd 生成「M月d日」展示标签。 */
+private fun dayLabel(key: String): String {
+    val parts = key.split("-")
+    if (parts.size < 3) return key
+    return "${parts[1].toInt()}月${parts[2].toInt()}日"
+}
+
+/** 球面距离（Haversine），返回米。 */
+private fun haversine(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Int {
+    val dLat = Math.toRadians(lat2 - lat1)
+    val dLng = Math.toRadians(lng2 - lng1)
+    val a = sin(dLat / 2).pow(2) +
+        cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLng / 2).pow(2)
+    val c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    return (6_371_000.0 * c).roundToInt()
+}

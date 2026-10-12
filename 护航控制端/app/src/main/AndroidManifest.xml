@@ -32,6 +32,11 @@
             </intent-filter>
         </activity>
 
+        <!-- 高德地图 SDK Key（占位，由 build.gradle.kts 的 AMAP_KEY 注入；默认空 = 回退占位底图） -->
+        <meta-data
+            android:name="com.amap.api.v2.apikey"
+            android:value="${AMAP_KEY}" />
+
     </application>
 
 </manifest>

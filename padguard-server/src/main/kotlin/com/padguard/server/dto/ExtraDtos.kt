@@ -85,10 +85,19 @@ data class TrackPointDto(
     val latitude: Double, val longitude: Double, val address: String? = null,
     val accuracy: Float? = null, val timestamp: Long
 )
-data class GeofenceDto(
-    val deviceId: String, val enabled: Boolean, val name: String?,
-    val centerLatitude: Double, val centerLongitude: Double,
-    val radiusMeters: Int, val alertOnExit: Boolean
+/** 电子围栏（多围栏）。[id] 为空表示"新建"，由服务端生成。 */
+data class GeofenceZoneDto(
+    val id: String? = null,
+    val deviceId: String,
+    val enabled: Boolean,
+    val name: String?,
+    val centerLatitude: Double,
+    val centerLongitude: Double,
+    val radiusMeters: Int,
+    val alertOnExit: Boolean,
+    /** P-L2 新增：进入安全区时告警（默认关）。 */
+    val alertOnEnter: Boolean = false,
+    val createdAt: Long = 0
 )
 
 // ============ 信息发布 ============

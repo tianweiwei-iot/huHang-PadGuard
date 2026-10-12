@@ -23,7 +23,8 @@ import org.springframework.stereotype.Service
  */
 @Service
 class MailService(
-    private val mailSender: JavaMailSender,
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private val mailSender: JavaMailSender?,
     @Value("\${padguard.mail.enabled:false}") private val enabled: Boolean,
     @Value("\${padguard.mail.from:no-reply@padguard.com}") private val from: String,
     @Value("\${spring.mail.host:}") private val host: String
@@ -55,13 +56,17 @@ class MailService(
             return false
         }
         return try {
-            val msg: MimeMessage = mailSender.createMimeMessage()
+            val sender = mailSender ?: run {
+                log.warn("密码重置通知未发送：JavaMailSender 未初始化（SMTP 未配置），退回后台弹窗明文转告。")
+                return false
+            }
+            val msg: MimeMessage = sender.createMimeMessage()
             val helper = MimeMessageHelper(msg, true, "UTF-8")
             helper.setFrom(InternetAddress(from, "PadGuard 管控平台", "UTF-8"))
             helper.setTo(toEmail)
             helper.setSubject("【PadGuard】您的账号密码已重置")
             helper.setText(buildBody(accountName, accountType, newPassword), false)
-            mailSender.send(msg)
+            sender.send(msg)
             log.info("密码重置通知已发送至 {}（账号 {} / {}）", toEmail, accountName, accountType)
             true
         } catch (e: Exception) {

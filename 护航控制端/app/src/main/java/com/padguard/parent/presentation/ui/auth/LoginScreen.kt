@@ -702,7 +702,7 @@ fun ServerConfigEditor(
             value = host,
             onValueChange = { host = it.trim(); error = null },
             label = { Text("服务器地址") },
-            placeholder = { Text("如 192.168.1.10") },
+            placeholder = { Text("如 8.148.68.183") },
             singleLine = true,
             isError = error != null,
             modifier = Modifier.fillMaxWidth(),

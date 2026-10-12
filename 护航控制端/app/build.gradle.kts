@@ -27,12 +27,20 @@ android {
             useSupportLibrary = true
         }
 
+        // 高德地图 SDK Key（占位）。真实部署时由运维通过 -PAMAP_KEY=xxx 传入，
+        // 或在 gradle.properties 写入 amapKey=xxx；默认空字符串 = 不加载真实底图，定位页回退到等距投影占位图。
+        // 绝不把真实 Key 写进代码仓库。
+        val amapKey = (findProperty("AMAP_KEY") as? String)?.takeIf { it.isNotBlank() }
+            ?: (findProperty("amapKey") as? String)?.takeIf { it.isNotBlank() }
+            ?: ""
+        manifestPlaceholders["AMAP_KEY"] = amapKey
+
         // 服务端地址构建期注入。
         // 本项目是局域网/私有化部署（服务端跑在家长电脑上），不存在公网接入点。
         // 曾在此填写虚构公网域名 api.padguard.com：DNS 根本解析不了，家长端所有接口
         // 一律"连不上"，且用户完全无法判断是地址问题还是网络问题。改为与 debug 一致的内网地址，
         // 真实部署在登录页「⚙ 高级设置」改成家长电脑的实际 IP 即可（改完立即生效，无需重打包）。
-        buildConfigField("String", "BASE_URL", "\"http://192.168.1.12:8090/v1/\"")
+        buildConfigField("String", "BASE_URL", "\"http://8.148.68.183:8090/v1/\"")
     }
 
     buildTypes {
@@ -47,7 +55,7 @@ android {
         debug {
             isMinifyEnabled = false
             // Debug API endpoint (can be overridden with local server)
-            buildConfigField("String", "BASE_URL", "\"http://192.168.1.12:8090/v1/\"")
+            buildConfigField("String", "BASE_URL", "\"http://8.148.68.183:8090/v1/\"")
         }
     }
 
@@ -114,6 +122,9 @@ dependencies {
 
     // JSON
     implementation("com.squareup.moshi:moshi-kotlin:1.15.1")
+
+    // 高德地图 SDK（定位页真实底图）。3dmap 已包含地图核心与定位组件，版本经阿里云镜像托管。
+    implementation("com.amap.api:3dmap:10.0.600")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

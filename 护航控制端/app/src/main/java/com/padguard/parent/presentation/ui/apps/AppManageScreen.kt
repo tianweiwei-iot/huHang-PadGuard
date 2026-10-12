@@ -319,17 +319,17 @@ private fun InstalledAppItem(
                     )
                 }
                 if (!selectionMode) {
-                    // 使用权限开关：关闭即在孩子端隐藏，这是最常用、也最需要"能反复拨"的操作，
-                    // 所以做成显式开关而不是藏进菜单。
+                    // 使用权限开关：开启=授权（孩子可正常使用）；关闭=取消授权（打开需家长密码）。
+                    // 这是应用管控最核心、也最需要"能反复拨"的操作，做成显式开关而非藏进菜单。
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Switch(
                             checked = app.allowed,
                             onCheckedChange = { onToggleAllowed() }
                         )
                         Text(
-                            if (app.allowed) "允许" else "隐藏",
+                            if (app.allowed) "已授权" else "取消授权",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (app.allowed) PadGuardColors.SuccessGreen else PadGuardColors.TextSecondary
+                            color = if (app.allowed) PadGuardColors.SuccessGreen else PadGuardColors.WarningRed
                         )
                     }
                     IconButton(onClick = onToggleSuspended) {
@@ -672,7 +672,7 @@ private fun BatchAllowBar(
 
 private fun statusText(app: InstalledApp): String = when {
     !app.installed -> "已卸载（历史记录）"
-    app.hidden -> "权限已关闭（打开需管理密码）"
+    app.hidden -> "已取消授权（打开需家长密码）"
     app.suspended -> "已挂起（打开即拦截）"
     app.blocked -> "已禁用（打开即拦截）"
     app.dailyLimitMinutes != null -> "限时 ${app.dailyLimitMinutes} 分钟 / 天"

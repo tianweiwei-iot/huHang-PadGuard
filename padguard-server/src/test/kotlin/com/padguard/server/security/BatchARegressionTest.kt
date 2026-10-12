@@ -5,13 +5,13 @@ import com.padguard.server.common.ParentErr
 import com.padguard.server.common.BizException
 import com.padguard.server.domain.Command
 import com.padguard.server.domain.Device
-import com.padguard.server.domain.Geofence
+import com.padguard.server.domain.GeofenceZone
 import com.padguard.server.domain.LocationTrack
 import com.padguard.server.mqtt.ChildUplinkHandler
 import com.padguard.server.repository.CommandRepository
 import com.padguard.server.repository.DeviceEventRepository
 import com.padguard.server.repository.DeviceRepository
-import com.padguard.server.repository.GeofenceRepository
+import com.padguard.server.repository.GeofenceZoneRepository
 import com.padguard.server.repository.LocationTrackRepository
 import com.padguard.server.service.AlertService
 import com.padguard.server.service.DeviceService
@@ -85,6 +85,8 @@ class BatchARegressionTest {
         override fun idOf(e: LocationTrack) = e.id
         override fun findByDeviceIdOrderByTsDesc(deviceId: String, pageable: Pageable) =
             table.values.filter { it.deviceId == deviceId }.sortedByDescending { it.ts }
+        override fun findByDeviceIdAndTsGreaterThanEqualOrderByTsDesc(deviceId: String, since: Long, pageable: Pageable) =
+            table.values.filter { it.deviceId == deviceId && (it.ts ?: 0) >= since }.sortedByDescending { it.ts }
         override fun deleteByDeviceId(deviceId: String): Int {
             val before = table.size
             table.values.removeIf { it.deviceId == deviceId }
@@ -92,9 +94,11 @@ class BatchARegressionTest {
         }
     }
 
-    private class FakeGeofenceRepo : FakeJpaRepository<Geofence, String>(), GeofenceRepository {
-        override val table = LinkedHashMap<String, Geofence>()
-        override fun idOf(e: Geofence) = e.deviceId
+    private class FakeGeofenceZoneRepo : FakeJpaRepository<GeofenceZone, String>(), GeofenceZoneRepository {
+        override val table = LinkedHashMap<String, GeofenceZone>()
+        override fun idOf(e: GeofenceZone) = e.id
+        override fun findByDeviceIdOrderByCreatedAtAsc(deviceId: String) =
+            table.values.filter { it.deviceId == deviceId }.sortedBy { it.createdAt }
         override fun deleteByDeviceId(deviceId: String): Int {
             val before = table.size
             table.values.removeIf { it.deviceId == deviceId }
@@ -230,10 +234,10 @@ class BatchARegressionTest {
 
     // ----------------------------- S4：Geofence 归属（审计漏网钉子） -----------------------------
 
-    private fun geofenceFixture(): Quad<GeofenceService, FakeDeviceRepo, FakeGeofenceRepo, FakeTrackRepo> {
+    private fun geofenceFixture(): Quad<GeofenceService, FakeDeviceRepo, FakeGeofenceZoneRepo, FakeTrackRepo> {
         val devices = FakeDeviceRepo()
         val tracks = FakeTrackRepo()
-        val geofences = FakeGeofenceRepo()
+        val geofences = FakeGeofenceZoneRepo()
         val guard = DeviceOwnershipGuard(devices)
         val svc = GeofenceService(devices, tracks, geofences, Mockito.mock(AlertService::class.java), guard)
         return Quad(svc, devices, geofences, tracks)
@@ -251,8 +255,8 @@ class BatchARegressionTest {
         seedOwnedDevice(devices)
         listOf(
             { svc.currentLocation("parent-B", "dev-1") },
-            { svc.trackHistory("parent-B", "dev-1", 10) },
-            { svc.getGeofence("parent-B", "dev-1") }
+            { svc.trackHistory("parent-B", "dev-1", 10, 7) },
+            { svc.listZones("parent-B", "dev-1") }
         ).forEach { call ->
             val ex = assertThrows(BizException::class.java) { call() }
             assertEquals(ParentErr.DEVICE_NOT_OWNED, ex.code, "非属主读取必须按越权拒绝")
@@ -263,18 +267,19 @@ class BatchARegressionTest {
     }
 
     @Test
-    fun `non owner cannot update geofence and nothing is persisted (s4 idor regression)`() {
+    fun `non owner cannot create geofence and nothing is persisted (s4 idor regression)`() {
         val (svc, devices, geofences, _) = geofenceFixture()
         seedOwnedDevice(devices)
-        val req = com.padguard.server.dto.GeofenceDto(
-            deviceId = "dev-1", enabled = true, name = "家",
-            centerLatitude = 31.0, centerLongitude = 121.0, radiusMeters = 200, alertOnExit = true
+        val req = com.padguard.server.dto.GeofenceZoneDto(
+            id = null, deviceId = "dev-1", enabled = true, name = "家",
+            centerLatitude = 31.0, centerLongitude = 121.0, radiusMeters = 200,
+            alertOnExit = true, alertOnEnter = false
         )
-        val ex = assertThrows(BizException::class.java) { svc.updateGeofence("parent-B", "dev-1", req) }
+        val ex = assertThrows(BizException::class.java) { svc.createZone("parent-B", "dev-1", req) }
         assertEquals(ParentErr.DEVICE_NOT_OWNED, ex.code)
         assertTrue(geofences.table.isEmpty(), "越权写围栏不得落库")
         // 属主本人正常写入
-        svc.updateGeofence("parent-A", "dev-1", req)
+        svc.createZone("parent-A", "dev-1", req)
         assertEquals(1, geofences.table.size, "属主写围栏应正常落库")
     }
 

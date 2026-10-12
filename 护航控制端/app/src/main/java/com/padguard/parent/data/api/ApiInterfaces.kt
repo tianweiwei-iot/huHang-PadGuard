@@ -426,23 +426,43 @@ interface LocationApi {
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<LocationDto>>
 
-    /** 获取电子围栏配置 */
-    @GET("location/{deviceId}/geofence")
-    suspend fun getGeofence(
+    /** 获取设备下全部电子围栏（一对多） */
+    @GET("location/{deviceId}/geofences")
+    suspend fun getGeofences(
         @Path("deviceId") deviceId: String
-    ): Response<ApiResponse<GeofenceDto>>
+    ): Response<ApiResponse<List<GeofenceZoneDto>>>
 
-    /** 更新电子围栏配置 */
-    @PUT("location/{deviceId}/geofence")
+    /** 新建电子围栏（[GeofenceZoneDto.id] 传 null） */
+    @POST("location/{deviceId}/geofences")
+    suspend fun createGeofence(
+        @Path("deviceId") deviceId: String,
+        @Body zone: GeofenceZoneDto
+    ): Response<ApiResponse<GeofenceZoneDto>>
+
+    /** 更新指定电子围栏 */
+    @PUT("location/{deviceId}/geofences/{id}")
     suspend fun updateGeofence(
         @Path("deviceId") deviceId: String,
-        @Body config: GeofenceDto
-    ): Response<ApiResponse<GeofenceDto>>
+        @Path("id") id: String,
+        @Body zone: GeofenceZoneDto
+    ): Response<ApiResponse<GeofenceZoneDto>>
 
-    /** 获取越界后的移动轨迹 */
+    /** 删除指定电子围栏 */
+    @DELETE("location/{deviceId}/geofences/{id}")
+    suspend fun deleteGeofence(
+        @Path("deviceId") deviceId: String,
+        @Path("id") id: String
+    ): Response<ApiResponse<Unit>>
+
+    /**
+     * 获取全量历史轨迹时间线（最近 [days] 天，按时间倒序）。
+     * [limit] 控制返回条数上限，需覆盖 30 天 @5 分钟间隔（约 8640 点），避免轨迹被服务端截断。
+     */
     @GET("location/{deviceId}/track")
     suspend fun getTrackHistory(
-        @Path("deviceId") deviceId: String
+        @Path("deviceId") deviceId: String,
+        @Query("days") days: Int = 30,
+        @Query("limit") limit: Int = 9000
     ): Response<ApiResponse<List<LocationTrackPointDto>>>
 }
 
