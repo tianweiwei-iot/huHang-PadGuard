@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.TimeZone
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -26,7 +27,17 @@ class UsageRepository @Inject constructor(
     private val timeProvider: TimeProvider
 ) {
 
-    private val dayKeyFormat = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
+    /**
+     * 日切口径必须与服务端 [com.padguard.server.service.StatisticsService] 完全一致：
+     * 服务端固定 ZoneId.of("Asia/Shanghai")，本端也必须显式锁定同一时区。
+     * Locale.getDefault() 只决定数字/语言，真正决定"算到哪一天"的是 TimeZone；
+     * 若设备时区非中国时区（或用户改过时区），用默认时区算日切会让"写 A 日、读 B 日"，
+     * 孩子端本地累计的"今日已用"与家长端服务端聚合（Asia/Shanghai）错位 ——
+     * 这正是"学生端与家长端不同步"的又一类成因，必须钉死时区。
+     */
+    private val dayKeyFormat = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).apply {
+        timeZone = TimeZone.getTimeZone("Asia/Shanghai")
+    }
 
     @Synchronized
     fun dayKey(timestamp: Long): String = dayKeyFormat.format(timestamp)
@@ -38,6 +49,10 @@ class UsageRepository @Inject constructor(
      * 零点附近一小时内的用量会"写进昨天、读自今天"（或反之），
      * 首页"已用 / 剩余"直接归零，而服务端按 Asia/Shanghai 聚合又是另一个值 ——
      * 这正是"孩子端与家长端时间对不上"的一类成因，必须全程单一口径。
+     *
+     * 配合 [dayKeyFormat] 已钉死的 Asia/Shanghai 时区：本函数只决定"用哪个时刻"
+     * （校准后的 now），[dayKeyFormat] 决定"按哪个时区切日"，两者齐备才能保证
+     * 本地日界 == 服务端日界，孩子端未激活分支的本地累计与家长端服务端统计不再错位。
      */
     @Synchronized
     fun dayKey(): String = dayKey(timeProvider.now())
