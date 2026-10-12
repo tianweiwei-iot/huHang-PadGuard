@@ -1,0 +1,13 @@
+-- 列级漂移修复：installed_apps.hidden（应用隐藏标记，家长关闭使用权限时孩子端桌面不显示）
+--
+-- 背景：实体 InstalledApp.hidden（ExtraModels.kt）带 @ColumnDefault("false")，
+--   本地 H2（local/home profile，ddl-auto=update）自动补列，掩盖了"迁移缺失"；
+--   PostgreSQL 生产形态（ddl-auto=none）不自动补列，家长端「应用管理」页
+--   查询 installed_apps 即报 column ia1_0.hidden does not exist → HTTP 500。
+--
+-- 写法对齐 V6/V10/V14 既有范式：ADD COLUMN IF NOT EXISTS 幂等 + NOT NULL DEFAULT
+--   兜底存量行（无默认值时给既有行补 NOT NULL 列会失败，正是实体注释预警的坑）。
+--
+-- 教训登记：列级漂移与表级漂移（V2026101101 计费表）同模式，G4 守卫测试须同时覆盖
+--   "实体列集合 = 迁移列集合" 与 "实体表集合 = 迁移表集合"。
+ALTER TABLE installed_apps ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE;
