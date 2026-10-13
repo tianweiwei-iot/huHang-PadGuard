@@ -58,7 +58,7 @@ class ScreenStreamHub {
 
     // ==================== 带宽遥测 ====================
     // 实时看屏是服务端中转架构，每一路都是"一份上行 + 一份下行"带宽。
-    // 不把带宽亮出来，就永远不知道"卡/贵"究竟卡在哪、花了多少 —— 这也是此前
+    // 不把带宽亮出来，就永远不知道"卡/贵"究竟卡在哪、花了多少 —— 这也是早期
     // 线上"还不知道带宽占用情况"的根因。这里按设备累计字节，并维护一个滚动 1s 窗口算速率。
     private val upWindowBytes = ConcurrentHashMap<String, AtomicLong>()
     private val upWindowStart = ConcurrentHashMap<String, AtomicLong>()

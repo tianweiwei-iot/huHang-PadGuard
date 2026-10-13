@@ -116,8 +116,8 @@ class PhotoCapture @Inject constructor(
                         null
                     }
                     else -> {
-                        // W38：上传失败不再"即删"。移交重试队列，弱网恢复后由 drain 重传 ——
-                        // 旧实现这里之后无条件 delete，家长端永远等不到这张照片。
+                        // 上传失败不再"即删"。移交重试队列，弱网恢复后由 drain 重传 ——
+                        // 早期实现这里之后无条件 delete，家长端永远等不到这张照片。
                         Logger.w(TAG) { "photo upload failed: $r" }
                         mediaRetry.enqueue(file, MediaUploadRetry.Kind.Media(taskId, 0, MIME_IMAGE_JPEG))
                         // 收尾时顺手重传队列（含刚入队的这条——网络可能已恢复）

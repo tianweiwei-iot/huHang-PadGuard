@@ -11,9 +11,9 @@ import okhttp3.Response
 import okhttp3.Route
 
 /**
- * 令牌自动续期（OkHttp Authenticator）（P1' 全量重写）。
+ * 令牌自动续期（OkHttp Authenticator）（全量重写）。
  *
- * 旧实现的三个问题，重写后逐一收口：
+ * 早期实现的三个问题，重写后逐一收口：
  *
  * 1. **无单飞（最严重）**：首页并发请求（设备列表 + 今日用量 + 消息数…）在 token
  *    过期时会**同时**收到 401，各自触发一次 /auth/refresh。refresh token 若是

@@ -23,7 +23,7 @@ import javax.sql.DataSource
 /**
  * 后台管理域的跨领域共享工具与常量。
  *
- * W25：从原 AdminService「上帝类」中抽离的纯函数 / 常量 / 数据类，全部以包级（top-level）
+ * 后台管理域跨领域共享的纯函数 / 常量 / 数据类，全部以包级（top-level）
  * 声明，供拆分后的各子 [org.springframework.stereotype.Service] 直接复用，无需层层传参或重复定义。
  * 这些符号原本是 AdminService 的 private 成员，现在仍只在 `com.padguard.server.service` 包内可见、被使用。
  */
@@ -104,7 +104,7 @@ fun toAdminDto(a: Admin): AdminDto = AdminDto(
 )
 
 /**
- * 读操作的权限闸门。此前服务端只对写操作 require，全系统没有任何一处校验过 read —— 因此
+ * 读操作的权限闸门。早期服务端只对写操作 require，全系统没有任何一处校验过 read —— 因此
  * 在 RBAC 矩阵里给某角色勾选或取消「查看」在服务端毫无区别。现在所有返回业务列表的方法都在首行过这道闸门。
  */
 fun requireRead(adminPerm: AdminPermissionService, adminId: String, area: String) =
@@ -132,7 +132,7 @@ data class SettingsStore(
     val brand: String = "PadGuard",
     val currency: String = "CNY",
     /**
-     * 新用户注册后赠送的免费试用天数。默认值必须与 `padguard.billing.trial-days` 一致（B3/D2 免费内测延长为 30 天）：
+     * 新用户注册后赠送的免费试用天数。默认值必须与 `padguard.billing.trial-days` 一致（免费内测阶段延长为 30 天）：
      * 这里是运营可见并可改的唯一入口，[com.padguard.server.service.BillingService] 创建试用时会优先读它。
      */
     val trialDays: Int = 30,
@@ -162,7 +162,7 @@ fun genPassword(systemSettingRepository: SystemSettingRepository, om: ObjectMapp
     return if (withSymbol) core + "!" else core
 }
 
-/** 当前是否处于开发类 profile（local/dev）。W22：示例支付仅允许在此类环境开启。 */
+/** 当前是否处于开发类 profile（local/dev）。示例支付仅允许在此类环境开启。 */
 fun isDevProfile(env: Environment): Boolean =
     env.activeProfiles.any { it.equals("local", true) || it.equals("dev", true) }
 

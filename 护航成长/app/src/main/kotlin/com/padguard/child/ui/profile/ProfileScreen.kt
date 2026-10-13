@@ -107,7 +107,7 @@ fun ProfileScreen(
         onPermissionGuide = onPermissionGuide,
         onOpenGuardA11y = openGuardA11ySettings,
         onSetServer = {
-            // W52 修复：服务器地址可被孩子无密码修改——改成不可达 IP 即让家长端"看不到"设备、
+            // 服务器地址可被孩子无密码修改——改成不可达 IP 即让家长端"看不到"设备、
             // 实时锁屏/消息/放行全失效。现统一过家长密码闸门（同页「去设置」入口同一范式）。
             if (viewModel.ensureGuardUnlocked(context)) {
                 serverInput = serverUrl
@@ -670,7 +670,7 @@ private fun SecurityCard(
                 onClick = onClickUsageStats
             )
             HorizontalDivider()
-            // D5（L-CH-08）：电池优化白名单入口。设备息屏进入 Doze 后若不加豁免，
+            // 电池优化白名单入口。设备息屏进入 Doze 后若不加豁免，
             // 后台 MQTT 心跳/定位/推送被冻结，每晚即脱管。引导用户手动加入白名单。
             // active 取真实白名单状态（ProfileViewModel.isBatteryOptimizationWhitelisted），
             // 不写死 —— 假状态比没有状态更坏。

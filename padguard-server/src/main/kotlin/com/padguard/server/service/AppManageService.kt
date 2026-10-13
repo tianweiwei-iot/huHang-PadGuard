@@ -260,7 +260,7 @@ class AppManageService(
     fun installApp(userId: String, deviceId: String, req: AppInstallRequest): CommandDto {
         // 必须校验归属：本接口会向指定设备下发"安装应用"指令，且 apkUrl 由请求方任意提供。
         // 少了这一步，任何已登录家长都能往**别人的**孩子平板上装任意 APK ——
-        // 这是越权里后果最严重的一类（远程静默安装）。同类方法均已校验，此前唯独这里漏了。
+        // 这是越权里后果最严重的一类（远程静默安装）。同类方法均已校验，早期唯独这里漏了。
         requireOwned(userId, deviceId)
         return commandService.issueCommand(
             deviceId, CommandType.INSTALL_APP,
@@ -430,7 +430,7 @@ class AppManageService(
 
     /**
      * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现）。
-     * 此前这里是逐 Service 复制的私有副本，复制粘贴模式必然漏网 ——
+     * 早期这里是逐 Service 复制的私有副本，复制粘贴模式必然漏网 ——
      * GeofenceService 正是漏抄的一份，造成位置/围栏全线 IDOR。逻辑现在只存在一份。
      */
     private fun requireOwned(userId: String, deviceId: String) =

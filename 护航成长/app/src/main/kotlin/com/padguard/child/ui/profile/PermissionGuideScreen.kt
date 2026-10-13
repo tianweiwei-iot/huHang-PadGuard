@@ -112,13 +112,13 @@ fun PermissionGuideScreen(
                     }
                 }
 
-                // D7（决策 D4 联动）：能力分层明示。
+                // 能力分层明示。
                 // 审查结论：非 DO 家庭里，孩子停用设备管理器 / 卸载 App 只是几步系统操作，
                 // 终端无力阻止（能力边界见 PadGuardDeviceAdminReceiver 类注释）。
                 // 若不提前讲明，家长会把「基础设备管理员」当成「设备所有者」来承诺，
                 // 信任崩塌来得更猛。这里按真实 ControlMode 讲透边界：
                 // 非 DO 是「尽力而为」（检测 + 上报，不阻止），DO/PO 才是系统级完整管控。
-                // 与 D1「绑定向导补一页 DO 版/普通版能力分层说明」的决策对齐。
+                // 绑定向导补充设备所有者(Device Owner)与普通模式的管控能力分层说明。
                 if (kind == "device_admin") {
                     CapabilityTierCard(mode = mode)
                     DeviceAdminActions(context = context, mode = mode, vm = vm)
@@ -143,7 +143,7 @@ fun PermissionGuideScreen(
                     }
                 }
 
-                // D5（L-CH-08）：电池优化白名单引导。
+                // 电池优化白名单引导。
                 // 受 Android / Play 家庭政策限制，本应用**不申请** REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
                 // （声明即被拒），因此无法直接以代码把自身加入豁免名单；
                 // 只能引导用户进入系统「不受电池优化限制的应用」列表页，由用户手动把本应用设为
@@ -248,7 +248,7 @@ private fun DeviceAdminActions(
 }
 
 /**
- * D7（决策 D4 联动）：管控能力分层明示卡片。
+ * 管控能力分层明示卡片。
  *
  * 文案边界与代码事实严格对齐（见 [com.padguard.child.receiver.PadGuardDeviceAdminReceiver]
  * 类注释与 [com.padguard.core.engine.guard.TamperDetector] 的设计立场）：

@@ -80,7 +80,7 @@ class UnlockRequestCenterViewModel @Inject constructor(
     private val handledInSession = mutableSetOf<String>()
 
     /**
-     * D1（L-PA-03）：已发过本地通知的工单 ID。
+     * 已发过本地通知的工单 ID。
      * 与 [handledInSession] 分开——后者记"本会话处理过"，这里记"已通知过"，
      * 避免 10 秒轮询反复堆叠同一条通知。未授权 POST_NOTIFICATIONS 时，
      * [NotificationHelper.notifyUnlockRequest] 内部静默返回，不会抛异常。
@@ -110,14 +110,14 @@ class UnlockRequestCenterViewModel @Inject constructor(
     }
 
     /**
-     * D1：App 是否处于前台。
+     * App 是否处于前台。
      * ViewModel 随导航根组合创建（彼时 App 必然可见），故默认 true。
      * 前台时不发本地通知——弹窗已经在打扰家长了，通知再响一次是噪音；
      * 只有退到后台（ON_STOP）后轮询仍持活着，新申请才需要通知触达。
      */
     private var appInForeground = true
 
-    /** D1：由导航根的生命周期观测回调驱动（ON_START=true / ON_STOP=false）。 */
+    /** 由导航根的生命周期观测回调驱动（ON_START=true / ON_STOP=false）。 */
     fun setAppForeground(foreground: Boolean) {
         appInForeground = foreground
     }
@@ -138,7 +138,7 @@ class UnlockRequestCenterViewModel @Inject constructor(
                 .filter { it.ticket.isPending && it.ticket.id !in handledInSession }
                 .minByOrNull { it.ticket.createdAt }
 
-            // D1（L-PA-03）：家长端此前零通知能力——App 在后台/未启动时"孩子求解锁"完全零触达。
+            // 家长端在后台/未启动时"孩子求解锁"完全零触达——本地通知是唯一的离屏触达手段。
             // 这里对每条新出现的 PENDING 工单发一次本地通知（渠道已在 MainActivity 创建，
             // 权限在登录后申请）。前台跳过：弹窗已是更强的打扰形式，双响只会让家长烦躁。
             if (!appInForeground) {
@@ -197,7 +197,7 @@ class UnlockRequestCenterViewModel @Inject constructor(
      *
      * @param successMessage 操作成功时展示的文案
      *
-     * W58 修复：成败文案在此一次性据实落定。旧实现由调用方在 `invokeOnCompletion` 里
+     * 成败文案在此一次性据实落定。早期实现由调用方在 `invokeOnCompletion` 里
      * 覆写成功话术 —— 该回调在协程结束后**无条件**执行，失败时也会把
      * "操作失败：…"盖成"已同意放行 30 分钟"，家长以为批了、实际工单还停在 PENDING，
      * 孩子端毫无反应。这正是"界面说成功、后端什么都没发生"的假成功形态。
@@ -232,7 +232,7 @@ class UnlockRequestCenterViewModel @Inject constructor(
         )
         // 无论成败都记一笔：避免失败后弹窗立刻复活，家长陷入"忽略-又弹-又忽略"的循环
         handledInSession.add(ticket.id)
-        // D1：处理（含忽略）即取消对应本地通知 —— 不清则通知栏长期挂着
+        // 处理（含忽略）即取消对应本地通知 —— 不清则通知栏长期挂着
         // "孩子请求解锁"，家长过会儿点开发现孩子早已在用平板，通知与事实不符。
         notificationHelper.cancelUnlockRequest(ticket.id)
         _uiState.value = _uiState.value.copy(

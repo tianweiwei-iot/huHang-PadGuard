@@ -22,9 +22,9 @@ import java.util.UUID
 
 /**
  * 演示数据与种子数据：
- * 1. 内置一个家长账号，便于 P0 直接联调；
- * 2. 幂等播种策略模板（P3-2，≥6 套），postgres 与 h2 双覆盖；
- * 3. 初始化内容管控字典（P2：网址分类库 + 敏感词库）。
+ * 1. 内置一个家长账号，便于直接联调；
+ * 2. 幂等播种策略模板（≥6 套），postgres 与 h2 双覆盖；
+ * 3. 初始化内容管控字典（：网址分类库 + 敏感词库）。
  */
 @Component
 class DataInitializer(
@@ -34,10 +34,9 @@ class DataInitializer(
     private val contentFilterService: ContentFilterService,
     private val env: Environment,
     /**
-     * E7（与 AdminDataInitializer 同口径）：家长端初始/重置口令文件落盘路径。
-     * 旧实现写死相对路径（容器工作目录）——docker-compose 只挂了 `./uploads:/app/uploads`，
-     * 工作目录在容器可写层里，容器一重建文件就丢，而家长口令已被强制重置出弱口令，
-     * 后果是全新部署直接锁死家长端、没人知道口令。默认改到挂载卷内的 uploads/ 下，
+     * 家长端初始/重置口令文件落盘路径。
+     * 口令文件需落在挂载卷（uploads/）内而非容器工作目录：工作目录在容器可写层里、容器一重建即丢，
+     * 而该口令是家长端初始/重置口令、无人知晓明文，文件丢失即等于锁死家长端。
      * 并支持用环境变量/配置覆盖到 secrets 卷（`PADGUARD_PARENT_INITIAL_PASSWORD_FILE`）。
      *
      * **为什么与 AdminDataInitializer 分成两个配置键**：那边写的是后台管理员口令、
@@ -56,7 +55,7 @@ class DataInitializer(
         seedParentAccount()
         if (env.activeProfiles.contains(PROFILE_LOCAL)) {
             // 测试账号（PERMANENT 永久订阅）只允许在 local 联调环境播种。
-            // 此前它对所有环境无条件生效，等于随安装包分发一个永久全功能账号，
+            // 早期它对所有环境无条件生效，等于随安装包分发一个永久全功能账号，
             // 密码还随源码/安装包分发 —— 与演示账号属同一类漏洞，收口到同一处理口径。
             seedTestAccount()
         } else {
@@ -72,13 +71,10 @@ class DataInitializer(
     /**
      * 账号初始化。
      *
-     * 原先无条件播种 `13800000000 / admin123`，且口令写死在代码里随安装包分发 ——
-     * 任何人拿到安装包就能登录家长端，查看实时画面、定位轨迹并远程操控设备。
-     *
-     * 但也不能简单删掉：系统**没有任何注册入口**（两个登录接口都要求用户已存在），
-     * 删掉等于把系统彻底锁死。所以改为：
+     * 系统**没有任何注册入口**（两个登录接口都要求用户已存在），因此需要一个初始账号的创建策略：
      * - 开发环境（local profile）：保留固定演示账号，方便联调；
-     * - 正式部署：库里无账号时才创建，口令**随机生成并写入本地文件**，绝不硬编码。
+     * - 正式部署：库里无账号时才创建，口令**随机生成并写入本地文件**，绝不硬编码，
+     *   避免口令随安装包分发导致任何人都能登录家长端、查看实时画面、定位轨迹并远程操控设备。
      */
     private fun seedParentAccount() {
         if (env.activeProfiles.contains(PROFILE_LOCAL)) {
@@ -94,9 +90,7 @@ class DataInitializer(
             // 所以这里主动识别出仍在使用出厂弱口令的账号并强制重置 ——
             // 家长若已自行改过密码，matches 为 false，不会打扰。
             existing != null && Passwords.matches(DEMO_PASSWORD, existing.passwordHash) -> {
-                // W16 修复：旧实现在 `seedInitialAdminPassword` 内部对用户做了一次 save，
-                // 但那时 passwordHash 还是旧哈希，返回新密码后只改了内存对象、未二次落库，
-                // 导致 DB 仍是出厂弱口令。现改为：先算新哈希并赋值，再一次性 save。
+                // 先算新哈希并赋值，再一次性 save，确保持久化的是重置后的新哈希。
                 val password = randomPassword()
                 existing.passwordHash = Passwords.encode(password)
                 userRepository.save(existing)
@@ -153,13 +147,13 @@ class DataInitializer(
      * 把初始/重置后的明文口令写入服务端工作目录，并在日志里提示绝对路径。
      *
      * 为什么必须落盘而不是只打日志：家长不会去翻 server-run.log，
-     * 拿不到密码就进不去家长端，系统等于锁死。而口令不能硬编码（那正是本次要修的漏洞），
+     * 拿不到密码就进不去家长端，系统等于锁死。而口令不能硬编码，
      * 所以"随机生成 + 落到显眼的文件 + 日志提示路径"是唯一既安全又可用的组合。
      */
     private fun writeInitialPasswordFile(phone: String, password: String, forceReset: Boolean) {
         val file = File(initialPasswordFile)
         runCatching {
-            // E7：目标目录可能不存在（uploads 卷未预建 / secrets 卷空挂载），先建目录再写
+            // 目标目录可能不存在（uploads 卷未预建 / secrets 卷空挂载），先建目录再写
             file.parentFile?.mkdirs()
             file.writeText(
                 """
@@ -230,7 +224,7 @@ class DataInitializer(
     }
 
     /**
-     * 策略模板市场（P3-2）：覆盖家庭与校园、日常与特殊场景，≥6 套。
+     * 策略模板市场：覆盖家庭与校园、日常与特殊场景，≥6 套。
      * 以 existsById 幂等，避免与 postgres 的 V2 迁移种子重复（V2 已含前 2 套）。
      */
     private fun seedPolicyTemplates() {

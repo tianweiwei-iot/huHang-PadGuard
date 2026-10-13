@@ -148,7 +148,7 @@ sealed interface ScheduleVerdict {
  * 节假日与调休判定。
  *
  * 之所以抽成接口：中国的法定节假日与调休安排每年由国务院公布，无法用算法推导，
- * 必须由服务端下发年度日历。P0 阶段给一个空实现（只按自然周末判断），
+ * 必须由服务端下发年度日历。早期阶段给一个空实现（只按自然周末判断），
  * 服务端日历接口就绪后替换实现即可，业务代码零改动。
  */
 interface HolidayProvider {
@@ -158,7 +158,7 @@ interface HolidayProvider {
     fun isWorkdayOverride(date: LocalDate): Boolean
 }
 
-/** P0 默认实现：不识别法定节假日，仅按自然周末判断 */
+/** 默认实现：不识别法定节假日，仅按自然周末判断 */
 @Singleton
 class DefaultHolidayProvider @Inject constructor() : HolidayProvider {
     override fun isHoliday(date: LocalDate): Boolean = false

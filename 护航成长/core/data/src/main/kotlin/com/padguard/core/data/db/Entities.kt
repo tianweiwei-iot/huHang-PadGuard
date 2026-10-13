@@ -96,7 +96,7 @@ data class DailyUsageEntity(
 
 /**
  * 待上报的高危告警事件。
- * 独立于普通日志队列，保证优先上传（对应契约 §7 同步优先级 P1）。
+ * 独立于普通日志队列，保证优先上传（对应契约 §7 高优先级同步）。
  */
 @Entity(tableName = "risk_event", indices = [Index(value = ["eventId"], unique = true)])
 data class RiskEventEntity(

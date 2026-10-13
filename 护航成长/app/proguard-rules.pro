@@ -18,7 +18,7 @@
 # Paho 使用反射实例化网络模块
 -keepnames class org.eclipse.paho.client.mqttv3.internal.NetworkModuleService
 
-# ====== kotlinx.serialization（策略包 PolicyPackage 等 @Serializable 模型，A3）======
+# ====== kotlinx.serialization（策略包 PolicyPackage 等 @Serializable 模型）======
 # release 下若生成的 $$serializer 及其 descriptor 被混淆/裁剪，反序列化会静默失败。
 # 必须保留序列化器类与 descriptor 字段（官方推荐规则集）。
 -keepattributes *Annotation*, InnerClasses

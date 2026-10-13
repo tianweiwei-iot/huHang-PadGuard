@@ -6,7 +6,7 @@ import org.springframework.stereotype.Service
 /**
  * 管控后台（admin）业务聚合层门面。
  *
- * W25：原 AdminService 是 1021 行的「上帝类」。现按领域拆分为下列独立 `@Service`，本类仅作门面，
+ * 管控后台（admin）业务聚合层门面，按领域拆分为下列独立 `@Service`，本类仅作统一入口，
  * **对外公开方法签名完全不变**（控制器 `AdminController` 与测试无需任何改动）：
  *
  * - [AdminAuthService]          登录

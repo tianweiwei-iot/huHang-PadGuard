@@ -171,7 +171,7 @@ enum class AgeBand(
  */
 @Serializable
 data class MinorModePolicy(
-    /** 未成年人模式总开关。这是 P1 的核心：一键启动/一键退出 */
+    /** 未成年人模式总开关。这是核心：一键启动/一键退出 */
     @SerialName("enabled") val enabled: Boolean = false,
 
     @SerialName("ageBand") val ageBand: AgeBand = AgeBand.BAND_8_12,

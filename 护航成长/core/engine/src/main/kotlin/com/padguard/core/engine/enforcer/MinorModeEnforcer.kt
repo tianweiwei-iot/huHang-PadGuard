@@ -14,7 +14,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * 未成年人模式执行器（P1 合规底座）。
+ * 未成年人模式执行器（合规底座）。
  *
  * ## 它做三件事
  * 1. **派生基线**：把分龄默认值压到 [PolicyPackage.appLimit] / [PolicyPackage.eyeCare] 上，
@@ -55,9 +55,9 @@ class MinorModeEnforcer @Inject constructor(
      * 判定当前是否处于宵禁。
      *
      * @param atMillis 判定时刻，默认取服务端校准后的墙钟（与"晚上 10 点"语义一致）
-     * @param timezone 策略时区（W36 修复）：旧实现用 [ZoneId.systemDefault]（设备本地时区），
-     *   孩子改时区即可令宵禁整体偏移（如 UTC-8 偏 14 小时），非 DO 设备完全可绕。
-     *   现统一用 [com.padguard.core.data.model.policy.SchedulePolicy.timezone]
+     * @param timezone 策略时区：以策略时区为准，而非设备本地时区；
+     *   若用设备本地时区，孩子改时区即可令宵禁整体偏移（如 UTC-8 偏 14 小时），非 DO 设备完全可绕。
+     *   统一用 [com.padguard.core.data.model.policy.SchedulePolicy.timezone]
      *   （经 `PolicyPackage.schedule.timezone` 取到，服务端随策略包下发），
      *   与 [com.padguard.core.engine.schedule.ScheduleEvaluator] 同一口径。
      */
@@ -72,7 +72,7 @@ class MinorModeEnforcer @Inject constructor(
             return MinorModeVerdict.Active
         }
 
-        // W36：时区以策略为准，而非设备本地时区，避免孩子改时区绕过宵禁。
+        // 时区以策略为准，而非设备本地时区，避免孩子改时区绕过宵禁。
         val zone = runCatching { ZoneId.of(timezone) }.getOrElse {
             Logger.w(TAG) { "invalid timezone $timezone, fallback to system default" }
             ZoneId.systemDefault()

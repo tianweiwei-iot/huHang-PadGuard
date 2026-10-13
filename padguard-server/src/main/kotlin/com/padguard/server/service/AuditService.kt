@@ -11,7 +11,7 @@ import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
 
 /**
- * 审计日志服务（P4-5）。
+ * 审计日志服务。
  *
  * ## 设计要点
  * 1. **独立事务（REQUIRES_NEW）**：即使主业务事务回滚，审计记录也照常落库，真实反映"有人尝试过某操作"，
@@ -60,12 +60,12 @@ class AuditService(
      * 分页查询审计日志（家长端 / 校园端）。deviceId 与 action 为可选过滤条件。
      *
      * 排序与分页全部交给数据库（ORDER BY + LIMIT/OFFSET）。
-     * 此前是把该设备/用户的**全部**审计日志捞进内存，再 sortedByDescending + drop + take：
+     * 早期是把该设备/用户的**全部**审计日志捞进内存，再 sortedByDescending + drop + take：
      * 审计日志只增不删，这个"分页"的耗时会随数据增长线性上升、内存占用不可控，
      * 是家长端偶发"一点审计就卡住"的成因。
      */
     fun query(userId: String?, deviceId: String?, action: String?, page: Int, size: Int): List<Map<String, Any?>> {
-        // W17 修复：按 deviceId 过滤前必须先校验设备归属，否则任意登录家长可凭他人设备号
+        // 按 deviceId 过滤前必须先校验设备归属，否则任意登录家长可凭他人设备号
         // 越权读取其审计流水（IDOR）。userId 为空只会出现在后台等可信调用方，那里本就不过滤设备。
         if (deviceId != null && userId != null) {
             ownershipGuard.requireOwned(userId, deviceId)

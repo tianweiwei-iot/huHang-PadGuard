@@ -100,7 +100,7 @@ object AppForeground {
                 // A 跳 B 的顺序是 A.onPause → B.onResume → A.onStop，
                 // 用 onStop 递减会让计数在 B 已在前台时被 A 的 stop 减成 0，
                 // 于是"明明在前台"被误判成后台，该直接弹窗的场景退化成通知。
-                // 反过来若像旧实现那样在 onStop 里跳过 isFinishing==false 的 Activity，
+                // 反过来若像早期实现那样在 onStop 里跳过 isFinishing==false 的 Activity，
                 // 按 Home 键（Activity 不 finishing）就永远不递减 ——
                 // 计数永久停在"前台"，后台启动授权页被系统静默丢弃，
                 // 家长端的实时看屏从此再也连不上，且平板上毫无提示。

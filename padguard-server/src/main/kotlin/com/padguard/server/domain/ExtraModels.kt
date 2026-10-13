@@ -215,7 +215,7 @@ class DeviceSetting(
     @Column(name = "require_password_on_launch") var requirePasswordOnLaunch: Boolean? = false,
     @Column(name = "web_blocked_urls", columnDefinition = "text") var webBlockedUrls: String? = null,
     /**
-     * 内容管控：搜索引擎强制安全搜索（P2）。
+     * 内容管控：搜索引擎强制安全搜索。
      * 开启后策略包下发 `web.safeSearch=true`，孩子端对主流搜索引擎注入 safe 参数。
      * 默认值 false（不强制），由家长在「上网管控」页开启。
      */
@@ -225,7 +225,7 @@ class DeviceSetting(
     // 上网管控、策略包重建）全部 500，孩子端因此拿不到策略包。写法与同类 systemLockRelaxed 保持一致。
     @Column(name = "web_safe_search") var webSafeSearch: Boolean? = false,
     /**
-     * 内容管控：按分类屏蔽（P2）。逗号分隔的 url_categories.id 列表。
+     * 内容管控：按分类屏蔽。逗号分隔的 url_categories.id 列表。
      * 命中这些分类的网址在设备端被拦截。空表示不按分类屏蔽。
      */
     @Column(name = "web_blocked_categories", columnDefinition = "text") var webBlockedCategories: String? = null,
@@ -269,11 +269,10 @@ class DeviceSetting(
 ) {
     companion object {
         /**
-         * 平板使用时长缺省的**唯一事实源**（W24 收敛）。
+         * 平板使用时长缺省的**唯一事实源**。
          *
-         * 旧实现该缺省值散落在四处：实体默认 120/180、接口回落 60、下发回落 60、服务端计时回落 120，
-         * 存量 NULL 行命中时三端数字对不上，违反"三端时间一致"核心约定。
-         * 现集中到此处，接口/下发/计时三处回落统一引用这两个常量，杜绝再次漂移。
+         * 实体默认、接口回落、下发回落、服务端计时回落统一引用这两个常量，
+         * 避免缺省值散落各处导致存量 NULL 行命中时三端数字对不上，违反"三端时间一致"核心约定。
          */
         const val DEFAULT_WEEKDAY_LIMIT_MINUTES = 120
         const val DEFAULT_WEEKEND_LIMIT_MINUTES = 180
@@ -360,7 +359,7 @@ class MediaTask(
 )
 
 /**
- * 审计日志（P4-5）：记录"谁在何时对哪台设备做了什么"。
+ * 审计日志：记录"谁在何时对哪台设备做了什么"。
  *
  * 触发点覆盖绑定/解绑、策略变更、解锁审批、指令下发等关键操作，作为合规追溯与责任界定的底座。
  * 写入采用独立事务（REQUIRES_NEW），且记录失败不影响主业务流程（由 [com.padguard.server.service.AuditService] 兜底）。
@@ -389,7 +388,7 @@ class AuditLog(
 )
 
 /**
- * 网址分类库（P2）。本地库 + 云端分类 API 的落库缓存。
+ * 网址分类库。本地库 + 云端分类 API 的落库缓存。
  * 风险等级 risk_level：LOW / MEDIUM / HIGH；blocked_by_default 表示命中即默认拦截（如黄赌毒）。
  */
 @Entity
@@ -404,7 +403,7 @@ class UrlCategory(
 )
 
 /**
- * 敏感词库（P2）。文本鉴黄/涉赌/暴力/诈骗等的本地词典，作为云端 AI 识别的本地兜底。
+ * 敏感词库。文本鉴黄/涉赌/暴力/诈骗等的本地词典，作为云端 AI 识别的本地兜底。
  * 命中后生成告警（涉密内容只告警、不全文展示）。
  */
 @Entity

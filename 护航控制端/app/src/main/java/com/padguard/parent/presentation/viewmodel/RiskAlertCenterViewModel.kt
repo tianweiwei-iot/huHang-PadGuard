@@ -18,11 +18,11 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * D7（完整版）：风险告警消费面。
+ * 风险告警消费面。
  *
  * ## 这个 ViewModel 补的是什么缺口
  * 孩子端的 TamperDetector 一直在上报高危事件（权限被撤销 / 已 Root / 时间被篡改 /
- * 无障碍被关闭 / 尝试卸载），服务端也建了告警、开了接口 —— 但家长端此前**零消费**：
+ * 无障碍被关闭 / 尝试卸载），服务端也建了告警、开了接口 —— 但家长端早期**零消费**：
  * 没有列表、没有红点、没有通知，"检测到"却说给谁听。本类把最后一环接上：
  * 轮询告警列表 → 消息中心展示 → 铃铛红点（ACTIVE 且非 INFO）→ 后台新 CRITICAL 本地通知。
  *
@@ -58,7 +58,7 @@ class RiskAlertCenterViewModel @Inject constructor(
     val uiState: StateFlow<RiskAlertUiState> = _uiState.asStateFlow()
 
     /**
-     * D7：已发过本地通知的告警 ID。
+     * 已发过本地通知的告警 ID。
      * 轮询每轮都会拿到同一条未确认告警，不去重就会 15 秒一条通知刷屏。
      * 与"已确认"是两回事：确认会取消通知并移出红点，这里只防重复发送。
      */
@@ -81,7 +81,7 @@ class RiskAlertCenterViewModel @Inject constructor(
     }
 
     /**
-     * D7：App 是否处于前台。由导航根的生命周期观测驱动（ON_START / ON_STOP），
+     * App 是否处于前台。由导航根的生命周期观测驱动（ON_START / ON_STOP），
      * 与解锁工单同一套门控 —— 前台时消息中心自己会展示，通知再响是噪音。
      */
     private var appInForeground = true
@@ -99,7 +99,7 @@ class RiskAlertCenterViewModel @Inject constructor(
                 ?.sortedByDescending { it.triggeredAt }
                 ?: return@launch
 
-            // D7：后台 + 新出现的 CRITICAL 告警 → 本地通知触达家长。
+            // 后台 + 新出现的 CRITICAL 告警 → 本地通知触达家长。
             // 只挑 CRITICAL：WARNING/INFO 是"留意"级，进消息中心即可，
             // 每条都推送会把"真的出事"淹在噪音里。
             if (!appInForeground) {

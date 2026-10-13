@@ -198,7 +198,7 @@ class ParentPolicyExtendedController(
     /**
      * 护眼模式。
      *
-     * 此前家长端的护眼开关必定失败：服务端既无存储也无通道，只有一句 failure 占位。
+     * 早期家长端的护眼开关必定失败：服务端既无存储也无通道，只有一句 failure 占位。
      * 现在落到 device_settings 并随策略包下发，孩子端以悬浮滤镜生效（无需 DO）。
      * 用 PUT：这是"这台设备当前的护眼状态"的整体覆盖，不是追加一条记录。
      */
@@ -385,7 +385,7 @@ class ParentStatisticsController(private val statisticsService: StatisticsServic
     /**
      * 单应用使用历史（应用详情二级页）。
      *
-     * 此前家长端点进"使用历史"必然报错：接口从未实现，只有一条 `Result.failure` 占位。
+     * 早期家长端点进"使用历史"必然报错：接口从未实现，只有一条 `Result.failure` 占位。
      * 数据来自已有的用量日志，无需孩子端新增上报。
      */
     @GetMapping("/{deviceId}/app-usage/history")

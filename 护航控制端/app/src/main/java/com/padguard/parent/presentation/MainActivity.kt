@@ -24,8 +24,8 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    // D1（L-PA-03）：家长端通知能力。此前 manifest 声明了 POST_NOTIFICATIONS 却零请求、零发送，
-    // 家长没开 App 时"孩子求解锁 / 设备告警 / 订阅到期"完全零触达。这里补齐渠道与权限。
+    // 家长端本地通知能力：应用启动即建通知渠道，登录成功后申请 POST_NOTIFICATIONS 权限，
+    // 使"孩子求解锁 / 设备告警 / 订阅到期"在家长未开 App 时也能触达。
     @Inject
     lateinit var notificationHelper: NotificationHelper
 
@@ -59,7 +59,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * D1：通知点击复用已在栈中的 MainActivity（SINGLE_TOP）时走这里。
+     * 通知点击复用已在栈中的 MainActivity（SINGLE_TOP）时走这里。
      * 必须把新 Intent 设回 Activity，PadGuardNavHost 才能读到
      * [NotificationHelper.EXTRA_OPEN_ALERTS] 并导航到消息中心；
      * 否则用户点第二条通知时，读到的还是上一条的旧 extra。

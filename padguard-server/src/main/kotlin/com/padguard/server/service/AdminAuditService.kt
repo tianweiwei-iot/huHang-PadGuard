@@ -17,7 +17,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
 /**
- * 审计日志 / 告警查看与关单。W25 从 AdminService 抽离。
+ * 审计日志 / 告警查看与关单。
  */
 @Service
 class AdminAuditService(

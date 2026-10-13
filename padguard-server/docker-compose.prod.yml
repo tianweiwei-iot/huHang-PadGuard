@@ -55,7 +55,7 @@ services:
       PADGUARD_MQTT_USERNAME: ${PADGUARD_MQTT_USERNAME:?PADGUARD_MQTT_USERNAME 必须在 .env 中设置}
       PADGUARD_MQTT_PASSWORD: ${PADGUARD_MQTT_PASSWORD:?PADGUARD_MQTT_PASSWORD 必须在 .env 中设置}
       # 设备共享凭据：注入 DeviceService → 绑定时经 BindResult 自动下发给孩子端（MqttTransport 使用）；
-      # App 端零配置，仅需在高级设置填 broker 地址。批次 D S1 收敛为 per-device。
+      # App 端零配置，仅需在高级设置填 broker 地址。收敛为 per-device。
       PADGUARD_MQTT_DEVICE_USERNAME: ${PADGUARD_MQTT_DEVICE_USERNAME:?PADGUARD_MQTT_DEVICE_USERNAME 必须在 .env 中设置}
       PADGUARD_MQTT_DEVICE_PASSWORD: ${PADGUARD_MQTT_DEVICE_PASSWORD:?PADGUARD_MQTT_DEVICE_PASSWORD 必须在 .env 中设置}
       PADGUARD_DEV_CHILDSIMULATOR: "false"

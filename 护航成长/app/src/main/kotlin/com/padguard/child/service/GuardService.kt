@@ -156,7 +156,7 @@ class GuardService : Service() {
     @Inject lateinit var watermark: WatermarkOverlay
     @Inject lateinit var credentials: CredentialStore
     @Inject lateinit var guardPassword: GuardPasswordManager
-    /** 媒体上传重试队列；解绑时随采集缓存一并清空（D6） */
+    /** 媒体上传重试队列；解绑时随采集缓存一并清空 */
     @Inject lateinit var mediaRetry: MediaUploadRetry
 
     /**
@@ -253,7 +253,7 @@ class GuardService : Service() {
         // 动态重启广播（屏幕亮起 / 网络恢复时立即把服务拉回，缩小脱管窗口）
         registerRestartReceiver()
         Logger.i(TAG) { "GuardService created, controlMode=${admin.refreshControlMode()}" }
-        // W51：启动清理残留 PENDING 指令（认领了但未执行完就退出），使其可被服务端重发重新认领，
+        // 启动清理残留 PENDING 指令（认领了但未执行完就退出），使其可被服务端重发重新认领，
         // 避免崩溃的指令被 7 天幂等窗口判重丢弃而永久静默丢失。
         scope.launch { runCatching { commandRepository.resetInFlightOnStartup() } }
         isRunning = true
@@ -1065,7 +1065,7 @@ class GuardService : Service() {
                             // 主循环下一轮读 monitoring() 时自然生效，这里无需额外动作
                             Logger.i(TAG) { "runtime config updated: ${event.values.keys}" }
                             // 设备名下发：家长端重命名后通过 downConfig(deviceName) 下发，
-                            // 这里持久化到本地，驱动「我的」页实时刷新（P6）
+                            // 这里持久化到本地，驱动「我的」页实时刷新
                             event.values["deviceName"]?.takeIf { it.isNotBlank() }?.let { name ->
                                 runSafely("saveDeviceName") { authRepository.saveDeviceName(name) }
                             }
@@ -1221,7 +1221,7 @@ class GuardService : Service() {
             }
 
             is EngineEffect.StartScreenRecord -> {
-                // 录屏此前直接走 ScreenCaptureService.startScreenRecord → 后台 startActivity 被 Android 10+ 拦掉，
+                // 录屏早期直接走 ScreenCaptureService.startScreenRecord → 后台 startActivity 被 Android 10+ 拦掉，
                 // 授权页永远出不来，家长端只看到"录屏启动失败"。统一走派发口后与截屏同一条链路。
                 val captureIntent = ScreenCaptureService.screenRecordIntent(
                     this, effect.taskId, effect.resolution, effect.withAudio
@@ -1505,7 +1505,7 @@ class GuardService : Service() {
         // 只清设备绑定、保留家庭账号登录态：解绑后应直接回到绑定页重新绑定，
         // 而不是退回登录页（孩子不知道家长密码，会永久卡死）。
         authRepository.clearDeviceBinding()
-        // D6（L-CH-07）：解绑即释放操作闸门密码与本地软拦截策略缓存。
+        // 解绑即释放操作闸门密码与本地软拦截策略缓存。
         // 若不清，平板转手后旧家庭的操作密码（GuardPasswordManager）与 AppGuardPolicyStore
         // 仍残留在新家庭设备上——孩子可凭旧密码绕过软拦截，隐私/管控承诺从第一天即不可信。
         // 这两者在 :app 模块（core:data 拿不到），故在此显式补清；Room 私有表已由
@@ -1522,7 +1522,7 @@ class GuardService : Service() {
             .onFailure { t -> Logger.e(TAG, t) { "releaseControl failed on unbind" } }
         runCatching { ScreenCaptureService.stopScreenRecord(this) }
         runCatching { ScreenCaptureService.stopAudioRecord(this) }
-        // D6（L-CH-07）：清本机采集媒体残留。Room/DataStore/guard 密码之上，
+        // 清本机采集媒体残留。Room/DataStore/guard 密码之上，
         // cacheDir 里的截屏/录屏/录音临时文件与未上传成功的重试队列同样是
         // "旧家庭在本设备上的管控痕迹"——平板转手后旧家庭录音录像不可残留。
         // 时序在 stop*Record 之后：确保没有正在写入的句柄再删文件。

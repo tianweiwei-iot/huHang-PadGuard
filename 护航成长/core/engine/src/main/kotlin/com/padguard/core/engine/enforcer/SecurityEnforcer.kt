@@ -81,7 +81,7 @@ class SecurityEnforcer @Inject constructor(
      * 且属于对抗系统的黑科技，上架与稳定性风险都高，本项目不采用。
      *
      * ## 关键修正：DO/PO 下无条件开启
-     * 旧实现把"置灰强制停止"绑在 [SecurityPolicy.antiForceStop] 开关上；一旦该开关被误关，
+     * 早期实现把"置灰强制停止"绑在 [SecurityPolicy.antiForceStop] 开关上；一旦该开关被误关，
      * 或策略未下发此字段，受管控设备就会回到"设置里能强停"的状态 —— 这正是「孩子能结束管控」
      * 的体感来源。对任何受管控设备，阻止被强行停止都是底线能力，不应由可关的开关决定，
      * 因此 DO/PO 下**始终**下发 `DISALLOW_APPS_CONTROL=true`；解绑走服务端授权流程，
@@ -127,7 +127,7 @@ class SecurityEnforcer @Inject constructor(
      * 检测逻辑放在 [com.padguard.core.engine.guard.TamperDetector]，本类只负责下发限制。
      *
      * ## 关键修正：安全模式 / 恢复出厂默认封死
-     * 旧实现把 `DISALLOW_SAFE_BOOT` / `DISALLOW_FACTORY_RESET` 绑在 [SecurityPolicy.blockRoot]
+     * 早期实现把 `DISALLOW_SAFE_BOOT` / `DISALLOW_FACTORY_RESET` 绑在 [SecurityPolicy.blockRoot]
      * 开关上；该开关一关，孩子就能从底层（恢复出厂 / 安全模式）绕过管控。
      * 这两条限制对任何受管控 DO 设备都属于底线，改为 **DO/PO 下始终下发**，
      * 不依赖可关的开关；`blockRoot` 仅控制「root 检测告警」的额外策略联动。

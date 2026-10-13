@@ -16,7 +16,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
 /**
- * 系统设置（读取 / 保存）。W25 从 AdminService 抽离。
+ * 系统设置（读取 / 保存）。
  */
 @Service
 class AdminSettingsService(
@@ -65,7 +65,7 @@ class AdminSettingsService(
                 req.plans?.forEach { put(it.id.uppercase(), it.priceFen) }
             }
         )
-        // W22：示例支付是生产环境的安全红线。后台「系统设置」允许运营把 mockPay 打开，
+        // 示例支付是生产环境的安全红线。后台「系统设置」允许运营把 mockPay 打开，
         // 但若是生产/预发等非开发 profile，落库后计费侧会据此跳过支付验签。故非开发环境一律拒绝开启。
         if (next.mockPay && !isDevProfile(env)) {
             throw BizException(ParentErr.PARAM_ERROR, "示例支付仅允许在开发环境（local/dev）开启，生产环境禁止开启", Audience.PARENT)

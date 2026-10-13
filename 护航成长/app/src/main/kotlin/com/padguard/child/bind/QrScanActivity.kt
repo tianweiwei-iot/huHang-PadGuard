@@ -60,7 +60,7 @@ import java.util.concurrent.Executors
  * ## 必须在这里动态申请相机权限
  * `AndroidManifest.xml` 里声明 `<uses-permission android:name="android.permission.CAMERA" />`
  * 只是"告知系统与应用商店"，**Android 6.0+ 真正能否打开摄像头取决于运行时授权**。
- * 此前本页直接 `ProcessCameraProvider.bindToLifecycle(...)`，未授权时抛
+ * 早期本页直接 `ProcessCameraProvider.bindToLifecycle(...)`，未授权时抛
  * `SecurityException`，又被 `runCatching` 静默吞掉 —— 表现就是"点了扫码没反应、
  * 摄像头完全没被调用"。现在改为：先申请权限，未授权给出明确提示与补救入口，
  * 且相机启动失败时把错误显示出来，不再静默失败。

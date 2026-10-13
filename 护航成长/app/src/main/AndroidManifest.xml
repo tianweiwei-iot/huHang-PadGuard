@@ -72,7 +72,7 @@
       无需 QUERY_ALL_PACKAGES（上架高危权限）。
       同时声明 LEANBACK_LAUNCHER 以兼容平板/电视的桌面入口。
 
-      W50：浏览器收口（WebEnforcer.installedBrowsers）用 ACTION_VIEW + https 链接
+      浏览器收口（WebEnforcer.installedBrowsers）用 ACTION_VIEW + https 链接
       枚举系统里能处理网页的应用，targetSdk 30+ 起同样受包可见性限制约束 ——
       缺了这条 VIEW/BROWSABLE 声明，queryIntentActivities 恒返回空集，
       挂起非许可浏览器静默失效（日志只有一行 warn，管控端与家长端都看不到）。
@@ -145,7 +145,7 @@
         tools:ignore="ProtectedPermissions" />
 
     <!--
-      **D4（L-CH-02，上线阻塞）**：MQTT 心跳保活依赖精确闹钟。
+      **MQTT 心跳保活依赖精确闹钟。**
       AlarmPingSender 用 setExactAndAllowWhileIdle 在 Doze 白名单窗口里唤醒进程发 PINGREQ，
       targetSdk 35 起该接口**必须**持有 SCHEDULE_EXACT_ALARM，否则抛 SecurityException。
       原 schedule() 被 runCatching 吞掉该异常 → 息屏进入 Doze 后心跳永不再触发 →

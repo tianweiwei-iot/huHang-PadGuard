@@ -34,7 +34,7 @@ import javax.inject.Inject
  * - [HomeUiState.selectedDeviceId] 为当前选中的设备标识；
  * - [HomeUiState.selectedDevice] 由其派生，所有页面统一从此读取，避免在 Home/统计/设备
  *   多处在各自用 firstOrNull 重复解析，导致选中态漂移的隐性回归。
- * - [HomeUiState.dailyLimitMinutes] 来自 PolicyRepository（真实策略来源），取代此前 UI 硬编码的 120。
+ * - [HomeUiState.dailyLimitMinutes] 来自 PolicyRepository（真实策略来源），取代早期 UI 硬编码的 120。
  */
 data class HomeUiState(
     val userName: String = "家长用户",
@@ -273,7 +273,7 @@ class HomeViewModel @Inject constructor(
      * `(quota - remaining)`（= 自计时开始起的墙钟流逝、封顶到额度）。孩子端首页、服务端锁机判定、
      * 本看板头条都必须读这同一个数字，否则定义就不一致、必然对不上。
      *
-     * - 此前第一版只拉取**一次**今日用量，孩子多玩一小时看板仍停旧值 → 已通过本 30s 轮询 + WS 推送兜底解决（陈旧问题）。
+     * - 早期第一版只拉取**一次**今日用量，孩子多玩一小时看板仍停旧值 → 已通过本 30s 轮询 + WS 推送兜底解决（陈旧问题）。
      * - **云端部署后再次复发**：根因是当时看板头条走的是「孩子端上报的累计前台用量」(StatisticsService 的
      *   reported-usage 当天 MAX)，而孩子端首页走的是「墙钟流逝」—— 两者隔着息屏/锁屏/后台的空闲时长，
      *   局域网连续操作空闲≈0 看不出，云端真实使用就会差出数分钟。

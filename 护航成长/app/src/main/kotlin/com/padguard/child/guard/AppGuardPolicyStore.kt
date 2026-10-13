@@ -146,7 +146,7 @@ class AppGuardPolicyStore @Inject constructor(
      * 同步读取当前策略；从未下发过策略返回 null（= 不做任何拦截）。
      *
      * ## 关键修复（应用管控闪退根因）
-     * 旧实现用 `runBlocking(Dispatchers.IO) { store.data.first() }` 在**主线程**同步读盘。
+     * 早期实现用 `runBlocking(Dispatchers.IO) { store.data.first() }` 在**主线程**同步读盘。
      * 无障碍服务的 `onAccessibilityEvent` 每次界面切换都会调用本方法，等于在主线程频繁
      * 阻塞磁盘读取——系统会把无障碍服务判定为无响应并杀掉进程，表现为
      * "打开任意应用都闪退 / 正常使用也闪退"（授权与否都走这条热路径，所以全都崩）。

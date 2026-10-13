@@ -10,10 +10,10 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * 媒体上传重试队列（W38）。
+ * 媒体上传重试队列。
  *
  * ## 修的问题
- * 旧实现在四条上传路径上「失败即删」：截屏（[com.padguard.child.capture.ScreenCaptureService] doCapture）、
+ * 早期实现在四条上传路径上「失败即删」：截屏（[com.padguard.child.capture.ScreenCaptureService] doCapture）、
  * 录屏（finalizeRecording）、录音（stopAudioRecord）、拍照（[com.padguard.child.capture.PhotoCapture]）——
  * 上传失败后只记一行日志就把本地文件删掉。于是弱网/服务端重启窗口里，
  * 家长点了「截屏 / 录屏 / 录音 / 拍照」，孩子端明明成功采集了，文件却被悄悄丢弃，
@@ -27,7 +27,7 @@ import javax.inject.Singleton
  *
  * ## 边界
  * - 队列有上限（[MAX_FILES] 条）与存活期（[MAX_AGE_MS]），超限丢最旧 ——
- *   缓存不能无限涨，否则照样把磁盘写满（E11 的老问题）。
+ *   缓存不能无限涨，否则照样把磁盘写满。
  * - 重传仍失败就留在队列里等下一轮，不抛异常打扰调用方。
  */
 @Singleton
@@ -125,7 +125,7 @@ class MediaUploadRetry @Inject constructor(
     }
 
     /**
-     * D6（L-CH-07）：解绑即清空整个重试队列（文件 + 索引 + 目录）。
+     * 解绑即清空整个重试队列（文件 + 索引 + 目录）。
      *
      * 队列里躺着的是尚未上传成功的采集媒体（截屏/录屏/录音），
      * 全部属于"旧家庭在本设备上的管控痕迹"。Room 与 DataStore 清了，

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-W61 防复发闸门：包名一致性检查。
+包名一致性检查（防复发闸门）。
 
-背景（审查 W61）：家长端曾有四套包名并存（parent/ 目录下声明
+背景：家长端曾有四套包名并存（parent/ 目录下声明
 com.padguard.presentation.* / com.padguard.data.* / com.padguard.domain.* /
 com.padguard.parent.*），编译正常但 IDE 导航/重构/按包检索全部失灵。
-批次 K 已一次性对齐为「package 声明 == 物理目录」，本脚本防止回归。
+已一次性对齐为「package 声明 == 物理目录」，本脚本防止回归。
 
 判定规则：每个 .kt 文件的 package 声明必须等于其所在目录相对
 src/main/java 的路径（点分）。这是 Android/Kotlin 的标准约定，
@@ -79,7 +79,7 @@ def main() -> int:
     modules = sys.argv[1:] or DEFAULT_MODULES
     total = sum(check_module(m) for m in modules)
     if total:
-        print(f"\n合计 {total} 个文件包名不一致——请把 package 声明改为与目录一致（W61 对齐口径）。")
+        print(f"\n合计 {total} 个文件包名不一致——请把 package 声明改为与目录一致（对齐口径）。")
     return 1 if total else 0
 
 

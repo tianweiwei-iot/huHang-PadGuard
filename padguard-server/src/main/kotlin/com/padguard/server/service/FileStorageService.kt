@@ -65,7 +65,7 @@ class FileStorageService(
         if (baseUrl.isNotBlank()) "${baseUrl.trimEnd('/')}/v1/files/$id" else "/v1/files/$id"
 
     /**
-     * E11（L-OPS-06）：按 id 删除文件（磁盘 + 记录）。
+     * 按 id 删除文件（磁盘 + 记录）。
      *
      * 保留期清理用：uploads 里的孩子端录屏/截图无生命周期，单个 90MB 级，
      * 不清则 50GiB 盘 6-18 个月写满 → PG 拒写全站瘫痪。
@@ -80,7 +80,7 @@ class FileStorageService(
         return runCatching { file.delete() }.getOrDefault(false)
     }
 
-    /** 存储根目录（磁盘检查用：E11 的 df 告警盯着这个目录所在的文件系统）。 */
+    /** 存储根目录（磁盘检查用：磁盘用量告警盯着这个目录所在的文件系统）。 */
     fun storageRoot(): File = dir
 
     /** 从文件 URL 中解析 id；无法解析（历史脏数据/相对路径异常）时返回 null。 */

@@ -89,7 +89,7 @@ interface CommandRepository : JpaRepository<Command, String> {
     /**
      * 轮询下发（高频路径）：在 SQL 层完成「状态 + 未过期 + 游标」过滤并截断批次。
      *
-     * 此前是 [findByDeviceIdOrderByCreatedAtAsc] 全量捞出该设备**全部历史指令**再在
+     * 早期是 [findByDeviceIdOrderByCreatedAtAsc] 全量捞出该设备**全部历史指令**再在
      * 内存里 filter——指令表只增不删，孩子端每 3 秒轮询一次，随使用时间推移
      * 单次查询要扫描的行数持续线性增长，直接拖垮整个连接池（表现为家长端操作全部变慢）。
      * 配合 idx_commands_poll 复合索引，这里退化为一次索引范围扫描。
@@ -204,7 +204,7 @@ interface AuditLogRepository : JpaRepository<AuditLog, String> {
     /**
      * 分页查询（倒序 + 可选 action 过滤），供家长端审计页面使用。
      *
-     * 此前实现是把该设备/用户的**全部**审计日志捞进内存再 sortedByDescending + drop + take：
+     * 早期实现是把该设备/用户的**全部**审计日志捞进内存再 sortedByDescending + drop + take：
      * 审计日志只增不删，这个"分页"会随数据增长越来越慢，且内存占用不可控。
      * 这里改为数据库侧排序 + 真正的分页（LIMIT/OFFSET），只取回当前页。
      */

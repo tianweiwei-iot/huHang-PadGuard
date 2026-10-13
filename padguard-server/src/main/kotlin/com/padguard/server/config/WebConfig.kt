@@ -66,7 +66,7 @@ class WebConfig(
                 "/v1/auth/register",
                 // 支付回调必须放行：网关侧服务器-to-服务器调用不带家长 JWT，
                 // 其合法性由 PaymentVerifier 验签保证（BillingController 注释声明的意图，
-                // 此前漏配在本清单 —— 真实渠道回调会被这里 401 掉）。
+                // 早期漏配在本清单 —— 真实渠道回调会被这里 401 掉）。
                 "/v1/billing/notify",
                 "/v1/files/**",
                 // 公开服务器信息端点：客户端绑定引导/信息展示需匿名读取

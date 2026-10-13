@@ -23,8 +23,8 @@ import java.util.*
  * 3. 与既有初始化逻辑解耦，互不污染，降低回归风险。
  *
  * ## 弱口令收口（与 DataInitializer 家长侧同口径）
- * `admin/admin123` 此前对所有环境无条件播种且**无任何强制重置机制**——家长侧演示账号
- * 有"识别出厂弱口令并强制重置"的处理，管理员侧此前漏配，等于把后台全权入口的默认凭据
+ * `admin/admin123` 早期对所有环境无条件播种且**无任何强制重置机制**——家长侧演示账号
+ * 有"识别出厂弱口令并强制重置"的处理，管理员侧早期漏配，等于把后台全权入口的默认凭据
  * 永久印在页面上（index.html 登录表单还预填了这对凭据）。现对齐为：
  * - local profile：保留 admin/admin123 便于联调；
  * - 正式部署首次启动（admins 表为空）：随机生成强口令并写入本地文件（不硬编码）；
@@ -35,9 +35,9 @@ class AdminDataInitializer(
     private val adminRepository: AdminRepository,
     private val env: Environment,
     /**
-     * E6（L-OPS-07）：初始/重置口令文件的落盘路径。
+     * 初始/重置口令文件的落盘路径。
      *
-     * 旧实现写死相对路径（容器工作目录）——docker-compose 只挂了 `./uploads:/app/uploads`，
+     * 早期实现写死相对路径（容器工作目录）——docker-compose 只挂了 `./uploads:/app/uploads`，
      * 工作目录在容器可写层里：**容器一重建文件就丢**，而管理员口令已被强制重置出 admin123，
      * 后果是全新部署直接锁死后台、没人知道口令。默认改到挂载卷内的 uploads/ 下，
      * 并支持用环境变量/配置覆盖到 secrets 卷（`PADGUARD_INITIAL_PASSWORD_FILE`）。
@@ -108,7 +108,7 @@ class AdminDataInitializer(
     private fun writeInitialPasswordFile(usernames: String, password: String, reset: Boolean) {
         val file = File(initialPasswordFile)
         runCatching {
-            // E6：目标目录可能不存在（uploads 卷未预建 / secrets 卷空挂载），先建目录再写
+            // 目标目录可能不存在（uploads 卷未预建 / secrets 卷空挂载），先建目录再写
             file.parentFile?.mkdirs()
             file.writeText(
                 """
@@ -122,7 +122,7 @@ class AdminDataInitializer(
                 此文件包含明文口令，妥善保管，用后可删除。
                 """.trimIndent(), Charsets.UTF_8
             )
-            // 打绝对路径：相对路径在容器里没人知道落在哪，E6 的教训就是"文件写了却找不到"
+            // 使用绝对路径：相对路径在容器里没人知道落在哪，"文件写了却找不到"
             log.warn("管理员口令已写入 {}（请登录后立即修改并删除该文件）", file.absolutePath)
         }.onFailure { log.error("写入管理员初始密码文件失败: {} -> {}", initialPasswordFile, it.message) }
     }

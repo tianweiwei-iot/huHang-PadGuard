@@ -104,7 +104,7 @@ fun DeviceDetailScreen(
                 ChildProfileCard(device)
             }
 
-            // W63 修复：原网格中「重启」「授权」与「定位」一样只弹假 toast（一个请求都不发），
+            // 原网格中「重启」「授权」与「定位」一样只弹假 toast（一个请求都不发），
             // 而同页「一键锁屏」是真链路——同页真假并存最伤信任。现：
             // - 定位：接真实指令链路（viewModel.locateNow → /v1/monitor/{id}/locate → LOCATE 指令）；
             // - 重启 / 授权：移出网格，改为下方置灰说明（服务端无 REBOOT 指令；
@@ -132,7 +132,7 @@ fun DeviceDetailScreen(
                 onGrantExemption = viewModel::grantExemption
             )
 
-            // 受管控水印（P0-1）：替代"关不掉的系统录屏红点"的可控提示手段，
+            // 受管控水印：替代"关不掉的系统录屏红点"的可控提示手段，
             // 卡片内已写明系统限制，避免家长把两者混淆。
             WatermarkCard(
                 enabled = uiState.watermarkEnabled,
@@ -413,7 +413,7 @@ private fun QuickCommandGrid(locating: Boolean = false, onCommand: (String) -> U
                     FeatureGridItem(feature = it, onClick = { if (it.name != "定位" || !locating) onCommand(it.name) })
                 }
             }
-            // W63：做不到的命令不装样子。远程重启无指令支持；临时授权需选时长。
+            // 做不到的命令不装样子。远程重启无指令支持；临时授权需选时长。
             // 移出网格 + 明示真实情况与正确入口，杜绝"界面说成功、后端什么都没发生"。
             Spacer(modifier = Modifier.height(4.dp))
             Text(

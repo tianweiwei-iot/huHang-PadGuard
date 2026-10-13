@@ -168,7 +168,7 @@ import javax.inject.Singleton
 /**
  * 真实后端数据源（接真线）。
  *
- * 取代 Mock 阶段的 [com.padguard.parent.data.local.LocalDataSource]，将 8 个领域仓储接口映射到
+ * 取代 Mock 实现的 [com.padguard.parent.data.local.LocalDataSource]，将 8 个领域仓储接口映射到
  * `https://<域名>/v1/` 下的真实 REST 接口（统一响应体 [ApiResponse]，约定 `code == 0` 为成功）。
  *
  * 设计原则（与用户稳定性要求一致）：
@@ -249,7 +249,7 @@ class ApiDataSource @Inject constructor(
     /**
      * 只关心"指令有没有被服务端接受"的写操作。
      *
-     * W62 修复前：此处仅判 [Response.isSuccessful]，而服务端对业务失败
+     * 早期此处仅判 [Response.isSuccessful]，而服务端对业务失败
      * （2001 设备不存在 / 2003 不归属 / 4001 订阅过期 …）回落为 HTTP 200 + `{code,message}` 信封，
      * 于是"订阅过期点同意放行""设备已解绑点锁屏"等全部被误判成功。
      * 现额外解析信封里的业务 code：非 0 一律按失败上抛，覆盖 11 个指令链路
@@ -1500,7 +1500,7 @@ private fun AlertDto.toDomain(): Alert = Alert(
     level = safeEnum(level) { AlertLevel.WARNING }, title = title, message = message ?: "",
     status = safeEnum(status) { AlertStatus.ACTIVE }, category = safeEnum(category) { AlertCategory.SYSTEM_ANOMALY },
     triggeredAt = triggeredAt, acknowledgedAt = acknowledgedAt, resolvedAt = resolvedAt,
-    // D7：保留服务端原始事件类型，见 Alert.categoryRaw 的注释
+    // 保留服务端原始事件类型，见 Alert.categoryRaw 的注释
     categoryRaw = category
 )
 

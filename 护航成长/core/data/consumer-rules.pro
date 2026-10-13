@@ -4,7 +4,7 @@
 # 策略模型参与序列化，保留构造器
 -keep class com.padguard.core.data.model.** { *; }
 
-# kotlinx.serialization：本模块策略模型（PolicyPackage 等）序列化器与 descriptor 必须保留（A3）
+# kotlinx.serialization：本模块策略模型（PolicyPackage 等）序列化器与 descriptor 必须保留
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.**
 -keepclasseswithmembers class com.padguard.core.data.model.** {

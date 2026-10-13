@@ -127,7 +127,7 @@ class KidHomeViewModel @Inject constructor(
      * - 其余受管控应用：依赖「打开应用也要密码」开关 + 家长密码，二者缺一不可，否则不拦；
      * - 系统关键包（防砖名单）→ 不拦。
      *
-     * 这是桌面这层"可视网关"的必要补强：此前 [launchApp] 直接启动，会绕过本应由
+     * 这是桌面这层"可视网关"的必要补强：早期 [launchApp] 直接启动，会绕过本应由
      * 无障碍服务实施的启动门禁（且一旦无障碍未开就彻底免密）。
      */
     fun needsLaunchGuard(pkg: String): Boolean {

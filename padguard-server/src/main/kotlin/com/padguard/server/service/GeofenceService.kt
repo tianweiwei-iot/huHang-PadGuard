@@ -118,7 +118,7 @@ class GeofenceService(
     /**
      * 批量围栏进入/离开检测（一对多）。
      *
-     * 原 [detectGeofenceExits] 只处理单围栏、且只告警"离开"。现改为遍历该设备的**每一个**
+     * 原 [detectGeofenceExits] 只处理单围栏、且只告警"离开"。改为遍历该设备的**每一个**
      * 启用围栏，分别判定进入（[GeofenceZone.alertOnEnter]）与离开（[GeofenceZone.alertOnExit]）
      * 状态切换并告警。状态机只告警"进入 -> 离开"或"离开 -> 进入"的边界点，避免连续点刷屏。
      *

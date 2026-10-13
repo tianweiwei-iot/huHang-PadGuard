@@ -14,7 +14,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
 /**
- * 设备管理（列表 / 远程锁屏 / 远程解锁）。W25 从 AdminService 抽离。
+ * 设备管理（列表 / 远程锁屏 / 远程解锁）。
  */
 @Service
 class AdminDeviceService(

@@ -26,7 +26,7 @@ private val Context.authDataStore: DataStore<Preferences> by preferencesDataStor
  * - 保存当前用户基础字段，供 [currentUserFlow] 与脱机态展示使用；
  * - 退出登录时清空。
  *
- * 与 Mock 阶段 LocalDataSource 的偏好存储解耦，使用独立的 DataStore 文件，避免相互污染。
+ * 与 Mock 实现 LocalDataSource 的偏好存储解耦，使用独立的 DataStore 文件，避免相互污染。
  */
 @Singleton
 class TokenManager @Inject constructor(

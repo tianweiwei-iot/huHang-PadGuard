@@ -30,7 +30,7 @@ import org.eclipse.paho.client.mqttv3.internal.ClientComms
  * 与原版的三点差异：
  * 1. PendingIntent 强制加 `FLAG_IMMUTABLE`（targetSdk >= 31 硬性要求，原版因此在新系统崩溃）；
  * 2. 广播接收器用 `RECEIVER_NOT_EXPORTED` 注册（targetSdk >= 34 硬性要求）；
- * 3. D4：精确闹钟不可用（权限被撤销/OEM 限制）时降级非精确闹钟而非静默死亡。
+ * 3. 精确闹钟不可用（权限被撤销/OEM 限制）时降级非精确闹钟而非静默死亡。
  */
 class AlarmPingSender(private val context: Context) : MqttPingSender {
 
@@ -95,10 +95,10 @@ class AlarmPingSender(private val context: Context) : MqttPingSender {
                 alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAt, intent)
             }
         } catch (e: SecurityException) {
-            // D4 兜底：SCHEDULE_EXACT_ALARM 虽随安装授予，但 Android 12+ 用户可在
+            // 兜底：SCHEDULE_EXACT_ALARM 虽随安装授予，但 Android 12+ 用户可在
             // 「设置 → 闹钟和提醒」撤销，个别 OEM ROM 亦有限制 —— 此时精确闹钟不可用。
             // 降级到 setAndAllowWhileIdle（非精确但允许 Doze 窗口触发）：
-            // 时机变钝，心跳不断。绝不回到旧实现的 runCatching 吞异常静默死亡路径
+            // 时机变钝，心跳不断。绝不回到早期实现的 runCatching 吞异常静默死亡路径
             // （那会导致 broker 约 135s 判掉线，表现为每晚息屏即脱管）。
             Logger.w(TAG, e) { "exact alarm unavailable, degrading to inexact alarm" }
             runCatching {

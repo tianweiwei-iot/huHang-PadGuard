@@ -54,13 +54,13 @@ class LocalDataSource @Inject constructor(
         private val KEY_USER_ROLE = stringPreferencesKey("user_role")
         private val KEY_SCENE_TYPE = stringPreferencesKey("scene_type")
 
-        /** Mock 阶段每日总时长默认上限（分钟）。真实后端接入后由服务端返回。 */
+        /** Mock 实现每日总时长默认上限（分钟）。真实后端接入后由服务端返回。 */
         private const val DEFAULT_DAILY_LIMIT_MINUTES = 120
     }
 
     // ==================== Mock 数据工厂 ====================
 
-    // 设备台账内存存储：增删改查均作用于此，保证 CRUD 在 Mock 阶段真实生效
+    // 设备台账内存存储：增删改查均作用于此，保证 CRUD 在 Mock 实现真实生效
     private val deviceStore = linkedMapOf(
         "dev_001" to Device(
             id = "dev_001",
@@ -467,7 +467,7 @@ class LocalDataSource @Inject constructor(
     override suspend fun deleteAppCatalog(deviceId: String, catalogId: String): Result<Unit> =
         Result.success(Unit)
 
-    // ==================== MonitorRepository 实现 (P1 - Mock) ====================
+    // ==================== MonitorRepository 实现 (Mock) ====================
 
     override suspend fun requestScreenshot(deviceId: String): Result<ScreenshotData> =
         Result.success(ScreenshotData(

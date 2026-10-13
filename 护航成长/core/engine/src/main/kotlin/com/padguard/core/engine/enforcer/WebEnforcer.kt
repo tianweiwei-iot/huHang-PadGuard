@@ -28,7 +28,7 @@ import javax.inject.Singleton
  * | 无障碍服务读地址栏（本类采用） | 浏览器地址栏文本、页面标题 | 依赖各浏览器控件 id，换版本会失效；App 内嵌 WebView 读不到 |
  * | 私有 DNS / 代理 | 域名 | 需要服务端基础设施，且 App 内直连 IP 可绕过 |
  *
- * P0 阶段的取舍：**域名级过滤 + 浏览器收口**。
+ * 早期阶段的取舍：**域名级过滤 + 浏览器收口**。
  * - 域名匹配（[match]）由无障碍服务/VpnService 调用，两条通道共用同一套规则，避免两份实现打架；
  * - 浏览器收口（[apply]）通过挂起非许可浏览器，把上网入口压缩到可控范围 ——
  *   这是**真正见效**的一步，因为哪怕关键词过滤失效，孩子也只能用被允许的浏览器。
@@ -183,8 +183,8 @@ class WebEnforcer @Inject constructor(
         }
         val allowed = policy.allowBrowsers.toSet()
         val installed = installedBrowsers()
-        // W50：枚举不到任何浏览器时（manifest 缺 VIEW/BROWSABLE queries 声明、
-        // 或包可见性被限制），旧实现会"静默不挂起任何浏览器"——管控端以为在收口，
+        // 枚举不到任何浏览器时（manifest 缺 VIEW/BROWSABLE queries 声明、
+        // 或包可见性被限制），早期实现会"静默不挂起任何浏览器"——管控端以为在收口，
         // 实际孩子可以用任意浏览器上网。这里如实上报，让"做不到"在界面上可见。
         if (installed.isEmpty()) {
             report.markUnsupported(

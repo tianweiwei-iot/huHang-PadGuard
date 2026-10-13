@@ -464,8 +464,8 @@ class PolicyExtensionService(
             "version" to version,
             "deviceId" to deviceId,
             "scene" to (device.scene ?: "FAMILY"),
-            // W77: sceneMode 读 device.sceneMode（由 applyMode 同步落库的唯一事实源）。
-            // 不可再写死 "NORMAL" 兜底覆盖，否则会冲掉家长刚切换的模式，使切换对孩子的设备零生效。
+            //  sceneMode 读 device.sceneMode（由 applyMode 同步落库的唯一事实源）。
+            // 不可再写死 "NORMAL" 兜底覆盖，否则会冲掉家长刚切换的模式，使切换对孩子的设备不生效。
             "sceneMode" to (device.sceneMode ?: "NORMAL"),
             "peripheral" to mapOf("wifi" to "ALLOW", "bluetooth" to "DISABLE", "camera" to "DISABLE", "usbFileTransfer" to "DISABLE"),
             // 护眼：独立顶级段，不塞进 appLimit —— 后者是"应用限时"，两者毫不相干，

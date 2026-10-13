@@ -62,7 +62,7 @@ sealed class LocationOutcome {
  * 平台 [LocationManager] 是 AOSP 自带能力，零额外依赖、任何 ROM 都有。
  *
  * ## "准确"是怎么做到的（本次补齐的关键）
- * 旧实现只取 `getLastKnownLocation`，而这可能是**几十分钟前甚至几天前**的缓存点：
+ * 早期实现只取 `getLastKnownLocation`，而这可能是**几十分钟前甚至几天前**的缓存点：
  * 家长端看到的位置与实际相差甚远，却带着一个"刚刚上报"的时间戳，比失败更误导。
  * 现在分三步：
  * 1. **取最新的已知点**：不再按 GPS→网络→被动的固定顺序取第一个非空值，
@@ -213,7 +213,7 @@ class LocationCollector @Inject constructor(
         return requestFreshFix(manager, timeoutMs) ?: cached
     }
 
-    /** 所有 provider 的缓存点里**时间戳最新**的那个（旧实现按固定顺序取第一个非空，可能拿回一个很旧的点）。 */
+    /** 所有 provider 的缓存点里**时间戳最新**的那个（早期实现按固定顺序取第一个非空，可能拿回一个很旧的点）。 */
     private fun latestCached(manager: LocationManager): Location? =
         PROVIDER_PRIORITY.mapNotNull { provider ->
             // 逐个 runCatching：ROM 差异很大，有的 provider 未启用时会直接抛，

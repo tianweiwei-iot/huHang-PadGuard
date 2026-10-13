@@ -23,7 +23,7 @@ import javax.inject.Singleton
  * take/mark 的精确配对载体（C2'）。
  *
  * [entityIds] 是 Room 自增主键 —— take 时从实体上直接带出，mark 时按它精确回写。
- * 此前 mark* 是"重查一次 pending 前 N 条"当刚上报批次：take 与 mark 之间若有并发
+ * 早期 mark* 是"重查一次 pending 前 N 条"当刚上报批次：take 与 mark 之间若有并发
  * 插入/并发 take（uploadPending 有 5 条触发路径），重查窗口会包含**不属于本批**的新行，
  * 把从未上传的日志错标成已上传，且这类丢失静默无声 —— 告警"永不丢弃"的承诺就此破产。
  */
@@ -277,7 +277,7 @@ class LogRepository @Inject constructor(
         val pending = logDao.pendingCount()
         if (pending <= MAX_PENDING_LOGS) return
         // 离线数日的极端兜底：pending 超限时**丢弃最旧的未上传普通日志**，防表无限膨胀。
-        // 此前实现删的是"已上传"日志 —— 已上传的本就有 purge 兜着，pending 却永不清，
+        // 早期实现删的是"已上传"日志 —— 已上传的本就有 purge 兜着，pending 却永不清，
         // 与"未上传数据永不清理"的承诺拼起来 = 超限保护形同虚设（R6 登记项）。
         // 告警（risk_event）不在本清理范围内：告警永不因容量而丢弃。
         val excess = pending - MAX_PENDING_LOGS

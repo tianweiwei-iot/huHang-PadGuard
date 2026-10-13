@@ -77,7 +77,7 @@ class JwtTokenProvider(
 
     /**
      * 按令牌类型解析。三类令牌（家长 access / refresh、管理员）用同一密钥签发，
-     * 仅靠 typ 声明区分 —— 此前 parseUserId 只验签不验 typ，导致：
+     * 仅靠 typ 声明区分 —— 早期 parseUserId 只验签不验 typ，导致：
      * 30 天的 refresh token 可当 access token 调全部业务接口；
      * access token 可被拿去无限续期；管理员令牌可通过家长 WS 握手。
      * 现在调用方必须声明自己期望的令牌类型，类型不符一律拒绝。

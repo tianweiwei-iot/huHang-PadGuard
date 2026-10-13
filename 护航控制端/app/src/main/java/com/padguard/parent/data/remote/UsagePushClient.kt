@@ -88,7 +88,7 @@ class UsagePushClient @Inject constructor(
         val url = buildWsUrl(token) ?: return
         val request = Request.Builder().url(url).build()
         webSocket = wsClient.newWebSocket(request, listener)
-        // P2'：不要在这里复位 reconnectAttempts。
+        // 不要在这里复位 reconnectAttempts。
         // connect() 也是断线退避重连的入口，在这里复位会让每次重连都从 1s 重新起算，
         // 指数退避形同虚设（服务端长时间宕机时变成 1s 一次的固定频率打点）。
         // 复位只属于 onOpen —— 连接真正建立才算"恢复健康"。

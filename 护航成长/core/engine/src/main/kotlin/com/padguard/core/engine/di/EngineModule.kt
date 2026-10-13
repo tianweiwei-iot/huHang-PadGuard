@@ -25,7 +25,7 @@ import javax.inject.Singleton
  *
  * ## HolidayProvider 为什么留成接口
  * 节假日/调休表在校园场景需要按地区、按学年替换（甚至由服务端下发），
- * 但 P0 阶段服务端还没有这个能力，先用 [DefaultHolidayProvider] 的内置规则兜底。
+ * 但早期阶段服务端还没有这个能力，先用 [DefaultHolidayProvider] 的内置规则兜底。
  * 保留接口是为了后续换成"服务端下发日历"时不改 [ScheduleEvaluator] 一行代码。
  */
 @Module

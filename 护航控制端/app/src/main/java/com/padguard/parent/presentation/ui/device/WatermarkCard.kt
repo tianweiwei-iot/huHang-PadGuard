@@ -30,7 +30,7 @@ import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 
 /**
- * 受管控水印卡片（P0-1）。
+ * 受管控水印卡片。
  *
  * ## 这张卡存在的真正原因：有一个诉求我们做不到
  * 家长提"录屏能不能别显示红点"时，指的是 Android 在 MediaProjection 会话期间

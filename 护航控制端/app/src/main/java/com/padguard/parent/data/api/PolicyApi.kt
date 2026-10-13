@@ -73,7 +73,7 @@ interface PolicyApi {
      *
      * 与黑名单分开：名单内容是高频增删，模式是低频设置。
      * mode 决定孩子端按"只管名单内"还是"只放行名单内"执行 ——
-     * 服务端此前把它硬编码成 BLACKLIST，白名单模式在链路上是断的。
+     * 服务端早期把它硬编码成 BLACKLIST，白名单模式在链路上是断的。
      */
     @PUT("policies/{deviceId}/apps/list-policy")
     suspend fun updateAppListPolicy(
@@ -277,7 +277,7 @@ interface PolicyApi {
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<UsageSessionDto>>
 
-    // === 未成年人模式（P1 合规底座） ===
+    // === 未成年人模式（合规底座） ===
     @GET("policies/{deviceId}/minor-mode")
     suspend fun getMinorMode(
         @Path("deviceId") deviceId: String

@@ -526,7 +526,7 @@ private fun ScreenSettingsCard(
             onCheckedChange = { value -> onEdit { it.copy(highDefinition = value) } }
         )
 
-        // W39（决策④-A）：录屏画质档位与"含设备声音"在孩子端均未实现——
+        // 录屏画质档位与"含设备声音"在孩子端均未实现——
         // 协议字段保留为预留能力，但这里不再给"设了有用"的假开关。
         // 宁可没有功能，不能假报成功；音轨混流独立排期，上线后此处恢复真实控件。
         // 能力矩阵见《前后端契约对齐确认表》§七。

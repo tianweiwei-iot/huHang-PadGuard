@@ -183,7 +183,7 @@ class BillingService(
     /**
      * 示例支付开关：后台系统设置（DB）优先，未保存则回退部署配置。
      *
-     * 为什么改：此前后台「系统设置 → 示例支付」只是把一个布尔值存进库里，
+     * 为什么改：早期后台「系统设置 → 示例支付」只是把一个布尔值存进库里，
      * 计费侧读的却是启动时的 `padguard.billing.mock-pay-enabled` 配置项，
      * 两者完全断开 —— 运营在后台打开开关没有任何效果，必须改配置重启，属于"设了没用"。
      * 现在与 [effectiveTrialDays] 同一口径：DB 优先、配置兜底、解析失败安全回退。
@@ -332,7 +332,7 @@ class BillingService(
             ?: throw BizException(ParentErr.PARAM_ERROR, "套餐不存在", Audience.PARENT)
         // 只接受收银台可购买套餐：TRIAL（无需下单）与 PERMANENT（一次性后台开通，不参与下单/
         // 金额计算，否则可被 ¥0 下单 + mockPay 白嫖永久会员）都不在此列。
-        // 此前只拦截了 TRIAL，PERMANENT 仍能下单 —— 一个 `plan=PERMANENT` 的请求即可生成 ¥0 订单，
+        // 早期只拦截了 TRIAL，PERMANENT 仍能下单 —— 一个 `plan=PERMANENT` 的请求即可生成 ¥0 订单，
         // 经 mockPay / markPaid 直接开通永久会员，是典型"绕过收费"后门。
         if (plan !in Plan.purchasable()) {
             throw BizException(ParentErr.PARAM_ERROR, "该套餐不可购买", Audience.PARENT)

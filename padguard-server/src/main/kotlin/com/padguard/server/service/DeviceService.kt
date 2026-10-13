@@ -395,7 +395,7 @@ class DeviceService(
         dev.deviceTokenHash = "revoked_" + UUID.randomUUID().toString()
         deviceRepository.save(dev)
         // 解绑即清理该设备全部私有业务数据：截图、轨迹、用量、指令、告警、已装应用、围栏、
-        // 设备设置等。此前只把 userId 置空，这些行永久残留在库里（且下次有人绑到同一台平板
+        // 设备设置等。早期只把 userId 置空，这些行永久残留在库里（且下次有人绑到同一台平板
         // 时会被新孩子继承）。审计日志刻意保留，供管理员追责。
         purgeDeviceDataWithRetry(deviceId, "UNBIND")
         auditService.record(userId, deviceId, AuditAction.DEVICE_UNBIND, targetType = "device", targetId = deviceId)
@@ -648,7 +648,7 @@ class DeviceService(
     /**
      * 在线状态的"惰性超时"兜底判定：仅影响返回给家长端的值，不改库。
      *
-     * 背景：设备上线状态此前完全依赖两个事件 —— MQTT 断线触发 [setOffline]，或孩子端心跳
+     * 背景：设备上线状态早期完全依赖两个事件 —— MQTT 断线触发 [setOffline]，或孩子端心跳
      * 触发 [applyHeartbeat] 置 ONLINE。但存在两个盲区：
      * 1. local profile 下 MQTT 关闭，[setOffline] 永不触发；
      * 2. HTTP 降级心跳只把状态置为 ONLINE，从不置 OFFLINE。

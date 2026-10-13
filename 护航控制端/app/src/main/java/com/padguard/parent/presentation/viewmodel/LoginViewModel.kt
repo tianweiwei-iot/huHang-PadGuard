@@ -88,7 +88,7 @@ data class LoginUiState(
     val history: List<AccountPrefs.SavedAccount> = emptyList(),
     /** 是否"记住密码"；勾选后下次进入自动回填该账号密码 */
     val rememberPassword: Boolean = false,
-    /** B1：忘记密码引导弹窗开关（端 + 服务端均无自动重置端点，引导走客服人工重置） */
+    /** 忘记密码引导弹窗开关（端 + 服务端均无自动重置端点，引导走客服人工重置） */
     val showForgotPassword: Boolean = false
 )
 
@@ -179,7 +179,7 @@ class LoginViewModel @Inject constructor(
         }
     }
 
-    // B1：忘记密码——端 + 服务端均无自助重置端点（W22 后服务端改密需管理员），
+    // 忘记密码——端 + 服务端均无自助重置端点（服务端改密需管理员），
     // 故弹出引导弹窗，引导用户走客服人工重置，而非一个"点了没反应"的死按钮。
     fun forgotPassword() {
         _uiState.value = _uiState.value.copy(showForgotPassword = true)
@@ -246,7 +246,7 @@ class LoginViewModel @Inject constructor(
             _uiState.value = state.copy(isLoading = true, error = null)
             val result = authRepository.register(phone, pwd, state.nickname.trim().ifBlank { null })
             result.onSuccess {
-                // B5：注册时不静默记住密码（无勾选语义）；记住密码仅限登录页用户主动勾选。
+                // 注册时不静默记住密码（无勾选语义）；记住密码仅限登录页用户主动勾选。
                 accountPrefs.save(phone, pwd, remember = false)
                 _uiState.value = _uiState.value.copy(
                     isLoading = true,

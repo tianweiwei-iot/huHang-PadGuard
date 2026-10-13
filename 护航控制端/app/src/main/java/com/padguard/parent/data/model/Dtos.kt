@@ -87,7 +87,7 @@ data class DeviceDto(
     val lastOnlineTime: Long?,
     val batteryLevel: Int?,
     val controlMode: String?,   // 后端可能为 null（孩子端尚未上报）
-    /** W77: 家长端切换的管控模式（NORMAL / LEARNING / FOCUS），由服务端 applyMode 落库并随设备详情下发；此前缺失会导致 sceneMode 反序列化被静默丢弃。 */
+    /** 家长端切换的管控模式（NORMAL / LEARNING / FOCUS），由服务端 applyMode 落库并随设备详情下发；早期缺失会导致 sceneMode 反序列化被静默丢弃。 */
     val sceneMode: String?,
     val groupId: String?,
     val groupName: String?,     // 后端当前恒为 null
@@ -193,7 +193,7 @@ data class MediaResultDto(
 
 @JsonClass(generateAdapter = true)
 data class StartRecordRequest(
-    // W39：以下两个字段为预留（wire 兼容继续下发），孩子端录屏恒按原生分辨率、不含音轨；
+    // 以下两个字段为预留（wire 兼容继续下发），孩子端录屏恒按原生分辨率、不含音轨；
     // 家长端 UI 已明示，详见《前后端契约对齐确认表》§六 录屏能力矩阵。
     val resolution: String,            // "SD_480P" | "HD_720P" | "FHD_1080P"（预留未生效）
     val withAudio: Boolean             // 预留未生效（录屏不混入设备声音）
@@ -515,7 +515,7 @@ data class UsageSessionDto(
     val lastDelayEpoch: Long? = null
 )
 
-// ==================== 指令回执（P0-5 可观测性） ====================
+// ==================== 指令回执（可观测性） ====================
 
 /**
  * 下发指令时服务端返回的对象。
@@ -552,12 +552,12 @@ data class CommandResultDto(
     val payload: Map<String, Any?>? = null,
     val createdAt: Long = 0,
     val executedAt: Long? = null,
-    /** P0-5：指令回执的错误码 / 描述，说明"为什么没生效" */
+    /** 指令回执的错误码 / 描述，说明"为什么没生效" */
     val errorCode: String? = null,
     val errorMessage: String? = null
 )
 
-// ==================== 未成年人模式（P1 合规底座） ====================
+// ==================== 未成年人模式（合规底座） ====================
 
 /**
  * 未成年人模式当前配置。
@@ -685,7 +685,7 @@ data class AppUsageHistoryEntryDto(
  * 未读告警数的传输对象。
  *
  * 服务端 `/v1/alerts/unread-count` 返回的是 `{"count": N}` **对象**而不是裸数字。
- * 此前这里声明成 `ApiResponse<Int>`，Moshi 反序列化时拿到 OBJECT 却要写成 INT，
+ * 早期这里声明成 `ApiResponse<Int>`，Moshi 反序列化时拿到 OBJECT 却要写成 INT，
  * 直接抛 JsonDataException —— 属典型的"契约错配在解析阶段就炸"。
  */
 @JsonClass(generateAdapter = true)

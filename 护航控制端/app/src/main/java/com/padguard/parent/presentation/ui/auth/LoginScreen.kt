@@ -41,7 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import android.widget.Toast
 
 /**
- * 登录页 (P0 优先级)
+ * 登录页 (优先级)
  *
  * 功能：
  * - 手机号 + 密码登录
@@ -97,7 +97,7 @@ fun LoginScreen(
             Spacer(modifier = Modifier.height(48.dp))
 
             // 登录方式切换（注册模式下隐藏：注册只有一种流程，
-            // B2：短信登录为死 tab（服务端 sms-login-enabled=false 且无短信服务商，发码/校验均为假），
+            // 短信登录为死 tab（服务端 sms-login-enabled=false 且无短信服务商，发码/校验均为假），
             // 故不再暴露切换入口，避免用户点到"获取验证码"却永远收不到、或误以为有短信通道。
             // （LoginModeToggle / toggleLoginMode / SmsLoginForm 暂留作未开通占位，不影响编译。）
 
@@ -188,7 +188,7 @@ fun LoginScreen(
                 }
             }
 
-            // B1：忘记密码引导弹窗（客服人工重置流程）
+            // 忘记密码引导弹窗（客服人工重置流程）
             if (uiState.showForgotPassword) {
                 AlertDialog(
                     onDismissRequest = viewModel::dismissForgotPassword,
@@ -215,7 +215,7 @@ fun LoginScreen(
             //
             // 为什么必须放在登录页：服务器地址填错时，人根本登不进去，
             // 若只有「我的」页能改，就形成「连不上 → 登不进 → 改不了」的死循环。
-            // 此前这里是一个"弹窗按钮"，但因为整页不可滚动，它在小屏上被挤出可视区，
+            // 早期这里是一个"弹窗按钮"，但因为整页不可滚动，它在小屏上被挤出可视区，
             // 表现就是"登录页没有高级设置"。
             AdvancedSettingsSection(
                 serverUrl = serverUrl,
@@ -236,8 +236,8 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // D2（L-PA-06）：协议改为可点击，点击跳「简易协议页」（下方 AgreementDialog 承载）。
-            // 此前是纯文本、点击无任何反应，商店隐私审核硬伤（未成年人产品更敏感）。
+            // 协议改为可点击，点击跳「简易协议页」（下方 AgreementDialog 承载）。
+            // 早期是纯文本、点击无任何反应，商店隐私审核硬伤（未成年人产品更敏感）。
             var showAgreement by remember { mutableStateOf(false) }
             Text(
                 text = "登录即表示同意《用户协议》和《隐私政策》",
@@ -249,7 +249,7 @@ fun LoginScreen(
                     .clickable { showAgreement = true }
             )
 
-            // D2（L-PA-06）：简易协议页（本地承载，避免依赖尚未备案的域名/URL）。
+            // 简易协议页（本地承载，避免依赖未备案的域名/URL）。
             if (showAgreement) {
                 AgreementDialog(onDismiss = { showAgreement = false })
             }
@@ -857,7 +857,7 @@ fun ServerConfigDialog(
 }
 
 /**
- * D2（L-PA-06）：简易协议页。
+ * 简易协议页。
  * 登录页协议文案点击后展示，承载《用户协议》与《隐私政策》要点。
  * 采用本地文本而非外链 URL：当前域名尚未完成 ICP 备案，外链不可达；
  * 后续备案完成后可替换为跳转正式协议页。

@@ -39,17 +39,15 @@ import javax.inject.Singleton
  * - 本端校验时把家长输入的明文再算一次 SHA-256 比对；
  * - 不引入盐：保证服务端下发的哈希与本地校验口径完全一致（盐会破坏跨设备一致性）。
  *
- * ## 解锁窗口（W34 修复）
- * 旧实现只用 `System.currentTimeMillis()`（墙钟）记录解锁到期时间，孩子**回拨系统时间**
- * 即可让 `now < unlockedUntil` 永远成立 → 永久解锁。现改为**双时钟**：
+ * ## 解锁窗口
+ * 解锁到期时间用**双时钟**记录，防止孩子**回拨系统时间**使 `now < unlockedUntil` 永远成立而永久解锁：
  * - 单调时钟（`SystemClock.elapsedRealtime()`）为主，不受手动改时间影响；
  * - 墙钟（`System.currentTimeMillis()`）为辅，防重启后单调时钟归零导致的"永久解锁"。
  * 两者任一判定过期即视为过期（见 [isUnlocked] / [Snapshot.isUnlocked]），宁可提前恢复管控也不留真空。
  *
- * ## 主线程读取（W34 修复）
- * 旧实现 `isUnlockedNow/isEnabledNow/isLockedOutNow` 用 `runBlocking(Dispatchers.IO)` 在主线程读 DataStore，
- * 无障碍服务高频回调下易触发 ANR。现改为：初始化时订阅 DataStore Flow，把最新值写入 [@Volatile] 快照，
- * 主线程方法只读快照，零挂起。
+ * ## 主线程读取
+ * `isUnlockedNow/isEnabledNow/isLockedOutNow` 在主线程（如无障碍服务高频回调）中被调用，若直接 `runBlocking(Dispatchers.IO)` 读 DataStore 易触发 ANR。
+ * 改为：初始化时订阅 DataStore Flow，把最新值写入 [@Volatile] 快照，主线程方法只读快照，零挂起。
  */
 private val Context.guardDataStore: DataStore<Preferences> by preferencesDataStore(name = "padguard_guard")
 
@@ -61,14 +59,14 @@ class GuardPasswordManager @Inject constructor(
 
     private val KEY_HASH = stringPreferencesKey("guard_hash")
     private val KEY_ENABLED = booleanPreferencesKey("guard_enabled")
-    /** 解锁窗口到期（墙钟）。W34：与 elapsed 双时钟并用。 */
+    /** 解锁窗口到期（墙钟），与 elapsed 单调时钟并用。 */
     private val KEY_UNLOCKED_UNTIL = longPreferencesKey("guard_unlocked_until")
-    /** 解锁窗口到期（单调时钟）。W34 新增：防回拨系统时间永久解锁。 */
+    /** 解锁窗口到期（单调时钟），防回拨系统时间造成永久解锁。 */
     private val KEY_UNLOCKED_UNTIL_ELAPSED = longPreferencesKey("guard_unlocked_until_elapsed")
     private val KEY_FAIL_COUNT = intPreferencesKey("guard_fail_count")
-    /** 试错锁定到期（墙钟）。W34：与 elapsed 双时钟并用。 */
+    /** 试错锁定到期（墙钟），与 elapsed 单调时钟并用。 */
     private val KEY_LOCKED_UNTIL = longPreferencesKey("guard_locked_until")
-    /** 试错锁定到期（单调时钟）。W34 新增。 */
+    /** 试错锁定到期（单调时钟）。 */
     private val KEY_LOCKED_UNTIL_ELAPSED = longPreferencesKey("guard_locked_until_elapsed")
 
     /** 解锁后允许的时长窗口（毫秒）。默认 10 分钟，足够家长完成一次改设置/装应用。 */
@@ -77,7 +75,7 @@ class GuardPasswordManager @Inject constructor(
     data class GuardState(val enabled: Boolean, val unlocked: Boolean)
 
     /**
-     * 主线程安全的状态快照（W34）。由 init 中订阅 DataStore Flow 持续刷新，
+     * 主线程安全的状态快照。由 init 中订阅 DataStore Flow 持续刷新，
      * 所有 `*Now()` 方法只读它，绝不挂起。
      */
     @Volatile
@@ -109,7 +107,7 @@ class GuardPasswordManager @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
-        // 持续把 DataStore 最新值镜像到 @Volatile 快照，避免主线程 runBlocking 读（W34 ANR）。
+        // 持续把 DataStore 最新值镜像到 @Volatile 快照，避免主线程 runBlocking 读导致的 ANR。
         scope.launch {
             store.data.collect { prefs -> snapshot = snapshotFrom(prefs) }
         }
@@ -126,7 +124,7 @@ class GuardPasswordManager @Inject constructor(
     /** 当前是否处于「已解锁」窗口内（解锁后才允许安装/卸载/改设置） */
     suspend fun isUnlocked(): Boolean = isUnlocked(store.data.first())
 
-    /** 同步快捷读取：无障碍服务在主线程事件回调里用，避免挂起（W34：只读 @Volatile 快照）。 */
+    /** 同步快捷读取：无障碍服务在主线程事件回调里用，避免挂起（只读 @Volatile 快照）。 */
     fun isUnlockedNow(): Boolean = snapshot.isUnlocked()
 
     fun isEnabledNow(): Boolean = snapshot.enabled
@@ -174,8 +172,8 @@ class GuardPasswordManager @Inject constructor(
      * 锁定期间即使密码正确也返回 false —— 否则可以"故意错 5 次锁住，
      * 等冷却后用同一个已知密码立刻通过"，限制形同虚设。
      *
-     * ## 锁定计时（W34 修复）
-     * 锁定到期同样用双时钟（elapsed + wall），回拨系统时间无法提前解除锁定。
+ * ## 锁定计时
+ * 锁定到期同样用双时钟（elapsed + wall），回拨系统时间无法提前解除锁定。
      */
     suspend fun verifyWithLimit(plain: String): VerifyResult {
         val prefs = store.data.first()
@@ -221,10 +219,10 @@ class GuardPasswordManager @Inject constructor(
         val lockedForMs: Long
     )
 
-    /** 同步读：当前是否处于"失败过多锁定期"，无障碍回调用（W34：只读 @Volatile 快照）。 */
+    /** 同步读：当前是否处于"失败过多锁定期"，无障碍回调用（只读 @Volatile 快照）。 */
     fun isLockedOutNow(): Boolean = snapshot.isLockedOut()
 
-    /** 解锁：开启一个时间窗口，期间允许安装/卸载/改设置（W34：双时钟写入）。 */
+    /** 解锁：开启一个时间窗口，期间允许安装/卸载/改设置（双时钟写入）。 */
     suspend fun unlock() {
         val now = System.currentTimeMillis()
         val elapsed = SystemClock.elapsedRealtime()
@@ -264,10 +262,10 @@ class GuardPasswordManager @Inject constructor(
     }
 
     /**
-     * 把 DataStore 首选项映射为 [Snapshot]（W34）。
+     * 把 DataStore 首选项映射为 [Snapshot]。
      *
      * 必须是类内成员：[Snapshot] 是私有嵌套类，顶层函数看不见它；
-     * 同时直接用 [KEY_] 常量而不是重复键名字符串——两处字符串漂移过一回（W23 同款事故）。
+     * 同时直接用 [KEY_] 常量而不是重复键名字符串——避免两处字符串漂移导致键名不一致。
      */
     private fun snapshotFrom(prefs: Preferences): Snapshot = Snapshot(
         enabled = prefs[KEY_ENABLED] ?: false,

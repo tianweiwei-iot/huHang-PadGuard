@@ -106,7 +106,7 @@ fun ProfileScreen(
                     ProfileAction.Subscription
                 ),
                 ProfileItem("我的孩子", Icons.Default.ChildCare, "管理被守护设备", ProfileAction.Children),
-                // D3（L-PA-09）：家庭成员 / 设置目标页尚未实现，置灰并标注"敬请期待"，避免死入口误导。
+                // 家庭成员 / 设置目标页尚未实现，置灰并标注"敬请期待"，避免死入口误导。
                 ProfileItem("家庭成员", Icons.Default.People, "敬请期待", ProfileAction.Members, enabled = false),
                 ProfileItem("护眼设置", Icons.Default.RemoveRedEye, "蓝光 / 距离 / 姿势", ProfileAction.EyeCare),
                 ProfileItem("设置", Icons.Default.Settings, "敬请期待", ProfileAction.Settings, enabled = false),
@@ -189,7 +189,7 @@ private data class ProfileItem(
     val icon: ImageVector,
     val subtitle: String,
     val action: ProfileAction,
-    // D3（L-PA-09）：未实现的目标页（家庭成员 / 设置）置灰禁用，避免"点了没反应"误导用户。
+    // 未实现的目标页（家庭成员 / 设置）置灰禁用，避免"点了没反应"误导用户。
     val enabled: Boolean = true
 )
 

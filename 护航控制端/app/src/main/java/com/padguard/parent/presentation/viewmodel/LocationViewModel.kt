@@ -26,7 +26,7 @@ import javax.inject.Inject
  * 定位 ViewModel（实时管控 > 定位）
  *
  * 职责：实时位置、地图服务与视图模式切换、电子围栏（多围栏）配置、越界判定与移动轨迹。
- * 地图渲染为占位实现（Mock 阶段），接入百度 / 高德 SDK 时只需替换绘制层，状态层无需改动。
+ * 地图渲染为占位实现（Mock 实现），接入百度 / 高德 SDK 时只需替换绘制层，状态层无需改动。
  */
 data class LocationUiState(
     val provider: MapProvider = MapProvider.AMAP,

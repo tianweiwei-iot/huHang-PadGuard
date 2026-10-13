@@ -22,7 +22,7 @@ import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
 
 /**
- * 权限 / 角色 / 管理员管理（RBAC）。W25 从 AdminService 抽离。
+ * 权限 / 角色 / 管理员管理（RBAC）。
  */
 @Service
 class AdminRbacService(
@@ -47,7 +47,7 @@ class AdminRbacService(
     }
 
     /**
-     * 新建自定义角色。此前「新建角色」只在前端内存 push 一条，刷新即丢、服务端不存在该角色。
+     * 新建自定义角色。早期「新建角色」只在前端内存 push 一条，刷新即丢、服务端不存在该角色。
      * 现在落库并参与权限判定。
      */
     @Transactional
@@ -77,7 +77,7 @@ class AdminRbacService(
     }
 
     /**
-     * 还原角色权限到系统默认值。内置角色的权限一旦在矩阵里被改乱，此前没有任何自助恢复手段。
+     * 还原角色权限到系统默认值。内置角色的权限一旦在矩阵里被改乱，早期没有任何自助恢复手段。
      */
     @Transactional
     fun resetRolePrivileges(adminId: String, roleId: String): Map<String, Any> {

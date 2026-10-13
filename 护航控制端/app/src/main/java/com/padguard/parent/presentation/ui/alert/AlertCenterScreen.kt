@@ -66,8 +66,8 @@ import java.util.Locale
  * 而孩子往往不会再提，这条申请就这么不了了之。
  * 所以这里把 PENDING / IGNORED / APPROVED / REJECTED 全部列出，非终态的一律保留处理入口。
  *
- * ## D7：为什么风险告警也进这个页面
- * 高危事件（权限被撤销 / 已 Root / 时间被篡改 / 无障碍被关闭）此前服务端有告警、
+ * ## 为什么风险告警也进这个页面
+ * 高危事件（权限被撤销 / 已 Root / 时间被篡改 / 无障碍被关闭）早期服务端有告警、
  * 家长端没有消费面。单独开一个"告警页"意味着家长要在铃铛之外再找第二个入口，
  * 而告警出现时家长恰恰在忙 —— 融进消息中心，一次点击全看到。
  * 告警分区排在解锁申请之上：前者是"管控可能已失效"（时效压力在家长侧），
@@ -87,7 +87,7 @@ fun AlertCenterScreen(
     onApprove: (UnlockTicketEntry, Int) -> Unit,
     onReject: (UnlockTicketEntry) -> Unit,
     onRefresh: () -> Unit,
-    // D7：风险告警分区（根层 RiskAlertCenterViewModel 驱动）
+    // 风险告警分区（根层 RiskAlertCenterViewModel 驱动）
     riskAlerts: List<Alert> = emptyList(),
     riskUnreadCount: Int = 0,
     riskProcessing: Boolean = false,
@@ -114,7 +114,7 @@ fun AlertCenterScreen(
                         color = PadGuardColors.TextPrimary
                     )
                     Spacer(Modifier.weight(1f))
-                    // D7：红点合并两类未读（解锁工单 + 需关注的告警）——
+                    // 红点合并两类未读（解锁工单 + 需关注的告警）——
                     // 家长认的是"铃铛上有东西要处理"，不关心来源。
                     val totalUnread = state.unreadCount + riskUnreadCount
                     if (totalUnread > 0) {
@@ -132,7 +132,7 @@ fun AlertCenterScreen(
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // D7：风险告警分区在前（管控失效比等放行更紧急）
+                // 风险告警分区在前（管控失效比等放行更紧急）
                 if (riskAlerts.isNotEmpty()) {
                     item(key = "risk_header") {
                         SectionHeader(title = "风险预警", count = riskAlerts.size)

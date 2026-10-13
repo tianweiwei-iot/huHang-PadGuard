@@ -50,7 +50,7 @@ class AdminRoleOverride(
 /**
  * 后台自定义角色（运营自建，区别于 [AdminRoles.ROLES] 里的内置角色）。
  *
- * 存在必要性：后台「角色权限 → 新建角色」此前只在前端内存里 push 一条记录，
+ * 存在必要性：后台「角色权限 → 新建角色」早期只在前端内存里 push 一条记录，
  * 刷新即丢，且服务端压根没有该角色 —— 管理员一旦被指派到它，权限解析为空（什么都干不了）。
  * 现在自定义角色落库（V24），[com.padguard.server.security.AdminPermissionService]
  * 会把内置角色与自定义角色合并后再做权限判定与矩阵渲染。
@@ -113,7 +113,7 @@ object AdminRoles {
     /**
      * 领域元数据（中文名 + 动作定义），经 `GET /v1/admin/rbac/permissions` 下发前端。
      *
-     * 前端矩阵**不再自带副本**，根除前后端白名单漂移：此前前端硬编码了一个服务端未登记的
+     * 前端矩阵**不再自带副本**，根除前后端白名单漂移：早期前端硬编码了一个服务端未登记的
      * `monitor` 领域，而服务端在 `sanitize()` 里把未知领域静默丢弃，
      * 运营勾选后存不进去、刷新又变回未勾选 —— 表现为"矩阵不可设置"。
      *
@@ -228,7 +228,7 @@ object AdminRoles {
      * 一旦允许收窄 super 的权限，超管会自锁、后台可能永久锁死且无人能解。
      *
      * 注意与 isSystem 区分：其余内置角色（ops/cs/finance/audit）**可以**被编辑，
-     * 这正是 RBAC 的意义所在 —— 此前前端用 isSystem 一刀切全部 disable，
+     * 这正是 RBAC 的意义所在 —— 早期前端用 isSystem 一刀切全部 disable，
      * 导致四个最常用的内置角色矩阵全是灰的、"不可设置"。
      */
     val LOCKED_ROLES: Set<String> = setOf("super")

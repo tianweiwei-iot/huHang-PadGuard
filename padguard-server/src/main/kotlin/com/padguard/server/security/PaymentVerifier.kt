@@ -67,9 +67,9 @@ class ConfigurablePaymentVerifier(
     private val byChannel = channelVerifiers.associateBy { it.channel }
 
     /**
-     * 示例支付是否开启的**唯一事实源**：W22 收敛。
+     * 示例支付是否开启的**唯一事实源**：
      *
-     * 旧实现只读启动配置 `padguard.billing.mock-pay-enabled`，而计费侧 [com.padguard.server.service.BillingService]
+     * 早期实现只读启动配置 `padguard.billing.mock-pay-enabled`，而计费侧 [com.padguard.server.service.BillingService]
      * 读的是后台「系统设置」DB 里的 `mockPay` 字段 —— 两处各读各的（双口径）。
      * 后果：运营在后台把 `mockPay` 打开后，[com.padguard.server.service.BillingService] 在支付校验处直接跳过验签，
      * 等于在生产开了一条免验证白嫖通道，而启动断言只查配置项被完全绕过。

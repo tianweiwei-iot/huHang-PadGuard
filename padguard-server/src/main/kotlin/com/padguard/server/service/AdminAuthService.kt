@@ -12,7 +12,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 
 /**
- * 后台管理员登录。W25 从 AdminService 抽离。
+ * 后台管理员登录。
  */
 @Service
 class AdminAuthService(

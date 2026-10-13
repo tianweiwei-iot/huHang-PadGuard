@@ -80,7 +80,7 @@ class SchemaIndexInitializer(
             // 应用台账按设备查（统计聚合图标时回查）
             "CREATE INDEX IF NOT EXISTS idx_installed_apps_device ON installed_apps (device_id, installed)",
 
-            // W32：以下表在 ddl-auto=update（本地 / 家庭部署，flyway 关闭）路径下不会执行建表迁移，
+            // 以下表在 ddl-auto=update（本地 / 家庭部署，flyway 关闭）路径下不会执行建表迁移，
             // 而 Hibernate 不保证补索引，故在此显式补齐，避免大表全表扫描。
             // 定位记录按「设备 + 时间」回查
             "CREATE INDEX IF NOT EXISTS idx_location_tracks_device_ts ON location_tracks (device_id, ts)",
@@ -91,9 +91,9 @@ class SchemaIndexInitializer(
             // 使用时长会话按「日」批量扫描（每日额度重置 / 统计）
             "CREATE INDEX IF NOT EXISTS idx_usage_sessions_day ON usage_sessions (day_key)",
 
-            // W32 续：以下两张表有明确的查询路径，同样补上——
+            // 以下两张表有明确的查询路径，同样补上——
             // 设备上传文件保留期清理按「设备 + 创建时间」取早于阈值的记录
-            // （E11 RetentionCleanup，无索引时每次清理全表扫 uploaded_files）
+            // （无索引时每次清理全表扫 uploaded_files）
             "CREATE INDEX IF NOT EXISTS idx_uploaded_files_device_created ON uploaded_files (device_id, created_at)",
             // 解锁工单按「设备 + 状态」轮询（孩子端提交后家长端 10s 级轮询待审批列表）
             "CREATE INDEX IF NOT EXISTS idx_unlock_tickets_device_status ON unlock_tickets (device_id, status)"

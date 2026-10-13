@@ -21,7 +21,7 @@ import javax.sql.DataSource
 
 /**
  * 仪表盘聚合（跨领域 KPI + 营收序列 + 套餐分布 + 区域分布 + 告警数 + 最近操作）。
- * W25 从 AdminService 抽离，统一挂 server:read。
+ * 统一挂 server:read。
  */
 @Service
 class AdminDashboardService(
@@ -60,7 +60,7 @@ class AdminDashboardService(
         val revenueSeries = lastMonthsRevenue(paymentOrderRepository, 6).map { it.amount }
         val planDist = subs.groupBy { planCategory(it.plan) }
             .map { (cat, list) -> NameCount(planLabel(if (cat == "free") "TRIAL" else cat.uppercase()), list.size) }
-        // users.region 字段存在（V13 起可维护），此前恒返回空数组导致首页柱状图永远空白。
+        // users.region 字段存在（V13 起可维护），早期恒返回空数组导致首页柱状图永远空白。
         val regionDist = userRepository.findAll()
             .groupBy { it.region?.takeIf { r -> r.isNotBlank() } ?: "未填写" }
             .map { (region, list) -> NameCount(region, list.size) }

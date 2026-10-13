@@ -7,7 +7,7 @@ import com.padguard.server.service.ContentFilterService
 import org.springframework.web.bind.annotation.*
 
 /**
- * 合规与内容管控端点（P4-5 审计 + P2 内容管控）。
+ * 合规与内容管控端点（审计 + 内容管控）。
  * 家长端统一响应包装 { code, message, data, timestamp }。
  */
 @RestController
@@ -17,7 +17,7 @@ class ParentComplianceController(
     private val contentFilterService: ContentFilterService
 ) {
 
-    // ==================== 审计日志（P4-5） ====================
+    // ==================== 审计日志 ====================
 
     /**
      * 查询审计日志。可按设备与动作过滤；deviceId 与 action 均可选。
@@ -32,7 +32,7 @@ class ParentComplianceController(
         @RequestParam(required = false, defaultValue = "20") size: Int
     ) = ApiResponse.ok(auditService.query(userId, deviceId, action, page, size))
 
-    // ==================== 内容管控（P2） ====================
+    // ==================== 内容管控 ====================
 
     /** 网址分类库清单（含默认屏蔽标记），供家长端选择"按分类屏蔽"。 */
     @GetMapping("/content/categories")

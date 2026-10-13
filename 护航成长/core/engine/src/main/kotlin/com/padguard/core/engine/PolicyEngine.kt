@@ -104,8 +104,8 @@ class PolicyEngine @Inject constructor(
     /**
      * 当前生效的管控模式（NORMAL / LEARNING / FOCUS），随策略包下发。
      *
-     * W77 修复：此前 PolicyPackage 没有 sceneMode 字段、引擎也不持有它，
-     * 家长端切换模式对孩子端零生效。现把它提升为可观察状态，供 UI / 后续模式化管控消费。
+     * PolicyPackage 携带 sceneMode 字段，引擎据此持有当前管控模式，
+     * 供 UI / 后续模式化管控消费。
      */
     private val _sceneMode = MutableStateFlow("NORMAL")
     val sceneMode: StateFlow<String> = _sceneMode.asStateFlow()
@@ -170,7 +170,7 @@ class PolicyEngine @Inject constructor(
             }
 
             lastAppliedVersion = policy.version
-            // W77: 把本次策略包携带的管控模式提升为当前生效模式，供 UI / 模式化管控消费。
+            //  把本次策略包携带的管控模式提升为当前生效模式，供 UI / 模式化管控消费。
             if (_sceneMode.value != policy.sceneMode) _sceneMode.value = policy.sceneMode
 
             if (report.hasFailure) {
@@ -339,8 +339,8 @@ class PolicyEngine @Inject constructor(
         }
 
         // ---------- 3.5 日总时长（服务端权威会话驱动） ----------
-        // 旧实现依据本地采样累计判定 DAILY_TOTAL，三端各自按本地时钟算，必然对不上。
-        // 现改为服务端锁定计时起点与额度，三端用同一 serverNow - startEpoch 派生剩余，
+        // 早期实现依据本地采样累计判定 DAILY_TOTAL，三端各自按本地时钟算，必然对不上。
+        // 改为服务端锁定计时起点与额度，三端用同一 serverNow - startEpoch 派生剩余，
         // 到期未延时即经此处挂 DAILY_LIMIT，并经 syncAutoReasons 统一管理生命周期
         // （临时解锁期内会被 LockController 自动抑制，避免家长放行被立刻锁回）。
         // dailyLimitExpired 由 GuardService 从会话管理器算出后传入，本地不依赖采样。

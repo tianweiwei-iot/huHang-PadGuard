@@ -188,7 +188,7 @@ class UsageSessionManager @Inject constructor(
         baselineServerNow = 0L
         baselineRemainingMs = 0L
         _state.value = UiState()
-        // 若此前因会话到期锁过屏，这里把 DAILY_LIMIT 原因释放掉（新一轮 tick 也会由 syncAutoReasons 兜底）
+        // 若早期因会话到期锁过屏，这里把 DAILY_LIMIT 原因释放掉（新一轮 tick 也会由 syncAutoReasons 兜底）
         lockController.releaseLock(LockReason.DAILY_LIMIT)
     }
 

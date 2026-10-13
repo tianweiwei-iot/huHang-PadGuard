@@ -15,15 +15,14 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * D1（L-PA-03）：家长端通知能力。
+ * 家长端本地通知能力。
  *
- * 此前 manifest 声明了 POST_NOTIFICATIONS 但**零请求、零发送**——家长没开 App 时，
- * "孩子求解锁 / 设备告警 / 订阅到期" 完全零触达。这里补齐：
+ * 负责三件事：
  * 1) 创建高优先级通知渠道（Android 8+ 必须）；
- * 2) 在权限已授予的前提下本地发送通知；
+ * 2) 在权限已授予的前提下本地发送通知（解锁申请、风险告警、订阅到期等）；
  * 3) 点击通知回到 App，由全局解锁申请弹窗继续处理。
  *
- * 注意：未授予 POST_NOTIFICATIONS 时 [canPost] 返回 false，调用方静默跳过，
+ * 未授予 POST_NOTIFICATIONS 时 [canPost] 返回 false，调用方静默跳过，
  * 不抛异常（targetSdk 33+ 未授权发通知会被系统丢弃，无需额外兜底）。
  */
 @Singleton
@@ -36,14 +35,14 @@ class NotificationHelper @Inject constructor(
         private const val NOTIFICATION_ID_UNLOCK = 1001
 
         /**
-         * D7：高危告警（CRITICAL）本地通知。
+         * 高危告警（CRITICAL）本地通知。
          * 与解锁工单（[NOTIFICATION_ID_UNLOCK]）分开 ID 与 tag：两类通知语义不同、
          * 生命周期也不同（告警要留到家长确认，工单在处理即取消），共用一个 ID 会互相取消。
          */
         private const val NOTIFICATION_ID_RISK = 1002
 
         /**
-         * D1：通知点击 Intent 的 extra 键。
+         * 通知点击 Intent 的 extra 键。
          * 点击通知 → MainActivity（SINGLE_TOP）→ PadGuardNavHost 读到该 extra 后
          * 导航到消息中心（Screen.AlertList）。用 extra 而非 deep link：
          * 本项目是 Compose Navigation 字符串路由，没有 XML nav graph 可挂 NavDeepLink。
@@ -107,7 +106,7 @@ class NotificationHelper @Inject constructor(
     }
 
     /**
-     * D1：工单已被处理（同意/拒绝/忽略）时取消对应通知。
+     * 工单已被处理（同意/拒绝/忽略）时取消对应通知。
      * 不清的后果：家长处理完，通知栏还挂着"孩子请求解锁"，
      * 过一会儿点开来孩子早已在用平板 —— 通知与事实不符，比没有通知更糟。
      */
@@ -116,7 +115,7 @@ class NotificationHelper @Inject constructor(
     }
 
     /**
-     * D7：孩子端上报高危事件（CRITICAL：权限被撤销 / 已 Root / 时间被篡改 /
+     * 孩子端上报高危事件（CRITICAL：权限被撤销 / 已 Root / 时间被篡改 /
      * 无障碍被关闭 / 尝试卸载）时本地通知家长。
      *
      * 标题与正文直接用服务端 [AlertService.EVENT_TITLES] 映射好的中文（经告警列表带回来），
@@ -149,7 +148,7 @@ class NotificationHelper @Inject constructor(
     }
 
     /**
-     * D7：家长在消息中心确认（acknowledge）某条告警后取消其通知。
+     * 家长在消息中心确认（acknowledge）某条告警后取消其通知。
      * 与工单同理：不取消则家长已处理的事项还挂在通知栏，稀释真正需要处理的那些。
      */
     fun cancelRiskAlert(alertId: String) {

@@ -149,7 +149,7 @@ class BindViewModel @Inject constructor(
                     // 绑定成功后记录账号密码：便于掉线/重置后直接恢复，也供「我的」页查看
                     authRepository.saveChildCredentials(account, pwd)
                     // 绑定成功 ≠ 可控：守护服务承担心跳/策略同步/MQTT 上行，
-                    // 而它此前只在开机或设备管理员启用时启动，绑定完成后从未拉起，
+                    // 而它早期只在开机或设备管理员启用时启动，绑定完成后从未拉起，
                     // 导致设备一直 OFFLINE、家长端看得到设备却管不了。这里立即拉起。
                     GuardService.start(app, "bindSuccess-account")
                 }.getOrElse { e ->

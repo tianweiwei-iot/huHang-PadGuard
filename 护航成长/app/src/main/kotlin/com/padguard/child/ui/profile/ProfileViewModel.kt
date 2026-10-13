@@ -140,7 +140,7 @@ class ProfileViewModel @Inject constructor(
     }
 
     /**
-     * 孩子端自定义设备名（P6）。
+     * 孩子端自定义设备名。
      * 本地持久化 + 上报服务端两步：服务端写入台账后，
      * 家长端下次拉取设备列表即可看到新名字（实时性由家长端轮询/推送决定）。
      */
@@ -281,7 +281,7 @@ class ProfileViewModel @Inject constructor(
     }
 
     /**
-     * D5（L-CH-08）：真实检测电池优化白名单状态。
+     * 真实检测电池优化白名单状态。
      * isIgnoringBatteryOptimizations 在 API 23+ 可用；个别 OEM 定制ROM 可能抛异常，
      * 此时按"未加白名单"处理（引导用户去确认，比假装已豁免安全）。
      */
@@ -337,7 +337,7 @@ data class ProfileUiState(
     val isDeviceOwner: Boolean = false,
     val usageStatsGranted: Boolean = false,
     /**
-     * D5（L-CH-08）：本应用是否已在电池优化白名单里。
+     * 本应用是否已在电池优化白名单里。
      * 不在名单时息屏进 Doze，后台心跳/定位/推送被冻结，"每晚脱管"。
      * 必须读真实状态 —— 写死 false 会让已加白名单的设备也显示"未开启"（假状态）。
      */

@@ -179,7 +179,7 @@ class Command(
     @Column(name = "created_at") var createdAt: Long = 0,
     @Column(name = "executed_at") var executedAt: Long? = null,
     /**
-     * 指令回执携带的错误码 / 错误描述（P0-5 可观测性）。
+     * 指令回执携带的错误码 / 错误描述（可观测性）。
      * 孩子端执行失败（REJECTED / UNSUPPORTED / FAILED）时会回传，
      * 服务端落库后家长端轮询 [getCommand] 即可看到"指令为什么没生效"。
      */

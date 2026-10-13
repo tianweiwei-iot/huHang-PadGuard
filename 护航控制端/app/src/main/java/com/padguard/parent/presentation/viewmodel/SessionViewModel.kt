@@ -17,7 +17,7 @@ import javax.inject.Inject
  *
  * 修复「杀进程/重装后总是回到登录页」的问题：
  * TokenManager 一直把会话持久化在 DataStore 里，但导航图的 startDestination
- * 此前硬编码为登录页，持久化数据从未被消费。现在由本类在启动时读取一次，
+ * 早期硬编码为登录页，持久化数据从未被消费。现在由本类在启动时读取一次，
  * 已登录则直接进入主页，未登录才进入登录页。
  *
  * 同时把 DataStore 的用户流转为响应式 StateFlow：会话在任何时刻被清空

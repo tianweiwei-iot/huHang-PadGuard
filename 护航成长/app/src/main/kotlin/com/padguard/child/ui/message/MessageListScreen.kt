@@ -34,8 +34,8 @@ import java.util.Locale
 /**
  * 消息中心列表。
  *
- * P0 数据源：复用 [LogRepository] 的拦截 / 告警事件。
- * P1 接入：家长推送消息 + 系统公告，与本列表用 section header 区分。
+ * 数据源：复用 [LogRepository] 的拦截 / 告警事件。
+ * 接入：家长推送消息 + 系统公告，与本列表用 section header 区分。
  */
 @Composable
 fun MessageListScreen(

@@ -43,7 +43,7 @@ import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 
 /**
- * 未成年人模式卡片（P1 合规底座）。
+ * 未成年人模式卡片（合规底座）。
  *
  * ## 界面要回答的三个问题
  * 家长在这张卡上停留不超过 10 秒，所以必须一眼看到：

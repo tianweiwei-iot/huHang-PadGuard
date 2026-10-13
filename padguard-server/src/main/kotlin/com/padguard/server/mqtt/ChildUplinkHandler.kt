@@ -121,7 +121,7 @@ class ChildUplinkHandler(
         }
         cmd.status = ack.status
         cmd.executedAt = ack.executedAt
-        // P0-5：回执里的错误码 / 描述一并落库，家长端才能看到"指令为什么没生效"。
+        // 回执里的错误码 / 描述一并落库，家长端才能看到"指令为什么没生效"。
         // 仅当回执确实带错误时才覆盖，避免把历史 SUCCESS 回执的 errorCode 清掉。
         if (!ack.errorCode.isNullOrBlank() || !ack.errorMessage.isNullOrBlank()) {
             cmd.errorCode = ack.errorCode

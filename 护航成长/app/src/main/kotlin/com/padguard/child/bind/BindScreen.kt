@@ -251,8 +251,8 @@ private fun MethodChoiceStep(
             onClick = onInputAccount
         )
 
-        // D7（L-PA-12）：防卸载能力分层说明。
-        // 此前向导只强调"防卸载"，未区分设备所有者(Device Owner)与非 DO 模式的能力差异，
+        // 防卸载能力分层说明。
+        // 早期向导只强调"防卸载"，未区分设备所有者(Device Owner)与非 DO 模式的能力差异，
         // 家长易误以为任何情况下孩子都删不掉本应用。这里把事实讲清楚，避免预期落差。
         Card(
             onClick = { /* 纯说明卡片，无交互 */ },

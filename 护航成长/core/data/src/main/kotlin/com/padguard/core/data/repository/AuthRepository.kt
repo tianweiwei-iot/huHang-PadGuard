@@ -56,7 +56,7 @@ class AuthRepository @Inject constructor(
         val CHILD_USER_ID = stringPreferencesKey("child_user_id")
         val CHILD_LOGGED_IN = booleanPreferencesKey("child_logged_in")
         // === 账号密码记录（家长家庭账号）===
-        // W35 安全修复：本端**不再持久化家长账号密码明文**。
+        // 安全设计：本端不再持久化家长账号密码明文。
         // 早期实现把密码明文写入 DataStore，root / 备份提取即可拿到家庭账号密码，等同于把家长端门户钥匙交给孩子。
         // 孩子端鉴权只依赖 [CHILD_TOKEN]（登录后下发，足够用），密码仅用于首登，
         // 因此这里仅保留「记住账号」语义，密码永不落库。键保留以便旧版本升级时干净迁移（clear 会一并清掉）。
@@ -203,7 +203,7 @@ class AuthRepository @Inject constructor(
     /**
      * 记录「记住账号」状态（登录页勾选时调用）。
      *
-     * W35 安全修复：本方法**不再写入家长账号密码明文**。
+     * 安全设计：本方法不写入家长账号密码明文。
      * 仅记录手机号用于登录表单预填，密码永不持久化——孩子端鉴权依赖 [CHILD_TOKEN]，
      * 不需要本地密码；即使设备被 root / 备份提取，也拿不到家庭账号密码。
      * 升级前若已写过密码，[clearRememberedCredentials] / [clear] 会一并清除。
@@ -211,12 +211,12 @@ class AuthRepository @Inject constructor(
     suspend fun saveChildCredentials(phone: String, password: String) {
         store.edit {
             it[Keys.CHILD_PHONE] = phone
-            // W35：password 故意不落库（见 Keys.CHILD_PASSWORD 说明）
+            // password 故意不落库（见 Keys.CHILD_PASSWORD 说明）
             it[Keys.CHILD_REMEMBER] = true
         }
     }
 
-    /** 已记录的账号 +（空）密码。W35 起密码不再持久化，第二个元素恒为空串。 */
+    /** 已记录的账号 +（空）密码。密码不再持久化，第二个元素恒为空串。 */
     val rememberedCredentials: Flow<Pair<String, String>> =
         store.data.catch { emit(emptyPreferences()) }
             .map { it[Keys.CHILD_PHONE].orEmpty() to "" }
@@ -309,14 +309,12 @@ class AuthRepository @Inject constructor(
             it.remove(Keys.TOKEN_EXPIRES_AT)
             it.remove(Keys.BOUND_AT)
             it.remove(Keys.DEVICE_NAME)
-            // D6（L-CH-07）：孩子端不应持久化家长密码明文（W35 已不让写入），
-            // 但旧版本升级残留的键仍可能存在，解绑时一并清掉，不留旧家庭凭据痕迹。
+            // 解绑时一并清掉旧版本升级可能残留的家长密码键，不留旧家庭凭据痕迹。
             it.remove(Keys.CHILD_PASSWORD)
         }
-        // D6（L-CH-07）：解绑即清本机私有数据。Room 库存储了策略缓存、行为日志、
-        // 指令记录、应用时长、风险/告警事件、解锁工单、协议同意、家长消息——
-        // 这些都属于"旧家庭在本设备上的管控痕迹"，若不清除，平板转手后新家庭
-        // 仍能从本地库读到上一家的行为日志与协议同意状态，隐私承诺从第一天即不可信。
+        // 解绑即清本机私有数据：Room 库存储了策略缓存、行为日志、指令记录、应用时长、
+        // 风险/告警事件、解锁工单、协议同意、家长消息——这些都属于"旧家庭在本设备上的管控痕迹"，
+        // 若不清除，平板转手后新家庭仍能从本地库读到上一家的行为日志与协议同意状态。
         wipePrivateDb()
     }
 
@@ -331,12 +329,12 @@ class AuthRepository @Inject constructor(
             // DataStore 写入失败时重试一次，仍失败则记录日志交由上层处理
             store.edit { it.clear() }
         }
-        // D6：全清场景（卸载 / 出厂重置）同样清 Room 私有表，避免残留旧家庭管控痕迹。
+        // 全清场景（卸载 / 出厂重置）同样清 Room 私有表，避免残留旧家庭管控痕迹。
         wipePrivateDb()
     }
 
     /**
-     * D6（L-CH-07）：清空本地 Room 管控数据库全部表。
+     * 清空本地 Room 管控数据库全部表。
      * 在 IO 线程执行（Room 的 clearAllTables 是阻塞调用）。
      * Room 表均位于 /data/data/com.padguard.child/databases 应用私有目录，
      * 清掉即"本机不再保留任何上一家管控痕迹"。失败不阻断解绑主流程（记日志交由上层）。

@@ -33,7 +33,7 @@ import com.padguard.core.data.model.policy.WebPolicy
  * 之所以把 Mock 策略写得"很满"而不是全用默认值：
  * 默认值下大部分开关都是 ALLOW / 空列表，策略引擎的绝大多数分支根本不会被执行，
  * Mock 联调就只能验证"链路通不通"，验证不了"策略落地对不对"。
- * 这里的两套预置策略（家庭场景 / 校园场景）覆盖了 P0 需要落地的全部管控项。
+ * 这里的两套预置策略（家庭场景 / 校园场景）覆盖了需要落地的全部管控项。
  */
 internal object MockServerState {
 
@@ -43,7 +43,7 @@ internal object MockServerState {
      * 关键设计：Mock 不跳过签名，而是用这把密钥**真实签发**每条指令，
      * 终端侧 [com.padguard.core.transport.CommandGate] 走的是与生产完全相同的校验代码。
      * 这样"服务端签名字段顺序与终端 signingPayload 不一致"这类协议级 BUG
-     * 会在 Mock 阶段就暴露，而不是等真服务端上线才发现指令全部被拒。
+     * 会在 Mock 实现就暴露，而不是等真服务端上线才发现指令全部被拒。
      */
     const val HMAC_SECRET = "padguard-mock-hmac-secret-do-not-ship"
 

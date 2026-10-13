@@ -17,9 +17,11 @@ android {
 
     defaultConfig {
         applicationId = "com.padguard.child"
-        minSdk = project.findProperty("MIN_SDK").toString().toInt()
-        targetSdk = project.findProperty("TARGET_SDK").toString().toInt()
-        // W80：属性缺失时不抛裸 NPE——下方 versionCode 单调守卫会以可读的
+        // 与护航控制端一致：属性缺失时落安全默认值，避免 build.gradle.kts 配置阶段
+        // 因 findProperty(...).toString() 在 null 上 NPE 直接炸构建（而非给出可读报错）。
+        minSdk = project.findProperty("MIN_SDK")?.toString()?.toInt() ?: 26
+        targetSdk = project.findProperty("TARGET_SDK")?.toString()?.toInt() ?: 35
+        // 属性缺失时不抛裸 NPE——下方 versionCode 单调守卫会以可读的
         // "versionCode 小于已发布基线" 报错拦住构建，比 Kotlin 空指针栈友好。
         // 默认值取历史首发版本（低于 baseline，保证缺失即被守卫拦下）。
         versionCode = project.findProperty("VERSION_CODE")?.toString()?.toInt() ?: 2
@@ -144,7 +146,7 @@ dependencies {
     testImplementation(libs.junit)
 }
 
-// A2：release 签名守卫（仅在实际打 release 包时校验，不影响 debug）。
+// release 签名守卫（仅在实际打 release 包时校验，不影响 debug）。
 // 孩子端为 Device Owner / Kiosk 场景，APK 签名不可更换，正式 keystore 必须就位，否则包无法安装。
 afterEvaluate {
     val rel = android.signingConfigs.findByName("release")
@@ -160,7 +162,7 @@ afterEvaluate {
     }
 }
 
-// W80：versionCode 单调守卫。CI / 每次构建校验 versionCode 不低于已发布基线，
+// versionCode 单调守卫。CI / 每次构建校验 versionCode 不低于已发布基线，
 // 防止无意回退导致设备把新包当降级拒绝安装（表现：重装了 App 却还是旧行为）。
 // 基线文件 versionCode.baseline 随每次发版手动 +1，并随代码一起提交。
 afterEvaluate {
@@ -171,7 +173,7 @@ afterEvaluate {
         tasks.named("preBuild") {
             doLast {
                 check(current >= baseline) {
-                    "W80: versionCode=$current 小于已发布基线 $baseline，禁止回退。请递增 gradle.properties 中的 VERSION_CODE 后再构建。"
+                    "versionCode=$current 小于已发布基线 $baseline，禁止回退。请递增 gradle.properties 中的 VERSION_CODE 后再构建。"
                 }
             }
         }

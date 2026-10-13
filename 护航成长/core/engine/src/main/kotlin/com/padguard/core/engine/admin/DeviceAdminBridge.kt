@@ -328,7 +328,7 @@ class DeviceAdminBridge @Inject constructor(
      * API 30 起 `setGlobalSetting(AUTO_TIME)` 与 `setAutoTimeRequired` 双双废弃，
      * 必须改用 `setAutoTimeEnabled` / `setAutoTimeZoneEnabled`。
      * 这个版本分叉如果漏了，在 Android 11+ 上会静默无效 ——
-     * 而"自动对时没锁住"意味着改系统时间即可绕过所有时段管控，属于 P0 级漏洞。
+     * 而"自动对时没锁住"意味着改系统时间即可绕过所有时段管控，属于最高优先级漏洞。
      */
     @Suppress("DEPRECATION")
     fun setAutoTimeEnforced(enforced: Boolean): OpResult = guarded("setAutoTime=$enforced") {
@@ -588,7 +588,7 @@ class DeviceAdminBridge @Inject constructor(
      * 解绑 / 回收时撤销本应用施加的全部管控痕迹，使终端回到普通状态且**可被卸载**。
      *
      * 这是「家长端解绑后，孩子端应不受管控、管控系统有权卸载」的落地点。
-     * 旧实现只清绑定凭据、不释放 Device Owner / 设备管理员，导致解绑后：
+     * 早期实现只清绑定凭据、不释放 Device Owner / 设备管理员，导致解绑后：
      *   1) 已生效的 DPM 策略（挂起/隐藏应用、禁用相机截屏、加固基线、Kiosk 桌面）残留；
      *   2) 因持 DO 身份，应用无法被常规卸载。
      * 本方法补齐这两点。

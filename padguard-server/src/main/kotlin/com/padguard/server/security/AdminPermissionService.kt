@@ -256,7 +256,7 @@ class AdminPermissionService(
      * 还原某角色的权限到系统默认值（清除 override）。
      *
      * 存在的意义：内置角色一旦在矩阵里被改乱（比如误取消了某个读权限导致菜单打不开），
-     * 此前没有任何自助恢复手段，只能改代码或改数据库。现在运营可一键回滚。
+     * 早期没有任何自助恢复手段，只能改代码或改数据库。现在运营可一键回滚。
      */
     fun resetRolePrivileges(roleKey: String) {
         if (roleKey in AdminRoles.LOCKED_ROLES) {

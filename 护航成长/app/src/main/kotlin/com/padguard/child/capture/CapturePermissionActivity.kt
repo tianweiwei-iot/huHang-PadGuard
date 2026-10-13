@@ -63,7 +63,7 @@ class CapturePermissionActivity : ComponentActivity() {
             CaptureConsent.markDeniedTemporarily(this)
             CaptureConsentPrompter.clear(this)
             ScreenCaptureService.pendingIntent = null
-            // P1/P2：之前拒绝后只记日志，孩子和家长都不知道发生了什么，
+            // ：之前拒绝后只记日志，孩子和家长都不知道发生了什么，
             // 家长端只会一直"等待授权"。这里给出明确提示，说明如何恢复。
             Toast.makeText(
                 this,
@@ -169,7 +169,7 @@ class CapturePermissionActivity : ComponentActivity() {
          * 而 Android 10+ 禁止后台直接弹 Activity（[CapturePermissionActivity.startWith] 可能被系统拦掉），
          * 导致孩子永远看不到授权弹窗、家长端一直"等待授权"。
          * 由守护服务发一条高优先级通知，点击通知的 PendingIntent 启动授权页是**用户主动触发**，
-         * 系统必然放行 —— 这是 P1「首次需授权后一直无画面」的可靠解法。
+         * 系统必然放行 —— 「首次需授权后一直无画面」的可靠解法。
          */
         fun capturePermissionPendingIntent(context: Context, captureIntent: Intent): PendingIntent {
             val intent = Intent(context, CapturePermissionActivity::class.java).apply {

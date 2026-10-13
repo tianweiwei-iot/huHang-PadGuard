@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component
 import java.io.File
 
 /**
- * E11（L-OPS-06）：磁盘写满防护 —— 保留期清理 + 磁盘水位告警。
+ * 磁盘写满防护 —— 保留期清理 + 磁盘水位告警。
  *
  * ## 不清理的后果（审计实测口径）
  * - `location_tracks`：288 行/天/设备只增不删 ≈ 2.1GB/年/设备；

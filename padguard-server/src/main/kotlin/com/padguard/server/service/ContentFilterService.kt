@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicReference
 import jakarta.annotation.PostConstruct
 
 /**
- * 内容管控服务（P2 补强）。
+ * 内容管控服务（补强）。
  *
  * 覆盖"最大差距项"：网址分类库、搜索引擎强制安全搜索、按分龄/分类屏蔽、敏感词扫描。
  *

@@ -11,7 +11,7 @@ import java.lang.management.ManagementFactory
 import javax.sql.DataSource
 
 /**
- * 服务端监控（JVM 指标 / 数据库连通 / 实时日志）。W25 从 AdminService 抽离。
+ * 服务端监控（JVM 指标 / 数据库连通 / 实时日志）。
  */
 @Service
 class AdminServerMonitorService(
@@ -37,7 +37,7 @@ class AdminServerMonitorService(
             jvmHeapUsedMb = usedMb.toInt(),
             jvmHeapMaxMb = maxMb.toInt(),
             threads = ManagementFactory.getThreadMXBean().threadCount,
-            // 以下三项取自 RequestMetrics 的 60 秒滑动窗口真值（此前是硬编码假数字）。
+            // 以下三项取自 RequestMetrics 的 60 秒滑动窗口真值（早期是硬编码假数字）。
             requestsPerMin = requestMetrics.requestsPerMin(),
             qpmHistory = requestMetrics.qpmHistory(),
             errorRate = requestMetrics.errorRate(),
@@ -46,7 +46,7 @@ class AdminServerMonitorService(
             instances = listOf(
                 ServerMetrics.Instance(
                     name = "padguard-server",
-                    // 主机地址取自后台可维护的「服务器基本信息」，此前写死 192.168.1.10:8090。
+                    // 主机地址取自后台可维护的「服务器基本信息」，早期写死 192.168.1.10:8090。
                     host = runCatching { serverProfileService.getServerProfile() }
                         .getOrNull()?.let { "${it.publicHost}:${it.port}" } ?: "—",
                     status = if (up) "UP" else "DOWN",

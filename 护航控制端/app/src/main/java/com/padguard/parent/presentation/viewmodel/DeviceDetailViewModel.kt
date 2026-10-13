@@ -62,7 +62,7 @@ data class DeviceDetailUiState(
     val upgradeItems: List<AppUpgradeItem> = emptyList(),
     val isUpgrading: Boolean = false,
     val monthlyReport: StatisticsReport? = null,
-    // === 未成年人模式（P1 合规底座） ===
+    // === 未成年人模式（合规底座） ===
     val minorMode: MinorMode? = null,
     /** 各龄档合规默认值，用于在下发前就把后果展示给家长 */
     val ageBandDefaults: Map<AgeBand, AgeBandDefault> = emptyMap(),
@@ -72,9 +72,9 @@ data class DeviceDetailUiState(
      */
     val effectiveDailyLimitMinutes: Int = 60,
     val minorModeBusy: Boolean = false,
-    /** 最近一条指令的执行结果，供界面展示"到底生效了没有"（P0-5） */
+    /** 最近一条指令的执行结果，供界面展示"到底生效了没有" */
     val lastCommand: CommandResult? = null,
-    // === 受管控水印（P0-1） ===
+    // === 受管控水印 ===
     val watermarkEnabled: Boolean = false,
     /** 水印文案；空串表示用设备端默认文案 */
     val watermarkContent: String = "",
@@ -156,7 +156,7 @@ class DeviceDetailViewModel @Inject constructor(
      *
      * 下发后**继续追踪执行结果**：只显示"已发送"的话，设备没反应时家长无从判断
      * 是设备离线、指令没送达、还是执行失败 —— 而这三种情况的处理方式完全不同。
-     * 这里把最终状态写进 toast，让"为什么没生效"在界面上可见（P0-5）。
+     * 这里把最终状态写进 toast，让"为什么没生效"在界面上可见。
      */
     fun lockScreen() {
         issueTracked("锁屏", "锁定") { policyRepository.lockScreen(deviceId) }
@@ -168,7 +168,7 @@ class DeviceDetailViewModel @Inject constructor(
     }
 
     /**
-     * 受管控水印开关（P0-1）。
+     * 受管控水印开关。
      *
      * @param enabled 打开还是收起水印
      * @param content 自定义文案，留空则设备端用默认"受管控设备"
@@ -297,7 +297,7 @@ class DeviceDetailViewModel @Inject constructor(
     }
 
     /**
-     * 立即定位（W63 修复：原「定位」按钮只弹"已发送"假 toast，一个请求都不发）。
+     * 立即定位（原「定位」按钮只弹"已发送"假 toast，一个请求都不发）。
      *
      * 走真实指令链路：POST /v1/monitor/{deviceId}/locate → 服务端下发 LOCATE 指令 →
      * 孩子端当场补采一次位置并上报。定位是异步的，下发成功后延迟两次拉取最新坐标

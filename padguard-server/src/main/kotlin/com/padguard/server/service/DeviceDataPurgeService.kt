@@ -28,7 +28,7 @@ import org.springframework.transaction.annotation.Transactional
  *
  * ## 为什么必须有这个集中入口
  * 设备台账（Device）按硬件指纹复用，一台平板会在"孤儿回收"和"跨账号复用"两种情况下
- * 换到新家长名下。此前只有一条 `usage_logs` 的清理散落在 [com.padguard.server.service.DeviceService]
+ * 换到新家长名下。早期只有一条 `usage_logs` 的清理散落在 [com.padguard.server.service.DeviceService]
  * 里，其余私有数据（截图、轨迹、告警、指令、已装应用、围栏、设备设置、设备事件、使用时长、
  * 上传文件）全部原样留给下一任家长 —— 这是实打实的儿童隐私泄漏，而且解绑路径下**连 usage_logs
  * 都没清**，数据只增不减。

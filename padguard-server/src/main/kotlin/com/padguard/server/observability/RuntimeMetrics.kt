@@ -18,13 +18,13 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.ArrayDeque
 
-// W81：统一时区为 Asia/Shanghai，避免宿主机 TZ 为 UTC 时日志时间戳偏 8 小时（docker 未锁 TZ 时同样漂移）
+// 统一时区为 Asia/Shanghai，避免宿主机 TZ 为 UTC 时日志时间戳偏 8 小时（docker 未锁 TZ 时同样漂移）
 private val HHMMSS: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(SERVER_ZONE_ID)
 
 /**
  * HTTP 请求量 / 错误率采集（60 秒滑动窗口）。
  *
- * 为什么要它：后台「服务端监控」页的 QPM 与错误率此前是硬编码的 0 和 "0.00"，
+ * 为什么要它：后台「服务端监控」页的 QPM 与错误率早期是硬编码的 0 和 "0.00"，
  * 运营看到的是一组永远不会变的假数字，无法据此判断服务是否异常。
  * 这里用最轻量的方式算真值——只维护最近 60 秒的时间戳队列，不引入 Micrometer
  * 等重型依赖，也不写磁盘，重启即清零（与进程生命周期一致，符合"运行时指标"语义）。

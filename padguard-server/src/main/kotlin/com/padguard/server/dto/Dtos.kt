@@ -237,7 +237,7 @@ data class WatermarkRequest(
 data class CommandDto(
     val msgId: String, val type: String, val status: String,
     val payload: Map<String, Any?>?, val createdAt: Long, val executedAt: Long?,
-    /** P0-5：指令回执的错误码 / 描述，供家长端展示"为什么没生效" */
+    /** 指令回执的错误码 / 描述，供家长端展示"为什么没生效" */
     val errorCode: String? = null,
     val errorMessage: String? = null
 )

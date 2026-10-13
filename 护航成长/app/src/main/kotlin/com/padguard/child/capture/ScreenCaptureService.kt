@@ -89,7 +89,7 @@ class ScreenCaptureService : Service() {
     @Inject lateinit var authRepository: AuthRepository
     @Inject lateinit var transportSettings: TransportSettings
 
-    /** W38：上传失败的媒体进重试队列，不再"失败即删" */
+    /** 上传失败的媒体进重试队列，不再"失败即删" */
     @Inject lateinit var mediaRetry: MediaUploadRetry
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -144,7 +144,7 @@ class ScreenCaptureService : Service() {
 
     // ==================== 帧缓冲复用（消除逐帧分配导致的 GC 卡顿）====================
     //
-    // 实时推流每帧都要"取原始帧 → 缩放 → 压 JPEG"。旧实现每一步都新建 Bitmap：
+    // 实时推流每帧都要"取原始帧 → 缩放 → 压 JPEG"。早期实现每一步都新建 Bitmap：
     // 全分辨率 RGBA_8888 约 9MB，再建一张缩放图约数 MB，单帧分配 9~17MB，
     // 每秒数帧就会频繁触发 GC，表现为家长端画面周期性"卡屏"（设备端泵线程被 GC 停顿，
     // 服务端队列随之排空，家长端停在最后一帧）。
@@ -194,11 +194,11 @@ class ScreenCaptureService : Service() {
     /** 录屏的最长时长兜底：家长端忘了点停止时，不能无限录下去（存储与耗电都扛不住） */
     private var recordStopJob: Job? = null
 
-    /** 录音的最长时长兜底（W42，与录屏同思路） */
+    /** 录音的最长时长兜底（与录屏同思路） */
     private var audioStopJob: Job? = null
 
     /**
-     * W42 起停竞态标志：stop 到达时 start 协程尚未落地（audioTaskId 仍为 null），
+     * 起停竞态标志：stop 到达时 start 协程尚未落地（audioTaskId 仍为 null），
      * 先记请求；start 落地后据此立即自停，避免"永远录下去没人停"。
      */
     @Volatile private var audioStopRequested = false
@@ -270,7 +270,7 @@ class ScreenCaptureService : Service() {
         // 投影失效即退出：两者一体，投影没了服务继续留着只会是一条空通知
         ScreenCaptureSession.setOnProjectionLost {
             Logger.i(TAG) { "projection lost, stopping capture service" }
-            // W41：投影失效时若仍在录屏，不能静默丢档 —— 编码器里已攒下的帧仍可收尾成片，
+            // 投影失效时若仍在录屏，不能静默丢档 —— 编码器里已攒下的帧仍可收尾成片，
             // 让家长至少拿到失效前那段；收尾逻辑自带"0 样本/半成品不上传"的护栏。
             if (screenRecording.get()) {
                 Logger.w(TAG) { "projection lost while recording, finalize what we have" }
@@ -278,7 +278,7 @@ class ScreenCaptureService : Service() {
             }
             stopIfIdle()
         }
-        // W38：服务启动时先把上一轮上传失败攒下的队列重传一遍（弱网恢复后的自然时机）
+        // 服务启动时先把上一轮上传失败攒下的队列重传一遍（弱网恢复后的自然时机）
         scope.launch { runCatching { mediaRetry.drain() } }
     }
 
@@ -328,7 +328,7 @@ class ScreenCaptureService : Service() {
         releaseCaptureSession()
         releaseRecorder()
         releaseAudio()
-        // W41：未收尾的录制/录音文件在此清理 —— 它们永远不会被上传
+        // 未收尾的录制/录音文件在此清理 —— 它们永远不会被上传
         // （留着就是 cacheDir 里没人认领的垃圾，积少成多把磁盘写满）。
         // 已入重试队列的文件不在这里（在 media_retry/ 目录，由队列自己管理）。
         runCatching { recordFile?.takeIf { it.exists() }?.delete() }
@@ -384,8 +384,8 @@ class ScreenCaptureService : Service() {
         when (val result = remote.uploadScreenshot(shotId, now, TRIGGER_REMOTE, jpeg)) {
             is ApiResult.Success -> Logger.i(TAG) { "screenshot uploaded: $shotId ${jpeg.size / 1024}KB" }
             else -> {
-                // W38：上传失败不再"即删"。落盘移交重试队列，弱网恢复后由 drain 重传 ——
-                // 旧实现这里只记一行日志就把帧丢了，家长端永远等不到这张截图。
+                // 上传失败不再"即删"。落盘移交重试队列，弱网恢复后由 drain 重传 ——
+                // 早期实现这里只记一行日志就把帧丢了，家长端永远等不到这张截图。
                 Logger.w(TAG) { "screenshot upload failed: $result" }
                 val tmp = File(cacheDir, "shot_$shotId.jpg")
                 if (runCatching { tmp.writeBytes(jpeg) }.isSuccess) {
@@ -501,13 +501,13 @@ class ScreenCaptureService : Service() {
 
     @Suppress("DEPRECATION")
     private fun startScreenRecord(taskId: String, resolution: String, withAudio: Boolean, intent: Intent) {
-        // W39（决策④-A）：resolution / withAudio 是协议里的**预留字段**——
+        // resolution / withAudio 是协议里的**预留字段**——
         // 录屏始终按屏幕原生分辨率编码、且不混入音轨（AAC 音轨混流独立排期）。
         // 这里"接受但不生效"，并如实记一行日志：字段继续随指令收发（协议砍能力只砍
         // 产品承诺，不动线上 wire 兼容），但任何一端都不许再暗示它们有用。
         if (resolution.isNotBlank() || withAudio) {
             Logger.w(TAG) {
-                "screen record params accepted but NOT honored (W39): " +
+                "screen record params accepted but NOT honored: " +
                     "resolution=$resolution withAudio=$withAudio; " +
                     "recording at native screen resolution without audio track"
             }
@@ -645,7 +645,7 @@ class ScreenCaptureService : Service() {
                 }
             } catch (t: Throwable) {
                 Logger.e(TAG, t) { "screen record start failed" }
-                // P2 修复：之前失败只记日志、被控端无任何提示，家长端也收不到失败信号。
+                // ：之前失败只记日志、被控端无任何提示，家长端也收不到失败信号。
                 // 这里给出本机可感知的提示，孩子立刻知道录屏没起来（多半是未授权屏幕采集）。
                 // 注意：此处在协程内，this 是 CoroutineScope 而非 Context，必须用 applicationContext。
                 Toast.makeText(
@@ -746,8 +746,8 @@ class ScreenCaptureService : Service() {
             when (val r = remote.uploadMedia(taskId, durationSec, MIME_VIDEO_MP4, file)) {
                 is ApiResult.Success -> Logger.i(TAG) { "screen record uploaded: $taskId ${file.length() / 1024}KB samples=$recordSampleCount" }
                 else -> {
-                    // W38：上传失败不再"失败即删"。移交重试队列，弱网恢复后重传 ——
-                    // 旧实现这里之后无条件 delete，家长端永远等不到这段录屏。
+                    // 上传失败不再"失败即删"。移交重试队列，弱网恢复后重传 ——
+                    // 早期实现这里之后无条件 delete，家长端永远等不到这段录屏。
                     Logger.w(TAG) { "screen record upload failed: $r" }
                     mediaRetry.enqueue(file, MediaUploadRetry.Kind.Media(taskId, durationSec, MIME_VIDEO_MP4))
                 }
@@ -767,7 +767,7 @@ class ScreenCaptureService : Service() {
         recordFile = null
         activeTaskId = null
         recordStartedAt = 0L
-        // W38：收尾时顺手重传队列里积压的媒体（含刚入队的那条——网络可能已恢复）
+        // 收尾时顺手重传队列里积压的媒体（含刚入队的那条——网络可能已恢复）
         runCatching { mediaRetry.drain() }
         stopIfIdle()
     }
@@ -1220,7 +1220,7 @@ class ScreenCaptureService : Service() {
             stopIfIdle()
             return
         }
-        // W42 起停竞态：stop 先于 start 完成时（指令几乎同时到达），旧实现里
+        // 起停竞态：stop 先于 start 完成时（指令几乎同时到达），早期实现里
         // stopAudioRecord 看到 audioTaskId=null 就直接返回，随后 start 才落地 ——
         // 结果这条录音要一直录到服务被杀，没有任何停止路径。这里记一个
         // "停止已请求"标志，start 落地后立刻自停。
@@ -1253,7 +1253,7 @@ class ScreenCaptureService : Service() {
                 audioTaskId = taskId
                 audioStartedAt = System.currentTimeMillis()
                 Logger.i(TAG) { "audio record started: taskId=$taskId" }
-                // W42：与录屏同样给出最长时长兜底 —— 家长端忘了点停止时不能无限录
+                // 与录屏同样给出最长时长兜底 —— 家长端忘了点停止时不能无限录
                 // （耗电与存储都扛不住，且 MediaRecorder 有内部文件大小上限）。
                 audioStopJob?.cancel()
                 audioStopJob = scope.launch {
@@ -1304,7 +1304,7 @@ class ScreenCaptureService : Service() {
                     is ApiResult.Success ->
                         Logger.i(TAG) { "audio uploaded: $taskId ${file.length() / 1024}KB ${durationSec}s" }
                     else -> {
-                        // W38：上传失败进重试队列，不再静默删除（家长端等不到这段录音）
+                        // 上传失败进重试队列，不再静默删除（家长端等不到这段录音）
                         Logger.w(TAG) { "audio upload failed: $r" }
                         mediaRetry.enqueue(file, MediaUploadRetry.Kind.Media(taskId, durationSec, MIME_AUDIO_M4A))
                     }
@@ -1347,7 +1347,7 @@ class ScreenCaptureService : Service() {
      */
     private fun stopIfIdle() {
         if (mediaRecorder != null || audioRecorder != null) return
-        // W41：录屏进行中同样不能退 —— 旧实现只查了 mediaRecorder/audioRecorder，
+        // 录屏进行中同样不能退 —— 早期实现只查了 mediaRecorder/audioRecorder，
         // 而现行录屏走 MediaCodec 路径（mediaRecorder 恒为 null），投影一失效服务就被
         // stopSelf，onDestroy 随之把未收尾的录制文件扔在 cacheDir 里：
         // 既传不上去（静默丢档），又变成没人认领的垃圾文件。
@@ -1387,12 +1387,12 @@ class ScreenCaptureService : Service() {
         // 注意与历史版本的关键差别：**失败时不能把标志位置 true**。
         // Android 14+ 上 `mediaProjection` 类型的前台服务要求调用方已持有
         // `android:project_media` appop（即用户已授权 MediaProjection）。
-        // 旧实现在这里直接 startForegroundService 起服务 —— 此时还没授权，
+        // 早期实现在这里直接 startForegroundService 起服务 —— 此时还没授权，
         // 系统抛 SecurityException，但标志位却被置成 true，
         // 于是授权完成后重放请求时再也不会重试，createVirtualDisplay 必然失败，
         // 表现为"截屏/录屏永远转圈"。现在失败如实记录并保持可重试。
         //
-        // 前台类型按需裁剪（实测 TB330FU / Android 14+ 的硬教训）：
+        // 前台类型按需裁剪（实测 TB330FU / Android 14+ 的硬经验）：
         // `microphone` 类型额外要求 RECORD_AUDIO 处于"可用状态"（运行时授权 +
         // while-in-use 资格）。把 microphone 类型无条件拼进 startForeground，
         // 会因为资格不满足让**整个** startForeground 抛 SecurityException ——
@@ -1515,7 +1515,7 @@ class ScreenCaptureService : Service() {
         /** 单次录屏的最长时长，到点自动收尾（家长端忘点停止的兜底） */
         private const val MAX_RECORD_MS = 10 * 60 * 1000L
 
-        /** 单次录音的最长时长，到点自动收尾（W42，与录屏同思路） */
+        /** 单次录音的最长时长，到点自动收尾（与录屏同思路） */
         private const val MAX_AUDIO_RECORD_MS = 30 * 60 * 1000L
 
         // ---- 录屏编码参数（MediaCodec 从采集帧编码）----
@@ -1683,7 +1683,7 @@ class ScreenCaptureService : Service() {
         }
 
         /**
-         * D6（L-CH-07）：解绑即清本机采集媒体残留。
+         * 解绑即清本机采集媒体残留。
          *
          * 采集产物全部直写 cacheDir（[PhotoCapture] 的 photo_*.jpg、截屏 shot_*.jpg、
          * 录屏 rec_*.mp4、录音 aud_*.m4a），与 Room/DataStore 里的记录是同一边界：
@@ -1772,7 +1772,7 @@ class ScreenCaptureService : Service() {
             }.onFailure { Logger.e(TAG, it) { "failed to start ScreenCaptureService" } }
         }
 
-        // W39 注：曾有 resolutionSize()（把家长端下发的画质档位换算成像素），
+        // 注：曾有 resolutionSize()（把家长端下发的画质档位换算成像素），
         // 但录屏编码路径从未调用它——能力未上线就不留暗示它存在的死代码。
         // 画质档位真正生效时（连同 AAC 音轨混流一起排期），随编码参数一并重建。
     }

@@ -21,7 +21,7 @@ interface UploadedFileRepository : JpaRepository<UploadedFile, String> {
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
     /**
-     * E11（L-OPS-06）：保留期清理——取"设备上传且早于阈值"的文件记录。
+     * 保留期清理——取"设备上传且早于阈值"的文件记录。
      * 只清 deviceId 非空的（孩子端截屏/录屏/日志导出）：家长上传的发布素材/APK
      * 由 PublishedMessage / AppInstaller 引用，不在清理范围。
      */
@@ -45,7 +45,7 @@ interface ScreenshotRepository : JpaRepository<Screenshot, String> {
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
     /**
-     * E11（L-OPS-06）：保留期清理——先取出早于阈值的记录（要按 fileUrl 删对应文件），
+     * 保留期清理——先取出早于阈值的记录（要按 fileUrl 删对应文件），
      * 再由调用方删文件 + 删记录。截图记录本身很小，但 fileUrl 指向的 jpg 不删
      * 就会在 uploads 里无限堆积（家长端『看屏』每点一次就是一张）。
      */
@@ -73,7 +73,7 @@ interface LocationTrackRepository : JpaRepository<LocationTrack, String> {
     fun updateAddressById(@Param("id") id: String, @Param("address") address: String)
 
     /**
-     * E11（L-OPS-06）：定位轨迹保留期清理。
+     * 定位轨迹保留期清理。
      * 轨迹 288 行/天/设备只增不删（~2.1GB/年/设备），是库里第二大增长源；
      * 且属儿童行踪隐私，保留 90 天足够家长回看，超期应当清除。
      * ts 可空（历史行可能缺定位时间戳），用 coalesce 回落 receivedAt。
@@ -94,7 +94,7 @@ interface AlertRepository : JpaRepository<Alert, String> {
 
     /**
      * 按「用户 + 设备」过滤（可选状态）。
-     * 供告警列表页使用：此前是查出该用户全部告警后在内存里 filter deviceId，
+     * 供告警列表页使用：早期是查出该用户全部告警后在内存里 filter deviceId，
      * 会导致分页返回的条数不足一页（过滤发生在分页之后），且随告警累积越来越慢。
      */
     fun findByUserIdAndDeviceIdAndStatus(
@@ -207,7 +207,7 @@ interface MediaTaskRepository : JpaRepository<MediaTask, String> {
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
     /**
-     * E11（L-OPS-06）：保留期清理——取早于阈值的媒体任务（录屏/录音，url 指向 uploads 文件）。
+     * 保留期清理——取早于阈值的媒体任务（录屏/录音，url 指向 uploads 文件）。
      * 单个录屏可达 90MB，是 uploads 目录无限增长的主因；记录与文件必须一起清，
      * 只删文件会留孤儿记录（家长端列表点开是 404），只删记录则文件永远躺着。
      */

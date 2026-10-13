@@ -31,7 +31,7 @@ class El {
   querySelector(sel) { return REG(sel); }
   querySelectorAll(sel) {
     // 让角色卡片列表可枚举 —— 用于真实模拟"点击卡片切换明细"这条链路。
-    // 旧实现的缺陷正是"容器重建后仍向被丢弃的旧节点写明细"，只有真实走一遍
+    // 早期实现的缺陷正是"容器重建后仍向被丢弃的旧节点写明细"，只有真实走一遍
     // cards.onclick → drawDetail 才能证明明细确实写到了当前有效的容器上。
     // 同一份 HTML 必须返回同一批元素对象，否则视图里绑定的 onclick 会在下一次查询时丢失
     if (sel === "[data-role]") {

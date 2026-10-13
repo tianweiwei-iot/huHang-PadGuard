@@ -105,7 +105,7 @@ sealed class Screen(val route: String) {
     }
     object AlertList : Screen("alert_list")
     object Profile : Screen("profile")
-    // D3（L-PA-09）：关于页（此前是「我的」页死入口，现已落地真实页面）
+    // 关于页
     object About : Screen("about")
 }
 
@@ -137,13 +137,13 @@ fun PadGuardNavHost(
     // 家长翻到哪个页面都能收到申请，不会被某个页面的销毁打断。
     val unlockVm: UnlockRequestCenterViewModel = hiltViewModel()
     val unlockState by unlockVm.uiState.collectAsState()
-    // D7：风险告警全局轮询（与解锁工单同层级：Activity 作用域，翻到哪个页面都在拉，
+    // 风险告警全局轮询（与解锁工单同层级：Activity 作用域，翻到哪个页面都在拉，
     // 后台时新 CRITICAL 告警转本地通知触达家长）
     val riskVm: RiskAlertCenterViewModel = hiltViewModel()
     val riskState by riskVm.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // D1（L-PA-03）：通知点击直达消息中心。
+    // 通知点击直达消息中心。
     // 覆盖两种入口：①冷启动——onCreate 的 intent 就带着 extra；
     // ②热点击——App 在栈里，SINGLE_TOP 走 MainActivity.onNewIntent → setIntent。
     // 用 ON_START 观测而非 LaunchedEffect(user)：后者在热点击时不会重组（键没变），
@@ -157,9 +157,9 @@ fun PadGuardNavHost(
             when (event) {
                 Lifecycle.Event.ON_START -> {
                     unlockVm.setAppForeground(true)
-                    // D7：风险告警共用同一套前台门控 —— 前台不打扰，退到后台才发通知
+                    // 风险告警共用同一套前台门控 —— 前台不打扰，退到后台才发通知
                     riskVm.setAppForeground(true)
-                    // D1：通知点击直达消息中心。冷启动（onCreate intent 带 extra）与
+                    // 通知点击直达消息中心。冷启动（onCreate intent 带 extra）与
                     // 热点击（SINGLE_TOP → onNewIntent → setIntent）都必经 ON_START；
                     // LifecycleRegistry 会把当前事件补派给新观察者，冷启动同样不漏。
                     val activity = navHostContext as? MainActivity
@@ -168,7 +168,7 @@ fun PadGuardNavHost(
                         navController.navigate(Screen.AlertList.route)
                     }
                 }
-                // D1：退到后台才允许本地通知触达（前台已有弹窗，双响是噪音）
+                // 退到后台才允许本地通知触达（前台已有弹窗，双响是噪音）
                 Lifecycle.Event.ON_STOP -> {
                     unlockVm.setAppForeground(false)
                     riskVm.setAppForeground(false)
@@ -187,7 +187,7 @@ fun PadGuardNavHost(
         unlockVm.clearActionMessage()
     }
 
-    // D7：风险告警的确认反馈，与解锁工单共用 snackbar 通道
+    // 风险告警的确认反馈，与解锁工单共用 snackbar 通道
     LaunchedEffect(riskState.actionMessage) {
         val msg = riskState.actionMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
@@ -214,7 +214,7 @@ fun PadGuardNavHost(
             startDestination = startDestination
         ) {
         composable(Screen.Login.route) {
-            // D1（L-PA-03）：登录成功后申请通知权限，使"孩子求解锁"能本地触达家长
+            // 登录成功后申请通知权限，使"孩子求解锁"能本地触达家长
             val activity = LocalContext.current as? MainActivity
             LoginScreen(
                 onLoginSuccess = {
@@ -228,7 +228,7 @@ fun PadGuardNavHost(
         composable(Screen.Main.route) {
             MainScreen(
                 rootNavController = navController,
-                // D7：铃铛红点合并解锁工单与风险告警两类未读
+                // 铃铛红点合并解锁工单与风险告警两类未读
                 unreadAlertCount = unlockState.unreadCount + riskState.unreadCount,
                 onNavigateToAlerts = { navController.navigate(Screen.AlertList.route) }
             )
@@ -243,14 +243,14 @@ fun PadGuardNavHost(
                 onApprove = { entry, minutes -> unlockVm.approve(entry.ticket, minutes) },
                 onReject = { entry -> unlockVm.reject(entry.ticket) },
                 onRefresh = unlockVm::refresh,
-                // D7：风险告警分区（同一页面承载，根层 VM 已在此处之上取出）
+                // 风险告警分区（同一页面承载，根层 VM 已在此处之上取出）
                 riskAlerts = riskState.alerts,
                 riskUnreadCount = riskState.unreadCount,
                 riskProcessing = riskState.processing,
                 onAcknowledgeRisk = { alert -> riskVm.acknowledge(alert) }
             )
         }
-        // D3（L-PA-09）：关于页落地为真实路由（此前「我的」页的关于入口是静默 no-op）
+        // 关于页落地为真实路由
         composable(Screen.About.route) {
             AboutScreen(onBack = { navController.popBackStack() })
         }

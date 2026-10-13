@@ -75,7 +75,7 @@ private const val TAG = "MessageActivity"
  * 管理员消息/公告全屏弹窗（[com.padguard.core.engine.command.EngineEffect.ShowMessage] 落地）。
  *
  * ## 霸屏（blocking=true）必须"真霸屏"
- * 旧实现里 `blocking` 只是让按钮文案从「知道了」变成「我已阅读」——
+ * 早期实现里 `blocking` 只是让按钮文案从「知道了」变成「我已阅读」——
  * 孩子点一下就关掉了，所谓霸屏形同虚设。
  *
  * 现在霸屏语义是：**在 [durationSec] 内占满屏幕，不能退出、不能操作、不提供任何关闭入口**，

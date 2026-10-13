@@ -110,7 +110,7 @@ class CommandService(
         expiredCommandSweeper.sweepIfDue(deviceId, now)
 
         // 游标合法性校验（含**时钟偏移容错**）：
-        // 终端时钟略快于服务端时，since 会落在「未来」——此前直接判非法归零，
+        // 终端时钟略快于服务端时，since 会落在「未来」——早期直接判非法归零，
         // 等于每次轮询都下发全部 PENDING 指令，叠加回执延迟就会重复执行
         // （实测录屏每 3 秒被丢弃重启一次）。因此对轻微超前做 clamp 而不是归零。
         //
@@ -126,7 +126,7 @@ class CommandService(
             since > now -> (now - CLOCK_SKEW_GRACE_MS).coerceAtLeast(0L)
             else -> 0L
         }
-        // 过滤与批次截断全部下沉到 SQL：此前是捞出该设备全部历史指令再内存 filter，
+        // 过滤与批次截断全部下沉到 SQL：早期是捞出该设备全部历史指令再内存 filter，
         // 指令表只增不删，单次查询成本随使用时长线性增长，是全局响应变慢的主因之一。
         // 注：过期回收走 [ExpiredCommandSweeper.sweepIfDue]（按设备 30s 节流），
         // 既消除死代码，又把高频轮询路径上的维护成本降到 1/10。

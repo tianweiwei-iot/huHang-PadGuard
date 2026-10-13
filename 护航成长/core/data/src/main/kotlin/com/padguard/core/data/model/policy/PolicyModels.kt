@@ -21,8 +21,8 @@ data class PolicyPackage(
     /**
      * 管控模式（家长端切换：NORMAL / LEARNING / FOCUS）。
      *
-     * W77 修复：此前 PolicyPackage 没有这个字段，服务端下发的 `sceneMode` 在反序列化时被静默丢弃，
-     * 于是家长端切了模式、孩子端却毫无变化（四重断裂之一）。
+     * PolicyPackage 携带 sceneMode 字段，避免服务端下发的该字段在反序列化时被静默丢弃，
+     * 从而保证家长端切换模式能正确反映到孩子端。
      */
     @SerialName("sceneMode") val sceneMode: String = "NORMAL",
     @SerialName("effectiveFrom") val effectiveFrom: Long = 0L,
@@ -352,7 +352,7 @@ data class WebPolicy(
     @SerialName("blockPopup") val blockPopup: Boolean = false,
     @SerialName("blockDownload") val blockDownload: Boolean = false,
     /**
-     * 搜索引擎强制安全搜索（服务端 P2 内容管控下发，对应 `web.safeSearch`）。
+     * 搜索引擎强制安全搜索（服务端 内容管控下发，对应 `web.safeSearch`）。
      * 开启后由 URL 重写通道（无障碍读地址栏 / VpnService）对主流搜索引擎注入 safe 参数；
      * 设备侧无法独立验证命中与否，仅在报告中如实标注，不宣称拦截页面正文。
      */

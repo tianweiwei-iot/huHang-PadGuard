@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.Flow
 /**
  * 认证仓库接口
  * 对应设计文档"账号与权限"章节
- * P0 优先级功能
+ * 优先级功能
  */
 interface AuthRepository {
 
@@ -151,7 +151,7 @@ data class DeviceGroup(
 /**
  * 屏幕监控仓库接口
  * 对应设计文档"实时管控 > 屏幕监控"章节
- * P1 优先级功能
+ * 优先级功能
  *
  * 职责：实时截屏、录屏、屏幕监控设置。
  * 设备位置属于定位领域，请使用 [LocationRepository]，勿在本接口中堆叠。
@@ -435,7 +435,7 @@ interface PolicyRepository {
      * 继续查执行结果，把"指令已下发"推进到"设备已执行"。
      * 只返回成功/失败的话，家长点完锁屏看到"已发送"，设备却毫无反应时，
      * 根本无法区分是"没收到""没执行"还是"执行失败" ——
-     * 这正是 P0-5 可观测性要解决的核心问题。
+     * 这正是 可观测性要解决的核心问题。
      */
     suspend fun lockScreen(deviceId: String): Result<CommandResult>
 
@@ -521,7 +521,7 @@ interface PolicyRepository {
     /** 读取孩子端当前使用计时会话，含服务端锚定的剩余时长（与家长端/孩子端同一份） */
     suspend fun getUsageSession(deviceId: String): Result<UsageSession>
 
-    // === 未成年人模式（P1 合规底座） ===
+    // === 未成年人模式（合规底座） ===
     /** 读取未成年人模式当前配置 */
     suspend fun getMinorMode(deviceId: String): Result<MinorMode>
 
@@ -536,7 +536,7 @@ interface PolicyRepository {
 }
 
 /**
- * 指令执行结果（P0-5 可观测性）。
+ * 指令执行结果（可观测性）。
  *
  * [status] 直接透传服务端语义：PENDING（设备还没回执）/ SUCCESS（已执行）/
  * FAILED（执行失败）/ EXPIRED（超时未执行）。
@@ -550,7 +550,7 @@ data class CommandResult(
     val status: String = "",
     val createdAt: Long = 0,
     val executedAt: Long? = null,
-    /** P0-5：指令回执的错误码 / 描述，说明"为什么没生效" */
+    /** 指令回执的错误码 / 描述，说明"为什么没生效" */
     val errorCode: String? = null,
     val errorMessage: String? = null
 ) {

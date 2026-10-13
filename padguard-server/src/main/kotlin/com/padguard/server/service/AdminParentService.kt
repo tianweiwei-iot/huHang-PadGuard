@@ -16,7 +16,7 @@ import java.util.UUID
 
 /**
  * 家长账号管理（列表 / 详情 / 冻结 / 激活 / 重置密码 / 新建 / 修改 / 删除）。
- * W25 从 AdminService 抽离。
+ * 
  */
 @Service
 class AdminParentService(
@@ -124,7 +124,7 @@ class AdminParentService(
         userRepository.save(u)
         auditServiceRecord(adminId, AdminAudit.PARENTS_CREATE, "parent", u.id, "新建家长 ${u.phone}")
 
-        // 「创建并开通」必须真的开通：此前前端传的 plan 被服务端完全忽略。
+        // 「创建并开通」必须真的开通：早期前端传的 plan 被服务端完全忽略。
         // 现在按所选套餐直接落一条 ACTIVE 订阅；永久会员按 100 年计（不做过期处理）。
         val planKey = req.plan?.takeIf { it.isNotBlank() }
         val activated = if (planKey != null && planKey.uppercase() !in setOf("FREE", "TRIAL")) {

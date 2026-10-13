@@ -22,8 +22,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 /**
- * D3（L-PA-09）：关于页。
- * 「我的」页的「关于」入口此前是死入口（MainScreen 里静默 no-op）。
+ * 关于页。
+ * 「我的」页的「关于」入口早期是死入口（MainScreen 里静默 no-op）。
  * 这里补一个真实页面，展示应用名称、版本、备案/版权占位等基础信息。
  */
 @OptIn(ExperimentalMaterial3Api::class)

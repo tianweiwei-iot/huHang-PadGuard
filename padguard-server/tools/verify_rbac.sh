@@ -3,8 +3,8 @@
 #
 # 验证目标（对应本轮修复的四项核心缺陷）：
 #   1. 权限元数据由服务端下发（前端不再硬编码）
-#   2. 内置角色（非 super）可被编辑 —— 此前 isSystem 一刀切导致矩阵全灰
-#   3. read 类权限真正参与服务端校验 —— 此前全系统无任何一处校验 read
+#   2. 内置角色（非 super）可被编辑 —— 早期 isSystem 一刀切导致矩阵全灰
+#   3. read 类权限真正参与服务端校验 —— 早期全系统无任何一处校验 read
 #   4. 保存前置校验（有写无读被拒） + 系统锁定角色不可编辑 + 还原默认
 #
 # 用法：bash tools/verify_rbac.sh
@@ -40,7 +40,7 @@ print('  锁定角色：', d['lockedRoles'])
 "
 
 echo
-echo "=== 2. 内置角色可编辑（此前 isSystem 一刀切全灰）==="
+echo "=== 2. 内置角色可编辑（早期 isSystem 一刀切全灰）==="
 # 给「客服」加 parents:write（内置角色 cs，非系统锁定）
 ROLES=$(curl -s "${AUTH[@]}" "$BASE/v1/admin/rbac/roles")
 echo "$ROLES" > "$OUT/roles.json"

@@ -19,7 +19,7 @@ import javax.inject.Singleton
  * 周期性位置上报（策略字段 `monitoring.locationIntervalSec` 的**执行者**）。
  *
  * ## 为什么必须补这一类
- * `locationIntervalSec` 在策略模型里定义多年，但此前只被"校验区间"（`MonitoringEnforcer`），
+ * `locationIntervalSec` 在策略模型里定义多年，但早期只被"校验区间"（`MonitoringEnforcer`），
  * **从来没有任何代码按它去调度采集** —— 于是服务端 `location_tracks` 里几乎没有数据，
  * 家长端的"最新位置"永远是空的、轨迹画不出来、电子围栏也无从判定
  * （服务端的越界检测是在入库时触发的，没有上报点就等于围栏不存在）。

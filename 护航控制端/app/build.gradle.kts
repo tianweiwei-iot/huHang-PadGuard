@@ -49,7 +49,7 @@ android {
 
     signingConfigs {
         create("release") {
-            // A1：release 签名必须从 local.properties / gradle.properties 或 CI 环境变量注入，禁止把明文密钥写进仓库。
+            // release 签名必须从 local.properties / gradle.properties 或 CI 环境变量注入，禁止把明文密钥写进仓库。
             // 生成（一次性，妥善保管）：
             //   keytool -genkeypair -v -keystore release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias padguard
             // 在 local.properties（不入库）写入：
@@ -166,7 +166,7 @@ dependencies {
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }
 
-// A4：高德 Key 注入守卫 + release 签名守卫（仅在实际打 release 包时校验，不影响 debug）。
+// 高德 Key 注入守卫 + release 签名守卫（仅在实际打 release 包时校验，不影响 debug）。
 // 缺少高德 Key 会导致定位页白屏/无底图（上线事故）；缺少签名则包无法安装。
 afterEvaluate {
     val rel = android.signingConfigs.findByName("release")
@@ -195,7 +195,7 @@ afterEvaluate {
     }
 }
 
-// W80：versionCode 单调守卫。CI / 每次构建校验 versionCode 不低于已发布基线，
+// versionCode 单调守卫。CI / 每次构建校验 versionCode 不低于已发布基线，
 // 防止无意回退导致设备把新包当降级拒绝安装（表现：重装了 App 却还是旧行为）。
 // 基线文件 versionCode.baseline 随每次发版手动 +1，并随代码一起提交。
 afterEvaluate {
@@ -206,7 +206,7 @@ afterEvaluate {
         tasks.named("preBuild") {
             doLast {
                 check(current >= baseline) {
-                    "W80: versionCode=$current 小于已发布基线 $baseline，禁止回退。请递增 gradle.properties 中的 VERSION_CODE 后再构建。"
+                    "versionCode=$current 小于已发布基线 $baseline，禁止回退。请递增 gradle.properties 中的 VERSION_CODE 后再构建。"
                 }
             }
         }

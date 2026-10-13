@@ -166,9 +166,9 @@ data class WebPolicyDto(
     val smartShutdownEnabled: Boolean = false,
     val smartShutdownStartTime: String? = null,
     val smartShutdownEndTime: String? = null,
-    /** P2 内容管控：搜索引擎强制安全搜索开关 */
+    /** 内容管控：搜索引擎强制安全搜索开关 */
     val safeSearch: Boolean = false,
-    /** P2 内容管控：按分类屏蔽的 url_categories.id 列表（已含默认屏蔽项） */
+    /** 内容管控：按分类屏蔽的 url_categories.id 列表（已含默认屏蔽项） */
     val blockedCategories: List<String> = emptyList()
 )
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -405,7 +405,7 @@ data class AppLimitRequest(val minutes: Int = 0)
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class BatchSuspendRequest(val packages: List<String> = emptyList(), val suspended: Boolean = true)
 
-// ============ 内容管控（P2） ============
+// ============ 内容管控 ============
 /** 安全搜索开关请求 */
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class SafeSearchRequest(val enabled: Boolean = false)

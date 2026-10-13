@@ -203,7 +203,7 @@ class ControlPolicyViewModel @Inject constructor(
     fun toggleAppBlock(app: AppPolicy, blocked: Boolean) {
         viewModelScope.launch {
             val updated = app.copy(isBlocked = blocked)
-            // W54 修复：应用黑名单开关必须走 updateAppBlacklist（按整包名单一次下发），
+            // 应用黑名单开关必须走 updateAppBlacklist（按整包名单一次下发），
             // 之前误走 setAppTimeLimit 会写成"全局每日总时长"端点（dailyLimitMinutes=null → 全局限额清零），
             // 且根本不下发任何黑名单 —— 界面说已禁用、孩子端照常能开。
             val blockedPackages = _uiState.value.installedApps.mapNotNull { a ->
@@ -245,7 +245,7 @@ class ControlPolicyViewModel @Inject constructor(
     fun setAppTimeLimit(app: AppPolicy, minutes: Int?) {
         viewModelScope.launch {
             val updated = app.copy(dailyLimitMinutes = minutes)
-            // W54 修复：单应用限时改走 setAppLimit（per-app 端点），
+            // 单应用限时改走 setAppLimit（per-app 端点），
             // 之前误走 setAppTimeLimit 会写入"全局每日总时长"端点，造成单应用限额与全局限额互相覆盖、单应用限额实际不生效。
             policyRepository.setAppLimit(deviceId, app.packageName, minutes ?: 0)
             _uiState.value = _uiState.value.copy(
@@ -320,7 +320,7 @@ class ControlPolicyViewModel @Inject constructor(
     /**
      * 一键解锁。
      *
-     * 服务端此前只有"锁"没有"开"，锁屏一旦下发就只能等策略自然失效 —— 单向闸门。
+     * 服务端早期只有"锁"没有"开"，锁屏一旦下发就只能等策略自然失效 —— 单向闸门。
      * 这里补上对称的解锁通道，家长点了「去处理」才能真正放行。
      */
     fun unlockNow() {

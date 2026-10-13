@@ -17,7 +17,7 @@ class WebSocketConfig(
         // - "/v1/ws"  ：兼容存量旧客户端 APK
         //
         // 为什么必须兼容 "/v1/ws"（2026-10-06 线上事故复盘）：
-        // 旧版家长端 APK 连的是 /v1/ws，而此前只注册了 /ws —— 旧包每次握手都打到
+        // 旧版家长端 APK 连的是 /v1/ws，而早期只注册了 /ws —— 旧包每次握手都打到
         // **不存在的端点**，服务端抛 NoResourceFoundException 并被 GlobalExceptionHandler
         // 兜成 500（{"code":5001,"message":"No static resource v1/ws."}）。
         // 客户端握手失败后会**每秒重试**，单日实测产生 35890 次 500，把 Tomcat 线程

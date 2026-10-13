@@ -256,7 +256,7 @@ class MonitorService(
     /**
      * 上报媒体文件完成。
      *
-     * W20 修复：必须校验 [deviceId] 与媒体任务归属设备一致，否则任意设备可凭枚举到的 taskId
+     * 必须校验 [deviceId] 与媒体任务归属设备一致，否则任意设备可凭枚举到的 taskId
      * 越权改写他人媒体任务（跨设备劫持）。deviceId 来自设备认证后的 [RequestAttribute]，
      * 不一致时静默丢弃（不报错、不更新），避免泄露任务是否存在。
      */

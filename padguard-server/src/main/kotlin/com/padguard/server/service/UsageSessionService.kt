@@ -96,7 +96,7 @@ class UsageSessionService(
      * （[toDto] 的 remaining 派生、[com.padguard.child.usagesession.UsageSessionManager.isExpired]）
      * 全部以此为准。
      *
-     * 之所以需要这个方法：家长端统计页此前用「孩子端上报的累计前台用量」作头条
+     * 之所以需要这个方法：家长端统计页早期用「孩子端上报的累计前台用量」作头条
      * （[com.padguard.server.service.StatisticsService.sumMinutes]），它与本值之间隔着
      * 「息屏 / 锁屏 / 切后台」的空闲时长，云端真实使用场景下会差出数分钟，表现为
      * 「家长端与孩子端时间对不上」。统一走本方法即可从定义上消除该差异。
@@ -142,7 +142,7 @@ class UsageSessionService(
         log.info("usage session extended device={} +{}min total={}", deviceId, minutes, entity.extendedMinutes)
 
         deviceService.getUserId(deviceId)?.let { userId ->
-            // W31: 延时生效事件须"按端点 audience 分流"，补 audience 字段，避免"抛 PARENT 给 CHILD 端点"的 audience 错配。
+            //  延时生效事件须"按端点 audience 分流"，补 audience 字段，避免"抛 PARENT 给 CHILD 端点"的 audience 错配。
             // - 家长端（PARENT）：经 WebSocket 实时通知，让家长端看板/通知知悉孩子申请了延时；
             // - 被控端孩子（CHILD）：经 MQTT 下行通道推到设备，孩子端即时刷新自身倒计时。
             webSocketPush.pushToUser(
@@ -174,8 +174,8 @@ class UsageSessionService(
     /**
      * 解析当日额度：按工作日/周末取家长在「时间管控」页设置的值。
      *
-     * W24 收敛：NULL 回落统一引用 [DeviceSetting] 的实体缺省常量（唯一事实源），
-     * 不再本地硬编码 120/180 —— 旧实现与接口回落(60)/下发回落(60)/实体默认(120/180)
+     * NULL 回落统一引用 [DeviceSetting] 的实体缺省常量（唯一事实源），
+     * 不再本地硬编码 120/180 —— 早期实现与接口回落(60)/下发回落(60)/实体默认(120/180)
      * 四处漂移，存量 NULL 行命中时三端数字对不上。
      */
     private fun resolveQuota(deviceId: String, now: Long): Int {

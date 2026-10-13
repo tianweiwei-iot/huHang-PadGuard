@@ -153,7 +153,7 @@ object TransportModule {
      *
      * 判定用 `BuildConfig.USE_MOCK_SERVER` 而不是 [TransportSettings.useMock]：
      * 后者是运行时可变的 StateFlow，而 Hilt 的 @Singleton 只解析一次，
-     * 用可变值会造成"页面上开关已切换、实际仍走旧实现"的不一致。
+     * 用可变值会造成"页面上开关已切换、实际仍走早期实现"的不一致。
      * 运行时切 Mock 属于调试能力，由调试页重启守护服务来生效，语义更清晰。
      */
     @Provides

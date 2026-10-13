@@ -90,8 +90,8 @@
     if (config.useMock) { await wait(120); return mockFn(); }
     try { return await liveFn(); }
     catch (e) {
-      // W67 修复：只有「网络层失败」才降级为空数据。
-      // 旧实现把 401/403 等 HTTP 错误也吞掉降级成全 0 假仪表盘，
+      // 只有「网络层失败」才降级为空数据。
+      // 早期实现把 401/403 等 HTTP 错误也吞掉降级成全 0 假仪表盘，
       // 导致无权限管理员看到一片绿色"正常"数据（假成功）。
       // 收到服务端响应（含 4xx/5xx/业务错误）必须如实上抛，绝不编造数据。
       if (!(e instanceof NetworkError)) throw e;
@@ -121,9 +121,9 @@
       const msg = (j && (j.message || j.error)) || ("HTTP " + res.status);
       throw new Error(msg);
     }
-    // W67 修复：校验业务码。服务端统一信封 { code, message, data }，
+    // 校验业务码。服务端统一信封 { code, message, data }，
     // code 存在且非 0 表示业务失败（如设备已解绑/不存在/订阅过期），
-    // 旧实现只判 HTTP 状态导致"设备已删点锁屏弹成功"这类假成功。
+    // 早期实现只判 HTTP 状态导致"设备已删点锁屏弹成功"这类假成功。
     if (j && typeof j.code === "number" && j.code !== 0) {
       throw new Error((j.message || j.error) || ("业务错误 code=" + j.code));
     }
@@ -289,7 +289,7 @@
       }));
     },
     async listRoles() { return liveOrMock(() => http("GET", "/v1/admin/rbac/roles"), () => clone(M.ROLES)); },
-    // 新建/删除自定义角色：此前只在前端内存里 push，刷新即丢且服务端不存在该角色。
+    // 新建/删除自定义角色：早期只在前端内存里 push，刷新即丢且服务端不存在该角色。
     // 现在落库（V24 admin_roles），立即可用于指派。
     async createRole(role) {
       return liveOrMock(() => http("POST", "/v1/admin/rbac/roles", role), () => { M.ROLES.push(clone(role)); return { ok: true, role: clone(role) }; });

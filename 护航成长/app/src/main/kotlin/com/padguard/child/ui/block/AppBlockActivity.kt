@@ -46,8 +46,8 @@ import dagger.hilt.android.AndroidEntryPoint
  *   （借同学手机、找破解），给一条"讲理由、等同意"的正规路径反而更可控。
  *
  * 注意：本页是"软拦截"的视觉拦截层。真正禁止应用启动（用户点图标根本进不去）
- * 依赖 Device Owner 的 `setApplicationHidden` / 用户限制，属于 P1 Kiosk 范畴；
- * 当前 P0 下通过"前台应用被识别为黑名单 → 盖此页 + 返回桌面"实现拦截，
+ * 依赖 Device Owner 的 `setApplicationHidden` / 用户限制，属于 Kiosk 范畴；
+ * 当前通过"前台应用被识别为黑名单 → 盖此页 + 返回桌面"实现拦截，
  * 且在 GuardService 中同一包名在仍处前台时已通过 `lastBlockedPackage` 去重避免反复拉起。
  */
 @AndroidEntryPoint

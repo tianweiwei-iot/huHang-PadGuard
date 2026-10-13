@@ -102,7 +102,7 @@ data class Device(
     val lastOnlineTime: Long?,      // 最后上线时间戳
     val batteryLevel: Int?,         // 电量 0-100
     val controlMode: ControlMode,
-    /** 家长端切换的管控模式（NORMAL / LEARNING / FOCUS）。W77 修复：此前回显错读 controlMode（孩子端上报的权限等级），导致切换后家长端状态不更新。 */
+    /** 家长端切换的管控模式（NORMAL / LEARNING / FOCUS）。早期回显错读 controlMode（孩子端上报的权限等级），导致切换后家长端状态不更新。 */
     val sceneMode: ControlMode = ControlMode.NORMAL,
     val groupId: String?,           // 所属分组ID
     val groupName: String?,         // 分组名称
@@ -153,7 +153,7 @@ data class AppUsage(
     /**
      * 开始使用的墙钟毫秒。
      *
-     * 这三个字段此前**只存在于本地演示数据里，真实接口从不填充**——
+     * 这三个字段早期**只存在于本地演示数据里，真实接口从不填充**——
      * 映射函数 `AppUsageDto.toDomain()` 只搬了包名/名称/时长/图标，
      * 于是家长端"开始时间/停止时间"两栏在真机上永远为空，
      * 看起来就像是"这块代码写好了又不见了"。
@@ -287,7 +287,7 @@ data class Alert(
     val acknowledgedAt: Long? = null,
     val resolvedAt: Long? = null,
     /**
-     * D7：服务端原始事件类型（如 PERMISSION_REVOKED / ROOT_DETECTED / ACCESSIBILITY_DISABLED）。
+     * 服务端原始事件类型（如 PERMISSION_REVOKED / ROOT_DETECTED / ACCESSIBILITY_DISABLED）。
      *
      * 为什么在 [category] 之外还要留一份原始串：[AlertCategory] 枚举是早期按"设备离线/应用违规"
      * 这类粗分类设计的，与孩子端实际上报的事件类型（见服务端 AlertService.EVENT_TITLES）
@@ -431,7 +431,7 @@ data class LocationInfo(
 /**
  * 录屏画质档位
  *
- * **W39 预留字段**：档位选择当前未在孩子端生效（录屏恒按屏幕原生分辨率编码），
+ * **预留字段**：档位选择当前未在孩子端生效（录屏恒按屏幕原生分辨率编码），
  * 家长端 UI 已明示；AAC 音轨混流与画质档位一并排期，上线前本枚举仅作 wire 兼容保留。
  */
 enum class RecordResolution(val label: String, val shortSide: Int) {
@@ -443,7 +443,7 @@ enum class RecordResolution(val label: String, val shortSide: Int) {
 /**
  * 屏幕监控设置（家长端可配置项，下发至被管控平板）
  *
- * W39 注：[recordResolution] / [recordWithAudio] 为**预留字段**——协议继续收发
+ * [recordResolution] / [recordWithAudio] 为**预留字段**——协议继续收发
  * （wire 兼容），但孩子端录屏不按档位缩放、不混入音轨；UI 不再提供这两个开关，
  * 详见《前后端契约对齐确认表》§六 录屏能力矩阵。
  */
@@ -451,8 +451,8 @@ data class ScreenMonitorSettings(
     val deviceId: String,
     val autoRefreshSeconds: Int = 5,                        // 实时画面自动刷新间隔（秒）
     val highDefinition: Boolean = true,                     // 高清画面
-    val recordResolution: RecordResolution = RecordResolution.HD_720P, // W39 预留未生效
-    val recordWithAudio: Boolean = false,                   // W39 预留未生效（录屏不含设备声音）
+    val recordResolution: RecordResolution = RecordResolution.HD_720P, // 预留未生效
+    val recordWithAudio: Boolean = false,                   // 预留未生效（录屏不含设备声音）
     val allowRemoteLock: Boolean = true                     // 是否允许远程锁屏
 )
 

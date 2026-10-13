@@ -158,14 +158,14 @@ fun MainScreen(
                             ProfileAction.ServerAddress -> {
                                 // 服务器地址弹窗由 ProfileScreen 本地处理，无需在此导航
                             }
-                            // D3（L-PA-09）：家庭成员 / 设置尚未实现，ProfileScreen 内已置灰禁用，
+                            // 家庭成员 / 设置尚未实现，ProfileScreen 内已置灰禁用，
                             // 这里不再响应（避免"点了没反应"误导）。
                             ProfileAction.Members,
                             ProfileAction.Settings -> {
                                 // 目标页尚未实现，预留；集中在此处理避免散落静默空操作
                             }
                             ProfileAction.About -> {
-                                // D3（L-PA-09）：关于页已落地为真实路由，导航进入。
+                                // 关于页已落地为真实路由，导航进入。
                                 rootNavController.navigate(Screen.About.route)
                             }
                         }

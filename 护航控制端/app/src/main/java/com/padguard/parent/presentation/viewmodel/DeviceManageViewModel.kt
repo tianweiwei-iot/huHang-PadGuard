@@ -89,7 +89,7 @@ class DeviceManageViewModel @Inject constructor(
         }
     }
 
-    /** 家长端扫描被控平板二维码后回调（Mock 阶段支持手动输入载荷模拟扫码） */
+    /** 家长端扫描被控平板二维码后回调（Mock 实现支持手动输入载荷模拟扫码） */
     fun bindByQrPayload(payload: String) {
         viewModelScope.launch {
             deviceRepository.bindByQrPayload(payload.trim(), alias = null)
