@@ -233,8 +233,8 @@ class DeviceSetting(
     /** 启用时间管控总开关：false 时孩子端不按时长/时段执行管控。缺省为 true（存量行迁移后默认开启）。 */
     @Column(name = "time_control_enabled") var timeControlEnabled: Boolean = true,
     // 可空 + null 视为默认值：存量行（迁移前创建）这些列为 NULL，读取时由服务层兜底
-    @Column(name = "weekday_limit_minutes") var weekdayLimitMinutes: Int? = 120,
-    @Column(name = "weekend_limit_minutes") var weekendLimitMinutes: Int? = 180,
+    @Column(name = "weekday_limit_minutes") var weekdayLimitMinutes: Int? = DEFAULT_WEEKDAY_LIMIT_MINUTES,
+    @Column(name = "weekend_limit_minutes") var weekendLimitMinutes: Int? = DEFAULT_WEEKEND_LIMIT_MINUTES,
     @Column(name = "rest_after_minutes") var restAfterMinutes: Int? = 60,
     @Column(name = "rest_duration_minutes") var restDurationMinutes: Int? = 15,
     /** 可用时间段 JSON：[{"startTime":"08:00","endTime":"18:00"}]，null 表示未设置 */
@@ -266,7 +266,19 @@ class DeviceSetting(
      */
     @Column(name = "require_password_on_install") var requirePasswordOnInstall: Boolean? = true,
     @Column(name = "require_password_on_uninstall") var requirePasswordOnUninstall: Boolean? = true
-)
+) {
+    companion object {
+        /**
+         * 平板使用时长缺省的**唯一事实源**（W24 收敛）。
+         *
+         * 旧实现该缺省值散落在四处：实体默认 120/180、接口回落 60、下发回落 60、服务端计时回落 120，
+         * 存量 NULL 行命中时三端数字对不上，违反"三端时间一致"核心约定。
+         * 现集中到此处，接口/下发/计时三处回落统一引用这两个常量，杜绝再次漂移。
+         */
+        const val DEFAULT_WEEKDAY_LIMIT_MINUTES = 120
+        const val DEFAULT_WEEKEND_LIMIT_MINUTES = 180
+    }
+}
 
 @Entity
 @Table(name = "policy_templates")

@@ -4,6 +4,7 @@ import com.padguard.server.domain.Admin
 import com.padguard.server.repository.AdminRepository
 import com.padguard.server.security.Passwords
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.ApplicationArguments
 import org.springframework.boot.ApplicationRunner
 import org.springframework.core.env.Environment
@@ -32,7 +33,17 @@ import java.util.*
 @Component
 class AdminDataInitializer(
     private val adminRepository: AdminRepository,
-    private val env: Environment
+    private val env: Environment,
+    /**
+     * E6（L-OPS-07）：初始/重置口令文件的落盘路径。
+     *
+     * 旧实现写死相对路径（容器工作目录）——docker-compose 只挂了 `./uploads:/app/uploads`，
+     * 工作目录在容器可写层里：**容器一重建文件就丢**，而管理员口令已被强制重置出 admin123，
+     * 后果是全新部署直接锁死后台、没人知道口令。默认改到挂载卷内的 uploads/ 下，
+     * 并支持用环境变量/配置覆盖到 secrets 卷（`PADGUARD_INITIAL_PASSWORD_FILE`）。
+     */
+    @Value("\${padguard.initial-password-file:uploads/管理员初始密码-请登录后修改.txt}")
+    private val initialPasswordFile: String
 ) : ApplicationRunner {
 
     private val log = LoggerFactory.getLogger(AdminDataInitializer::class.java)
@@ -60,7 +71,7 @@ class AdminDataInitializer(
         val password = randomPassword()
         adminRepository.save(newAdmin(password))
         writeInitialPasswordFile("admin", password, reset = false)
-        log.warn("已创建初始后台管理员 admin，随机口令已写入 {}（请登录后立即修改并删除该文件）", INITIAL_PASSWORD_FILE)
+        log.warn("已创建初始后台管理员 admin，随机口令已落盘（请登录后立即修改并删除该文件）")
     }
 
     /** 正式部署：识别仍在使用出厂弱口令的管理员并强制重置（每次启动幂等检查） */
@@ -95,8 +106,10 @@ class AdminDataInitializer(
      * 是既安全又可用的组合。多个账号共用同一批重置时共用一个新口令。
      */
     private fun writeInitialPasswordFile(usernames: String, password: String, reset: Boolean) {
-        val file = File(INITIAL_PASSWORD_FILE)
+        val file = File(initialPasswordFile)
         runCatching {
+            // E6：目标目录可能不存在（uploads 卷未预建 / secrets 卷空挂载），先建目录再写
+            file.parentFile?.mkdirs()
             file.writeText(
                 """
                 PadGuard 管理员初始口令
@@ -109,7 +122,9 @@ class AdminDataInitializer(
                 此文件包含明文口令，妥善保管，用后可删除。
                 """.trimIndent(), Charsets.UTF_8
             )
-        }.onFailure { log.error("写入管理员初始密码文件失败: {}", it.message) }
+            // 打绝对路径：相对路径在容器里没人知道落在哪，E6 的教训就是"文件写了却找不到"
+            log.warn("管理员口令已写入 {}（请登录后立即修改并删除该文件）", file.absolutePath)
+        }.onFailure { log.error("写入管理员初始密码文件失败: {} -> {}", initialPasswordFile, it.message) }
     }
 
     private fun randomPassword(): String {
@@ -121,6 +136,5 @@ class AdminDataInitializer(
     companion object {
         private const val PROFILE_LOCAL = "local"
         const val FACTORY_PASSWORD = "admin123"
-        const val INITIAL_PASSWORD_FILE = "管理员初始密码-请登录后修改.txt"
     }
 }

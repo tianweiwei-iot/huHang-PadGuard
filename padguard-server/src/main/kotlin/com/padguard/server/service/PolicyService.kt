@@ -189,7 +189,14 @@ class PolicyService(
         }
     }
 
-    /** 家长端改模式：全量包追加 sceneMode，版本+1，通知孩子端重新拉取 */
+    /**
+     * 家长端改模式：全量包追加 sceneMode，版本+1，通知孩子端重新拉取。
+     *
+     * W77 修复：sceneMode 必须同步落库到 [com.padguard.server.domain.Models.Device.sceneMode]，
+     * 否则 [PolicyExtensionService.buildPolicyPackage]（rebuildPolicy / ensureRebuilt 路径）会把它
+     * 回退成默认值 "NORMAL"，表现为"切换管控模式对孩子端零生效"。落库后 buildPolicyPackage 读到的
+     * 就是家长真正选中的模式，整条链路口径一致。
+     */
     fun applyMode(deviceId: String, mode: String): Int {
         val policy = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)
             ?: run { createDefault(deviceId); policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)!! }
@@ -207,6 +214,13 @@ class PolicyService(
                 updatedAt = System.currentTimeMillis()
             )
         )
+        // W77: 把选中模式同步到 device.sceneMode，作为该设备管控模式的唯一事实源。
+        deviceRepository.findById(deviceId).orElse(null)?.let { dev ->
+            if (dev.sceneMode != mode) {
+                dev.sceneMode = mode
+                deviceRepository.save(dev)
+            }
+        }
         mqttGateway.publishPolicyNotify(deviceId, newVersion)
         return newVersion
     }

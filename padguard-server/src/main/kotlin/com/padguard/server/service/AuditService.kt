@@ -2,6 +2,7 @@ package com.padguard.server.service
 
 import com.padguard.server.domain.AuditLog
 import com.padguard.server.repository.AuditLogRepository
+import com.padguard.server.security.DeviceOwnershipGuard
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
@@ -19,7 +20,10 @@ import java.util.UUID
  * 3. **操作语义化**：[action] 采用动词 + 宾语的常量（见 [AuditAction]），便于按动作统计与过滤。
  */
 @Service
-class AuditService(private val auditLogRepository: AuditLogRepository) {
+class AuditService(
+    private val auditLogRepository: AuditLogRepository,
+    private val ownershipGuard: DeviceOwnershipGuard
+) {
 
     private val log = LoggerFactory.getLogger(AuditService::class.java)
 
@@ -61,6 +65,11 @@ class AuditService(private val auditLogRepository: AuditLogRepository) {
      * 是家长端偶发"一点审计就卡住"的成因。
      */
     fun query(userId: String?, deviceId: String?, action: String?, page: Int, size: Int): List<Map<String, Any?>> {
+        // W17 修复：按 deviceId 过滤前必须先校验设备归属，否则任意登录家长可凭他人设备号
+        // 越权读取其审计流水（IDOR）。userId 为空只会出现在后台等可信调用方，那里本就不过滤设备。
+        if (deviceId != null && userId != null) {
+            ownershipGuard.requireOwned(userId, deviceId)
+        }
         val pageable = PageRequest.of(
             page.coerceAtLeast(0),
             if (size > 0) size.coerceAtMost(100) else 20

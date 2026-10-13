@@ -65,6 +65,34 @@ class FileStorageService(
         if (baseUrl.isNotBlank()) "${baseUrl.trimEnd('/')}/v1/files/$id" else "/v1/files/$id"
 
     /**
+     * E11（L-OPS-06）：按 id 删除文件（磁盘 + 记录）。
+     *
+     * 保留期清理用：uploads 里的孩子端录屏/截图无生命周期，单个 90MB 级，
+     * 不清则 50GiB 盘 6-18 个月写满 → PG 拒写全站瘫痪。
+     * 先删记录再删文件：记录没了下载即 404，文件残留只是占盘子的孤儿。
+     *
+     * @return 磁盘文件是否真实删除（记录不存在返回 false）
+     */
+    fun deleteById(id: String): Boolean {
+        val meta = uploadedFileRepository.findById(id).orElse(null) ?: return false
+        uploadedFileRepository.delete(meta)
+        val file = File(dir, File(meta.storedPath).name)
+        return runCatching { file.delete() }.getOrDefault(false)
+    }
+
+    /** 存储根目录（磁盘检查用：E11 的 df 告警盯着这个目录所在的文件系统）。 */
+    fun storageRoot(): File = dir
+
+    /** 从文件 URL 中解析 id；无法解析（历史脏数据/相对路径异常）时返回 null。 */
+    fun idFromUrl(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        val marker = "/v1/files/"
+        val i = url.lastIndexOf(marker)
+        if (i < 0) return null
+        return url.substring(i + marker.length).substringBefore('?').takeIf { it.isNotBlank() }
+    }
+
+    /**
      * 解析出可读取的文件。
      *
      * 两道校验缺一不可：

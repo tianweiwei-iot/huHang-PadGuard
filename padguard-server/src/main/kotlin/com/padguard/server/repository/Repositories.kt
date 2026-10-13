@@ -234,6 +234,10 @@ interface DeviceEventRepository : JpaRepository<DeviceEvent, String> {
     fun existsByEventId(eventId: String): Boolean
     fun findByDeviceIdAndTimestampBetween(deviceId: String, start: Long, end: Long): List<DeviceEvent>
 
+    @Modifying
+    @Query("delete from DeviceEvent e where e.deviceId = :deviceId")
+    fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+
     /**
      * 批量查重（与 [UsageLogRepository.findExistingLogIds] 同款）：
      * 只投影 eventId 一列，避免逐条 exists 造成的上百次 DB 往返。

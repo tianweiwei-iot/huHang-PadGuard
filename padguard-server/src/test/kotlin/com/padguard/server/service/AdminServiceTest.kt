@@ -9,6 +9,7 @@ import com.padguard.server.dto.AdminCreateParentRequest
 import com.padguard.server.dto.AdminCreateRequest
 import com.padguard.server.dto.AdminManualSubscriptionRequest
 import com.padguard.server.dto.AdminRolePrivilegesDto
+import com.padguard.server.dto.AdminSettingsSaveDto
 import com.padguard.server.dto.AdminUpdateParentRequest
 import com.padguard.server.dto.AdminUpdateAdminRequest
 import com.padguard.server.mqtt.MqttGateway
@@ -168,6 +169,9 @@ class AdminServiceTest {
             table.values.removeIf { it.deviceId == deviceId }
             return before - table.size
         }
+        // E11：保留期清理查询
+        override fun findReceivedAtBefore(ts: Long): List<Screenshot> =
+            table.values.filter { it.receivedAt < ts }
     }
 
     // ----------------------------- 测试夹具 -----------------------------
@@ -180,10 +184,11 @@ class AdminServiceTest {
         val subs: FakeSubRepo,
         val devices: FakeDeviceRepo,
         val alerts: FakeAlertRepo,
-        val overrides: FakeOverrideRepo
+        val overrides: FakeOverrideRepo,
+        val settings: FakeSystemSettingRepo
     )
 
-    private fun fixture(): Fixture {
+    private fun fixture(activeProfiles: Set<String> = emptySet()): Fixture {
         val users = FakeUserRepo()
         val devices = FakeDeviceRepo()
         val subs = FakeSubRepo()
@@ -199,8 +204,8 @@ class AdminServiceTest {
         val objectMapper = ObjectMapper()
         // 计费/指令等服务仅用于满足 AdminService 构造；本测试不触发它们的业务路径。
         // 计费验签器用示例支付放行模式（mockPayEnabled=true），避免影响 refund/manualActivate 等用例。
-        val billing = BillingService(subs, orders, devices, users, 7L, 3, 3800, 9800, 29800, 3, 3, 5, 30L, true, com.padguard.server.security.ConfigurablePaymentVerifier(true, listOf()), FakeSystemSettingRepo(), ObjectMapper())
-        val auditService = AuditService(auditLogs)
+        val billing = BillingService(subs, orders, devices, users, 7L, 3, 3800, 9800, 29800, 3, 3, 5, 30L, true, com.padguard.server.security.ConfigurablePaymentVerifier(true, settings, objectMapper, listOf()), FakeSystemSettingRepo(), ObjectMapper())
+        val auditService = AuditService(auditLogs, com.padguard.server.security.DeviceOwnershipGuard(devices))
         // 真实 RBAC 闸门，与 AdminService 共享同一份 admin 仓储 —— 权限事实一致。
         val adminPerm = AdminPermissionService(admins, overrides, FakeCustomRoleRepo(), objectMapper)
         val mqtt = MqttGateway(null, objectMapper, "default")
@@ -221,7 +226,13 @@ class AdminServiceTest {
             users, devices, subs, orders,
             admins, overrides, alerts, auditLogs, settings,
             billing, commandService, jwt, adminPerm, auditService, mailService,
-            objectMapper, dataSource, serverProfileService, RequestMetrics(), RuntimeLogRing()
+            objectMapper, dataSource,
+            // W22：AdminService 新增 env 依赖（示例支付仅允许开发 profile 开启）。
+            // 默认无 active profile，等价于生产口径；activeProfiles 参数供 dev 用例注入。
+            org.springframework.mock.env.MockEnvironment().apply {
+                setActiveProfiles(*activeProfiles.toTypedArray())
+            },
+            serverProfileService, RequestMetrics(), RuntimeLogRing()
         )
 
         // 种入管理员：超管 / 运营 / 审计 / 财务 / 已停用超管
@@ -231,7 +242,7 @@ class AdminServiceTest {
         admins.save(Admin("A-finance", "finance", "h", "财务", null, "finance", "active", false, null, 0))
         admins.save(Admin("A-disabled", "disabled", "h", "停用超管", null, "super", "disabled", false, null, 0))
 
-        return Fixture(svc, users, admins, orders, subs, devices, alerts, overrides)
+        return Fixture(svc, users, admins, orders, subs, devices, alerts, overrides, settings)
     }
 
     private fun seedParent(f: Fixture, id: String = "parent-1", status: String = "active") {
@@ -538,5 +549,38 @@ class AdminServiceTest {
         val newHash = f.admins.table["A-finance"]!!.passwordHash
         assertEquals(true, (r["newPwd"] as String).isNotBlank(), "必须返回新密码明文")
         assertEquals(false, newHash == before, "密码哈希必须更新")
+    }
+
+    // ----------------------------- W22：示例支付开关的环境红线 -----------------------------
+
+    @Test
+    fun `saveSettings rejects enabling mockPay outside dev profile and persists nothing`() {
+        val f = fixture() // 无 active profile = 生产口径
+        val ex = assertThrows(BizException::class.java) {
+            f.svc.saveSettings("A-super", AdminSettingsSaveDto(mockPay = true))
+        }
+        assertEquals(ParentErr.PARAM_ERROR, ex.code, "非开发环境开启示例支付必须被拒（W22 生产红线）")
+        assertFalse(
+            f.settings.table.containsKey("admin.settings"),
+            "拒绝开启时不得留下任何设置落库——落库即等于给计费侧开了免验证通道"
+        )
+    }
+
+    @Test
+    fun `saveSettings allows disabling mockPay outside dev profile`() {
+        val f = fixture()
+        // 模拟 dev 时期遗留的开启状态：生产环境必须允许（且应当）关掉它
+        f.settings.save(SystemSetting("admin.settings", """{"mockPay":true}"""))
+        val r = f.svc.saveSettings("A-super", AdminSettingsSaveDto(mockPay = false))
+        assertEquals(false, r.mockPay, "关闭示例支付是生产环境的正当操作，不应被拦")
+        assertEquals(false, f.svc.settings("A-super").mockPay, "关闭必须真实落库并被回读确认")
+    }
+
+    @Test
+    fun `saveSettings allows enabling mockPay in dev profile`() {
+        val f = fixture(activeProfiles = setOf("dev"))
+        val r = f.svc.saveSettings("A-super", AdminSettingsSaveDto(mockPay = true))
+        assertEquals(true, r.mockPay, "开发环境允许开启示例支付（本地联调用）")
+        assertEquals(true, f.svc.settings("A-super").mockPay, "开启必须真实落库并被回读确认")
     }
 }

@@ -119,8 +119,7 @@ class DeviceService(
                 // 清**全部**私有数据，而不只是用量日志：截图/轨迹/告警/指令/已装应用/围栏/设备设置
                 // 都是上任孩子与上任家长的痕迹，留下来就是隐私泄漏（新家长一绑定就能看到
                 // 别人家孩子的截图和行踪）。统一入口保证新增私有表时不会漏清。
-                runCatching { deviceDataPurgeService.purge(existing.id, "TRANSFER") }
-                    .onFailure { log.warn("清理易主设备 {} 的私有数据失败(已忽略): {}", existing.id, it.message) }
+                purgeDeviceDataWithRetry(existing.id, "TRANSFER")
             }
             existing.apply {
                 // 必须重新归属给当前家长。
@@ -398,8 +397,7 @@ class DeviceService(
         // 解绑即清理该设备全部私有业务数据：截图、轨迹、用量、指令、告警、已装应用、围栏、
         // 设备设置等。此前只把 userId 置空，这些行永久残留在库里（且下次有人绑到同一台平板
         // 时会被新孩子继承）。审计日志刻意保留，供管理员追责。
-        runCatching { deviceDataPurgeService.purge(deviceId, "UNBIND") }
-            .onFailure { log.warn("解绑设备 {} 后清理私有数据失败(已忽略): {}", deviceId, it.message) }
+        purgeDeviceDataWithRetry(deviceId, "UNBIND")
         auditService.record(userId, deviceId, AuditAction.DEVICE_UNBIND, targetType = "device", targetId = deviceId)
         // 关键：必须通知被控端。否则平板本地仍持有旧令牌、继续上报心跳并处于受控态，
         // 家长端看着"解绑了"，但孩子端其实还挂在管控里 —— 这就是"解绑无效"的体感来源。
@@ -411,6 +409,28 @@ class DeviceService(
     private fun pushUnbind(deviceId: String) {
         runCatching { mqttGateway.publishConfig(deviceId, mapOf("unbind" to "1")) }
             .onFailure { log.warn("push unbind config failed: $it") }
+    }
+
+    /**
+     * 易主 / 解绑时清理设备私有数据，带有限重试。
+     *
+     * [com.padguard.server.service.DeviceDataPurgeService.purge] 现已改为原子事务：
+     * 任意一张表删除失败即整体回滚并抛异常。这里捕获后做有限次重试，避免因瞬时 DB 抖动
+     * 导致隐私数据漏清（假成功）。每次重试都是全新的整轮事务，前一次回滚的内容不会残留。
+     * 重试耗尽仍失败则记 ERROR（运维需关注），但**不**阻断解绑/易主主流程。
+     */
+    private fun purgeDeviceDataWithRetry(deviceId: String, reason: String, maxRetries: Int = 3) {
+        var lastErr: Throwable? = null
+        repeat(maxRetries) { attempt ->
+            try {
+                deviceDataPurgeService.purge(deviceId, reason)
+                return
+            } catch (e: Exception) {
+                lastErr = e
+                log.warn("清理设备 {} 私有数据失败（第 {} 次，将重试）：{}", deviceId, attempt + 1, e.message)
+            }
+        }
+        log.error("清理设备 {} 私有数据在 {} 次重试后仍失败，隐私数据可能残留：{}", deviceId, maxRetries, lastErr?.message)
     }
 
     /** 家长修改设备别名 */
@@ -586,8 +606,7 @@ class DeviceService(
 
         // 从别人名下过来的必须清干净：截图/轨迹/用量/指令，见 DeviceDataPurgeService 的说明。
         if (!previousOwner.isNullOrBlank() && previousOwner != userId) {
-            runCatching { deviceDataPurgeService.purge(dev.id, "TRANSFER") }
-                .onFailure { log.warn("局域网接入设备 {} 后清理私有数据失败(已忽略): {}", dev.id, it.message) }
+            purgeDeviceDataWithRetry(dev.id, "TRANSFER")
         }
         policyService.createDefault(dev.id)
         auditService.record(userId, dev.id, AuditAction.DEVICE_BIND, targetType = "device", targetId = dev.id)

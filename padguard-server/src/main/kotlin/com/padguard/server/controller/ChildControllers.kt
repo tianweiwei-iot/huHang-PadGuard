@@ -277,7 +277,7 @@ class ChildReportController(
     ): DeviceApiResponse<*> {
         val mime = file.contentType ?: "application/octet-stream"
         val url = fileStorageService.store(mime, file.bytes, file.originalFilename ?: "media.bin", deviceId = deviceId)
-        monitorService.finishMediaTask(taskId, url, mime, file.size, durationSeconds ?: 0)
+        monitorService.finishMediaTask(taskId, deviceId, url, mime, file.size, durationSeconds ?: 0)
         return DeviceApiResponse.ok(UploadAckDto(accepted = true, url = url))
     }
 

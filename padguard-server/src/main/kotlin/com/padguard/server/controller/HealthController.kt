@@ -82,5 +82,5 @@ class HealthController(private val dataSource: DataSource) {
 
     private fun formatTime(millis: Long): String =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
-            .format(Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()))
+            .format(Instant.ofEpochMilli(millis).atZone(ZoneId.of("Asia/Shanghai")))
 }

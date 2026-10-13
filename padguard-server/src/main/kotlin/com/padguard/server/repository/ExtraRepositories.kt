@@ -15,7 +15,19 @@ interface DeviceGroupRepository : JpaRepository<DeviceGroup, String> {
 }
 
 @Repository
-interface UploadedFileRepository : JpaRepository<UploadedFile, String>
+interface UploadedFileRepository : JpaRepository<UploadedFile, String> {
+    @Modifying
+    @Query("delete from UploadedFile f where f.deviceId = :deviceId")
+    fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+
+    /**
+     * E11（L-OPS-06）：保留期清理——取"设备上传且早于阈值"的文件记录。
+     * 只清 deviceId 非空的（孩子端截屏/录屏/日志导出）：家长上传的发布素材/APK
+     * 由 PublishedMessage / AppInstaller 引用，不在清理范围。
+     */
+    @Query("select f from UploadedFile f where f.deviceId is not null and f.createdAt < :ts")
+    fun findDeviceFilesCreatedBefore(@Param("ts") ts: Long): List<UploadedFile>
+}
 
 @Repository
 interface ScreenshotRepository : JpaRepository<Screenshot, String> {
@@ -31,6 +43,14 @@ interface ScreenshotRepository : JpaRepository<Screenshot, String> {
     @Modifying
     @Query("delete from Screenshot s where s.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+
+    /**
+     * E11（L-OPS-06）：保留期清理——先取出早于阈值的记录（要按 fileUrl 删对应文件），
+     * 再由调用方删文件 + 删记录。截图记录本身很小，但 fileUrl 指向的 jpg 不删
+     * 就会在 uploads 里无限堆积（家长端『看屏』每点一次就是一张）。
+     */
+    @Query("select s from Screenshot s where s.receivedAt < :ts")
+    fun findReceivedAtBefore(@Param("ts") ts: Long): List<Screenshot>
 }
 
 @Repository
@@ -51,6 +71,16 @@ interface LocationTrackRepository : JpaRepository<LocationTrack, String> {
     @Modifying
     @Query("update LocationTrack t set t.address = :address where t.id = :id")
     fun updateAddressById(@Param("id") id: String, @Param("address") address: String)
+
+    /**
+     * E11（L-OPS-06）：定位轨迹保留期清理。
+     * 轨迹 288 行/天/设备只增不删（~2.1GB/年/设备），是库里第二大增长源；
+     * 且属儿童行踪隐私，保留 90 天足够家长回看，超期应当清除。
+     * ts 可空（历史行可能缺定位时间戳），用 coalesce 回落 receivedAt。
+     */
+    @Modifying
+    @Query("delete from LocationTrack t where coalesce(t.ts, t.receivedAt) < :ts")
+    fun deleteByTsBefore(@Param("ts") ts: Long): Int
 }
 
 @Repository
@@ -146,6 +176,10 @@ interface TimeRestrictionRepository : JpaRepository<TimeRestriction, String> {
 @Repository
 interface UsageSessionRepository : JpaRepository<UsageSession, String> {
     fun findByDeviceId(deviceId: String): UsageSession?
+
+    @Modifying
+    @Query("delete from UsageSession u where u.deviceId = :deviceId")
+    fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
 
 @Repository
@@ -171,6 +205,14 @@ interface MediaTaskRepository : JpaRepository<MediaTask, String> {
     @Modifying
     @Query("delete from MediaTask t where t.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+
+    /**
+     * E11（L-OPS-06）：保留期清理——取早于阈值的媒体任务（录屏/录音，url 指向 uploads 文件）。
+     * 单个录屏可达 90MB，是 uploads 目录无限增长的主因；记录与文件必须一起清，
+     * 只删文件会留孤儿记录（家长端列表点开是 404），只删记录则文件永远躺着。
+     */
+    @Query("select m from MediaTask m where m.startedAt < :ts")
+    fun findStartedAtBefore(@Param("ts") ts: Long): List<MediaTask>
 }
 
 @Repository

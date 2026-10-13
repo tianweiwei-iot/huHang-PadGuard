@@ -292,8 +292,8 @@ class PolicyExtensionService(
             deviceId = deviceId,
             enabled = s.timeControlEnabled,
             enabledTimeRanges = s.enabledTimeRangesJson?.let(::parseTimeRanges),
-            weekdayLimitMinutes = s.weekdayLimitMinutes ?: 60,
-            weekendLimitMinutes = s.weekendLimitMinutes ?: 60,
+            weekdayLimitMinutes = s.weekdayLimitMinutes ?: DeviceSetting.DEFAULT_WEEKDAY_LIMIT_MINUTES,
+            weekendLimitMinutes = s.weekendLimitMinutes ?: DeviceSetting.DEFAULT_WEEKEND_LIMIT_MINUTES,
             restAfterMinutes = s.restAfterMinutes ?: 60,
             restDurationMinutes = s.restDurationMinutes ?: 15,
             syncToDevice = false
@@ -464,6 +464,8 @@ class PolicyExtensionService(
             "version" to version,
             "deviceId" to deviceId,
             "scene" to (device.scene ?: "FAMILY"),
+            // W77: sceneMode 读 device.sceneMode（由 applyMode 同步落库的唯一事实源）。
+            // 不可再写死 "NORMAL" 兜底覆盖，否则会冲掉家长刚切换的模式，使切换对孩子的设备零生效。
             "sceneMode" to (device.sceneMode ?: "NORMAL"),
             "peripheral" to mapOf("wifi" to "ALLOW", "bluetooth" to "DISABLE", "camera" to "DISABLE", "usbFileTransfer" to "DISABLE"),
             // 护眼：独立顶级段，不塞进 appLimit —— 后者是"应用限时"，两者毫不相干，
@@ -516,8 +518,8 @@ class PolicyExtensionService(
                 // 派生时会回落到分龄默认值（如 BAND_16_18=120 分钟），表现为"家长改了时长也没反应、平板始终 2 小时"。
                 // 这里与 weekdayTotalMinutes 同源，保证兜底值也是家长真实设置的每日额度。
                 "dailyTotalMinutes" to (settings.weekdayLimitMinutes ?: 0),
-                "weekdayTotalMinutes" to (settings.weekdayLimitMinutes ?: 60),
-                "weekendTotalMinutes" to (settings.weekendLimitMinutes ?: 60),
+                "weekdayTotalMinutes" to (settings.weekdayLimitMinutes ?: DeviceSetting.DEFAULT_WEEKDAY_LIMIT_MINUTES),
+                "weekendTotalMinutes" to (settings.weekendLimitMinutes ?: DeviceSetting.DEFAULT_WEEKEND_LIMIT_MINUTES),
                 "restAfterMinutes" to (settings.restAfterMinutes ?: 60),
                 "restDurationMinutes" to (settings.restDurationMinutes ?: 15),
                 "rules" to limitRules

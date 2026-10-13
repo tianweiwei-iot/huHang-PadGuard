@@ -87,9 +87,18 @@ class BatchARegressionTest {
             table.values.filter { it.deviceId == deviceId }.sortedByDescending { it.ts }
         override fun findByDeviceIdAndTsGreaterThanEqualOrderByTsDesc(deviceId: String, since: Long, pageable: Pageable) =
             table.values.filter { it.deviceId == deviceId && (it.ts ?: 0) >= since }.sortedByDescending { it.ts }
+        override fun updateAddressById(id: String, address: String) {
+            table[id]?.address = address
+        }
         override fun deleteByDeviceId(deviceId: String): Int {
             val before = table.size
             table.values.removeIf { it.deviceId == deviceId }
+            return before - table.size
+        }
+        // E11：保留期清理（与 JPQL coalesce(t.ts, t.receivedAt) 同口径）
+        override fun deleteByTsBefore(ts: Long): Int {
+            val before = table.size
+            table.values.removeIf { (it.ts ?: it.receivedAt) < ts }
             return before - table.size
         }
     }
@@ -112,6 +121,11 @@ class BatchARegressionTest {
         override fun idOf(e: com.padguard.server.domain.DeviceEvent) = e.id
         override fun existsByEventId(eventId: String) = table.values.any { it.eventId == eventId }
         override fun findByDeviceIdAndTimestampBetween(deviceId: String, start: Long, end: Long) = emptyList<com.padguard.server.domain.DeviceEvent>()
+        override fun deleteByDeviceId(deviceId: String): Int {
+            val before = table.size
+            table.values.removeIf { it.deviceId == deviceId }
+            return before - table.size
+        }
         override fun findExistingEventIds(eventIds: Collection<String>) =
             table.values.filter { it.eventId in eventIds }.map { it.eventId }.toSet()
         override fun insertIgnoreConflict(

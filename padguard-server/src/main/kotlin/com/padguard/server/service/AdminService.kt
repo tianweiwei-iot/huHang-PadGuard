@@ -11,6 +11,7 @@ import com.padguard.server.security.AdminPermissionService
 import com.padguard.server.security.JwtTokenProvider
 import com.padguard.server.security.Passwords
 import org.slf4j.LoggerFactory
+import org.springframework.core.env.Environment
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.lang.management.ManagementFactory
@@ -52,6 +53,7 @@ class AdminService(
     private val mailService: MailService,
     private val objectMapper: ObjectMapper,
     private val dataSource: DataSource,
+    private val env: Environment,
     private val serverProfileService: ServerProfileService,
     private val requestMetrics: com.padguard.server.observability.RequestMetrics,
     private val runtimeLogRing: com.padguard.server.observability.RuntimeLogRing
@@ -99,7 +101,7 @@ class AdminService(
 
     private fun fmt(ms: Long?): String? {
         if (ms == null || ms == 0L) return null
-        return FMT.format(Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()))
+        return FMT.format(Instant.ofEpochMilli(ms).atZone(ZoneId.of("Asia/Shanghai")))
     }
 
     private fun online(dev: Device): Boolean {
@@ -979,6 +981,12 @@ class AdminService(
                 req.plans?.forEach { put(it.id.uppercase(), it.priceFen) }
             }
         )
+        // W22：示例支付是生产环境的安全红线。后台「系统设置」允许运营把 mockPay 打开，
+        // 但若是生产/预发等非开发 profile，落库后计费侧（BillingService/PaymentVerifier）会据此
+        // 跳过支付验签，等于开一条免验证白嫖通道。故非开发环境一律拒绝开启。
+        if (next.mockPay && !isDevProfile()) {
+            throw BizException(ParentErr.PARAM_ERROR, "示例支付仅允许在开发环境（local/dev）开启，生产环境禁止开启", Audience.PARENT)
+        }
         systemSettingRepository.save(SystemSetting("admin.settings", objectMapper.writeValueAsString(next)))
         auditService.record(adminId, null, AdminAudit.SETTINGS_WRITE, targetType = "settings", targetId = "admin.settings", detail = "修改系统设置")
         return settingsInternal()
@@ -990,11 +998,11 @@ class AdminService(
         /**
          * 新用户注册后赠送的免费试用天数。
          *
-         * 默认值必须与 `padguard.billing.trial-days` 一致（当前同为 1 天）：
+         * 默认值必须与 `padguard.billing.trial-days` 一致（当前同为 30 天，B3/D2 免费内测延长）：
          * 这里是**运营可见并可改**的唯一入口，[BillingService] 创建试用时会优先读它，
-         * 读不到才回退配置文件。两处默认值若不一致，会出现"后台显示 7 天、实际只给 1 天"。
+         * 读不到才回退配置文件。两处默认值若不一致，会出现"后台显示 30 天、实际只给 1 天"。
          */
-        val trialDays: Int = 1,
+        val trialDays: Int = 30,
         val passwordPolicy: String = "medium",
         val mfaRequired: Boolean = false,
         val mockPay: Boolean = false,
@@ -1006,4 +1014,8 @@ class AdminService(
             systemSettingRepository.findById("admin.settings").orElse(null)?.valueJson
                 ?.let { objectMapper.readValue(it, SettingsStore::class.java) }
         }.getOrNull() ?: SettingsStore()
+
+    /** 当前是否处于开发类 profile（local/dev）。W22：示例支付仅允许在此类环境开启。 */
+    private fun isDevProfile(): Boolean =
+        env.activeProfiles.any { it.equals("local", true) || it.equals("dev", true) }
 }

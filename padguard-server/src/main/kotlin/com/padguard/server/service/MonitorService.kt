@@ -16,6 +16,7 @@ import com.padguard.server.repository.ScreenshotRepository
 import com.padguard.server.ws.WebSocketPushService
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
+import org.slf4j.LoggerFactory
 import java.util.UUID
 
 @Service
@@ -30,6 +31,8 @@ class MonitorService(
     private val hub: ScreenStreamHub,
     @Value("\${padguard.stream.max-live-devices:1000}") private val maxLiveDevices: Int = 1000
 ) {
+    private val log = LoggerFactory.getLogger(MonitorService::class.java)
+
     /** 家长请求实时截屏：落 PENDING 截图记录 + 下发 SCREENSHOT 指令（带 shotId 便于回传关联） */
     fun requestScreenshot(userId: String, deviceId: String): ScreenshotRequestResult {
         requireOwned(userId, deviceId)
@@ -250,8 +253,19 @@ class MonitorService(
         pushScreenshotReady(deviceId, entity)
     }
 
-    fun finishMediaTask(taskId: String, fileUrl: String, mimeType: String, size: Long, durationSeconds: Int?) {
+    /**
+     * 上报媒体文件完成。
+     *
+     * W20 修复：必须校验 [deviceId] 与媒体任务归属设备一致，否则任意设备可凭枚举到的 taskId
+     * 越权改写他人媒体任务（跨设备劫持）。deviceId 来自设备认证后的 [RequestAttribute]，
+     * 不一致时静默丢弃（不报错、不更新），避免泄露任务是否存在。
+     */
+    fun finishMediaTask(taskId: String, deviceId: String, fileUrl: String, mimeType: String, size: Long, durationSeconds: Int?) {
         mediaTaskRepository.findById(taskId).ifPresent { t ->
+            if (t.deviceId != deviceId) {
+                log.warn("finishMediaTask 归属不符，已忽略：taskId={}, 任务设备={}, 上报设备={}", taskId, t.deviceId, deviceId)
+                return@ifPresent
+            }
             t.url = fileUrl
             t.mimeType = mimeType
             t.size = size

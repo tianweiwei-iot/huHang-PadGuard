@@ -17,7 +17,8 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.ArrayDeque
 
-private val HHMMSS: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault())
+// W81：统一时区为 Asia/Shanghai，避免宿主机 TZ 为 UTC 时日志时间戳偏 8 小时（docker 未锁 TZ 时同样漂移）
+private val HHMMSS: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.of("Asia/Shanghai"))
 
 /**
  * HTTP 请求量 / 错误率采集（60 秒滑动窗口）。

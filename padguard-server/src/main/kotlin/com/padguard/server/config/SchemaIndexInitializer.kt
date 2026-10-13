@@ -78,7 +78,18 @@ class SchemaIndexInitializer(
             "CREATE INDEX IF NOT EXISTS idx_screenshots_device_id ON screenshots (device_id, captured_at)",
 
             // 应用台账按设备查（统计聚合图标时回查）
-            "CREATE INDEX IF NOT EXISTS idx_installed_apps_device ON installed_apps (device_id, installed)"
+            "CREATE INDEX IF NOT EXISTS idx_installed_apps_device ON installed_apps (device_id, installed)",
+
+            // W32：以下表在 ddl-auto=update（本地 / 家庭部署，flyway 关闭）路径下不会执行建表迁移，
+            // 而 Hibernate 不保证补索引，故在此显式补齐，避免大表全表扫描。
+            // 定位记录按「设备 + 时间」回查
+            "CREATE INDEX IF NOT EXISTS idx_location_tracks_device_ts ON location_tracks (device_id, ts)",
+            // 围栏按设备列出
+            "CREATE INDEX IF NOT EXISTS idx_geofence_zones_device ON geofence_zones (device_id)",
+            // 媒体任务按「设备 + 状态」轮询取待处理任务（PENDING 优先）
+            "CREATE INDEX IF NOT EXISTS idx_media_tasks_device_status ON media_tasks (device_id, status)",
+            // 使用时长会话按「日」批量扫描（每日额度重置 / 统计）
+            "CREATE INDEX IF NOT EXISTS idx_usage_sessions_day ON usage_sessions (day_key)"
         )
     }
 }

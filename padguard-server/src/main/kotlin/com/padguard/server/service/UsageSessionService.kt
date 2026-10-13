@@ -2,8 +2,10 @@ package com.padguard.server.service
 
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
+import com.padguard.server.domain.DeviceSetting
 import com.padguard.server.domain.UsageSession
 import com.padguard.server.dto.UsageSessionDto
+import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.DeviceSettingRepository
 import com.padguard.server.repository.UsageSessionRepository
 import com.padguard.server.ws.WebSocketPushService
@@ -27,7 +29,8 @@ class UsageSessionService(
     private val usageSessionRepository: UsageSessionRepository,
     private val deviceSettingRepository: DeviceSettingRepository,
     private val deviceService: DeviceService,
-    private val webSocketPush: WebSocketPushService
+    private val webSocketPush: WebSocketPushService,
+    private val mqttGateway: MqttGateway
 ) {
     private val log = LoggerFactory.getLogger(UsageSessionService::class.java)
     private val zoneId = ZoneId.of("Asia/Shanghai")
@@ -138,24 +141,50 @@ class UsageSessionService(
         log.info("usage session extended device={} +{}min total={}", deviceId, minutes, entity.extendedMinutes)
 
         deviceService.getUserId(deviceId)?.let { userId ->
+            // W31: 延时生效事件须"按端点 audience 分流"，补 audience 字段，避免"抛 PARENT 给 CHILD 端点"的 audience 错配。
+            // - 家长端（PARENT）：经 WebSocket 实时通知，让家长端看板/通知知悉孩子申请了延时；
+            // - 被控端孩子（CHILD）：经 MQTT 下行通道推到设备，孩子端即时刷新自身倒计时。
             webSocketPush.pushToUser(
                 userId,
                 mapOf(
                     "type" to "usage.delay",
+                    "audience" to "PARENT",
                     "deviceId" to deviceId,
                     "minutes" to minutes,
                     "extendedMinutes" to entity.extendedMinutes,
                     "at" to now
                 )
             )
+            mqttGateway.publishConfig(
+                deviceId,
+                mapOf(
+                    "type" to "usage.delay",
+                    "audience" to "CHILD",
+                    "deviceId" to deviceId,
+                    "minutes" to minutes.toString(),
+                    "extendedMinutes" to entity.extendedMinutes.toString(),
+                    "at" to now.toString()
+                )
+            )
         }
         return toDto(entity, now, deviceId)
     }
 
-    /** 解析当日额度：按工作日/周末取家长在「时间管控」页设置的值 */
+    /**
+     * 解析当日额度：按工作日/周末取家长在「时间管控」页设置的值。
+     *
+     * W24 收敛：NULL 回落统一引用 [DeviceSetting] 的实体缺省常量（唯一事实源），
+     * 不再本地硬编码 120/180 —— 旧实现与接口回落(60)/下发回落(60)/实体默认(120/180)
+     * 四处漂移，存量 NULL 行命中时三端数字对不上。
+     */
     private fun resolveQuota(deviceId: String, now: Long): Int {
-        val ds = deviceSettingRepository.findById(deviceId).orElse(null) ?: return 120
-        return if (isWeekend(now)) (ds.weekendLimitMinutes ?: 180) else (ds.weekdayLimitMinutes ?: 120)
+        val ds = deviceSettingRepository.findById(deviceId).orElse(null)
+            ?: return DeviceSetting.DEFAULT_WEEKDAY_LIMIT_MINUTES
+        return if (isWeekend(now)) {
+            ds.weekendLimitMinutes ?: DeviceSetting.DEFAULT_WEEKEND_LIMIT_MINUTES
+        } else {
+            ds.weekdayLimitMinutes ?: DeviceSetting.DEFAULT_WEEKDAY_LIMIT_MINUTES
+        }
     }
 
     private fun toDto(s: UsageSession, now: Long, deviceId: String): UsageSessionDto {

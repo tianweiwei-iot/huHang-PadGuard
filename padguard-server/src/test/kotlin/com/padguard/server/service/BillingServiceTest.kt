@@ -111,7 +111,7 @@ class BillingServiceTest {
         trialDevices: Int = 3,
         mockPayEnabled: Boolean = true,
         payTimeoutMinutes: Long = 30,
-        verifier: PaymentVerifier = ConfigurablePaymentVerifier(true, listOf())
+        verifier: PaymentVerifier = ConfigurablePaymentVerifier(true, FakeSystemSettingRepo(), ObjectMapper(), listOf())
     ): Fixture {
         val subRepo = FakeSubscriptionRepo()
         val orderRepo = FakeOrderRepo()
@@ -486,7 +486,7 @@ class BillingServiceTest {
     @Test
     fun `handleNotify rejects when verification fails (fail closed)`() {
         // 生产默认：真实渠道（WECHAT）尚未接入验签器 → 验签一律拒绝，宁可暂不入账也不白嫖
-        val f = service(mockPayEnabled = true, verifier = ConfigurablePaymentVerifier(false, listOf()))
+        val f = service(mockPayEnabled = true, verifier = ConfigurablePaymentVerifier(false, FakeSystemSettingRepo(), ObjectMapper(), listOf()))
         val orderNo = f.orderVia("WECHAT", "MONTHLY")
 
         val ex = assertThrows(BizException::class.java) { f.svc.handleNotify(PayRequest(orderNo, "TX-1"), "{}", emptyMap()) }

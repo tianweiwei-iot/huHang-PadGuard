@@ -1,6 +1,8 @@
 package com.padguard.server.security
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.padguard.server.domain.PayChannel
+import com.padguard.server.repository.SystemSettingRepository
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
@@ -54,7 +56,9 @@ interface ChannelPaymentVerifier : PaymentVerifier {
  */
 @Component
 class ConfigurablePaymentVerifier(
-    @Value("\${padguard.billing.mock-pay-enabled:false}") private val mockPayEnabled: Boolean,
+    @Value("\${padguard.billing.mock-pay-enabled:false}") private val configMockPayEnabled: Boolean,
+    private val systemSettingRepository: SystemSettingRepository,
+    private val objectMapper: ObjectMapper,
     private val channelVerifiers: List<ChannelPaymentVerifier>
 ) : PaymentVerifier {
 
@@ -62,9 +66,27 @@ class ConfigurablePaymentVerifier(
 
     private val byChannel = channelVerifiers.associateBy { it.channel }
 
+    /**
+     * 示例支付是否开启的**唯一事实源**：W22 收敛。
+     *
+     * 旧实现只读启动配置 `padguard.billing.mock-pay-enabled`，而计费侧 [com.padguard.server.service.BillingService]
+     * 读的是后台「系统设置」DB 里的 `mockPay` 字段 —— 两处各读各的（双口径）。
+     * 后果：运营在后台把 `mockPay` 打开后，[com.padguard.server.service.BillingService] 在支付校验处直接跳过验签，
+     * 等于在生产开了一条免验证白嫖通道，而启动断言只查配置项被完全绕过。
+     *
+     * 现收敛为与 [com.padguard.server.service.BillingService] 同一读取口径：DB（admin.settings.mockPay）优先、
+     * 配置兜底、解析失败安全回退。配合 [com.padguard.server.service.AdminService.saveSettings] 对非 dev 环境
+     * 拒绝 `mockPay=true` 落库，生产环境示例支付恒为 false。
+     */
+    private fun effectiveMockPay(): Boolean =
+        runCatching {
+            systemSettingRepository.findById("admin.settings").orElse(null)?.valueJson
+                ?.let { objectMapper.readTree(it).get("mockPay")?.asBoolean() }
+        }.getOrNull() ?: configMockPayEnabled
+
     override fun verify(channel: String, rawBody: String, headers: Map<String, String>): Boolean {
         // 1) 示例支付（开发）模式：跳过验签，便于端到端验证"下单→支付→开通"链路。
-        if (mockPayEnabled) {
+        if (effectiveMockPay()) {
             log.debug("payment verify skipped (mock-pay-enabled): channel={}", channel)
             return true
         }

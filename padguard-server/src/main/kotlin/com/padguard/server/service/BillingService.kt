@@ -493,7 +493,7 @@ class BillingService(
 
     private fun newOrderNo(now: Long): String =
         "PG" + java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
-            .format(Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault())) +
+            .format(Instant.ofEpochMilli(now).atZone(ZoneId.of("Asia/Shanghai"))) +
             (1000..9999).random()
 
     /**
@@ -501,7 +501,7 @@ class BillingService(
      * 30×12=360 天会让年卡每年少 5 天，续费几年后家长会发现"明明买的年卡怎么提前到期"。
      */
     private fun plusMonths(ts: Long, months: Int): Long {
-        val zone = ZoneId.systemDefault()
+        val zone = ZoneId.of("Asia/Shanghai")
         val date: LocalDate = Instant.ofEpochMilli(ts).atZone(zone).toLocalDate().plusMonths(months.toLong())
         // 到期时刻取顺延当日 23:59:59.999，家长体感是"当天还能用"
         return date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1

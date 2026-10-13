@@ -13,6 +13,7 @@ import com.padguard.server.service.ContentFilterService
 import org.slf4j.LoggerFactory
 import org.springframework.boot.context.event.ApplicationReadyEvent
 import org.springframework.context.event.EventListener
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.core.env.Environment
 import org.springframework.stereotype.Component
 import java.io.File
@@ -31,7 +32,21 @@ class DataInitializer(
     private val policyTemplateRepository: PolicyTemplateRepository,
     private val subscriptionRepository: SubscriptionRepository,
     private val contentFilterService: ContentFilterService,
-    private val env: Environment
+    private val env: Environment,
+    /**
+     * E7（与 AdminDataInitializer 同口径）：家长端初始/重置口令文件落盘路径。
+     * 旧实现写死相对路径（容器工作目录）——docker-compose 只挂了 `./uploads:/app/uploads`，
+     * 工作目录在容器可写层里，容器一重建文件就丢，而家长口令已被强制重置出弱口令，
+     * 后果是全新部署直接锁死家长端、没人知道口令。默认改到挂载卷内的 uploads/ 下，
+     * 并支持用环境变量/配置覆盖到 secrets 卷（`PADGUARD_PARENT_INITIAL_PASSWORD_FILE`）。
+     *
+     * **为什么与 AdminDataInitializer 分成两个配置键**：那边写的是后台管理员口令、
+     * 这边写的是家长端账号口令，是两个不同账号的两份明文。共用一个键时，
+     * 运营按任一处的说明覆盖路径，两份口令就会被挤进同一个文件、后写的覆盖先写的 ——
+     * 拿到文件的那一方登录直接失败，且没有任何报错。
+     */
+    @Value("\${padguard.parent-initial-password-file:uploads/初始密码-请登录后修改.txt}")
+    private val initialPasswordFile: String
 ) {
 
     private val log = LoggerFactory.getLogger(DataInitializer::class.java)
@@ -79,7 +94,13 @@ class DataInitializer(
             // 所以这里主动识别出仍在使用出厂弱口令的账号并强制重置 ——
             // 家长若已自行改过密码，matches 为 false，不会打扰。
             existing != null && Passwords.matches(DEMO_PASSWORD, existing.passwordHash) -> {
-                existing.passwordHash = Passwords.encode(seedInitialAdminPassword(existing))
+                // W16 修复：旧实现在 `seedInitialAdminPassword` 内部对用户做了一次 save，
+                // 但那时 passwordHash 还是旧哈希，返回新密码后只改了内存对象、未二次落库，
+                // 导致 DB 仍是出厂弱口令。现改为：先算新哈希并赋值，再一次性 save。
+                val password = randomPassword()
+                existing.passwordHash = Passwords.encode(password)
+                userRepository.save(existing)
+                writeInitialPasswordFile(existing.phone, password, forceReset = true)
             }
             existing == null -> seedInitialAdmin()
         }
@@ -90,16 +111,9 @@ class DataInitializer(
         val existing = userRepository.findByPhone(TEST_ACCOUNT_PHONE) ?: return
         if (!Passwords.matches(TEST_ACCOUNT_PASSWORD, existing.passwordHash)) return
         val password = randomPassword()
-        userRepository.save(existing.apply { passwordHash = Passwords.encode(password) })
+        existing.passwordHash = Passwords.encode(password)
+        userRepository.save(existing)
         writeInitialPasswordFile(existing.phone, password, forceReset = true)
-    }
-
-    /** 为已有账号强制重置口令并落盘，返回新明文口令。 */
-    private fun seedInitialAdminPassword(user: User): String {
-        val password = randomPassword()
-        userRepository.save(user)
-        writeInitialPasswordFile(user.phone, password, forceReset = true)
-        return password
     }
 
     private fun seedDemoAccount() {
@@ -143,8 +157,10 @@ class DataInitializer(
      * 所以"随机生成 + 落到显眼的文件 + 日志提示路径"是唯一既安全又可用的组合。
      */
     private fun writeInitialPasswordFile(phone: String, password: String, forceReset: Boolean) {
-        val file = File(INITIAL_PASSWORD_FILE)
+        val file = File(initialPasswordFile)
         runCatching {
+            // E7：目标目录可能不存在（uploads 卷未预建 / secrets 卷空挂载），先建目录再写
+            file.parentFile?.mkdirs()
             file.writeText(
                 """
                 PadGuard 初始账号口令
@@ -271,7 +287,6 @@ class DataInitializer(
         const val DEFAULT_ADMIN_PHONE = "13800000000"
         /** 仅 local profile 使用的演示口令；正式部署走随机生成，绝不会用到它 */
         const val DEMO_PASSWORD = "admin123"
-        const val INITIAL_PASSWORD_FILE = "初始密码-请登录后修改.txt"
         /** 固定测试账号：用户显式要求的永久会员种子账号（仅此处硬编码明文） */
         const val TEST_ACCOUNT_PHONE = "19371581808"
         const val TEST_ACCOUNT_PASSWORD = "201325"
