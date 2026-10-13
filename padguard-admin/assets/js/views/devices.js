@@ -33,17 +33,17 @@
     root.querySelector("#d-empty").innerHTML = "";
     const modeMap = { DO: ["purple", "设备所有者"], DA: ["blue", "设备管理员"], NONE: ["gray", "无"], };
     tb.innerHTML = list.map(d => `<tr>
-      <td><div class="cell-strong">${U.esc(d.name)}</div><div class="cell-sub">${d.deviceId} · ${d.deviceSn}</div></td>
+      <td><div class="cell-strong">${U.esc(d.name)}</div><div class="cell-sub">${U.esc(d.deviceId)} · ${U.esc(d.deviceSn)}</div></td>
       <td>${U.badge(modeMap[d.controlMode] || { NONE: ["gray", d.controlMode] }, d.controlMode)}</td>
-      <td>${U.esc(d.parentName || "")}<div class="cell-sub">${d.parentPhone}</div></td>
-      <td class="cell-sub">${d.model}<br>${d.osVersion}</td>
+      <td>${U.esc(d.parentName || "")}<div class="cell-sub">${U.esc(d.parentPhone)}</div></td>
+      <td class="cell-sub">${U.esc(d.model)}<br>${U.esc(d.osVersion)}</td>
       <td>${d.online ? '<span class="dot green"></span> 在线' : '<span class="dot gray"></span> 离线'}</td>
       <td>${d.remoteLocked ? '<span class="badge red">已锁</span>' : '<span class="badge gray">未锁</span>'}</td>
       <td>${d.minorMode ? '<span class="badge green">开启</span>' : '<span class="badge gray">关闭</span>'}</td>
       <td>${d.todayUsageMinutes ? Math.floor(d.todayUsageMinutes / 60) + 'h' + (d.todayUsageMinutes % 60) + 'm' : '—'}</td>
       <td><div class="row-actions">
-        <button class="btn btn-xs" data-detail="${d.deviceId}">详情</button>
-        ${d.remoteLocked ? '<button class="btn btn-xs btn-primary" data-act="unlock" data-id="' + d.deviceId + '">解锁</button>' : '<button class="btn btn-xs" data-act="lock" data-id="' + d.deviceId + '">锁屏</button>'}
+        <button class="btn btn-xs" data-detail="${U.esc(d.deviceId)}">详情</button>
+        ${d.remoteLocked ? '<button class="btn btn-xs btn-primary" data-act="unlock" data-id="' + U.esc(d.deviceId) + '">解锁</button>' : '<button class="btn btn-xs" data-act="lock" data-id="' + U.esc(d.deviceId) + '">锁屏</button>'}
       </div></td>
     </tr>`).join("");
     tb.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => openDetail(b.dataset.detail));
@@ -56,17 +56,17 @@
     const d = list.find(x => x.deviceId === id);
     if (!d) return;
     PG.ui.drawer({
-      title: "设备详情 · " + d.name,
-      body: `<div class="stat-line"><span>设备ID</span><span>${d.deviceId}</span></div>
-        <div class="stat-line"><span>序列号</span><span>${d.deviceSn}</span></div>
-        <div class="stat-line"><span>机型 / 系统</span><span>${d.model} · ${d.osVersion}</span></div>
-        <div class="stat-line"><span>管控模式</span><span>${d.controlMode}</span></div>
-        <div class="stat-line"><span>绑定家长</span><span>${U.esc(d.parentName || "")} (${d.parentPhone})</span></div>
-        <div class="stat-line"><span>在线状态</span><span>${d.online ? "在线" : "离线（" + d.lastOnlineAt + "）"}</span></div>
+      title: "设备详情 · " + U.esc(d.name),
+      body: `<div class="stat-line"><span>设备ID</span><span>${U.esc(d.deviceId)}</span></div>
+        <div class="stat-line"><span>序列号</span><span>${U.esc(d.deviceSn)}</span></div>
+        <div class="stat-line"><span>机型 / 系统</span><span>${U.esc(d.model)} · ${U.esc(d.osVersion)}</span></div>
+        <div class="stat-line"><span>管控模式</span><span>${U.esc(d.controlMode)}</span></div>
+        <div class="stat-line"><span>绑定家长</span><span>${U.esc(d.parentName || "")} (${U.esc(d.parentPhone)})</span></div>
+        <div class="stat-line"><span>在线状态</span><span>${d.online ? "在线" : "离线（" + U.esc(d.lastOnlineAt) + "）"}</span></div>
         <div class="stat-line"><span>远程锁屏</span><span>${d.remoteLocked ? "已锁" : "未锁"}</span></div>
         <div class="stat-line"><span>未成年人模式</span><span>${d.minorMode ? "开启" : "关闭"}</span></div>
-        <div class="stat-line"><span>绑定时间</span><span>${d.boundAt}</span></div>
-        <div class="stat-line"><span>区域</span><span>${d.region}</span></div>
+        <div class="stat-line"><span>绑定时间</span><span>${U.esc(d.boundAt)}</span></div>
+        <div class="stat-line"><span>区域</span><span>${U.esc(d.region)}</span></div>
         <div class="row" style="margin-top:16px;gap:10px">
           <button class="btn btn-primary" id="dl-lock">${d.remoteLocked ? "解锁" : "远程锁屏"}</button>
           <button class="btn" data-go="parents">查看家长</button>

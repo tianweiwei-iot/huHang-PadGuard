@@ -83,11 +83,18 @@
   // 安全深拷贝：undefined/null 原样返回，避免 JSON.parse(undefined) 抛 "undefined" is not valid JSON
   const clone = (o) => (o === undefined || o === null) ? o : JSON.parse(JSON.stringify(o));
 
+  // 网络层错误（服务端未启动 / file:// 跨域被拦截 / DNS / 断网）：这类才允许降级到空数据
+  class NetworkError extends Error {}
+
   async function liveOrMock(liveFn, mockFn) {
     if (config.useMock) { await wait(120); return mockFn(); }
     try { return await liveFn(); }
     catch (e) {
-      // 降级必须安全：Mock 已清空，返回的应是空数据而非编造数据；mockFn 自身不得抛错
+      // W67 修复：只有「网络层失败」才降级为空数据。
+      // 旧实现把 401/403 等 HTTP 错误也吞掉降级成全 0 假仪表盘，
+      // 导致无权限管理员看到一片绿色"正常"数据（假成功）。
+      // 收到服务端响应（含 4xx/5xx/业务错误）必须如实上抛，绝不编造数据。
+      if (!(e instanceof NetworkError)) throw e;
       PG.toast && PG.toast("warn", "实时接口不可用", "已降级为空数据：" + friendlyNetworkError(e));
       await wait(60);
       try { return mockFn(); }
@@ -103,15 +110,22 @@
         body: body ? JSON.stringify(body) : undefined,
       });
     } catch (e) {
-      // 网络层失败（服务端未启动 / file:// 跨域被浏览器拦截 / DNS 等）
-      throw new Error(friendlyNetworkError(e));
+      // 网络层失败（服务端未启动 / file:// 跨域被浏览器拦截 / DNS 等）—— 标记为可降级
+      throw new NetworkError(friendlyNetworkError(e));
     }
     let j = null;
     try { j = await res.json(); } catch (e) { j = null; }
     if (!res.ok) {
-      // 服务端统一返回 { code, message }，优先透传业务 message（如「密码错误」）
+      // 服务端统一返回 { code, message }，优先透传业务 message（如「密码错误」）。
+      // 这类 HTTP 错误如实抛出（不可降级）。
       const msg = (j && (j.message || j.error)) || ("HTTP " + res.status);
       throw new Error(msg);
+    }
+    // W67 修复：校验业务码。服务端统一信封 { code, message, data }，
+    // code 存在且非 0 表示业务失败（如设备已解绑/不存在/订阅过期），
+    // 旧实现只判 HTTP 状态导致"设备已删点锁屏弹成功"这类假成功。
+    if (j && typeof j.code === "number" && j.code !== 0) {
+      throw new Error((j.message || j.error) || ("业务错误 code=" + j.code));
     }
     return (j && j.data !== undefined) ? j.data : j;
   }

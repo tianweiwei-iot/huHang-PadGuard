@@ -28,7 +28,7 @@
         ${row("协议", '<select id="sp-scheme" style="' + inputStyle + '"><option value="http"' + (p.scheme === "http" ? " selected" : "") + '>http</option><option value="https"' + (p.scheme === "https" ? " selected" : "") + '>https</option></select>')}
         ${row("服务器名称", '<input id="sp-name" style="' + inputStyle + '" placeholder="PadGuard 管控服务端" value="' + esc(p.serverName) + '">')}
         ${row("备注", '<textarea id="sp-remark" style="' + inputStyle + ';min-height:60px" placeholder="内部备注">' + esc(p.remark) + '</textarea>')}
-        ${row("最后更新", '<span class="muted">' + (p.updatedAt ? new Date(p.updatedAt).toLocaleString() : "未设置") + '</span>')}
+        ${row("最后更新", '<span class="muted">' + esc(p.updatedAt ? new Date(p.updatedAt).toLocaleString() : "未设置") + '</span>')}
         ${row("对外访问地址预览", '<code id="sp-preview" style="color:var(--accent)"></code>')}
       </div>`;
 

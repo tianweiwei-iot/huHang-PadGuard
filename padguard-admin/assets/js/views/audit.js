@@ -26,7 +26,7 @@
     root.querySelector("#a-tab").innerHTML = `<div class="row wrap" style="margin-bottom:12px;gap:8px">
       <select id="al-area" class="btn" style="height:36px"><option value="">全部领域</option>${Object.keys(AREA_CN).map(a => '<option value="' + a + '">' + AREA_CN[a] + '</option>').join("")}</select></div>
       <div class="table-wrap"><table class="tbl"><thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>领域</th><th>对象</th><th>来源IP</th><th>结果</th></tr></thead><tbody id="al-body"></tbody></table></div>`;
-    const draw = (area) => { const f = area ? list.filter(l => l.area === area) : list; root.querySelector("#al-body").innerHTML = f.map(l => `<tr><td class="cell-sub">${l.time}</td><td>${U.esc(l.admin)}</td><td>${l.actionName}</td><td>${AREA_CN[l.area] || l.area}</td><td class="cell-sub">${l.target}</td><td class="cell-sub">${l.ip}</td><td>${l.result === "success" ? '<span class="badge green">成功</span>' : '<span class="badge red">失败</span>'}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">暂无记录</td></tr>'; };
+    const draw = (area) => { const f = area ? list.filter(l => l.area === area) : list; root.querySelector("#al-body").innerHTML = f.map(l => `<tr><td class="cell-sub">${U.esc(l.time)}</td><td>${U.esc(l.admin)}</td><td>${U.esc(l.actionName)}</td><td>${AREA_CN[l.area] ? AREA_CN[l.area] : U.esc(l.area)}</td><td class="cell-sub">${U.esc(l.target)}</td><td class="cell-sub">${U.esc(l.ip)}</td><td>${l.result === "success" ? '<span class="badge green">成功</span>' : '<span class="badge red">失败</span>'}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">暂无记录</td></tr>'; };
     draw(""); root.querySelector("#al-area").onchange = (e) => draw(e.target.value);
   }
 
@@ -40,9 +40,9 @@
         const c = { high: "red", mid: "amber", low: "gray" }[a.level] || "gray";
         const lv = { high: "高", mid: "中", low: "低" }[a.level];
         return `<div class="tl-item">
-          <div class="tl-time">${a.time} · <span class="badge ${c}">${lv}危</span> ${a.type} · ${a.status === "closed" ? "已处理" : "待处理"}</div>
-          <div class="tl-text">${U.esc(a.message)} <span class="cell-sub">（家长 ${a.relatedParent}）</span></div>
-          ${a.status !== "closed" ? '<div style="margin-top:6px"><button class="btn btn-xs" data-close="' + a.id + '">标记为已处理</button></div>' : ""}
+          <div class="tl-time">${U.esc(a.time)} · <span class="badge ${c}">${lv}危</span> ${U.esc(a.type)} · ${a.status === "closed" ? "已处理" : "待处理"}</div>
+          <div class="tl-text">${U.esc(a.message)} <span class="cell-sub">（家长 ${U.esc(a.relatedParent)}）</span></div>
+          ${a.status !== "closed" ? '<div style="margin-top:6px"><button class="btn btn-xs" data-close="' + U.esc(a.id) + '">标记为已处理</button></div>' : ""}
         </div>`;
       }).join("");
       el.querySelectorAll("[data-close]").forEach(b => b.onclick = async () => { await PG.api.closeAlert(b.dataset.close); PG.ui.toast("ok", "已处理", b.dataset.close); renderAlert(root); });

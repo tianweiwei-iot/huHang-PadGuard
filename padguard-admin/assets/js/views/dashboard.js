@@ -29,7 +29,7 @@
           <div class="between" style="gap:14px">
             <div style="flex:none">${U.donut(d.planDist.map((p, i) => ({ value: p.count, color: planColors[i] })), { center: k.parentsTotal + "", centerSub: "总账号", size: 160 })}</div>
             <div class="legend" style="flex-direction:column;align-items:flex-start">
-              ${d.planDist.map((p, i) => '<div><i style="background:' + planColors[i] + '"></i>' + p.name + ' · ' + p.count + '</div>').join("")}
+              ${d.planDist.map((p, i) => '<div><i style="background:' + planColors[i] + '"></i>' + U.esc(p.name) + ' · ' + p.count + '</div>').join("")}
             </div>
           </div>
         </div>
@@ -49,7 +49,7 @@
         <div class="card">
           <div class="card-head"><h3>最近管理操作</h3><a class="sub" style="cursor:pointer;color:var(--brand)" data-go="audit">查看全部 →</a></div>
           <div class="timeline">
-            ${d.recent.map(a => '<div class="tl-item"><div class="tl-time">' + a.time + ' · ' + a.admin + '</div><div class="tl-text">' + a.actionName + ' <span class="cell-sub">(' + a.target + ')</span></div></div>').join("")}
+            ${d.recent.map(a => '<div class="tl-item"><div class="tl-time">' + U.esc(a.time) + ' · ' + U.esc(a.admin) + '</div><div class="tl-text">' + U.esc(a.actionName) + ' <span class="cell-sub">(' + U.esc(a.target) + ')</span></div></div>').join("")}
           </div>
         </div>
       </div>`;
@@ -70,7 +70,7 @@
     const list = await PG.api.alerts();
     return list.filter(a => a.status !== "closed").slice(0, 5).map(a => {
       const c = { high: "red", mid: "amber", low: "gray" }[a.level] || "gray";
-      return '<div class="tl-item"><div class="tl-time">' + a.time + ' · <span class="badge ' + c + '">' + ({ high: "高", mid: "中", low: "低" }[a.level]) + '</span> ' + a.type + '</div><div class="tl-text">' + U.esc(a.message) + '</div></div>';
+      return '<div class="tl-item"><div class="tl-time">' + U.esc(a.time) + ' · <span class="badge ' + c + '">' + ({ high: "高", mid: "中", low: "低" }[a.level]) + '</span> ' + U.esc(a.type) + '</div><div class="tl-text">' + U.esc(a.message) + '</div></div>';
     }).join("") || '<div class="empty">暂无告警</div>';
   }
 })(window.PG);

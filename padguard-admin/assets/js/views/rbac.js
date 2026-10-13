@@ -414,7 +414,7 @@
         <td>${U.esc(a.name || "—")}</td>
         <td><span class="badge blue">${U.esc(a.roleName || a.roleId)}</span></td>
         <td>${a.status === "active" ? '<span class="badge green">启用</span>' : '<span class="badge gray">停用</span>'}</td>
-        <td class="cell-sub">${a.lastLoginAt || "—"}</td>
+        <td class="cell-sub">${U.esc(a.lastLoginAt || "—")}</td>
         <td><div class="row-actions">
           <button class="btn btn-xs" data-assign="${U.esc(a.id)}">变更角色</button>
           <button class="btn btn-xs" data-edit="${U.esc(a.id)}">编辑</button>

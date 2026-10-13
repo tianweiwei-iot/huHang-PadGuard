@@ -14,7 +14,7 @@
       <div class="grid grid-2">
         <div class="card">
           <div class="card-head"><h3>基础</h3></div>
-          <div class="form-row"><div class="field"><label>品牌名称</label><input id="st-brand" value="${s.brand}"></div><div class="field"><label>结算币种</label><select id="st-cur"><option>CNY</option><option>USD</option></select></div></div>
+          <div class="form-row"><div class="field"><label>品牌名称</label><input id="st-brand" value="${U.esc(s.brand)}"></div><div class="field"><label>结算币种</label><select id="st-cur"><option>CNY</option><option>USD</option></select></div></div>
           <div class="field"><label>免费试用天数</label><input id="st-trial" type="number" value="${s.trialDays}"></div>
         </div>
         <div class="card">
@@ -39,7 +39,7 @@
       <div class="card" style="margin-top:16px">
         <div class="card-head"><h3>套餐定价</h3><span class="sub">价格单位：分</span></div>
         <div class="table-wrap"><table class="tbl"><thead><tr><th>套餐</th><th>单价（分）</th><th>设备额度</th><th>核心权益</th></tr></thead><tbody>
-          ${s.plans.map(p => `<tr><td class="cell-strong">${p.name}</td><td><input class="btn" style="height:34px;width:120px" data-price="${p.id}" value="${p.priceFen}"></td><td>${p.deviceLimit}</td><td class="cell-sub">${p.features.join(" / ")}</td></tr>`).join("")}
+          ${s.plans.map(p => `<tr><td class="cell-strong">${U.esc(p.name)}</td><td><input class="btn" style="height:34px;width:120px" data-price="${p.id}" value="${p.priceFen}"></td><td>${p.deviceLimit}</td><td class="cell-sub">${U.esc(p.features.join(" / "))}</td></tr>`).join("")}
         </tbody></table></div>
         <p class="muted" style="font-size:12px;margin-top:10px">金额一律以「分」存储（避免浮点误差）；价格调整即时生效于新下单，不影响已购订阅。</p>
       </div>`;

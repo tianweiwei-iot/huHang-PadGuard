@@ -36,21 +36,21 @@
     if (!list.length) { tb.innerHTML = ""; root.querySelector("#p-empty").innerHTML = '<div class="empty">没有匹配的家长账号</div>'; return; }
     root.querySelector("#p-empty").innerHTML = "";
     tb.innerHTML = list.map(p => `<tr>
-      <td class="cell-strong">${p.id}</td>
-      <td><div class="cell-strong">${U.esc(p.name)}</div>${p.tags.map(t => '<span class="badge blue" style="margin-left:4px">' + t + '</span>').join("")}</td>
-      <td>${p.phone}</td>
+      <td class="cell-strong">${U.esc(p.id)}</td>
+      <td><div class="cell-strong">${U.esc(p.name)}</div>${p.tags.map(t => '<span class="badge blue" style="margin-left:4px">' + U.esc(t) + '</span>').join("")}</td>
+      <td>${U.esc(p.phone)}</td>
       <td>${U.badge(U.PARENT_STATUS, p.status)}</td>
       <td>${U.esc(p.planName)}</td>
       <td>${p.deviceCount} / ${p.childrenCount}</td>
-      <td class="muted">${p.region}</td>
-      <td class="cell-sub">${p.registeredAt}</td>
-      <td class="cell-sub">${p.lastLoginAt || "—"}</td>
+      <td class="muted">${U.esc(p.region)}</td>
+      <td class="cell-sub">${U.esc(p.registeredAt)}</td>
+      <td class="cell-sub">${U.esc(p.lastLoginAt || "—")}</td>
       <td><div class="row-actions">
-        <button class="btn btn-xs" data-detail="${p.id}">详情</button>
+        <button class="btn btn-xs" data-detail="${U.esc(p.id)}">详情</button>
         ${p.status === "suspended" ? '<button class="btn btn-xs btn-primary" data-act="activate" data-id="' + p.id + '">激活</button>' : '<button class="btn btn-xs" data-act="suspend" data-id="' + p.id + '">冻结</button>'}
-        <button class="btn btn-xs" data-act="edit" data-id="${p.id}">编辑</button>
-        <button class="btn btn-xs" data-act="reset" data-id="${p.id}">重置密码</button>
-        <button class="btn btn-xs btn-danger" data-act="del" data-id="${p.id}">删除</button>
+        <button class="btn btn-xs" data-act="edit" data-id="${U.esc(p.id)}">编辑</button>
+        <button class="btn btn-xs" data-act="reset" data-id="${U.esc(p.id)}">重置密码</button>
+        <button class="btn btn-xs btn-danger" data-act="del" data-id="${U.esc(p.id)}">删除</button>
       </div></td>
     </tr>`).join("");
     tb.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => openDetail(b.dataset.detail));
@@ -64,7 +64,7 @@
   function resetPwd(id) {
     PG.ui.confirm("重置密码", "将为 " + id + " 生成随机强密码并强制下次登录修改。", async () => {
       const r = await PG.api.resetParentPwd(id);
-      const m = PG.ui.modal({ title: "新密码", body: '<div class="stat-line"><span>账号</span><span>' + id + '</span></div><div class="stat-line"><span>临时密码</span><span style="font-family:monospace;color:var(--brand)">' + (r.newPwd || "PG" + Math.floor(100000 + Math.random() * 900000)) + '</span></div><p class="muted" style="font-size:12px">请通过安全渠道发送给家长，并提醒及时修改。</p>', foot: '<button class="btn btn-primary" id="ok">知道了</button>' });
+      const m = PG.ui.modal({ title: "新密码", body: '<div class="stat-line"><span>账号</span><span>' + U.esc(id) + '</span></div><div class="stat-line"><span>临时密码</span><span style="font-family:monospace;color:var(--brand)">' + U.esc(r.newPwd || "PG" + Math.floor(100000 + Math.random() * 900000)) + '</span></div><p class="muted" style="font-size:12px">请通过安全渠道发送给家长，并提醒及时修改。</p>', foot: '<button class="btn btn-primary" id="ok">知道了</button>' });
       m.el.querySelector("#ok").onclick = m.close;
       PG.ui.toast("ok", "密码已重置", id);
     });
@@ -121,17 +121,17 @@
     const d = PG.ui.drawer({
       title: "家长账号详情 · " + p.name,
       body: `
-      <div class="stat-line"><span>账号ID</span><span>${p.id}</span></div>
-      <div class="stat-line"><span>手机号</span><span>${p.phone}</span></div>
-      <div class="stat-line"><span>邮箱</span><span>${p.email || "—"}</span></div>
+      <div class="stat-line"><span>账号ID</span><span>${U.esc(p.id)}</span></div>
+      <div class="stat-line"><span>手机号</span><span>${U.esc(p.phone)}</span></div>
+      <div class="stat-line"><span>邮箱</span><span>${U.esc(p.email || "—")}</span></div>
       <div class="stat-line"><span>状态</span><span>${U.badge(U.PARENT_STATUS, p.status)}</span></div>
       <div class="stat-line"><span>套餐</span><span>${U.esc(p.planName)}</span></div>
-      <div class="stat-line"><span>到期时间</span><span>${p.expiredAt}</span></div>
-      <div class="stat-line"><span>区域</span><span>${p.region}</span></div>
-      <div class="stat-line"><span>注册 / 最近登录</span><span>${p.registeredAt} / ${p.lastLoginAt || "—"}</span></div>
+      <div class="stat-line"><span>到期时间</span><span>${U.esc(p.expiredAt)}</span></div>
+      <div class="stat-line"><span>区域</span><span>${U.esc(p.region)}</span></div>
+      <div class="stat-line"><span>注册 / 最近登录</span><span>${U.esc(p.registeredAt)} / ${U.esc(p.lastLoginAt || "—")}</span></div>
       <div class="stat-line"><span>绑定设备</span><span>${p.deviceCount} 台</span></div>
       <h4 style="margin:18px 0 8px">绑定设备</h4>
-      ${p.devices && p.devices.length ? '<div class="table-wrap"><table class="tbl"><thead><tr><th>设备</th><th>模式</th><th>在线</th><th>今日用量</th></tr></thead><tbody>' + p.devices.map(dv => '<tr><td>' + dv.name + '<div class="cell-sub">' + dv.deviceId + '</div></td><td>' + dv.controlMode + '</td><td>' + (dv.online ? '<span class="dot green"></span> 在线' : '<span class="dot gray"></span> 离线') + '</td><td>' + Math.floor(dv.todayUsageMinutes / 60) + 'h' + (dv.todayUsageMinutes % 60) + 'm</td></tr>').join("") + '</tbody></table></div>' : '<div class="empty">暂无绑定设备</div>'}
+      ${p.devices && p.devices.length ? '<div class="table-wrap"><table class="tbl"><thead><tr><th>设备</th><th>模式</th><th>在线</th><th>今日用量</th></tr></thead><tbody>' + p.devices.map(dv => '<tr><td>' + U.esc(dv.name) + '<div class="cell-sub">' + U.esc(dv.deviceId) + '</div></td><td>' + U.esc(dv.controlMode) + '</td><td>' + (dv.online ? '<span class="dot green"></span> 在线' : '<span class="dot gray"></span> 离线') + '</td><td>' + Math.floor(dv.todayUsageMinutes / 60) + 'h' + (dv.todayUsageMinutes % 60) + 'm</td></tr>').join("") + '</tbody></table></div>' : '<div class="empty">暂无绑定设备</div>'}
       <h4 style="margin:18px 0 8px">当前订阅</h4>
       ${p.subscription ? '<div class="stat-line"><span>套餐</span><span>' + U.esc(p.subscription.planName) + '</span></div><div class="stat-line"><span>状态</span><span>' + U.badge(U.SUB_STATUS, p.subscription.status) + '</span></div><div class="stat-line"><span>自动续费</span><span>' + (p.subscription.autoRenew ? "是" : "否") + '</span></div>' : '<div class="muted">未订阅付费套餐</div>'}
       `,
@@ -143,7 +143,7 @@
     // 套餐取自服务端真实可购套餐（Mock 已清空，用 PG.Mock.PLANS 会得到空下拉）
     const list = (await PG.api.listPlans()) || [];
     const plans = '<option value="TRIAL">免费版（试用）</option>' +
-      list.map(p => '<option value="' + p.id + '">' + p.name + (p.priceFen ? '（' + U.money(p.priceFen) + '/期）' : '') + '</option>').join("");
+      list.map(p => '<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + (p.priceFen ? '（' + U.money(p.priceFen) + '/期）' : '') + '</option>').join("");
     const m = PG.ui.modal({
       title: "新建家长账号", width: 480,
       body: `<div class="field"><label>家长姓名</label><input id="c-name" placeholder="如 张伟"></div>

@@ -29,20 +29,20 @@
     if (t === "plans") {
       const plans = await PG.api.listPlans();
       el.innerHTML = '<div class="grid grid-3">' + plans.map(p => `<div class="card">
-        <div class="between"><h3 style="margin:0">${p.name}</h3>${p.id === "yearly" ? '<span class="badge purple">推荐</span>' : ""}</div>
+        <div class="between"><h3 style="margin:0">${U.esc(p.name)}</h3>${p.id === "yearly" ? '<span class="badge purple">推荐</span>' : ""}</div>
         <div style="font-size:26px;font-weight:800;margin:10px 0">${p.priceFen ? U.money(p.priceFen) + '<span class="muted" style="font-size:13px;font-weight:400"> / 期</span>' : "免费"}</div>
         <div class="stat-line"><span>设备额度</span><span>${p.deviceLimit} 台</span></div>
-        <ul style="margin:10px 0 0;padding-left:18px;color:var(--text-2);font-size:13px">${p.features.map(f => "<li>" + f + "</li>").join("")}</ul>
+        <ul style="margin:10px 0 0;padding-left:18px;color:var(--text-2);font-size:13px">${p.features.map(f => "<li>" + U.esc(f) + "</li>").join("")}</ul>
       </div>`).join("") + '</div>';
     } else if (t === "subs") {
       const subs = await PG.api.listSubscriptions({});
       el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="s-st" class="btn" style="height:36px"><option value="">全部状态</option><option value="active">生效中</option><option value="trial">试用</option><option value="expired">已过期</option></select></div><div class="table-wrap"><table class="tbl"><thead><tr><th>家长</th><th>套餐</th><th>状态</th><th>开始</th><th>到期</th><th>自动续费</th><th>渠道</th></tr></thead><tbody id="s-body"></tbody></table></div>';
-      const draw = (st) => { const f = st ? subs.filter(s => s.status === st) : subs; root.querySelector("#s-body").innerHTML = f.map(s => `<tr><td>${U.esc(s.parentName)}<div class="cell-sub">${s.parentPhone}</div></td><td>${U.esc(s.planName)}</td><td>${U.badge(U.SUB_STATUS, s.status)}</td><td class="cell-sub">${s.startedAt}</td><td class="cell-sub">${s.expiredAt}</td><td>${s.autoRenew ? "是" : "否"}</td><td class="muted">${s.channel}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">暂无数据</td></tr>'; };
+      const draw = (st) => { const f = st ? subs.filter(s => s.status === st) : subs; root.querySelector("#s-body").innerHTML = f.map(s => `<tr><td>${U.esc(s.parentName)}<div class="cell-sub">${U.esc(s.parentPhone)}</div></td><td>${U.esc(s.planName)}</td><td>${U.badge(U.SUB_STATUS, s.status)}</td><td class="cell-sub">${U.esc(s.startedAt)}</td><td class="cell-sub">${U.esc(s.expiredAt)}</td><td>${s.autoRenew ? "是" : "否"}</td><td class="muted">${U.esc(s.channel)}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">暂无数据</td></tr>'; };
       draw(""); root.querySelector("#s-st").onchange = (e) => draw(e.target.value);
     } else if (t === "orders") {
       const orders = await PG.api.listOrders({});
       el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="o-st" class="btn" style="height:36px"><option value="">全部</option><option value="paid">已支付</option><option value="refunded">已退款</option><option value="unpaid">待支付</option></select></div><div class="table-wrap"><table class="tbl"><thead><tr><th>订单号</th><th>家长</th><th>套餐</th><th>金额</th><th>状态</th><th>渠道</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="o-body"></tbody></table></div>';
-      const draw = (st) => { const f = st ? orders.filter(o => o.status === st) : orders; root.querySelector("#o-body").innerHTML = f.map(o => `<tr><td class="cell-strong">${o.orderNo}</td><td>${U.esc(o.parentName)}<div class="cell-sub">${o.parentPhone}</div></td><td>${U.esc(o.planName)}</td><td class="cell-strong">${U.money(o.amountFen)}</td><td>${U.badge(U.ORDER_STATUS, o.status)}</td><td class="muted">${o.channel}</td><td class="cell-sub">${o.createdAt}</td><td>${o.status === "paid" ? '<button class="btn btn-xs" data-ref="' + o.orderNo + '">退款</button>' : "—"}</td></tr>`).join("") || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
+      const draw = (st) => { const f = st ? orders.filter(o => o.status === st) : orders; root.querySelector("#o-body").innerHTML = f.map(o => `<tr><td class="cell-strong">${U.esc(o.orderNo)}</td><td>${U.esc(o.parentName)}<div class="cell-sub">${U.esc(o.parentPhone)}</div></td><td>${U.esc(o.planName)}</td><td class="cell-strong">${U.money(o.amountFen)}</td><td>${U.badge(U.ORDER_STATUS, o.status)}</td><td class="muted">${U.esc(o.channel)}</td><td class="cell-sub">${U.esc(o.createdAt)}</td><td>${o.status === "paid" ? '<button class="btn btn-xs" data-ref="' + U.esc(o.orderNo) + '">退款</button>' : "—"}</td></tr>`).join("") || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
         el.querySelectorAll("[data-ref]").forEach(b => b.onclick = () => PG.ui.confirm("订单退款", "确认对订单 " + b.dataset.ref + " 发起退款？", async () => { await PG.api.refund(b.dataset.ref); PG.ui.toast("ok", "已退款", b.dataset.ref); renderTab(root, "orders"); }, true)); };
       draw(""); root.querySelector("#o-st").onchange = (e) => draw(e.target.value);
     } else if (t === "revenue") {
@@ -54,14 +54,14 @@
         ${mini("累计营收", U.moneyK(total))}${mini("近 12 月新增订阅", newSubs + " 单")}${mini("月均营收", U.moneyK(total / 12))}${mini("付费月份", paid + " / 12")}
       </div>
       <div class="card" style="box-shadow:none"><div class="card-head"><h3>月度营收与新增订阅</h3><span class="sub">近 12 个月</span></div>${U.line(rev.map(r => r.amount), { h: 220 })}</div>
-      <div class="table-wrap" style="margin-top:14px"><table class="tbl"><thead><tr><th>月份</th><th>营收</th><th>新增订阅</th><th>流失</th></tr></thead><tbody>${rev.map(r => '<tr><td class="cell-strong">' + r.month + '</td><td>' + U.money(r.amount) + '</td><td>' + r.newSubs + '</td><td class="muted">' + r.churn + '</td></tr>').join("")}</tbody></table></div>`;
+      <div class="table-wrap" style="margin-top:14px"><table class="tbl"><thead><tr><th>月份</th><th>营收</th><th>新增订阅</th><th>流失</th></tr></thead><tbody>${rev.map(r => '<tr><td class="cell-strong">' + U.esc(r.month) + '</td><td>' + U.money(r.amount) + '</td><td>' + r.newSubs + '</td><td class="muted">' + r.churn + '</td></tr>').join("")}</tbody></table></div>`;
     }
   }
 
   function mini(label, val) { return '<div class="mini-stat"><span class="ms-val">' + val + '</span><span class="ms-label">' + label + '</span></div>'; }
 
   function openManual() {
-    const plans = PG.Mock.PLANS.filter(p => p.id !== "free").map(p => '<option value="' + p.id + '">' + p.name + '</option>').join("");
+    const plans = PG.Mock.PLANS.filter(p => p.id !== "free").map(p => '<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + '</option>').join("");
     const m = PG.ui.modal({
       title: "手动开通 / 延长订阅", width: 460,
       body: `<div class="field"><label>家长手机号</label><input id="m-phone" placeholder="如 13800000000"></div>
