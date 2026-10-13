@@ -1,12 +1,12 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.model.MessageContentType
-import com.padguard.domain.model.MessagePublishRequest
-import com.padguard.domain.model.PublishedMessage
-import com.padguard.domain.repository.MessageRepository
+import com.padguard.parent.domain.model.MessageContentType
+import com.padguard.parent.domain.model.MessagePublishRequest
+import com.padguard.parent.domain.model.PublishedMessage
+import com.padguard.parent.domain.repository.MessageRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

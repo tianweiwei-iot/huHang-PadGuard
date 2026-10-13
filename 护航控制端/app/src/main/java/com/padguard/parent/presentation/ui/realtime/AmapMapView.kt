@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.realtime
+package com.padguard.parent.presentation.ui.realtime
 
 import android.content.Context
 import android.content.pm.PackageManager
@@ -25,9 +25,9 @@ import com.amap.api.maps.model.CircleOptions
 import com.amap.api.maps.model.LatLng
 import com.amap.api.maps.model.MarkerOptions
 import com.amap.api.maps.model.PolylineOptions
-import com.padguard.domain.model.GeofenceConfig
-import com.padguard.domain.model.LocationInfo
-import com.padguard.domain.model.MapViewMode
+import com.padguard.parent.domain.model.GeofenceConfig
+import com.padguard.parent.domain.model.LocationInfo
+import com.padguard.parent.domain.model.MapViewMode
 
 /**
  * 高德真实底图（定位页地图区域）。

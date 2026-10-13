@@ -1,22 +1,22 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.model.AppPolicy
-import com.padguard.domain.model.ControlMode
-import com.padguard.domain.model.TabletUsageSettings
-import com.padguard.domain.model.Device
-import com.padguard.domain.repository.PolicyTemplate
-import com.padguard.domain.model.SceneType
-import com.padguard.domain.model.TimeRestriction
-import com.padguard.domain.model.WebPolicy
-import com.padguard.domain.repository.AgeBand
-import com.padguard.domain.repository.AgeBandDefault
-import com.padguard.domain.repository.DeviceRepository
-import com.padguard.domain.repository.MinorMode
-import com.padguard.domain.repository.PolicyRepository
-import com.padguard.presentation.util.TimeFormat
+import com.padguard.parent.domain.model.AppPolicy
+import com.padguard.parent.domain.model.ControlMode
+import com.padguard.parent.domain.model.TabletUsageSettings
+import com.padguard.parent.domain.model.Device
+import com.padguard.parent.domain.repository.PolicyTemplate
+import com.padguard.parent.domain.model.SceneType
+import com.padguard.parent.domain.model.TimeRestriction
+import com.padguard.parent.domain.model.WebPolicy
+import com.padguard.parent.domain.repository.AgeBand
+import com.padguard.parent.domain.repository.AgeBandDefault
+import com.padguard.parent.domain.repository.DeviceRepository
+import com.padguard.parent.domain.repository.MinorMode
+import com.padguard.parent.domain.repository.PolicyRepository
+import com.padguard.parent.presentation.util.TimeFormat
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -223,7 +223,7 @@ class ControlPolicyViewModel @Inject constructor(
     /**
      * 一键管控 / 一键放行全部应用。
      *
-     * 走批量接口 [com.padguard.domain.repository.PolicyRepository.updateAppBlacklist]，
+     * 走批量接口 [com.padguard.parent.domain.repository.PolicyRepository.updateAppBlacklist]，
      * 而不是循环调用 [toggleAppBlock]：逐个调用会给服务端打 N 次请求、
      * 触发 N 次策略重建，既慢，又会让终端在半途停在"部分生效"的中间态。
      * 批量接口一次下发、一次重建，状态始终一致。

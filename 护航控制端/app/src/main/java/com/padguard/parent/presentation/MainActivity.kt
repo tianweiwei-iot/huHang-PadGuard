@@ -12,8 +12,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import com.padguard.parent.notification.NotificationHelper
-import com.padguard.presentation.ui.PadGuardNavHost
-import com.padguard.presentation.ui.theme.PadGuardTheme
+import com.padguard.parent.presentation.ui.PadGuardNavHost
+import com.padguard.parent.presentation.ui.theme.PadGuardTheme
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 

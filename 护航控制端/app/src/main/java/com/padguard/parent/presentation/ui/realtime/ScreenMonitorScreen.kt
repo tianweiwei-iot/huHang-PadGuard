@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.realtime
+package com.padguard.parent.presentation.ui.realtime
 
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -72,11 +72,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.padguard.domain.model.ScreenMonitorSettings
-import com.padguard.domain.model.ScreenshotData
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.ScreenMonitorViewModel
+import com.padguard.parent.domain.model.ScreenMonitorSettings
+import com.padguard.parent.domain.model.ScreenshotData
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.ScreenMonitorViewModel
 import kotlin.math.roundToInt
 
 private val REFRESH_SECONDS_RANGE = 1f..30f

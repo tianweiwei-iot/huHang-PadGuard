@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.realtime
+package com.padguard.parent.presentation.ui.realtime
 
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -28,8 +28,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
 
 /**
  * 「实时管控」三个二级页面（屏幕监控 / 信息发布 / 定位）的共用组件。

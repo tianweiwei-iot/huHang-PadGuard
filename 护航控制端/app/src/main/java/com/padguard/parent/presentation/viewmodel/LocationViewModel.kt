@@ -1,13 +1,13 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.model.GeofenceConfig
-import com.padguard.domain.model.LocationInfo
-import com.padguard.domain.model.MapProvider
-import com.padguard.domain.model.MapViewMode
-import com.padguard.domain.repository.LocationRepository
+import com.padguard.parent.domain.model.GeofenceConfig
+import com.padguard.parent.domain.model.LocationInfo
+import com.padguard.parent.domain.model.MapProvider
+import com.padguard.parent.domain.model.MapViewMode
+import com.padguard.parent.domain.repository.LocationRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow

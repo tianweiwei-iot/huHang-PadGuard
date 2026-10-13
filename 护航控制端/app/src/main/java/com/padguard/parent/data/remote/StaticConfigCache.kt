@@ -1,7 +1,7 @@
 package com.padguard.parent.data.remote
 
-import com.padguard.domain.repository.AgeBand
-import com.padguard.domain.repository.AgeBandDefault
+import com.padguard.parent.domain.repository.AgeBand
+import com.padguard.parent.domain.repository.AgeBandDefault
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject

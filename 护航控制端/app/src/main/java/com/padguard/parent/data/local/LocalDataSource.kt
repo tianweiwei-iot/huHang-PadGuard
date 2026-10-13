@@ -1,4 +1,4 @@
-package com.padguard.data.local
+package com.padguard.parent.data.local
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -7,10 +7,10 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.padguard.domain.model.*
-import com.padguard.domain.repository.*
-import com.padguard.data.model.AppListPolicyDto
-import com.padguard.domain.KnownAppIcons
+import com.padguard.parent.domain.model.*
+import com.padguard.parent.domain.repository.*
+import com.padguard.parent.data.model.AppListPolicyDto
+import com.padguard.parent.domain.KnownAppIcons
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -37,14 +37,14 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 class LocalDataSource @Inject constructor(
     @ApplicationContext private val context: Context
 ) : 
-    com.padguard.domain.repository.AuthRepository,
-    com.padguard.domain.repository.DeviceRepository,
-    com.padguard.domain.repository.MonitorRepository,
-    com.padguard.domain.repository.PolicyRepository,
-    com.padguard.domain.repository.StatisticsRepository,
-    com.padguard.domain.repository.AlertRepository,
-    com.padguard.domain.repository.MessageRepository,
-    com.padguard.domain.repository.LocationRepository {
+    com.padguard.parent.domain.repository.AuthRepository,
+    com.padguard.parent.domain.repository.DeviceRepository,
+    com.padguard.parent.domain.repository.MonitorRepository,
+    com.padguard.parent.domain.repository.PolicyRepository,
+    com.padguard.parent.domain.repository.StatisticsRepository,
+    com.padguard.parent.domain.repository.AlertRepository,
+    com.padguard.parent.domain.repository.MessageRepository,
+    com.padguard.parent.domain.repository.LocationRepository {
 
     companion object {
         private val KEY_TOKEN = stringPreferencesKey("auth_token")
@@ -529,7 +529,7 @@ class LocalDataSource @Inject constructor(
     override suspend fun getMediaTask(
         deviceId: String,
         taskId: String
-    ): Result<com.padguard.data.model.MediaTaskStatusDto> =
+    ): Result<com.padguard.parent.data.model.MediaTaskStatusDto> =
         Result.failure(IllegalStateException("本地模式无录屏文件"))
 
     // ---- 实时看屏（本地模式下无真实画面流） ----

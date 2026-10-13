@@ -1,4 +1,4 @@
-package com.padguard.data.model
+package com.padguard.parent.data.model
 
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
@@ -676,7 +676,7 @@ data class AppUsageHistoryEntryDto(
     val endTime: String,
     val usageSeconds: Int
 ) {
-    fun toDomain() = com.padguard.domain.model.AppUsageHistoryEntry(
+    fun toDomain() = com.padguard.parent.domain.model.AppUsageHistoryEntry(
         date = date, startTime = startTime, endTime = endTime, usageSeconds = usageSeconds
     )
 }
@@ -702,7 +702,7 @@ data class DeviceImportRowDto(
     val model: String? = null,
     val groupName: String? = null
 ) {
-    fun toDomain() = com.padguard.domain.model.DeviceImportRow(
+    fun toDomain() = com.padguard.parent.domain.model.DeviceImportRow(
         hardwareId = hardwareId, alias = alias, model = model, groupName = groupName
     )
 }
@@ -717,7 +717,7 @@ data class DeviceImportResultDto(
     val skippedCount: Int,
     val failedRows: List<String> = emptyList()
 ) {
-    fun toDomain() = com.padguard.domain.model.DeviceImportResult(
+    fun toDomain() = com.padguard.parent.domain.model.DeviceImportResult(
         totalCount = totalCount,
         successCount = successCount,
         skippedCount = skippedCount,
@@ -948,7 +948,7 @@ data class LanDeviceDto(
     val ipAddress: String,
     val osVersion: String?
 ) {
-    fun toDomain() = com.padguard.domain.model.LanDevice(
+    fun toDomain() = com.padguard.parent.domain.model.LanDevice(
         deviceId = deviceId, model = model, ipAddress = ipAddress, osVersion = osVersion
     )
 }

@@ -1,18 +1,18 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.model.ScreenMonitorSettings
-import com.padguard.domain.model.ScreenRecordTask
-import com.padguard.domain.model.ScreenshotData
-import com.padguard.domain.repository.DeviceRepository
-import com.padguard.domain.repository.MonitorRepository
-import com.padguard.domain.repository.PolicyRepository
-import com.padguard.presentation.util.GallerySaver
-import com.padguard.presentation.util.TimeFormat
+import com.padguard.parent.domain.model.ScreenMonitorSettings
+import com.padguard.parent.domain.model.ScreenRecordTask
+import com.padguard.parent.domain.model.ScreenshotData
+import com.padguard.parent.domain.repository.DeviceRepository
+import com.padguard.parent.domain.repository.MonitorRepository
+import com.padguard.parent.domain.repository.PolicyRepository
+import com.padguard.parent.presentation.util.GallerySaver
+import com.padguard.parent.presentation.util.TimeFormat
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -343,7 +343,7 @@ class ScreenMonitorViewModel @Inject constructor(
      * 实际可能是几分钟前的旧画面。现在以服务端受理时间戳（ack.capturedAt，
      * 见 ApiDataSource.requestScreenshot 的映射）为下限，capturedAt >= 该值才采用。
      */
-    private suspend fun awaitScreenshot(): com.padguard.domain.model.ScreenshotData? {
+    private suspend fun awaitScreenshot(): com.padguard.parent.domain.model.ScreenshotData? {
         val ack = monitorRepository.requestScreenshot(deviceId).getOrNull() ?: return null
         val requestAt = ack.capturedAt
         for (poll in 0 until SCREENSHOT_POLL_TIMES) {

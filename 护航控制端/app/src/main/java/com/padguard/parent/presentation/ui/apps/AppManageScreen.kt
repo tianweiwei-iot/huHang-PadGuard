@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.apps
+package com.padguard.parent.presentation.ui.apps
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -21,12 +21,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import kotlinx.coroutines.launch
-import com.padguard.domain.model.InstalledApp
-import com.padguard.presentation.ui.components.AppIcon
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.viewmodel.AppManageUiState
-import com.padguard.presentation.viewmodel.AppManageViewModel
+import com.padguard.parent.domain.model.InstalledApp
+import com.padguard.parent.presentation.ui.components.AppIcon
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.viewmodel.AppManageUiState
+import com.padguard.parent.presentation.viewmodel.AppManageViewModel
 import kotlinx.coroutines.flow.collectLatest
 
 /**

@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.device
+package com.padguard.parent.presentation.ui.device
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -26,8 +26,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
 
 /**
  * 受管控水印卡片（P0-1）。

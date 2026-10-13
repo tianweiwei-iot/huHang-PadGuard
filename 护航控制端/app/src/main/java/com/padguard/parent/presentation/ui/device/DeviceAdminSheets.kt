@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.device
+package com.padguard.parent.presentation.ui.device
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -17,13 +17,13 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.padguard.domain.model.*
-import com.padguard.presentation.ui.components.FeatureGridItem
-import com.padguard.presentation.ui.components.FeatureItem
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.DeviceAdminSheet
+import com.padguard.parent.domain.model.*
+import com.padguard.parent.presentation.ui.components.FeatureGridItem
+import com.padguard.parent.presentation.ui.components.FeatureItem
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.DeviceAdminSheet
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -92,7 +92,7 @@ fun DeviceAdminEntryCard(onOpen: (DeviceAdminSheet) -> Unit) {
 
 @Composable
 fun DeviceAdminSheetHost(
-    uiState: com.padguard.presentation.viewmodel.DeviceDetailUiState,
+    uiState: com.padguard.parent.presentation.viewmodel.DeviceDetailUiState,
     onClose: () -> Unit,
     onUpdatePermissions: (DevicePermissionConfig) -> Unit,
     onUpdateFunctions: (DeviceFunctionConfig) -> Unit,
@@ -409,7 +409,7 @@ private fun displayVersion(versionName: String?, versionCode: Long): String {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun UpgradeSheet(
-    uiState: com.padguard.presentation.viewmodel.DeviceDetailUiState,
+    uiState: com.padguard.parent.presentation.viewmodel.DeviceDetailUiState,
     onClose: () -> Unit,
     onStartUpgrade: (String) -> Unit
 ) {
@@ -494,7 +494,7 @@ private fun UpgradeSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun StatsSheet(
-    uiState: com.padguard.presentation.viewmodel.DeviceDetailUiState,
+    uiState: com.padguard.parent.presentation.viewmodel.DeviceDetailUiState,
     onClose: () -> Unit
 ) {
     ModalBottomSheet(onDismissRequest = onClose) {

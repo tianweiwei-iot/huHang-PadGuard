@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.alert
+package com.padguard.parent.presentation.ui.alert
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -42,17 +42,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.padguard.domain.model.Alert
-import com.padguard.domain.model.AlertLevel
-import com.padguard.domain.model.AlertStatus
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.ui.components.AppSoftBackground
-import com.padguard.presentation.ui.theme.PrimaryBlue
-import com.padguard.presentation.ui.theme.PrimaryBlueDeep
-import com.padguard.presentation.ui.theme.TextSecondary
-import com.padguard.presentation.ui.theme.TintBlue
-import com.padguard.presentation.viewmodel.UnlockCenterUiState
-import com.padguard.presentation.viewmodel.UnlockTicketEntry
+import com.padguard.parent.domain.model.Alert
+import com.padguard.parent.domain.model.AlertLevel
+import com.padguard.parent.domain.model.AlertStatus
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.components.AppSoftBackground
+import com.padguard.parent.presentation.ui.theme.PrimaryBlue
+import com.padguard.parent.presentation.ui.theme.PrimaryBlueDeep
+import com.padguard.parent.presentation.ui.theme.TextSecondary
+import com.padguard.parent.presentation.ui.theme.TintBlue
+import com.padguard.parent.presentation.viewmodel.UnlockCenterUiState
+import com.padguard.parent.presentation.viewmodel.UnlockTicketEntry
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -77,7 +77,7 @@ import java.util.Locale
  * 本页与根层那个全局弹窗必须共享同一份数据（同一批工单、同一个轮询器）。
  * 若在导航目标里再取一次 ViewModel，拿到的是 NavBackStackEntry 作用域的新实例，
  * 两边数据各刷各的，会出现"弹窗刚忽略、消息中心还显示待处理"的撕裂。
- * 风险告警同理（[com.padguard.presentation.viewmodel.RiskAlertCenterViewModel]
+ * 风险告警同理（[com.padguard.parent.presentation.viewmodel.RiskAlertCenterViewModel]
  * 同样是根层全局实例），只是它没有配套弹窗，不需要防撕裂。
  */
 @Composable

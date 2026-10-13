@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.components
+package com.padguard.parent.presentation.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,7 +20,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
 
 /**
  * 清爽卡片风共享组件（视觉基准：docs/UI设计提示词.md v2.1，参考 WPS「我的」页版式）。

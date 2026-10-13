@@ -1,4 +1,4 @@
-package com.padguard.presentation.util
+package com.padguard.parent.presentation.util
 
 import android.graphics.Bitmap
 import androidx.compose.ui.graphics.ImageBitmap

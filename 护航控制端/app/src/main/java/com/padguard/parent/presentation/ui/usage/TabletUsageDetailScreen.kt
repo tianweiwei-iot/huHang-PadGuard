@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.usage
+package com.padguard.parent.presentation.ui.usage
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,17 +20,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.padguard.domain.model.AppUsage
-import com.padguard.presentation.ui.components.AppIcon
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.components.SoftHeroCard
-import com.padguard.presentation.ui.theme.OutlineSoft
-import com.padguard.domain.model.DailyUsage
-import com.padguard.domain.model.ReportPeriod
-import com.padguard.domain.model.UsageStats
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.TabletUsageDetailUiState
-import com.padguard.presentation.viewmodel.TabletUsageDetailViewModel
+import com.padguard.parent.domain.model.AppUsage
+import com.padguard.parent.presentation.ui.components.AppIcon
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.components.SoftHeroCard
+import com.padguard.parent.presentation.ui.theme.OutlineSoft
+import com.padguard.parent.domain.model.DailyUsage
+import com.padguard.parent.domain.model.ReportPeriod
+import com.padguard.parent.domain.model.UsageStats
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.TabletUsageDetailUiState
+import com.padguard.parent.presentation.viewmodel.TabletUsageDetailViewModel
 
 /**
  * 平板使用详情页（二级页面）

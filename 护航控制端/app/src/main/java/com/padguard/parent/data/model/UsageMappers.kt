@@ -1,7 +1,7 @@
-package com.padguard.data.model
+package com.padguard.parent.data.model
 
-import com.padguard.domain.model.AppUsage
-import com.padguard.domain.model.UsageStats
+import com.padguard.parent.domain.model.AppUsage
+import com.padguard.parent.domain.model.UsageStats
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale

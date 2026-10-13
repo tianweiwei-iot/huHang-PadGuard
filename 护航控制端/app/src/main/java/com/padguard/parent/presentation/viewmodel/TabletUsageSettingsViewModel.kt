@@ -1,11 +1,11 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.model.TabletUsageSettings
-import com.padguard.domain.model.TimeRange
-import com.padguard.domain.model.UsageSession
-import com.padguard.domain.repository.PolicyRepository
+import com.padguard.parent.domain.model.TabletUsageSettings
+import com.padguard.parent.domain.model.TimeRange
+import com.padguard.parent.domain.model.UsageSession
+import com.padguard.parent.domain.repository.PolicyRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

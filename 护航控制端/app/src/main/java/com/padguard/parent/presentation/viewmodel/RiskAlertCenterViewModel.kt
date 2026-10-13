@@ -1,11 +1,11 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.model.Alert
-import com.padguard.domain.model.AlertLevel
-import com.padguard.domain.model.AlertStatus
-import com.padguard.domain.repository.AlertRepository
+import com.padguard.parent.domain.model.Alert
+import com.padguard.parent.domain.model.AlertLevel
+import com.padguard.parent.domain.model.AlertStatus
+import com.padguard.parent.domain.repository.AlertRepository
 import com.padguard.parent.notification.NotificationHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job

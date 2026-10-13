@@ -1,10 +1,10 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.repository.DeviceRepository
-import com.padguard.domain.repository.PolicyRepository
-import com.padguard.domain.repository.UnlockTicket
+import com.padguard.parent.domain.repository.DeviceRepository
+import com.padguard.parent.domain.repository.PolicyRepository
+import com.padguard.parent.domain.repository.UnlockTicket
 import com.padguard.parent.notification.NotificationHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job

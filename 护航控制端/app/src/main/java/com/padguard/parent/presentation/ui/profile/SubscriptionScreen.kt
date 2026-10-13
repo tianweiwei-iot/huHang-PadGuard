@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.profile
+package com.padguard.parent.presentation.ui.profile
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -44,13 +44,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.padguard.data.model.PlanDto
-import com.padguard.data.model.SubscriptionDto
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.data.model.PayChannelDto
-import com.padguard.presentation.viewmodel.CheckoutState
-import com.padguard.presentation.viewmodel.SubscriptionUiState
-import com.padguard.presentation.viewmodel.SubscriptionViewModel
+import com.padguard.parent.data.model.PlanDto
+import com.padguard.parent.data.model.SubscriptionDto
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.data.model.PayChannelDto
+import com.padguard.parent.presentation.viewmodel.CheckoutState
+import com.padguard.parent.presentation.viewmodel.SubscriptionUiState
+import com.padguard.parent.presentation.viewmodel.SubscriptionViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -245,7 +245,7 @@ private fun PlanCard(
 }
 
 @Composable
-private fun OrderRow(order: com.padguard.data.model.OrderDto) {
+private fun OrderRow(order: com.padguard.parent.data.model.OrderDto) {
     SoftCard(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(14.dp),
@@ -282,7 +282,7 @@ private fun formatDate(ts: Long): String =
  * 收银台弹窗。
  *
  * 渲染 [CheckoutState]：顶部金额卡片 → 可勾选的支付渠道列表（RadioButton）→ 确认支付按钮。
- * 业务逻辑全在 [com.padguard.presentation.viewmodel.SubscriptionViewModel]，这里只管展示与交互。
+ * 业务逻辑全在 [com.padguard.parent.presentation.viewmodel.SubscriptionViewModel]，这里只管展示与交互。
  *
  * - 未选渠道 / 支付中时，"确认支付"禁用，避免重复提交；
  * - 支付中显示进度环 + "支付中…"，取消按钮同步禁用，防止支付中途被关掉；

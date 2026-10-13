@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.home
+package com.padguard.parent.presentation.ui.home
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -29,15 +29,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.padguard.domain.model.*
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.components.SoftHeroCard
-import com.padguard.presentation.ui.components.SoftIconBadge
-import com.padguard.presentation.ui.components.AppIcon
-import com.padguard.presentation.ui.theme.OutlineSoft
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.HomeUiState
+import com.padguard.parent.domain.model.*
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.components.SoftHeroCard
+import com.padguard.parent.presentation.ui.components.SoftIconBadge
+import com.padguard.parent.presentation.ui.components.AppIcon
+import com.padguard.parent.presentation.ui.theme.OutlineSoft
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.HomeUiState
 import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
@@ -344,7 +344,7 @@ private fun OfflineAlertBanner(deviceName: String) {
  */
 @Composable
 private fun UnlockRequestCard(
-    ticket: com.padguard.domain.repository.UnlockTicket,
+    ticket: com.padguard.parent.domain.repository.UnlockTicket,
     deviceName: String,
     onIgnore: (String) -> Unit,
     onHandle: () -> Unit,
@@ -411,7 +411,7 @@ private fun UnlockRequestCard(
 private fun TodayUsageModule(
     usedMinutes: Int,
     dailyLimitMinutes: Int,
-    appUsages: List<com.padguard.domain.model.AppUsage>,
+    appUsages: List<com.padguard.parent.domain.model.AppUsage>,
     onModuleClick: () -> Unit,
     onLimitClick: () -> Unit,
     childName: String = "",
@@ -527,7 +527,7 @@ private fun TodayUsageModule(
  * - 左侧 26dp 图标：优先用后端返回的 iconUrl（Coil 加载真实 APK 图标），加载失败时回退到字符徽章
  */
 @Composable
-private fun AppUsageLineRow(app: com.padguard.domain.model.AppUsage) {
+private fun AppUsageLineRow(app: com.padguard.parent.domain.model.AppUsage) {
     val startClock = TimeFormat.formatClock(app.startTime)
     val endClock = TimeFormat.formatClock(app.endTime)
     val duration = TimeFormat.formatAppUsageDuration(app.usageSeconds, app.usageMinutes)

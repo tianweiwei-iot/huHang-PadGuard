@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.profile
+package com.padguard.parent.presentation.ui.profile
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -23,9 +23,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.auth.ServerConfigDialog
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.auth.ServerConfigDialog
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 

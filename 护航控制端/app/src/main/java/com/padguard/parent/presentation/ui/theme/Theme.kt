@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.theme
+package com.padguard.parent.presentation.ui.theme
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.lightColorScheme
@@ -85,20 +85,20 @@ fun PadGuardTheme(
  */
 object PadGuardColors {
     // 语义状态色
-    val OnlineGreen = com.padguard.presentation.ui.theme.OnlineGreen
-    val OfflineGray = com.padguard.presentation.ui.theme.OfflineGray
-    val WarningRed = com.padguard.presentation.ui.theme.WarningRed
-    val SuccessGreen = com.padguard.presentation.ui.theme.SuccessGreen
+    val OnlineGreen = com.padguard.parent.presentation.ui.theme.OnlineGreen
+    val OfflineGray = com.padguard.parent.presentation.ui.theme.OfflineGray
+    val WarningRed = com.padguard.parent.presentation.ui.theme.WarningRed
+    val SuccessGreen = com.padguard.parent.presentation.ui.theme.SuccessGreen
     val Amber = Color(0xFFFFA000)
 
     // 品牌三色
-    val PrimaryBlue = com.padguard.presentation.ui.theme.PrimaryBlue
-    val AccentPurple = com.padguard.presentation.ui.theme.AccentPurple
-    val AccentPink = com.padguard.presentation.ui.theme.AccentPink
+    val PrimaryBlue = com.padguard.parent.presentation.ui.theme.PrimaryBlue
+    val AccentPurple = com.padguard.parent.presentation.ui.theme.AccentPurple
+    val AccentPink = com.padguard.parent.presentation.ui.theme.AccentPink
 
     // 文字
-    val TextPrimary = com.padguard.presentation.ui.theme.TextPrimary
-    val TextSecondary = com.padguard.presentation.ui.theme.TextSecondary
+    val TextPrimary = com.padguard.parent.presentation.ui.theme.TextPrimary
+    val TextSecondary = com.padguard.parent.presentation.ui.theme.TextSecondary
 
     // 兼容旧引用：卡片底 / 区块底
     val CardBg = Color.White
@@ -106,10 +106,10 @@ object PadGuardColors {
 
     // ---------- 淡彩图标圆底（容器 + 图标色，三色轮换） ----------
     val TintContainers = listOf(
-        com.padguard.presentation.ui.theme.TintBlue,
-        com.padguard.presentation.ui.theme.TintPurple,
-        com.padguard.presentation.ui.theme.TintPink,
-        com.padguard.presentation.ui.theme.TintBlue
+        com.padguard.parent.presentation.ui.theme.TintBlue,
+        com.padguard.parent.presentation.ui.theme.TintPurple,
+        com.padguard.parent.presentation.ui.theme.TintPink,
+        com.padguard.parent.presentation.ui.theme.TintBlue
     )
     val TintIconColors = listOf(
         PrimaryBlue,

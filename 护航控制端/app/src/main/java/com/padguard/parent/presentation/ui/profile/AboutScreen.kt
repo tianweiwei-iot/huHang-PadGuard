@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.profile
+package com.padguard.parent.presentation.ui.profile
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column

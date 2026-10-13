@@ -1,4 +1,4 @@
-package com.padguard.domain.model
+package com.padguard.parent.domain.model
 
 import java.util.UUID
 
@@ -610,7 +610,7 @@ data class DeviceImportResult(
  * 设备权限配置（对标 MDM 运行时权限授予）。
  *
  * 服务端以"已授予的运行时权限集合"表达；家长端 UI 以一组友好的开关呈现，
- * 每个开关映射到 Android 危险权限全称（见 [com.padguard.presentation.ui.device.PERMISSION_ITEMS]）。
+ * 每个开关映射到 Android 危险权限全称（见 [com.padguard.parent.presentation.ui.device.PERMISSION_ITEMS]）。
  * 下发时整包替换：开启=授予，关闭=收回（由孩子端 DPM setPermissionGrantState 执行）。
  */
 data class DevicePermissionConfig(
@@ -623,7 +623,7 @@ data class DevicePermissionConfig(
  * 设备功能开关配置（对标 MDM 设备能力管控 / DPM 用户限制）。
  *
  * 与服务端 [features] 逐字符一致：key 为 DPM 功能键（见 CommandKey.FEATURE_*），
- * value=true 表示"施加该限制 / 关闭该能力"。UI 以 [com.padguard.presentation.ui.device.FUNCTION_ITEMS] 呈现中文开关。
+ * value=true 表示"施加该限制 / 关闭该能力"。UI 以 [com.padguard.parent.presentation.ui.device.FUNCTION_ITEMS] 呈现中文开关。
  */
 data class DeviceFunctionConfig(
     val deviceId: String,

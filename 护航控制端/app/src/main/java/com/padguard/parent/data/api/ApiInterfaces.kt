@@ -1,11 +1,11 @@
-package com.padguard.data.api
+package com.padguard.parent.data.api
 
-import com.padguard.data.model.CreateOrderRequest
-import com.padguard.data.model.CreateOrderResponse
-import com.padguard.data.model.OrderDto
-import com.padguard.data.model.PlanDto
-import com.padguard.data.model.SubscriptionDto
-import com.padguard.data.model.*
+import com.padguard.parent.data.model.CreateOrderRequest
+import com.padguard.parent.data.model.CreateOrderResponse
+import com.padguard.parent.data.model.OrderDto
+import com.padguard.parent.data.model.PlanDto
+import com.padguard.parent.data.model.SubscriptionDto
+import com.padguard.parent.data.model.*
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
 import retrofit2.Response

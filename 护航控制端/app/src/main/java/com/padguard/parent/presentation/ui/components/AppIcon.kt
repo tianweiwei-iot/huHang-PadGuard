@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.components
+package com.padguard.parent.presentation.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -16,7 +16,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil.compose.SubcomposeAsyncImage
-import com.padguard.domain.KnownAppIcons
+import com.padguard.parent.domain.KnownAppIcons
 
 /**
  * 应用图标组件（控制端展示被管控端应用使用记录时复用）。

@@ -1,12 +1,12 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.model.ReportPeriod
-import com.padguard.domain.model.StatisticsReport
-import com.padguard.domain.model.UsageStats
-import com.padguard.domain.repository.PolicyRepository
-import com.padguard.domain.repository.StatisticsRepository
+import com.padguard.parent.domain.model.ReportPeriod
+import com.padguard.parent.domain.model.StatisticsReport
+import com.padguard.parent.domain.model.UsageStats
+import com.padguard.parent.domain.repository.PolicyRepository
+import com.padguard.parent.domain.repository.StatisticsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow

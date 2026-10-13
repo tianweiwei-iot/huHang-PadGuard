@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.apps
+package com.padguard.parent.presentation.ui.apps
 
 import android.content.Context
 import android.net.Uri

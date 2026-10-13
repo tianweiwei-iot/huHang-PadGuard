@@ -1,6 +1,6 @@
 package com.padguard.parent.data.remote
 
-import com.padguard.data.api.AuthApi
+import com.padguard.parent.data.api.AuthApi
 import com.padguard.parent.data.auth.TokenManager
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex

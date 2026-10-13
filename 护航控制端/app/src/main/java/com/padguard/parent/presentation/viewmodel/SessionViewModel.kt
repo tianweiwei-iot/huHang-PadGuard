@@ -2,9 +2,9 @@ package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.model.User
+import com.padguard.parent.domain.model.User
 import com.padguard.parent.data.auth.TokenManager
-import com.padguard.presentation.ui.Screen
+import com.padguard.parent.presentation.ui.Screen
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow

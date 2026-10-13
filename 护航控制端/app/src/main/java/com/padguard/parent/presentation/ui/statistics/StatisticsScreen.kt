@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.statistics
+package com.padguard.parent.presentation.ui.statistics
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -15,12 +15,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
-import com.padguard.domain.model.AppUsage
-import com.padguard.presentation.ui.components.AppIcon
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.domain.model.DailyUsage
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.StatisticsViewModel
+import com.padguard.parent.domain.model.AppUsage
+import com.padguard.parent.presentation.ui.components.AppIcon
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.domain.model.DailyUsage
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.StatisticsViewModel
 
 /**
  * 使用统计页（底部导航「统计」Tab）

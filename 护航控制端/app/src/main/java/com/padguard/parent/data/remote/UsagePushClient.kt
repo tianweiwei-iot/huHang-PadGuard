@@ -1,8 +1,8 @@
 package com.padguard.parent.data.remote
 
-import com.padguard.data.model.UsageStatsDto
-import com.padguard.data.model.toDomain
-import com.padguard.domain.model.UsageStats
+import com.padguard.parent.data.model.UsageStatsDto
+import com.padguard.parent.data.model.toDomain
+import com.padguard.parent.domain.model.UsageStats
 import com.padguard.parent.di.ServerPrefs
 import com.padguard.parent.data.auth.TokenManager
 import com.squareup.moshi.JsonClass

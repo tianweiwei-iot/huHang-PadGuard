@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.realtime
+package com.padguard.parent.presentation.ui.realtime
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -57,13 +57,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.padguard.domain.model.GeofenceConfig
-import com.padguard.domain.model.LocationInfo
-import com.padguard.domain.model.MapProvider
-import com.padguard.domain.model.MapViewMode
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.LocationViewModel
+import com.padguard.parent.domain.model.GeofenceConfig
+import com.padguard.parent.domain.model.LocationInfo
+import com.padguard.parent.domain.model.MapProvider
+import com.padguard.parent.domain.model.MapViewMode
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.LocationViewModel
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date

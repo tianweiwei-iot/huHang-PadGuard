@@ -1,7 +1,7 @@
-package com.padguard.data.importer
+package com.padguard.parent.data.importer
 
 import android.util.Xml
-import com.padguard.domain.model.DeviceImportRow
+import com.padguard.parent.domain.model.DeviceImportRow
 import org.xmlpull.v1.XmlPullParser
 import java.io.BufferedInputStream
 import java.io.BufferedReader

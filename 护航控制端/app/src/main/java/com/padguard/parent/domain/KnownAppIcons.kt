@@ -1,4 +1,4 @@
-package com.padguard.domain
+package com.padguard.parent.domain
 
 /**
  * 已知应用的「包名 → 图标地址」映射（公开 CDN，HTTPS 稳定）。

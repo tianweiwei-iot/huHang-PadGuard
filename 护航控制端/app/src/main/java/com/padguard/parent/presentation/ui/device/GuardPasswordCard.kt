@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.device
+package com.padguard.parent.presentation.ui.device
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -28,8 +28,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
 
 /**
  * 操作密码闸门卡片（C 端软拦截方案核心）。

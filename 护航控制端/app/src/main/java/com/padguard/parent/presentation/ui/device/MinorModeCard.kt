@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.device
+package com.padguard.parent.presentation.ui.device
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -36,11 +36,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.padguard.domain.repository.AgeBand
-import com.padguard.domain.repository.AgeBandDefault
-import com.padguard.domain.repository.MinorMode
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.domain.repository.AgeBand
+import com.padguard.parent.domain.repository.AgeBandDefault
+import com.padguard.parent.domain.repository.MinorMode
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
 
 /**
  * 未成年人模式卡片（P1 合规底座）。

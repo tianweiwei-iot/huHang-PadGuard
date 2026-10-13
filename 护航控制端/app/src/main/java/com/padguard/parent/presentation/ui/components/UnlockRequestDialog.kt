@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.components
+package com.padguard.parent.presentation.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -38,12 +38,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.ui.theme.PrimaryBlue
-import com.padguard.presentation.ui.theme.PrimaryBlueDeep
-import com.padguard.presentation.ui.theme.TextSecondary
-import com.padguard.presentation.ui.theme.TintBlue
-import com.padguard.presentation.viewmodel.UnlockTicketEntry
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.theme.PrimaryBlue
+import com.padguard.parent.presentation.ui.theme.PrimaryBlueDeep
+import com.padguard.parent.presentation.ui.theme.TextSecondary
+import com.padguard.parent.presentation.ui.theme.TintBlue
+import com.padguard.parent.presentation.viewmodel.UnlockTicketEntry
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale

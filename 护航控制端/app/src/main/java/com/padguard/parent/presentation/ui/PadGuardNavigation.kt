@@ -1,7 +1,7 @@
-package com.padguard.presentation.ui
+package com.padguard.parent.presentation.ui
 
-import com.padguard.presentation.ui.profile.AboutScreen
-import com.padguard.presentation.ui.profile.SubscriptionScreen
+import com.padguard.parent.presentation.ui.profile.AboutScreen
+import com.padguard.parent.presentation.ui.profile.SubscriptionScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -26,22 +26,22 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.padguard.domain.model.ReportPeriod
+import com.padguard.parent.domain.model.ReportPeriod
 import com.padguard.parent.notification.NotificationHelper
 import com.padguard.parent.presentation.MainActivity
 import com.padguard.parent.presentation.viewmodel.SessionViewModel
-import com.padguard.presentation.ui.alert.AlertCenterScreen
-import com.padguard.presentation.ui.auth.LoginScreen
-import com.padguard.presentation.ui.components.AppSoftBackground
-import com.padguard.presentation.ui.components.UnlockRequestDialog
-import com.padguard.presentation.ui.control.ControlPolicyScreen
-import com.padguard.presentation.ui.device.DeviceDetailScreen
-import com.padguard.presentation.ui.main.MainScreen
-import com.padguard.presentation.ui.realtime.LocationScreen
-import com.padguard.presentation.ui.realtime.MessagePublishScreen
-import com.padguard.presentation.ui.realtime.ScreenMonitorScreen
-import com.padguard.presentation.viewmodel.UnlockRequestCenterViewModel
-import com.padguard.presentation.viewmodel.RiskAlertCenterViewModel
+import com.padguard.parent.presentation.ui.alert.AlertCenterScreen
+import com.padguard.parent.presentation.ui.auth.LoginScreen
+import com.padguard.parent.presentation.ui.components.AppSoftBackground
+import com.padguard.parent.presentation.ui.components.UnlockRequestDialog
+import com.padguard.parent.presentation.ui.control.ControlPolicyScreen
+import com.padguard.parent.presentation.ui.device.DeviceDetailScreen
+import com.padguard.parent.presentation.ui.main.MainScreen
+import com.padguard.parent.presentation.ui.realtime.LocationScreen
+import com.padguard.parent.presentation.ui.realtime.MessagePublishScreen
+import com.padguard.parent.presentation.ui.realtime.ScreenMonitorScreen
+import com.padguard.parent.presentation.viewmodel.UnlockRequestCenterViewModel
+import com.padguard.parent.presentation.viewmodel.RiskAlertCenterViewModel
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -282,7 +282,7 @@ fun PadGuardNavHost(
         }
         composable(Screen.TabletUsageDetail.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
-            com.padguard.presentation.ui.usage.TabletUsageDetailScreen(
+            com.padguard.parent.presentation.ui.usage.TabletUsageDetailScreen(
                 deviceId = deviceId,
                 onBack = { navController.popBackStack() },
                 onAppClick = { pkg, _, period ->
@@ -292,14 +292,14 @@ fun PadGuardNavHost(
         }
         composable(Screen.TabletUsageSettings.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
-            com.padguard.presentation.ui.usage.TabletUsageSettingsScreen(
+            com.padguard.parent.presentation.ui.usage.TabletUsageSettingsScreen(
                 deviceId = deviceId,
                 onBack = { navController.popBackStack() }
             )
         }
         composable(Screen.AppManage.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
-            com.padguard.presentation.ui.apps.AppManageScreen(
+            com.padguard.parent.presentation.ui.apps.AppManageScreen(
                 deviceId = deviceId,
                 onBack = { navController.popBackStack() },
                 onNavigateToDeviceDetail = { navController.navigate(Screen.DeviceDetail.create(deviceId)) }
@@ -311,7 +311,7 @@ fun PadGuardNavHost(
             val packageName = URLDecoder.decode(pkgEncoded, "UTF-8")
             val periodName = backStackEntry.arguments?.getString("period") ?: ReportPeriod.DAILY.name
             val period = runCatching { ReportPeriod.valueOf(periodName) }.getOrDefault(ReportPeriod.DAILY)
-            com.padguard.presentation.ui.usage.AppUsageHistoryScreen(
+            com.padguard.parent.presentation.ui.usage.AppUsageHistoryScreen(
                 deviceId = deviceId,
                 packageName = packageName,
                 appName = "",

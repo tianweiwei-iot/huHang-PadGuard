@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.device
+package com.padguard.parent.presentation.ui.device
 
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -26,13 +26,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.padguard.domain.model.Device
-import com.padguard.domain.model.DeviceImportRow
-import com.padguard.domain.model.DeviceOnlineStatus
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.util.QrCodeGenerator
-import com.padguard.presentation.viewmodel.DeviceManageViewModel
+import com.padguard.parent.domain.model.Device
+import com.padguard.parent.domain.model.DeviceImportRow
+import com.padguard.parent.domain.model.DeviceOnlineStatus
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.util.QrCodeGenerator
+import com.padguard.parent.presentation.viewmodel.DeviceManageViewModel
 import kotlinx.coroutines.flow.collectLatest
 
 /**
@@ -406,12 +406,12 @@ private fun ManagedDeviceCard(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AccessMethodScreen(
-    uiState: com.padguard.presentation.viewmodel.DeviceManageUiState,
+    uiState: com.padguard.parent.presentation.viewmodel.DeviceManageUiState,
     onClose: () -> Unit,
     onBindByQr: (String) -> Unit,
     onBindByPairingCode: (String) -> Unit,
     onScanLan: () -> Unit,
-    onBindLan: (com.padguard.domain.model.LanDevice) -> Unit,
+    onBindLan: (com.padguard.parent.domain.model.LanDevice) -> Unit,
     onFilePicked: (android.net.Uri, String) -> Unit,
     onConfirmImport: () -> Unit
 ) {
@@ -472,7 +472,7 @@ private fun AccessMethodScreen(
 
 @Composable
 private fun QrAccessPanel(
-    uiState: com.padguard.presentation.viewmodel.DeviceManageUiState,
+    uiState: com.padguard.parent.presentation.viewmodel.DeviceManageUiState,
     onBindByQr: (String) -> Unit
 ) {
     var manualPayload by remember { mutableStateOf("") }
@@ -527,7 +527,7 @@ private fun QrAccessPanel(
 
 @Composable
 private fun PairingCodeAccessPanel(
-    uiState: com.padguard.presentation.viewmodel.DeviceManageUiState,
+    uiState: com.padguard.parent.presentation.viewmodel.DeviceManageUiState,
     onBindByPairingCode: (String) -> Unit
 ) {
     var code by remember { mutableStateOf("") }
@@ -585,9 +585,9 @@ private fun PairingCodeAccessPanel(
 
 @Composable
 private fun LanAccessPanel(
-    uiState: com.padguard.presentation.viewmodel.DeviceManageUiState,
+    uiState: com.padguard.parent.presentation.viewmodel.DeviceManageUiState,
     onScanLan: () -> Unit,
-    onBindLan: (com.padguard.domain.model.LanDevice) -> Unit
+    onBindLan: (com.padguard.parent.domain.model.LanDevice) -> Unit
 ) {
     LaunchedEffect(Unit) { onScanLan() }
 
@@ -669,7 +669,7 @@ private val importFileTypes = arrayOf(
 
 @Composable
 private fun ExcelImportPanel(
-    uiState: com.padguard.presentation.viewmodel.DeviceManageUiState,
+    uiState: com.padguard.parent.presentation.viewmodel.DeviceManageUiState,
     onFilePicked: (android.net.Uri, String) -> Unit,
     onConfirmImport: () -> Unit
 ) {

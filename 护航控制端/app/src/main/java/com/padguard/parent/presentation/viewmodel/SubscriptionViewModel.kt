@@ -1,12 +1,12 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.data.model.OrderDto
-import com.padguard.data.model.PayChannelDto
-import com.padguard.data.model.PlanDto
-import com.padguard.data.model.SubscriptionDto
-import com.padguard.domain.repository.BillingRepository
+import com.padguard.parent.data.model.OrderDto
+import com.padguard.parent.data.model.PayChannelDto
+import com.padguard.parent.data.model.PlanDto
+import com.padguard.parent.data.model.SubscriptionDto
+import com.padguard.parent.domain.repository.BillingRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

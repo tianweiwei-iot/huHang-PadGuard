@@ -1,13 +1,13 @@
-package com.padguard.domain.repository
+package com.padguard.parent.domain.repository
 
-import com.padguard.data.model.SubscriptionDto
-import com.padguard.data.model.PlanDto
-import com.padguard.data.model.OrderDto
-import com.padguard.data.model.CreateOrderResponse
-import com.padguard.data.model.PayChannelDto
-import com.padguard.data.model.AppListPolicyDto
+import com.padguard.parent.data.model.SubscriptionDto
+import com.padguard.parent.data.model.PlanDto
+import com.padguard.parent.data.model.OrderDto
+import com.padguard.parent.data.model.CreateOrderResponse
+import com.padguard.parent.data.model.PayChannelDto
+import com.padguard.parent.data.model.AppListPolicyDto
 import android.graphics.Bitmap
-import com.padguard.domain.model.*
+import com.padguard.parent.domain.model.*
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -220,7 +220,7 @@ interface MonitorRepository {
     suspend fun getMediaTask(
         deviceId: String,
         taskId: String
-    ): Result<com.padguard.data.model.MediaTaskStatusDto>
+    ): Result<com.padguard.parent.data.model.MediaTaskStatusDto>
 
     // === 屏幕监控设置 ===
     /** 获取屏幕监控设置 */

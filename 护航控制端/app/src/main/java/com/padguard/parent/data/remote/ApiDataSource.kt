@@ -1,146 +1,146 @@
 package com.padguard.parent.data.remote
 
-import com.padguard.data.api.BillingApi
-import com.padguard.domain.repository.BillingRepository
-import com.padguard.data.model.CreateOrderRequest
-import com.padguard.data.model.CreateOrderResponse
-import com.padguard.data.model.AppListPolicyDto
-import com.padguard.data.model.AppListPolicyRequest
-import com.padguard.data.model.DeviceImportRequestDto
-import com.padguard.data.model.DeviceImportRowDto
-import com.padguard.data.model.EyeProtectionRequest
-import com.padguard.data.model.LanBindRequestDto
-import com.padguard.data.model.OrderDto
-import com.padguard.data.model.PayChannelDto
-import com.padguard.data.model.PlanDto
-import com.padguard.data.model.SubscriptionDto
+import com.padguard.parent.data.api.BillingApi
+import com.padguard.parent.domain.repository.BillingRepository
+import com.padguard.parent.data.model.CreateOrderRequest
+import com.padguard.parent.data.model.CreateOrderResponse
+import com.padguard.parent.data.model.AppListPolicyDto
+import com.padguard.parent.data.model.AppListPolicyRequest
+import com.padguard.parent.data.model.DeviceImportRequestDto
+import com.padguard.parent.data.model.DeviceImportRowDto
+import com.padguard.parent.data.model.EyeProtectionRequest
+import com.padguard.parent.data.model.LanBindRequestDto
+import com.padguard.parent.data.model.OrderDto
+import com.padguard.parent.data.model.PayChannelDto
+import com.padguard.parent.data.model.PlanDto
+import com.padguard.parent.data.model.SubscriptionDto
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
-import com.padguard.data.api.AlertApi
-import com.padguard.data.api.AppManageApi
-import com.padguard.data.api.AuthApi
-import com.padguard.data.api.DeviceApi
-import com.padguard.data.api.FileApi
-import com.padguard.data.api.LocationApi
-import com.padguard.data.api.MessageApi
-import com.padguard.data.api.MonitorApi
-import com.padguard.data.api.PolicyApi
-import com.padguard.data.api.StatisticsApi
-import com.padguard.data.api.AppCatalogItemDto
-import com.padguard.data.api.AppDistributionItemDto
-import com.padguard.data.api.DistributeAppDto
-import com.padguard.data.api.FeaturePolicyDto
-import com.padguard.data.api.PermissionPolicyDto
-import com.padguard.data.api.UpgradeCheckItemDto
+import com.padguard.parent.data.api.AlertApi
+import com.padguard.parent.data.api.AppManageApi
+import com.padguard.parent.data.api.AuthApi
+import com.padguard.parent.data.api.DeviceApi
+import com.padguard.parent.data.api.FileApi
+import com.padguard.parent.data.api.LocationApi
+import com.padguard.parent.data.api.MessageApi
+import com.padguard.parent.data.api.MonitorApi
+import com.padguard.parent.data.api.PolicyApi
+import com.padguard.parent.data.api.StatisticsApi
+import com.padguard.parent.data.api.AppCatalogItemDto
+import com.padguard.parent.data.api.AppDistributionItemDto
+import com.padguard.parent.data.api.DistributeAppDto
+import com.padguard.parent.data.api.FeaturePolicyDto
+import com.padguard.parent.data.api.PermissionPolicyDto
+import com.padguard.parent.data.api.UpgradeCheckItemDto
 import com.padguard.parent.data.auth.TokenManager
-import com.padguard.data.model.AlertDto
-import com.padguard.data.model.ApiResponse
-import com.padguard.data.model.AppHiddenRequest
-import com.padguard.data.model.AppHiddenBatchRequest
-import com.padguard.data.model.AppLimitRequest
-import com.padguard.domain.repository.UploadedMedia
-import com.padguard.data.model.AppInstallRequest
-import com.padguard.data.model.AppPolicyDto
-import com.padguard.data.model.BatchSuspendRequest
-import com.padguard.data.model.InstalledAppDto
-import com.padguard.data.model.SuspendRequest
-import com.padguard.data.model.AppUsageDto
-import com.padguard.data.model.AssignGroupRequest
-import com.padguard.data.model.BindCodeResponse
-import com.padguard.data.model.BrowserDisableRequest
-import com.padguard.data.model.CloseAlertRequest
-import com.padguard.data.model.CreateGroupRequest
-import com.padguard.data.model.DailyLimitRequest
-import com.padguard.data.model.DailyUsageDto
-import com.padguard.data.model.DailyViolationDto
-import com.padguard.data.model.DeviceDto
-import com.padguard.data.model.DeviceGroupDto
-import com.padguard.data.model.DomainVisitDto
-import com.padguard.data.model.GeofenceZoneDto
-import com.padguard.data.model.LocationDto
-import com.padguard.data.model.LocationTrackPointDto
-import com.padguard.data.model.LoginPasswordRequest
-import com.padguard.data.model.LoginResponse
-import com.padguard.data.model.RegisterRequest
-import com.padguard.data.model.LoginSmsRequest
-import com.padguard.data.model.MessagePublishRequestDto
-import com.padguard.data.model.PolicyTemplateDto
-import com.padguard.data.model.PublishedMessageDto
-import com.padguard.data.model.RenameDeviceRequest
-import com.padguard.data.model.UpdateBlacklistRequest
-import com.padguard.data.model.ScreenMonitorSettingsDto
-import com.padguard.data.model.ScreenStatusDto
-import com.padguard.data.model.SendSmsRequest
-import com.padguard.data.model.ScreenshotDto
-import com.padguard.data.model.StartRecordRequest
-import com.padguard.data.model.StatisticsReportDto
-import com.padguard.data.model.TimeRestrictionDto
-import com.padguard.data.model.UsageStatsDto
-import com.padguard.data.model.UrlBlacklistRequest
-import com.padguard.data.model.ViolationStatsDto
-import com.padguard.data.model.WebActivityStatsDto
-import com.padguard.data.model.WebPolicyDto
-import com.padguard.data.model.TabletUsageSettingsDto
-import com.padguard.data.model.UsageSessionDto
-import com.padguard.data.model.TimeRangeDto
-import com.padguard.data.model.MinorModeDto
-import com.padguard.data.model.MinorModeRequestDto
-import com.padguard.data.model.AgeBandDefaultDto
-import com.padguard.data.model.CommandResultDto
-import com.padguard.data.model.WatermarkRequestDto
-import com.padguard.data.model.GuardPasswordRequestDto
-import com.padguard.domain.model.Alert
-import com.padguard.domain.model.AlertCategory
-import com.padguard.domain.model.AlertLevel
-import com.padguard.domain.model.AlertStatus
-import com.padguard.domain.model.AppPolicy
-import com.padguard.domain.model.AppUsage
-import com.padguard.domain.model.ControlMode
-import com.padguard.domain.model.DailyUsage
-import com.padguard.domain.model.Device
-import com.padguard.domain.repository.DeviceGroup
-import com.padguard.domain.model.DeviceOnlineStatus
-import com.padguard.domain.model.DevicePermissionConfig
-import com.padguard.domain.model.DeviceFunctionConfig
-import com.padguard.domain.model.DistributableApp
-import com.padguard.domain.model.AppUpgradeItem
-import com.padguard.domain.model.AppUploadMeta
-import com.padguard.domain.model.GeofenceConfig
-import com.padguard.domain.model.InstalledApp
-import com.padguard.domain.model.LocationInfo
-import com.padguard.domain.model.MessageContentType
-import com.padguard.domain.model.MessagePublishRequest
-import com.padguard.domain.model.PublishedMessage
-import com.padguard.domain.model.RecordResolution
-import com.padguard.domain.model.ReportPeriod
-import com.padguard.domain.model.SceneType
-import com.padguard.domain.model.ScreenMonitorSettings
-import com.padguard.domain.model.ScreenLiveStatus
-import com.padguard.domain.model.ScreenshotData
-import com.padguard.domain.model.StatisticsReport
-import com.padguard.domain.model.TimeRestriction
-import com.padguard.domain.model.UsageStats
-import com.padguard.domain.model.User
-import com.padguard.domain.model.UserRole
-import com.padguard.domain.model.TabletUsageSettings
-import com.padguard.domain.model.UsageSession
-import com.padguard.domain.model.TimeRange
-import com.padguard.domain.repository.ViolationStats
-import com.padguard.domain.repository.WebActivityStats
-import com.padguard.domain.repository.AgeBand
-import com.padguard.domain.repository.AgeBandDefault
-import com.padguard.domain.repository.MinorMode
-import com.padguard.domain.repository.CommandResult
-import com.padguard.domain.repository.AlertRepository
-import com.padguard.domain.repository.AuthRepository
-import com.padguard.domain.repository.DeviceRepository
-import com.padguard.domain.repository.LocationRepository
-import com.padguard.domain.repository.MessageRepository
-import com.padguard.domain.repository.MonitorRepository
-import com.padguard.domain.repository.PolicyRepository
-import com.padguard.domain.repository.StatisticsRepository
+import com.padguard.parent.data.model.AlertDto
+import com.padguard.parent.data.model.ApiResponse
+import com.padguard.parent.data.model.AppHiddenRequest
+import com.padguard.parent.data.model.AppHiddenBatchRequest
+import com.padguard.parent.data.model.AppLimitRequest
+import com.padguard.parent.domain.repository.UploadedMedia
+import com.padguard.parent.data.model.AppInstallRequest
+import com.padguard.parent.data.model.AppPolicyDto
+import com.padguard.parent.data.model.BatchSuspendRequest
+import com.padguard.parent.data.model.InstalledAppDto
+import com.padguard.parent.data.model.SuspendRequest
+import com.padguard.parent.data.model.AppUsageDto
+import com.padguard.parent.data.model.AssignGroupRequest
+import com.padguard.parent.data.model.BindCodeResponse
+import com.padguard.parent.data.model.BrowserDisableRequest
+import com.padguard.parent.data.model.CloseAlertRequest
+import com.padguard.parent.data.model.CreateGroupRequest
+import com.padguard.parent.data.model.DailyLimitRequest
+import com.padguard.parent.data.model.DailyUsageDto
+import com.padguard.parent.data.model.DailyViolationDto
+import com.padguard.parent.data.model.DeviceDto
+import com.padguard.parent.data.model.DeviceGroupDto
+import com.padguard.parent.data.model.DomainVisitDto
+import com.padguard.parent.data.model.GeofenceZoneDto
+import com.padguard.parent.data.model.LocationDto
+import com.padguard.parent.data.model.LocationTrackPointDto
+import com.padguard.parent.data.model.LoginPasswordRequest
+import com.padguard.parent.data.model.LoginResponse
+import com.padguard.parent.data.model.RegisterRequest
+import com.padguard.parent.data.model.LoginSmsRequest
+import com.padguard.parent.data.model.MessagePublishRequestDto
+import com.padguard.parent.data.model.PolicyTemplateDto
+import com.padguard.parent.data.model.PublishedMessageDto
+import com.padguard.parent.data.model.RenameDeviceRequest
+import com.padguard.parent.data.model.UpdateBlacklistRequest
+import com.padguard.parent.data.model.ScreenMonitorSettingsDto
+import com.padguard.parent.data.model.ScreenStatusDto
+import com.padguard.parent.data.model.SendSmsRequest
+import com.padguard.parent.data.model.ScreenshotDto
+import com.padguard.parent.data.model.StartRecordRequest
+import com.padguard.parent.data.model.StatisticsReportDto
+import com.padguard.parent.data.model.TimeRestrictionDto
+import com.padguard.parent.data.model.UsageStatsDto
+import com.padguard.parent.data.model.UrlBlacklistRequest
+import com.padguard.parent.data.model.ViolationStatsDto
+import com.padguard.parent.data.model.WebActivityStatsDto
+import com.padguard.parent.data.model.WebPolicyDto
+import com.padguard.parent.data.model.TabletUsageSettingsDto
+import com.padguard.parent.data.model.UsageSessionDto
+import com.padguard.parent.data.model.TimeRangeDto
+import com.padguard.parent.data.model.MinorModeDto
+import com.padguard.parent.data.model.MinorModeRequestDto
+import com.padguard.parent.data.model.AgeBandDefaultDto
+import com.padguard.parent.data.model.CommandResultDto
+import com.padguard.parent.data.model.WatermarkRequestDto
+import com.padguard.parent.data.model.GuardPasswordRequestDto
+import com.padguard.parent.domain.model.Alert
+import com.padguard.parent.domain.model.AlertCategory
+import com.padguard.parent.domain.model.AlertLevel
+import com.padguard.parent.domain.model.AlertStatus
+import com.padguard.parent.domain.model.AppPolicy
+import com.padguard.parent.domain.model.AppUsage
+import com.padguard.parent.domain.model.ControlMode
+import com.padguard.parent.domain.model.DailyUsage
+import com.padguard.parent.domain.model.Device
+import com.padguard.parent.domain.repository.DeviceGroup
+import com.padguard.parent.domain.model.DeviceOnlineStatus
+import com.padguard.parent.domain.model.DevicePermissionConfig
+import com.padguard.parent.domain.model.DeviceFunctionConfig
+import com.padguard.parent.domain.model.DistributableApp
+import com.padguard.parent.domain.model.AppUpgradeItem
+import com.padguard.parent.domain.model.AppUploadMeta
+import com.padguard.parent.domain.model.GeofenceConfig
+import com.padguard.parent.domain.model.InstalledApp
+import com.padguard.parent.domain.model.LocationInfo
+import com.padguard.parent.domain.model.MessageContentType
+import com.padguard.parent.domain.model.MessagePublishRequest
+import com.padguard.parent.domain.model.PublishedMessage
+import com.padguard.parent.domain.model.RecordResolution
+import com.padguard.parent.domain.model.ReportPeriod
+import com.padguard.parent.domain.model.SceneType
+import com.padguard.parent.domain.model.ScreenMonitorSettings
+import com.padguard.parent.domain.model.ScreenLiveStatus
+import com.padguard.parent.domain.model.ScreenshotData
+import com.padguard.parent.domain.model.StatisticsReport
+import com.padguard.parent.domain.model.TimeRestriction
+import com.padguard.parent.domain.model.UsageStats
+import com.padguard.parent.domain.model.User
+import com.padguard.parent.domain.model.UserRole
+import com.padguard.parent.domain.model.TabletUsageSettings
+import com.padguard.parent.domain.model.UsageSession
+import com.padguard.parent.domain.model.TimeRange
+import com.padguard.parent.domain.repository.ViolationStats
+import com.padguard.parent.domain.repository.WebActivityStats
+import com.padguard.parent.domain.repository.AgeBand
+import com.padguard.parent.domain.repository.AgeBandDefault
+import com.padguard.parent.domain.repository.MinorMode
+import com.padguard.parent.domain.repository.CommandResult
+import com.padguard.parent.domain.repository.AlertRepository
+import com.padguard.parent.domain.repository.AuthRepository
+import com.padguard.parent.domain.repository.DeviceRepository
+import com.padguard.parent.domain.repository.LocationRepository
+import com.padguard.parent.domain.repository.MessageRepository
+import com.padguard.parent.domain.repository.MonitorRepository
+import com.padguard.parent.domain.repository.PolicyRepository
+import com.padguard.parent.domain.repository.StatisticsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -168,7 +168,7 @@ import javax.inject.Singleton
 /**
  * 真实后端数据源（接真线）。
  *
- * 取代 Mock 阶段的 [com.padguard.data.local.LocalDataSource]，将 8 个领域仓储接口映射到
+ * 取代 Mock 阶段的 [com.padguard.parent.data.local.LocalDataSource]，将 8 个领域仓储接口映射到
  * `https://<域名>/v1/` 下的真实 REST 接口（统一响应体 [ApiResponse]，约定 `code == 0` 为成功）。
  *
  * 设计原则（与用户稳定性要求一致）：
@@ -458,19 +458,19 @@ class ApiDataSource @Inject constructor(
         return Result.failure(Exception("等待孩子端完成绑定超时，请确认孩子端已输入该配对码"))
     }
 
-    override suspend fun discoverLanDevices(): Result<List<com.padguard.domain.model.LanDevice>> =
+    override suspend fun discoverLanDevices(): Result<List<com.padguard.parent.domain.model.LanDevice>> =
         exec { deviceApi.discoverLanDevices() }.map { it.data.orEmpty().map { d -> d.toDomain() } }
 
     override suspend fun bindLanDevice(
-        lanDevice: com.padguard.domain.model.LanDevice,
+        lanDevice: com.padguard.parent.domain.model.LanDevice,
         alias: String?
     ): Result<Device> =
         exec { deviceApi.bindLanDevice(LanBindRequestDto(lanDevice.deviceId, alias)) }
             .map { it.data?.toDomain() ?: throw Exception("接入设备失败：服务端未返回设备信息") }
 
     override suspend fun importDevices(
-        rows: List<com.padguard.domain.model.DeviceImportRow>
-    ): Result<com.padguard.domain.model.DeviceImportResult> =
+        rows: List<com.padguard.parent.domain.model.DeviceImportRow>
+    ): Result<com.padguard.parent.domain.model.DeviceImportResult> =
         exec { deviceApi.importDevices(DeviceImportRequestDto(rows.map { DeviceImportRowDto(it.hardwareId, it.alias, it.model, it.groupName) })) }
             .map { it.data?.toDomain() ?: throw Exception("批量导入失败：服务端未返回结果") }
 
@@ -571,7 +571,7 @@ class ApiDataSource @Inject constructor(
         // 这里返回一个只带 taskId 的占位对象供上层判成败，真正的图走 getScreenshotHistory。
         exec { monitorApi.requestScreenshot(deviceId) }.map { ack ->
             val d = ack.data ?: throw Exception("截屏请求失败")
-            com.padguard.domain.model.ScreenshotData(
+            com.padguard.parent.domain.model.ScreenshotData(
                 deviceId = d.deviceId,
                 imageUrl = null,
                 thumbnailUrl = null,
@@ -616,12 +616,12 @@ class ApiDataSource @Inject constructor(
         deviceId: String,
         resolution: RecordResolution,
         withAudio: Boolean
-    ): Result<com.padguard.domain.model.ScreenRecordTask> =
+    ): Result<com.padguard.parent.domain.model.ScreenRecordTask> =
         exec { monitorApi.startScreenRecord(deviceId, StartRecordRequest(resolution.name, withAudio)) }
             .map { ack ->
                 val d = ack.data ?: throw Exception("录屏启动失败")
                 // 服务端回执里没有分辨率/开始时间，这些以家长端本次选择的为准
-                com.padguard.domain.model.ScreenRecordTask(
+                com.padguard.parent.domain.model.ScreenRecordTask(
                     taskId = d.taskId,
                     deviceId = deviceId,
                     startedAt = d.requestedAt ?: System.currentTimeMillis(),
@@ -636,7 +636,7 @@ class ApiDataSource @Inject constructor(
     override suspend fun getMediaTask(
         deviceId: String,
         taskId: String
-    ): Result<com.padguard.data.model.MediaTaskStatusDto> =
+    ): Result<com.padguard.parent.data.model.MediaTaskStatusDto> =
         exec { monitorApi.getMediaTask(deviceId, taskId) }
             .map { dto ->
                 val d = dto.data ?: throw Exception("媒体任务不存在")
@@ -750,14 +750,14 @@ class ApiDataSource @Inject constructor(
     override suspend fun getDeviceLocation(deviceId: String): Result<LocationInfo> =
         exec { locationApi.getDeviceLocation(deviceId) }.map { it.data?.toDomain() ?: throw Exception("获取位置失败") }
 
-    override suspend fun getGeofences(deviceId: String): Result<List<com.padguard.domain.model.GeofenceConfig>> =
+    override suspend fun getGeofences(deviceId: String): Result<List<com.padguard.parent.domain.model.GeofenceConfig>> =
         exec { locationApi.getGeofences(deviceId) }.map { it.data.orEmpty().map { z -> z.toDomain() } }
 
-    override suspend fun createGeofence(zone: com.padguard.domain.model.GeofenceConfig): Result<com.padguard.domain.model.GeofenceConfig> =
+    override suspend fun createGeofence(zone: com.padguard.parent.domain.model.GeofenceConfig): Result<com.padguard.parent.domain.model.GeofenceConfig> =
         exec { locationApi.createGeofence(zone.deviceId, zone.toDto()) }
             .map { it.data?.toDomain() ?: throw Exception("创建围栏失败") }
 
-    override suspend fun updateGeofence(zone: com.padguard.domain.model.GeofenceConfig): Result<com.padguard.domain.model.GeofenceConfig> =
+    override suspend fun updateGeofence(zone: com.padguard.parent.domain.model.GeofenceConfig): Result<com.padguard.parent.domain.model.GeofenceConfig> =
         exec { locationApi.updateGeofence(zone.deviceId, zone.id, zone.toDto()) }
             .map { it.data?.toDomain() ?: throw Exception("更新围栏失败") }
 
@@ -913,7 +913,7 @@ class ApiDataSource @Inject constructor(
         }.map { Unit }
     }
 
-    override suspend fun getWebPolicy(deviceId: String): Result<com.padguard.domain.model.WebPolicy> =
+    override suspend fun getWebPolicy(deviceId: String): Result<com.padguard.parent.domain.model.WebPolicy> =
         exec { policyApi.getWebPolicy(deviceId) }.map { it.data?.toDomain() ?: throw Exception("读取上网策略失败") }
 
     override suspend fun updateUrlBlacklist(deviceId: String, urls: List<String>): Result<Unit> =
@@ -975,14 +975,14 @@ class ApiDataSource @Inject constructor(
         execRaw {
             policyApi.tempUnlock(
                 deviceId,
-                com.padguard.data.model.TempUnlockRequest(durationMinutes = durationMinutes)
+                com.padguard.parent.data.model.TempUnlockRequest(durationMinutes = durationMinutes)
             )
         }
 
-    override suspend fun getUnlockTickets(deviceId: String): Result<List<com.padguard.domain.repository.UnlockTicket>> =
+    override suspend fun getUnlockTickets(deviceId: String): Result<List<com.padguard.parent.domain.repository.UnlockTicket>> =
         exec { policyApi.getUnlockTickets(deviceId) }.map { list ->
             list.data.orEmpty().map { dto ->
-                com.padguard.domain.repository.UnlockTicket(
+                com.padguard.parent.domain.repository.UnlockTicket(
                     id = dto.id, deviceId = dto.deviceId, packageName = dto.packageName,
                     appLabel = dto.appLabel, durationMinutes = dto.durationMinutes,
                     reason = dto.reason, status = dto.status, createdAt = dto.createdAt
@@ -996,14 +996,14 @@ class ApiDataSource @Inject constructor(
         execRaw {
             policyApi.approveUnlockTicket(
                 deviceId, ticketId,
-                com.padguard.data.model.UnlockApproveRequest(durationMinutes = durationMinutes)
+                com.padguard.parent.data.model.UnlockApproveRequest(durationMinutes = durationMinutes)
             )
         }
 
     override suspend fun ignoreUnlockTicket(deviceId: String, ticketId: String): Result<Unit> =
         execRaw {
             policyApi.rejectUnlockTicket(
-                deviceId, ticketId, com.padguard.data.model.UnlockRejectRequest(reason = "家长已忽略")
+                deviceId, ticketId, com.padguard.parent.data.model.UnlockRejectRequest(reason = "家长已忽略")
             )
         }
 
@@ -1011,13 +1011,13 @@ class ApiDataSource @Inject constructor(
         execRaw { policyApi.dismissUnlockTicket(deviceId, ticketId) }
 
     override suspend fun setControlMode(deviceId: String, mode: ControlMode): Result<Unit> =
-        execRaw { policyApi.setControlMode(deviceId, com.padguard.data.model.ModeChangeRequest(mode.name)) }
+        execRaw { policyApi.setControlMode(deviceId, com.padguard.parent.data.model.ModeChangeRequest(mode.name)) }
 
-    override suspend fun getPolicyTemplates(sceneType: SceneType): Result<List<com.padguard.domain.repository.PolicyTemplate>> =
+    override suspend fun getPolicyTemplates(sceneType: SceneType): Result<List<com.padguard.parent.domain.repository.PolicyTemplate>> =
         exec { policyApi.getTemplates(sceneType.name) }.map { it.data.orEmpty().map { t -> t.toDomain() } }
 
     override suspend fun applyPolicyTemplate(deviceId: String, templateId: String): Result<Unit> =
-        exec { policyApi.applyTemplate(deviceId, com.padguard.data.model.ApplyTemplateRequest(templateId)) }.map { Unit }
+        exec { policyApi.applyTemplate(deviceId, com.padguard.parent.data.model.ApplyTemplateRequest(templateId)) }.map { Unit }
 
     override suspend fun getTabletUsageSettings(deviceId: String): Result<TabletUsageSettings> =
         exec { policyApi.getTabletUsageSettings(deviceId) }
@@ -1079,7 +1079,7 @@ class ApiDataSource @Inject constructor(
         deviceId: String,
         packageName: String,
         period: ReportPeriod
-    ): Result<List<com.padguard.domain.model.AppUsageHistoryEntry>> =
+    ): Result<List<com.padguard.parent.domain.model.AppUsageHistoryEntry>> =
         exec { statisticsApi.getAppUsageHistory(deviceId, packageName, period.name.lowercase()) }
             .map { it.data.orEmpty().map { e -> e.toDomain() } }
 
@@ -1264,8 +1264,8 @@ private fun ScreenshotDto.toDomain(): ScreenshotData = ScreenshotData(
     capturedAt = capturedAt ?: 0, width = width ?: 0, height = height ?: 0
 )
 
-private fun com.padguard.data.model.ScreenRecordTaskDto.toDomain(): com.padguard.domain.model.ScreenRecordTask =
-    com.padguard.domain.model.ScreenRecordTask(
+private fun com.padguard.parent.data.model.ScreenRecordTaskDto.toDomain(): com.padguard.parent.domain.model.ScreenRecordTask =
+    com.padguard.parent.domain.model.ScreenRecordTask(
         taskId = taskId, deviceId = deviceId, startedAt = startedAt,
         resolution = safeEnum(resolution) { RecordResolution.HD_720P }, withAudio = withAudio
     )
@@ -1427,7 +1427,7 @@ private fun AppPolicyDto.toDomain(): AppPolicy = AppPolicy(
     appName = appName ?: packageName, isBlocked = isBlocked, dailyLimitMinutes = dailyLimitMinutes, iconUrl = null
 )
 
-private fun WebPolicyDto.toDomain(): com.padguard.domain.model.WebPolicy = com.padguard.domain.model.WebPolicy(
+private fun WebPolicyDto.toDomain(): com.padguard.parent.domain.model.WebPolicy = com.padguard.parent.domain.model.WebPolicy(
     deviceId = deviceId, blockedUrls = blockedUrls, browserDisabled = browserDisabled,
     smartShutdownEnabled = smartShutdownEnabled, smartShutdownStartTime = smartShutdownStartTime,
     smartShutdownEndTime = smartShutdownEndTime
@@ -1438,8 +1438,8 @@ private fun LocationTrackPointDto.toDomain(): LocationInfo = LocationInfo(
     accuracy = accuracy, timestamp = timestamp
 )
 
-private fun PolicyTemplateDto.toDomain(): com.padguard.domain.repository.PolicyTemplate =
-    com.padguard.domain.repository.PolicyTemplate(
+private fun PolicyTemplateDto.toDomain(): com.padguard.parent.domain.repository.PolicyTemplate =
+    com.padguard.parent.domain.repository.PolicyTemplate(
         id = id, name = name, description = description ?: "", sceneType = safeEnum(sceneType) { SceneType.FAMILY },
         category = category ?: "通用"
     )
@@ -1477,12 +1477,12 @@ private fun WebActivityStatsDto.toDomain(): WebActivityStats = WebActivityStats(
     totalVisits = totalVisits, topDomains = topDomains.orEmpty().map { it.toDomain() }, blockedAttempts = blockedAttempts
 )
 
-private fun DomainVisitDto.toDomain(): com.padguard.domain.repository.DomainVisit =
-    com.padguard.domain.repository.DomainVisit(domain = domain, visitCount = visitCount, lastVisitTime = lastVisitTime)
+private fun DomainVisitDto.toDomain(): com.padguard.parent.domain.repository.DomainVisit =
+    com.padguard.parent.domain.repository.DomainVisit(domain = domain, visitCount = visitCount, lastVisitTime = lastVisitTime)
 
 private fun ViolationStatsDto.toDomain(): ViolationStats = ViolationStats(
     totalCount = totalCount, byCategory = byCategory ?: emptyMap(),
-    trend = trend.orEmpty().map { com.padguard.domain.repository.DailyViolation(it.date, it.count) }
+    trend = trend.orEmpty().map { com.padguard.parent.domain.repository.DailyViolation(it.date, it.count) }
 )
 
 private fun PublishedMessageDto.toDomain(): PublishedMessage = PublishedMessage(

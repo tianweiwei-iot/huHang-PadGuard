@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.usage
+package com.padguard.parent.presentation.ui.usage
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -34,12 +34,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.padguard.domain.model.TabletUsageSettings
-import com.padguard.domain.model.TimeRange
-import com.padguard.domain.model.UsageSession
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.TabletUsageSettingsUiState
-import com.padguard.presentation.viewmodel.TabletUsageSettingsViewModel
+import com.padguard.parent.domain.model.TabletUsageSettings
+import com.padguard.parent.domain.model.TimeRange
+import com.padguard.parent.domain.model.UsageSession
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.TabletUsageSettingsUiState
+import com.padguard.parent.presentation.viewmodel.TabletUsageSettingsViewModel
 
 /**
  * 平板使用时间设置页（清爽浅色 · 舒适紧凑）

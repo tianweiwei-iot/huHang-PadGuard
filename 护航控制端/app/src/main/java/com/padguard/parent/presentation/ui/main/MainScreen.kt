@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.main
+package com.padguard.parent.presentation.ui.main
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -15,14 +15,14 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.padguard.presentation.ui.Screen
-import com.padguard.presentation.ui.device.DeviceManageScreen
-import com.padguard.presentation.ui.home.HomeScreen
-import com.padguard.presentation.ui.profile.ProfileAction
-import com.padguard.presentation.ui.profile.ProfileScreen
-import com.padguard.presentation.ui.statistics.StatisticsScreen
-import com.padguard.presentation.viewmodel.HomeViewModel
-import com.padguard.presentation.viewmodel.ProfileViewModel
+import com.padguard.parent.presentation.ui.Screen
+import com.padguard.parent.presentation.ui.device.DeviceManageScreen
+import com.padguard.parent.presentation.ui.home.HomeScreen
+import com.padguard.parent.presentation.ui.profile.ProfileAction
+import com.padguard.parent.presentation.ui.profile.ProfileScreen
+import com.padguard.parent.presentation.ui.statistics.StatisticsScreen
+import com.padguard.parent.presentation.viewmodel.HomeViewModel
+import com.padguard.parent.presentation.viewmodel.ProfileViewModel
 
 /**
  * 主框架：底部导航承载「首页 / 设备 / 统计 / 我的」四个顶级页面。

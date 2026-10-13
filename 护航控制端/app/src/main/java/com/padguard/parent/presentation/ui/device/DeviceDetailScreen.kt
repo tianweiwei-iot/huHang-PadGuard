@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.device
+package com.padguard.parent.presentation.ui.device
 
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
@@ -27,14 +27,14 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import android.graphics.BitmapFactory
 import android.net.Uri
-import com.padguard.domain.model.Device
-import com.padguard.domain.model.DeviceOnlineStatus
-import com.padguard.presentation.ui.components.FeatureGridItem
-import com.padguard.presentation.ui.components.FeatureItem
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.DeviceDetailViewModel
+import com.padguard.parent.domain.model.Device
+import com.padguard.parent.domain.model.DeviceOnlineStatus
+import com.padguard.parent.presentation.ui.components.FeatureGridItem
+import com.padguard.parent.presentation.ui.components.FeatureItem
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.DeviceDetailViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.withContext
@@ -254,7 +254,7 @@ private fun LaunchGuardGuideCard(onOpenAppManage: () -> Unit) {
 }
 
 @Composable
-private fun DeviceHeaderCard(device: com.padguard.domain.model.Device) {
+private fun DeviceHeaderCard(device: com.padguard.parent.domain.model.Device) {
     SoftCard(modifier = Modifier.fillMaxWidth()) {
         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(

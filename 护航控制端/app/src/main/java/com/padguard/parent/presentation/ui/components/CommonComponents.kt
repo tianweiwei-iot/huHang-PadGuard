@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.components
+package com.padguard.parent.presentation.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -17,10 +17,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.padguard.domain.model.Device
-import com.padguard.domain.model.DeviceOnlineStatus
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.ui.components.SoftCard
+import com.padguard.parent.domain.model.Device
+import com.padguard.parent.domain.model.DeviceOnlineStatus
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.components.SoftCard
 
 /**
  * 设备状态卡片（首页顶部）

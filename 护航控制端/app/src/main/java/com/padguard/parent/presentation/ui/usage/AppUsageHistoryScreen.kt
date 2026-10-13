@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.usage
+package com.padguard.parent.presentation.ui.usage
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -21,13 +21,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.padguard.domain.model.AppUsageHistoryEntry
-import com.padguard.presentation.ui.components.AppIcon
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.components.SoftHeroCard
-import com.padguard.domain.model.ReportPeriod
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.AppUsageHistoryViewModel
+import com.padguard.parent.domain.model.AppUsageHistoryEntry
+import com.padguard.parent.presentation.ui.components.AppIcon
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.components.SoftHeroCard
+import com.padguard.parent.domain.model.ReportPeriod
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.AppUsageHistoryViewModel
 
 /**
  * 应用使用记录子页（三级页面）

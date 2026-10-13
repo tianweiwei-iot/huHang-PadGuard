@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.auth
+package com.padguard.parent.presentation.ui.auth
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,12 +28,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.unit.dp
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.di.AccountPrefs
-import com.padguard.presentation.viewmodel.LoginViewModel
-import com.padguard.presentation.viewmodel.buildServerConfig
-import com.padguard.presentation.viewmodel.parseServerConfig
+import com.padguard.parent.presentation.viewmodel.LoginViewModel
+import com.padguard.parent.presentation.viewmodel.buildServerConfig
+import com.padguard.parent.presentation.viewmodel.parseServerConfig
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults

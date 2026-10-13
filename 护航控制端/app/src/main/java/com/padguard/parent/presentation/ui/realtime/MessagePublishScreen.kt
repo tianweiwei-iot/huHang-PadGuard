@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.realtime
+package com.padguard.parent.presentation.ui.realtime
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -50,10 +50,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.padguard.domain.model.MessageContentType
-import com.padguard.domain.model.PublishedMessage
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.MessagePublishViewModel
+import com.padguard.parent.domain.model.MessageContentType
+import com.padguard.parent.domain.model.PublishedMessage
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.MessagePublishViewModel
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 

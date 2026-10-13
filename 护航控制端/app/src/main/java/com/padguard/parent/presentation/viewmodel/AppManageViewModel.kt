@@ -1,13 +1,13 @@
-package com.padguard.presentation.viewmodel
+package com.padguard.parent.presentation.viewmodel
 
 import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.domain.model.DistributableApp
-import com.padguard.domain.model.InstalledApp
-import com.padguard.domain.repository.DeviceRepository
-import com.padguard.domain.repository.PolicyRepository
+import com.padguard.parent.domain.model.DistributableApp
+import com.padguard.parent.domain.model.InstalledApp
+import com.padguard.parent.domain.repository.DeviceRepository
+import com.padguard.parent.domain.repository.PolicyRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

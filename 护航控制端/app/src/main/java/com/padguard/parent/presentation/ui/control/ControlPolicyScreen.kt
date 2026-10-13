@@ -1,4 +1,4 @@
-package com.padguard.presentation.ui.control
+package com.padguard.parent.presentation.ui.control
 
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
@@ -19,13 +19,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.padguard.domain.model.ControlMode
-import com.padguard.presentation.ui.components.SoftCard
-import com.padguard.presentation.ui.theme.PadGuardColors
-import com.padguard.presentation.util.TimeFormat
-import com.padguard.presentation.viewmodel.ControlPolicyUiState
-import com.padguard.presentation.viewmodel.ControlPolicyViewModel
-import com.padguard.presentation.viewmodel.FamilyPreset
+import com.padguard.parent.domain.model.ControlMode
+import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import com.padguard.parent.presentation.util.TimeFormat
+import com.padguard.parent.presentation.viewmodel.ControlPolicyUiState
+import com.padguard.parent.presentation.viewmodel.ControlPolicyViewModel
+import com.padguard.parent.presentation.viewmodel.FamilyPreset
 import kotlinx.coroutines.flow.collectLatest
 
 /**

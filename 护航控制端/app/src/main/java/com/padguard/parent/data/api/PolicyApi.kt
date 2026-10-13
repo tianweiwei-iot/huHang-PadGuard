@@ -1,6 +1,6 @@
-package com.padguard.data.api
+package com.padguard.parent.data.api
 
-import com.padguard.data.model.*
+import com.padguard.parent.data.model.*
 import retrofit2.Response
 import retrofit2.http.*
 
