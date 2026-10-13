@@ -27,9 +27,10 @@ import org.eclipse.paho.client.mqttv3.internal.ClientComms
  * 用 `setExactAndAllowWhileIdle` 在 Doze 白名单窗口里唤醒进程发 PINGREQ，
  * 并在广播回调期间持有 WakeLock，确保网络 IO 完成前 CPU 不再睡回去。
  *
- * 与原版的两点差异：
+ * 与原版的三点差异：
  * 1. PendingIntent 强制加 `FLAG_IMMUTABLE`（targetSdk >= 31 硬性要求，原版因此在新系统崩溃）；
- * 2. 广播接收器用 `RECEIVER_NOT_EXPORTED` 注册（targetSdk >= 34 硬性要求）。
+ * 2. 广播接收器用 `RECEIVER_NOT_EXPORTED` 注册（targetSdk >= 34 硬性要求）；
+ * 3. D4：精确闹钟不可用（权限被撤销/OEM 限制）时降级非精确闹钟而非静默死亡。
  */
 class AlarmPingSender(private val context: Context) : MqttPingSender {
 
@@ -85,7 +86,7 @@ class AlarmPingSender(private val context: Context) : MqttPingSender {
         val intent = pendingIntent ?: return
         if (!started) return
         val triggerAt = System.currentTimeMillis() + delayInMilliseconds
-        runCatching {
+        try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 // setExactAndAllowWhileIdle 是唯一能在 Doze 下按时触发的接口，
                 // 系统对其有 9 分钟最小间隔限流，因此 KeepAlive 不应低于 60s。
@@ -93,8 +94,20 @@ class AlarmPingSender(private val context: Context) : MqttPingSender {
             } else {
                 alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAt, intent)
             }
-        }.onFailure {
-            Logger.w(TAG, it) { "failed to schedule mqtt ping" }
+        } catch (e: SecurityException) {
+            // D4 兜底：SCHEDULE_EXACT_ALARM 虽随安装授予，但 Android 12+ 用户可在
+            // 「设置 → 闹钟和提醒」撤销，个别 OEM ROM 亦有限制 —— 此时精确闹钟不可用。
+            // 降级到 setAndAllowWhileIdle（非精确但允许 Doze 窗口触发）：
+            // 时机变钝，心跳不断。绝不回到旧实现的 runCatching 吞异常静默死亡路径
+            // （那会导致 broker 约 135s 判掉线，表现为每晚息屏即脱管）。
+            Logger.w(TAG, e) { "exact alarm unavailable, degrading to inexact alarm" }
+            runCatching {
+                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, intent)
+            }.onFailure {
+                Logger.w(TAG, it) { "failed to schedule inexact mqtt ping" }
+            }
+        } catch (e: Exception) {
+            Logger.w(TAG, e) { "failed to schedule mqtt ping" }
         }
     }
 

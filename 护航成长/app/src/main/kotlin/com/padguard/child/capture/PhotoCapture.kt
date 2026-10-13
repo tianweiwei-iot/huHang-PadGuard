@@ -56,7 +56,8 @@ import kotlin.coroutines.resume
 @Singleton
 class PhotoCapture @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val remote: RemoteDataSource
+    private val remote: RemoteDataSource,
+    private val mediaRetry: MediaUploadRetry
 ) {
 
     /** 拍照并上传。@return 失败原因，`null` 表示成功 */
@@ -115,10 +116,17 @@ class PhotoCapture @Inject constructor(
                         null
                     }
                     else -> {
+                        // W38：上传失败不再"即删"。移交重试队列，弱网恢复后由 drain 重传 ——
+                        // 旧实现这里之后无条件 delete，家长端永远等不到这张照片。
                         Logger.w(TAG) { "photo upload failed: $r" }
-                        "拍照成功但上传失败"
+                        mediaRetry.enqueue(file, MediaUploadRetry.Kind.Media(taskId, 0, MIME_IMAGE_JPEG))
+                        // 收尾时顺手重传队列（含刚入队的这条——网络可能已恢复）
+                        runCatching { mediaRetry.drain() }
+                        "拍照成功但上传失败（已排队重试）"
                     }
                 }
+                // 入队成功的文件已被 enqueue 移走（copyTo + delete 源），这里 delete 是空操作；
+                // 成功上传的残留文件则在此清理
                 runCatching { file.delete() }
                 error
             } catch (t: Throwable) {

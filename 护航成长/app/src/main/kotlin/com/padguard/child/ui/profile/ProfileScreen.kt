@@ -107,16 +107,24 @@ fun ProfileScreen(
         onPermissionGuide = onPermissionGuide,
         onOpenGuardA11y = openGuardA11ySettings,
         onSetServer = {
-            serverInput = serverUrl
-            showServerDialog = true
+            // W52 修复：服务器地址可被孩子无密码修改——改成不可达 IP 即让家长端"看不到"设备、
+            // 实时锁屏/消息/放行全失效。现统一过家长密码闸门（同页「去设置」入口同一范式）。
+            if (viewModel.ensureGuardUnlocked(context)) {
+                serverInput = serverUrl
+                showServerDialog = true
+            }
         },
         onEditDeviceName = {
-            nameInput = state.deviceName.ifBlank { state.deviceSn }
-            showNameDialog = true
+            if (viewModel.ensureGuardUnlocked(context)) {
+                nameInput = state.deviceName.ifBlank { state.deviceSn }
+                showNameDialog = true
+            }
         },
         onEditStudentName = {
-            studentNameInput = state.studentName
-            showStudentNameDialog = true
+            if (viewModel.ensureGuardUnlocked(context)) {
+                studentNameInput = state.studentName
+                showStudentNameDialog = true
+            }
         },
         onEditNickname = {
             nicknameInput = state.childNickname
@@ -261,8 +269,10 @@ private fun ProfileContent(
                 SecurityCard(
                     deviceAdminActive = state.deviceAdminActive,
                     usageStatsGranted = state.usageStatsGranted,
+                    batteryOptimizationWhitelisted = state.batteryOptimizationWhitelisted,
                     onClickDeviceAdmin = { onPermissionGuide("device_admin") },
-                    onClickUsageStats = { onPermissionGuide("usage_stats") }
+                    onClickUsageStats = { onPermissionGuide("usage_stats") },
+                    onClickBatteryOptimization = { onPermissionGuide("battery_optimization") }
                 )
             }
             item {
@@ -639,8 +649,10 @@ private fun InfoRow(label: String, value: String) {
 private fun SecurityCard(
     deviceAdminActive: Boolean,
     usageStatsGranted: Boolean,
+    batteryOptimizationWhitelisted: Boolean,
     onClickDeviceAdmin: () -> Unit,
-    onClickUsageStats: () -> Unit
+    onClickUsageStats: () -> Unit,
+    onClickBatteryOptimization: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column {
@@ -656,6 +668,17 @@ private fun SecurityCard(
                 subtitle = "授权后才能统计每个 App 的真实使用时长",
                 active = usageStatsGranted,
                 onClick = onClickUsageStats
+            )
+            HorizontalDivider()
+            // D5（L-CH-08）：电池优化白名单入口。设备息屏进入 Doze 后若不加豁免，
+            // 后台 MQTT 心跳/定位/推送被冻结，每晚即脱管。引导用户手动加入白名单。
+            // active 取真实白名单状态（ProfileViewModel.isBatteryOptimizationWhitelisted），
+            // 不写死 —— 假状态比没有状态更坏。
+            PermissionRow(
+                title = "电池优化白名单",
+                subtitle = "加入豁免名单，确保息屏后仍能正常管控（锁屏/定位/推送）",
+                active = batteryOptimizationWhitelisted,
+                onClick = onClickBatteryOptimization
             )
         }
     }

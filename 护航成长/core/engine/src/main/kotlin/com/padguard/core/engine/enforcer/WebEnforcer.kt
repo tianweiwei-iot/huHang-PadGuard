@@ -183,6 +183,16 @@ class WebEnforcer @Inject constructor(
         }
         val allowed = policy.allowBrowsers.toSet()
         val installed = installedBrowsers()
+        // W50：枚举不到任何浏览器时（manifest 缺 VIEW/BROWSABLE queries 声明、
+        // 或包可见性被限制），旧实现会"静默不挂起任何浏览器"——管控端以为在收口，
+        // 实际孩子可以用任意浏览器上网。这里如实上报，让"做不到"在界面上可见。
+        if (installed.isEmpty()) {
+            report.markUnsupported(
+                "web.browserLimit",
+                "未能枚举到可处理网页的应用（Android 11+ 包可见性限制），浏览器收口未生效"
+            )
+            return
+        }
         val toSuspend = (installed - allowed).toList()
         val toRelease = (lastSuspendedBrowsers - toSuspend.toSet()).toList()
 

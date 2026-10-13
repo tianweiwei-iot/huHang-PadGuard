@@ -1,3 +1,7 @@
+// AGP 应用后，脚本顶层的 `java` 会被 JavaPluginExtension 访问器遮蔽，
+// `java.util.Properties` 因此解析失败（Unresolved reference: util）——必须显式 import。
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -34,6 +38,22 @@ android {
     signingConfigs {
         // 注意：Device Owner / Kiosk 场景下 APK 签名不可更换，
         // 请在 local.properties 或 CI 环境变量中配置正式 keystore。
+        create("release") {
+            val localProps = Properties().apply {
+                val f = rootProject.file("local.properties")
+                if (f.exists()) f.inputStream().use { load(it) }
+            }
+            val ksFile = (findProperty("RELEASE_STORE_FILE") as? String) ?: localProps.getProperty("RELEASE_STORE_FILE")
+            val ksPass = (findProperty("RELEASE_STORE_PASSWORD") as? String) ?: localProps.getProperty("RELEASE_STORE_PASSWORD")
+            val ksAlias = (findProperty("RELEASE_KEY_ALIAS") as? String) ?: localProps.getProperty("RELEASE_KEY_ALIAS")
+            val keyPass = (findProperty("RELEASE_KEY_PASSWORD") as? String) ?: localProps.getProperty("RELEASE_KEY_PASSWORD")
+            if (ksFile != null && ksPass != null && ksAlias != null && keyPass != null) {
+                storeFile = rootProject.file(ksFile)
+                storePassword = ksPass
+                keyAlias = ksAlias
+                keyPassword = keyPass
+            }
+        }
     }
 
     buildTypes {
@@ -44,6 +64,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
         debug {
             isMinifyEnabled = false
@@ -118,4 +139,38 @@ dependencies {
     implementation(libs.mlkit.barcode)
 
     testImplementation(libs.junit)
+}
+
+// A2：release 签名守卫（仅在实际打 release 包时校验，不影响 debug）。
+// 孩子端为 Device Owner / Kiosk 场景，APK 签名不可更换，正式 keystore 必须就位，否则包无法安装。
+afterEvaluate {
+    val rel = android.signingConfigs.findByName("release")
+    if (rel?.storeFile == null) {
+        tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
+            doFirst {
+                throw GradleException(
+                    "release 签名未配置：请在 local.properties 设置 RELEASE_STORE_FILE / RELEASE_STORE_PASSWORD / " +
+                    "RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD，或由 CI 注入同名环境变量。孩子端为 DO/Kiosk 场景，签名不可更换，务必使用正式 keystore。"
+                )
+            }
+        }
+    }
+}
+
+// W80：versionCode 单调守卫。CI / 每次构建校验 versionCode 不低于已发布基线，
+// 防止无意回退导致设备把新包当降级拒绝安装（表现：重装了 App 却还是旧行为）。
+// 基线文件 versionCode.baseline 随每次发版手动 +1，并随代码一起提交。
+afterEvaluate {
+    val baselineFile = file("versionCode.baseline")
+    if (baselineFile.exists() && baselineFile.readText().trim().isNotEmpty()) {
+        val baseline = baselineFile.readText().trim().toIntOrNull() ?: 0
+        val current = (findProperty("VERSION_CODE") as? String)?.trim()?.toIntOrNull() ?: 0
+        tasks.named("preBuild") {
+            doLast {
+                check(current >= baseline) {
+                    "W80: versionCode=$current 小于已发布基线 $baseline，禁止回退。请递增 gradle.properties 中的 VERSION_CODE 后再构建。"
+                }
+            }
+        }
+    }
 }

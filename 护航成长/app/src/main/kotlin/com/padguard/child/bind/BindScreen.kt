@@ -17,6 +17,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -249,6 +250,36 @@ private fun MethodChoiceStep(
             desc = "直接输入家长端账号和密码绑定，不受配对码 10 分钟时效与相机权限限制",
             onClick = onInputAccount
         )
+
+        // D7（L-PA-12）：防卸载能力分层说明。
+        // 此前向导只强调"防卸载"，未区分设备所有者(Device Owner)与非 DO 模式的能力差异，
+        // 家长易误以为任何情况下孩子都删不掉本应用。这里把事实讲清楚，避免预期落差。
+        Card(
+            onClick = { /* 纯说明卡片，无交互 */ },
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "关于防卸载",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "绑定后本应用会尽力防止被卸载（设备管理员 + 辅助功能守护）。但需注意：" +
+                        "在未以「设备所有者（企业 / 课堂）模式」激活的平板上，防卸载是尽力而为——" +
+                        "孩子仍可通过系统设置解除设备管理员后卸载，或通过恢复出厂设置绕过。" +
+                        "真正不可卸载需由学校 / 机构通过 Device Owner 部署。家长端的远程锁屏、应用管控等能力不受影响。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                )
+            }
+        }
 
         // 连接自检：绑定失败绝大多数是"服务器地址不通"，把地址与连通性直接摊开，
         // 避免用户只能看到一句笼统的"绑定失败"而无从下手。

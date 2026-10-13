@@ -94,6 +94,10 @@ interface CommandRecordDao {
 
     @Query("DELETE FROM command_record WHERE receivedAt < :before")
     suspend fun deleteBefore(before: Long)
+
+    /** 按状态删除（W51：启动清理残留 PENDING 中间态，使其可被服务端重发重新认领） */
+    @Query("DELETE FROM command_record WHERE status = :status")
+    suspend fun deleteByStatus(status: String)
 }
 
 @Dao

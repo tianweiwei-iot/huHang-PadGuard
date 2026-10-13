@@ -39,8 +39,10 @@ import com.padguard.core.engine.lock.LockReason
 import com.padguard.core.engine.lock.LockState
 import com.padguard.core.engine.schedule.ScheduleEvaluator
 import com.padguard.core.engine.schedule.ScheduleVerdict
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Instant
@@ -98,6 +100,15 @@ class PolicyEngine @Inject constructor(
 
     /** 锁定态，锁屏页与状态页直接订阅 */
     val lockState: StateFlow<LockState> = lockController.state
+
+    /**
+     * 当前生效的管控模式（NORMAL / LEARNING / FOCUS），随策略包下发。
+     *
+     * W77 修复：此前 PolicyPackage 没有 sceneMode 字段、引擎也不持有它，
+     * 家长端切换模式对孩子端零生效。现把它提升为可观察状态，供 UI / 后续模式化管控消费。
+     */
+    private val _sceneMode = MutableStateFlow("NORMAL")
+    val sceneMode: StateFlow<String> = _sceneMode.asStateFlow()
 
     /**
      * 串行化 [applyAll]。
@@ -159,6 +170,8 @@ class PolicyEngine @Inject constructor(
             }
 
             lastAppliedVersion = policy.version
+            // W77: 把本次策略包携带的管控模式提升为当前生效模式，供 UI / 模式化管控消费。
+            if (_sceneMode.value != policy.sceneMode) _sceneMode.value = policy.sceneMode
 
             if (report.hasFailure) {
                 raiseOnce(
@@ -240,7 +253,7 @@ class PolicyEngine @Inject constructor(
 
         // ---------- 1.5 未成年人模式夜间宵禁 ----------
         // 独立于时段锁判定：家长关闭「时段管控」不得解除合规强制项。
-        val minorMode = minorModeEnforcer.evaluate(policy.minorMode)
+        val minorMode = minorModeEnforcer.evaluate(policy.minorMode, timezone = policy.schedule.timezone)
         if (minorMode is MinorModeVerdict.Curfew) {
             autoReasons[LockReason.CURFEW] = LockDetail(
                 text = minorMode.text,
@@ -430,7 +443,7 @@ class PolicyEngine @Inject constructor(
 
     /** 未成年人模式当前状态（是否开启 / 是否处于宵禁），供状态页与家长展示 */
     suspend fun minorModeVerdict(): MinorModeVerdict =
-        minorModeEnforcer.evaluate(policyRepository.getPolicy().minorMode)
+        minorModeEnforcer.evaluate(policyRepository.getPolicy().minorMode, timezone = policyRepository.getPolicy().schedule.timezone)
 
     /** 当前档位对应的宵禁时段；模式关闭或未启用宵禁时返回 null */
     suspend fun curfewRule(): com.padguard.core.data.model.policy.ScheduleRule? =

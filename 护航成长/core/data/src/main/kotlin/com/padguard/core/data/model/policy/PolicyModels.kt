@@ -18,6 +18,13 @@ data class PolicyPackage(
     @SerialName("deviceId") val deviceId: String = "",
     @SerialName("updatedAt") val updatedAt: Long = 0L,
     @SerialName("scene") val scene: SceneType = SceneType.FAMILY,
+    /**
+     * 管控模式（家长端切换：NORMAL / LEARNING / FOCUS）。
+     *
+     * W77 修复：此前 PolicyPackage 没有这个字段，服务端下发的 `sceneMode` 在反序列化时被静默丢弃，
+     * 于是家长端切了模式、孩子端却毫无变化（四重断裂之一）。
+     */
+    @SerialName("sceneMode") val sceneMode: String = "NORMAL",
     @SerialName("effectiveFrom") val effectiveFrom: Long = 0L,
     @SerialName("effectiveTo") val effectiveTo: Long = 0L,
     @SerialName("peripheral") val peripheral: PeripheralPolicy = PeripheralPolicy(),
@@ -75,6 +82,7 @@ data class PolicyPackage(
             deviceId = incoming.deviceId.ifBlank { deviceId },
             updatedAt = incoming.updatedAt,
             scene = incoming.scene,
+            sceneMode = incoming.sceneMode,
             effectiveFrom = incoming.effectiveFrom,
             effectiveTo = incoming.effectiveTo,
             peripheral = incoming.peripheral,

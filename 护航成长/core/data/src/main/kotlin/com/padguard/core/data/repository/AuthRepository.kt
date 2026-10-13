@@ -9,11 +9,15 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.padguard.core.data.di.AuthDataStore
+import com.padguard.core.common.Logger
+import com.padguard.core.data.db.PadGuardDatabase
 import com.padguard.core.data.model.BindResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -25,7 +29,8 @@ import javax.inject.Singleton
  */
 @Singleton
 class AuthRepository @Inject constructor(
-    @AuthDataStore private val store: DataStore<Preferences>
+    @AuthDataStore private val store: DataStore<Preferences>,
+    private val db: PadGuardDatabase
 ) {
 
     private object Keys {
@@ -50,9 +55,11 @@ class AuthRepository @Inject constructor(
         val CHILD_TOKEN = stringPreferencesKey("child_token")
         val CHILD_USER_ID = stringPreferencesKey("child_user_id")
         val CHILD_LOGGED_IN = booleanPreferencesKey("child_logged_in")
-        // === 账号密码记录（家长家庭账号，用于免重复输入 / 掉线后自动重登）===
-        // 安全说明：与 deviceToken / hmacSecret 同库存放（DataStore，应用私有目录、
-        // 非 root 设备不可读）。仅当用户在登录页勾选「记住账号密码」时才会写入。
+        // === 账号密码记录（家长家庭账号）===
+        // W35 安全修复：本端**不再持久化家长账号密码明文**。
+        // 早期实现把密码明文写入 DataStore，root / 备份提取即可拿到家庭账号密码，等同于把家长端门户钥匙交给孩子。
+        // 孩子端鉴权只依赖 [CHILD_TOKEN]（登录后下发，足够用），密码仅用于首登，
+        // 因此这里仅保留「记住账号」语义，密码永不落库。键保留以便旧版本升级时干净迁移（clear 会一并清掉）。
         val CHILD_PASSWORD = stringPreferencesKey("child_password")
         val CHILD_REMEMBER = booleanPreferencesKey("child_remember")
 
@@ -194,24 +201,25 @@ class AuthRepository @Inject constructor(
     }
 
     /**
-     * 记录账号密码（登录页「记住账号密码」勾选时调用）。
+     * 记录「记住账号」状态（登录页勾选时调用）。
      *
-     * 安全说明：密码与 deviceToken / hmacSecret 同库存放于应用私有 DataStore
-     * （非 root 设备其他应用不可读），且**仅在用户显式勾选后**才写入，
-     * 用户随时可在「我的 → 账号与密码」一键清除。
+     * W35 安全修复：本方法**不再写入家长账号密码明文**。
+     * 仅记录手机号用于登录表单预填，密码永不持久化——孩子端鉴权依赖 [CHILD_TOKEN]，
+     * 不需要本地密码；即使设备被 root / 备份提取，也拿不到家庭账号密码。
+     * 升级前若已写过密码，[clearRememberedCredentials] / [clear] 会一并清除。
      */
     suspend fun saveChildCredentials(phone: String, password: String) {
         store.edit {
             it[Keys.CHILD_PHONE] = phone
-            it[Keys.CHILD_PASSWORD] = password
+            // W35：password 故意不落库（见 Keys.CHILD_PASSWORD 说明）
             it[Keys.CHILD_REMEMBER] = true
         }
     }
 
-    /** 已记录的账号 + 密码（未记录时均为空串）。 */
+    /** 已记录的账号 +（空）密码。W35 起密码不再持久化，第二个元素恒为空串。 */
     val rememberedCredentials: Flow<Pair<String, String>> =
         store.data.catch { emit(emptyPreferences()) }
-            .map { it[Keys.CHILD_PHONE].orEmpty() to it[Keys.CHILD_PASSWORD].orEmpty() }
+            .map { it[Keys.CHILD_PHONE].orEmpty() to "" }
 
     /** 是否开启了「记住账号密码」。 */
     val isRemembered: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
@@ -232,6 +240,8 @@ class AuthRepository @Inject constructor(
      * 否则存量设备不会补齐新增项（缺失表现为静默失效，家长无从察觉）。
      */
     companion object {
+        private const val TAG = "AuthRepository"
+
         /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
         const val CURRENT_AGREEMENT_VERSION = "1.0.0"
 
@@ -299,7 +309,15 @@ class AuthRepository @Inject constructor(
             it.remove(Keys.TOKEN_EXPIRES_AT)
             it.remove(Keys.BOUND_AT)
             it.remove(Keys.DEVICE_NAME)
+            // D6（L-CH-07）：孩子端不应持久化家长密码明文（W35 已不让写入），
+            // 但旧版本升级残留的键仍可能存在，解绑时一并清掉，不留旧家庭凭据痕迹。
+            it.remove(Keys.CHILD_PASSWORD)
         }
+        // D6（L-CH-07）：解绑即清本机私有数据。Room 库存储了策略缓存、行为日志、
+        // 指令记录、应用时长、风险/告警事件、解锁工单、协议同意、家长消息——
+        // 这些都属于"旧家庭在本设备上的管控痕迹"，若不清除，平板转手后新家庭
+        // 仍能从本地库读到上一家的行为日志与协议同意状态，隐私承诺从第一天即不可信。
+        wipePrivateDb()
     }
 
     /**
@@ -312,6 +330,21 @@ class AuthRepository @Inject constructor(
         } catch (e: IOException) {
             // DataStore 写入失败时重试一次，仍失败则记录日志交由上层处理
             store.edit { it.clear() }
+        }
+        // D6：全清场景（卸载 / 出厂重置）同样清 Room 私有表，避免残留旧家庭管控痕迹。
+        wipePrivateDb()
+    }
+
+    /**
+     * D6（L-CH-07）：清空本地 Room 管控数据库全部表。
+     * 在 IO 线程执行（Room 的 clearAllTables 是阻塞调用）。
+     * Room 表均位于 /data/data/com.padguard.child/databases 应用私有目录，
+     * 清掉即"本机不再保留任何上一家管控痕迹"。失败不阻断解绑主流程（记日志交由上层）。
+     */
+    private suspend fun wipePrivateDb() {
+        withContext(Dispatchers.IO) {
+            runCatching { db.clearAllTables() }
+                .onFailure { t -> Logger.w(TAG) { "wipe private db failed: ${t.message}" } }
         }
     }
 }

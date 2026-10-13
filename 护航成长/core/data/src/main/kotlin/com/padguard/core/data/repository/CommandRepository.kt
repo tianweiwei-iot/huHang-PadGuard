@@ -42,6 +42,10 @@ class CommandRepository @Inject constructor(
     /**
      * 登记指令（在处理前调用，抢占幂等标记）。
      * @return false 表示已处理过，调用方应回执 DUPLICATED 并终止
+     *
+     * W51 修复：认领阶段只写 [AckStatus.PENDING] 中间态，[recordResult] 才置终态（SUCCESS/FAILED/...）。
+     * 旧实现直接写 SUCCESS，进程在"认领→执行"之间崩溃会导致：本地记录已是成功、但服务端重发被幂等窗口判重丢弃，
+     * 指令静默丢失却显示"已成功"。配合 [resetInFlightOnStartup] 清理残留 PENDING，保证崩溃的指令可被重发重放。
      */
     suspend fun tryClaim(
         msgId: String,
@@ -55,11 +59,24 @@ class CommandRepository @Inject constructor(
                 type = type.name,
                 receivedAt = receivedAt,
                 executedAt = null,
-                status = AckStatus.SUCCESS.name
+                status = AckStatus.PENDING.name
             )
         )
         true
     }
+
+    /**
+     * 启动清理（W51）：删除所有残留 [AckStatus.PENDING] 中间态记录。
+     *
+     * 这些记录意味着"认领了但没执行完就退出了"（进程崩溃 / 设备重启）。
+     * 不清的话服务端在 7 天幂等窗口内重发会被 tryClaim 判重丢弃，指令永久丢失。
+     * 清除后服务端重发会重新认领并执行，保证最终一致。
+     */
+    suspend fun resetInFlightOnStartup() {
+        runCatching { dao.deleteByStatus(AckStatus.PENDING.name) }
+            .onFailure { Logger.w(TAG) { "resetInFlightOnStartup failed: ${it.message}" } }
+    }
+    private val TAG = "CommandRepository"
 
     suspend fun recordResult(
         msgId: String,

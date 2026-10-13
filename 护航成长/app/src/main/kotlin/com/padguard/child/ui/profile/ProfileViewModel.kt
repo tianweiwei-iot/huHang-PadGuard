@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
 import android.os.Process
 import android.os.StatFs
 import androidx.lifecycle.ViewModel
@@ -104,6 +105,7 @@ class ProfileViewModel @Inject constructor(
                     deviceAdminActive = adminState != AdminState.NONE,
                     isDeviceOwner = adminState == AdminState.OWNER,
                     usageStatsGranted = isUsageStatsGranted(),
+                    batteryOptimizationWhitelisted = isBatteryOptimizationWhitelisted(),
                     // ---------- 应用管控自检 ----------
                     // 家长最常问的是"我禁了应用，孩子还是能打开"。答案其实由三件事共同决定，
                     // 缺一件就静默失效，而界面上原本一点提示都没有：
@@ -279,6 +281,17 @@ class ProfileViewModel @Inject constructor(
     }
 
     /**
+     * D5（L-CH-08）：真实检测电池优化白名单状态。
+     * isIgnoringBatteryOptimizations 在 API 23+ 可用；个别 OEM 定制ROM 可能抛异常，
+     * 此时按"未加白名单"处理（引导用户去确认，比假装已豁免安全）。
+     */
+    private fun isBatteryOptimizationWhitelisted(): Boolean {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
+        return runCatching { pm.isIgnoringBatteryOptimizations(context.packageName) }
+            .getOrDefault(false)
+    }
+
+    /**
      * 操作密码闸门检查：供「我的」页中需要改动系统设置（如开启操作闸门无障碍服务）的入口调用。
      *
      * 返回 `true` 表示可继续（未启用密码 / 处于解锁窗口）；`false` 表示已拉起解锁界面、
@@ -323,6 +336,12 @@ data class ProfileUiState(
     val deviceAdminActive: Boolean = false,
     val isDeviceOwner: Boolean = false,
     val usageStatsGranted: Boolean = false,
+    /**
+     * D5（L-CH-08）：本应用是否已在电池优化白名单里。
+     * 不在名单时息屏进 Doze，后台心跳/定位/推送被冻结，"每晚脱管"。
+     * 必须读真实状态 —— 写死 false 会让已加白名单的设备也显示"未开启"（假状态）。
+     */
+    val batteryOptimizationWhitelisted: Boolean = false,
     /** 当前生效的应用名单模式（黑名单 / 白名单） */
     val appListModeLabel: String = "黑名单",
     /** 名单条数；0 表示家长端还没有下发任何应用管控配置 */

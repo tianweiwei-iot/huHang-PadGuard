@@ -154,6 +154,16 @@ data class CommandAck(
 
 @Serializable
 enum class AckStatus {
+    /**
+     * 已认领但尚未执行完毕（W51 新增的中间态）。
+     *
+     * 旧实现在 [com.padguard.core.data.repository.CommandRepository.tryClaim] 阶段就直接写 SUCCESS，
+     * 导致进程在"认领→执行"之间崩溃时，本地记录已是 SUCCESS、但服务端因 7 天幂等窗口把重发指令判重丢弃，
+     * 指令静默丢失、本地却显示"已成功"。现认领只写 PENDING，[recordResult] 才置终态；
+     * 启动时会清理残留 PENDING 使其可被服务端重发重新认领。
+     */
+    PENDING,
+
     SUCCESS,
 
     /** 执行失败，可重试 */

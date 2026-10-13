@@ -55,8 +55,13 @@ class MinorModeEnforcer @Inject constructor(
      * 判定当前是否处于宵禁。
      *
      * @param atMillis 判定时刻，默认取服务端校准后的墙钟（与"晚上 10 点"语义一致）
+     * @param timezone 策略时区（W36 修复）：旧实现用 [ZoneId.systemDefault]（设备本地时区），
+     *   孩子改时区即可令宵禁整体偏移（如 UTC-8 偏 14 小时），非 DO 设备完全可绕。
+     *   现统一用 [com.padguard.core.data.model.policy.SchedulePolicy.timezone]
+     *   （经 `PolicyPackage.schedule.timezone` 取到，服务端随策略包下发），
+     *   与 [com.padguard.core.engine.schedule.ScheduleEvaluator] 同一口径。
      */
-    fun evaluate(minorMode: MinorModePolicy, atMillis: Long = timeProvider.now()): MinorModeVerdict {
+    fun evaluate(minorMode: MinorModePolicy, atMillis: Long = timeProvider.now(), timezone: String = "Asia/Shanghai"): MinorModeVerdict {
         if (!minorMode.enabled) return MinorModeVerdict.Off
         if (!minorMode.curfewEnabled) return MinorModeVerdict.Active
 
@@ -67,7 +72,12 @@ class MinorModeEnforcer @Inject constructor(
             return MinorModeVerdict.Active
         }
 
-        val now = LocalDateTime.ofInstant(Instant.ofEpochMilli(atMillis), ZoneId.systemDefault())
+        // W36：时区以策略为准，而非设备本地时区，避免孩子改时区绕过宵禁。
+        val zone = runCatching { ZoneId.of(timezone) }.getOrElse {
+            Logger.w(TAG) { "invalid timezone $timezone, fallback to system default" }
+            ZoneId.systemDefault()
+        }
+        val now = LocalDateTime.ofInstant(Instant.ofEpochMilli(atMillis), zone)
         val nowMinutes = now.hour * 60 + now.minute
         // 区间判定复用 [MinorModePolicy.isCurfewAt]：首页与锁机判定共用同一份口径，
         // 避免"首页显示可用、设备却锁着"这种自相矛盾。
@@ -80,7 +90,7 @@ class MinorModeEnforcer @Inject constructor(
         } else {
             now.toLocalDate().atTime(end / 60, end % 60)
         }
-        val untilMillis = endDateTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val untilMillis = endDateTime.atZone(zone).toInstant().toEpochMilli()
 
         return MinorModeVerdict.Curfew(
             start = minorMode.effectiveCurfewStart(),

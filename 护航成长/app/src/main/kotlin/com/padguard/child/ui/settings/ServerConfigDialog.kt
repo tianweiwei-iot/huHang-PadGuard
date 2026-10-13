@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,6 +13,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,13 +41,14 @@ fun ServerConfigDialog(
     var host by remember { mutableStateOf(cfg.host) }
     var port by remember { mutableStateOf(cfg.port) }
     var path by remember { mutableStateOf(cfg.path) }
+    var scheme by remember { mutableStateOf(cfg.scheme) }
     var error by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
             TextButton(onClick = {
-                val built = buildServerConfig(host, port, path)
+                val built = buildServerConfig(host, port, path, scheme)
                 if (built == null) {
                     error = "请填写有效的服务器地址与端口（1–65535）"
                     return@TextButton
@@ -88,7 +92,25 @@ fun ServerConfigDialog(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 )
-                val preview = buildServerConfig(host, port, path)
+                // 协议选择：默认回显解析出的 scheme（用户若原本填的是 https，必须保留，不能静默降级成明文 http）
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    listOf("http" to "HTTP", "https" to "HTTPS").forEach { (value, label) ->
+                        val selected = scheme == value
+                        OutlinedButton(
+                            onClick = { scheme = value; error = null },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surface
+                            )
+                        ) { Text(label) }
+                    }
+                }
+
+                val preview = buildServerConfig(host, port, path, scheme)
                 Text(
                     text = "完整地址：${preview ?: "（请补全地址与端口）"}",
                     style = MaterialTheme.typography.bodySmall,
@@ -113,29 +135,41 @@ fun ServerConfigDialog(
 
 /** 把完整 baseUrl 解析成 地址 / 端口 / 前缀，供高级设置弹窗回显。 */
 private fun parseServerConfig(raw: String): ServerConfig {
-    val noScheme = raw.trim().removePrefix("https://").removePrefix("http://")
+    val trimmed = raw.trim()
+    // 先判定协议：用户若填了 https://，解析后必须把 scheme 记下来，
+    // 否则 buildServerConfig 一律回写 http://，等于把加密链路悄悄降级成明文。
+    val scheme = when {
+        trimmed.startsWith("https://", ignoreCase = true) -> "https"
+        trimmed.startsWith("http://", ignoreCase = true) -> "http"
+        else -> "http"
+    }
+    val noScheme = trimmed.removePrefix("https://").removePrefix("http://")
     val slash = noScheme.indexOf('/')
     val authority = if (slash >= 0) noScheme.substring(0, slash) else noScheme
     val pathPart = if (slash >= 0) noScheme.substring(slash) else "/"
     val colon = authority.indexOf(':')
     val host = if (colon >= 0) authority.substring(0, colon) else authority
     val port = if (colon >= 0) authority.substring(colon + 1) else "8090"
-    return ServerConfig(host = host, port = port, path = pathPart)
+    return ServerConfig(host = host, port = port, path = pathPart, scheme = scheme)
 }
 
 /** 由 地址 / 端口 / 前缀 拼回完整 baseUrl；任一不合法返回 null。 */
-private fun buildServerConfig(host: String, port: String, path: String): String? {
+private fun buildServerConfig(host: String, port: String, path: String, scheme: String = "http"): String? {
     val h = host.trim()
     if (h.isBlank()) return null
     val p = port.trim().toIntOrNull() ?: return null
     if (p <= 0 || p > 65535) return null
     val cleanPath = path.trim().trimStart('/').trimEnd('/').let { if (it.isBlank()) "" else "/$it" }
-    return "http://$h:$p$cleanPath/"
+    // 保留用户选择的协议；不允许凭空降级成 http（默认也是 http，仅当解析时就无 scheme 才落到 http）。
+    val s = if (scheme.equals("https", ignoreCase = true)) "https" else "http"
+    return "$s://$h:$p$cleanPath/"
 }
 
 /** 高级设置弹窗用的服务器配置拆分。 */
 private data class ServerConfig(
     val host: String = "",
     val port: String = "8090",
-    val path: String = "/api/v1"
+    val path: String = "/api/v1",
+    /** 协议：http 或 https。解析时保留用户原输入，保存时原样回写，避免 https 被悄悄降级成 http */
+    val scheme: String = "http"
 )

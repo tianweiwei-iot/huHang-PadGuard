@@ -92,18 +92,15 @@ class SystemLockEnforcer @Inject constructor(
                     admin.setGlobalSetting(Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, "0")
                 )
             } else {
-                // 解封方向必须对称恢复（含 debug 构建豁免的情况）：
-                // 早期版本把这两项清零后从不恢复，导致平板上开发者选项入口永久消失、
-                // USB 调试打不开，连 adb 都救不回来 —— 这是本次「救援缺口」的根因。
-                report.record(
-                    "systemLock.devSettingsRestored",
-                    admin.setGlobalSetting(Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, "1")
-                )
-                report.record(
-                    "systemLock.adbRestored",
-                    admin.setGlobalSetting(Settings.Global.ADB_ENABLED, "1")
-                )
-                // 若历史上被关过 USB 数据信号（adb 物理断连），同样要恢复
+                // W49 修复（决策⑦-A）：解封方向**只清用户限制，绝不主动把 ADB / 开发者选项置 1**。
+                // 旧实现在策略"允许调试"（或 debug 构建豁免）时主动 setGlobalSetting(ADB_ENABLED,"1")，
+                // 等于孩子插上 USB 就拿到了 adb，可卸载管控端、侧载白名单外应用，管控形同虚设；
+                // 还会让 TamperDetector 把自己开的 ADB 报成高危告警（告警流自我污染）。
+                // 现在解封仅移除 DISALLOW_DEBUGGING_FEATURES 用户限制（见上方 line 81），
+                // ADB / 开发者选项是否开启完全交由设备/家长手动决定，管控端不替孩子开。
+                //
+                // USB 数据信号只恢复物理连通（不启用 adb）：历史上若被关过则恢复，
+                // 否则保持设备现状。它不影响 ADB_ENABLED 开关，不构成越权。
                 report.record(
                     "systemLock.usbSignalingRestored",
                     admin.setUsbDataSignaling(enabled = true)

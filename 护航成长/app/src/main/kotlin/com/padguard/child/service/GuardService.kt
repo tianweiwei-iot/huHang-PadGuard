@@ -21,6 +21,7 @@ import androidx.core.content.ContextCompat
 import com.padguard.child.MainActivity
 import com.padguard.child.R
 import com.padguard.child.capture.CaptureConsentPrompter
+import com.padguard.child.capture.MediaUploadRetry
 import com.padguard.child.capture.PhotoCapture
 import com.padguard.child.capture.ScreenCaptureService
 import com.padguard.child.time.TimeOffsetPrefs
@@ -49,6 +50,7 @@ import com.padguard.core.data.model.Heartbeat
 import com.padguard.core.data.model.LogType
 import com.padguard.core.data.db.ParentMessageEntity
 import com.padguard.core.data.repository.AuthRepository
+import com.padguard.core.data.repository.CommandRepository
 import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.data.repository.MessageRepository
 import com.padguard.core.data.repository.PolicyRepository
@@ -137,6 +139,7 @@ class GuardService : Service() {
 
     @Inject lateinit var locationAutoReporter: LocationAutoReporter
     @Inject lateinit var appInventory: AppInventoryCollector
+    @Inject lateinit var commandRepository: CommandRepository
     /** 应用管控策略的本地镜像，供无障碍服务在非 DO 设备上做降级拦截 */
     @Inject lateinit var appGuardStore: AppGuardPolicyStore
     /** 锁屏呈现统一入口：前台走 Activity、后台走悬浮层（后台启动 Activity 会被系统拦截） */
@@ -153,6 +156,8 @@ class GuardService : Service() {
     @Inject lateinit var watermark: WatermarkOverlay
     @Inject lateinit var credentials: CredentialStore
     @Inject lateinit var guardPassword: GuardPasswordManager
+    /** 媒体上传重试队列；解绑时随采集缓存一并清空（D6） */
+    @Inject lateinit var mediaRetry: MediaUploadRetry
 
     /**
      * 当前是否"已绑定"（由 [observeBinding] 维护）。
@@ -248,6 +253,9 @@ class GuardService : Service() {
         // 动态重启广播（屏幕亮起 / 网络恢复时立即把服务拉回，缩小脱管窗口）
         registerRestartReceiver()
         Logger.i(TAG) { "GuardService created, controlMode=${admin.refreshControlMode()}" }
+        // W51：启动清理残留 PENDING 指令（认领了但未执行完就退出），使其可被服务端重发重新认领，
+        // 避免崩溃的指令被 7 天幂等窗口判重丢弃而永久静默丢失。
+        scope.launch { runCatching { commandRepository.resetInFlightOnStartup() } }
         isRunning = true
         // 注册看门狗：进程被系统/清理工具杀掉后由系统侧周期拉起（START_STICKY 并不保证重建）。
         // 放在 onCreate 而不是绑定流程里：即便这台设备还没绑定，守护也要在，
@@ -1497,6 +1505,15 @@ class GuardService : Service() {
         // 只清设备绑定、保留家庭账号登录态：解绑后应直接回到绑定页重新绑定，
         // 而不是退回登录页（孩子不知道家长密码，会永久卡死）。
         authRepository.clearDeviceBinding()
+        // D6（L-CH-07）：解绑即释放操作闸门密码与本地软拦截策略缓存。
+        // 若不清，平板转手后旧家庭的操作密码（GuardPasswordManager）与 AppGuardPolicyStore
+        // 仍残留在新家庭设备上——孩子可凭旧密码绕过软拦截，隐私/管控承诺从第一天即不可信。
+        // 这两者在 :app 模块（core:data 拿不到），故在此显式补清；Room 私有表已由
+        // clearDeviceBinding 内部 wipePrivateDb 一并清掉。失败不阻断解绑主流程。
+        runCatching { guardPassword.clear() }
+            .onFailure { t -> Logger.e(TAG, t) { "guard password clear failed on unbind" } }
+        runCatching { appGuardStore.clear() }
+            .onFailure { t -> Logger.e(TAG, t) { "app guard policy store clear failed on unbind" } }
         // 解绑即释放全部管控痕迹 + 释放 Device Owner / 设备管理员：
         // 使孩子端真正"不受管控"，且管控系统/用户可常规卸载（清除 DO → 卸载）。
         // 必须放在 stopSelf 之前、且晚于 clearDeviceBinding（此时仍持 DO 权限，可正常撤销策略）。
@@ -1505,6 +1522,14 @@ class GuardService : Service() {
             .onFailure { t -> Logger.e(TAG, t) { "releaseControl failed on unbind" } }
         runCatching { ScreenCaptureService.stopScreenRecord(this) }
         runCatching { ScreenCaptureService.stopAudioRecord(this) }
+        // D6（L-CH-07）：清本机采集媒体残留。Room/DataStore/guard 密码之上，
+        // cacheDir 里的截屏/录屏/录音临时文件与未上传成功的重试队列同样是
+        // "旧家庭在本设备上的管控痕迹"——平板转手后旧家庭录音录像不可残留。
+        // 时序在 stop*Record 之后：确保没有正在写入的句柄再删文件。
+        runCatching { ScreenCaptureService.wipeLocalMedia(this) }
+            .onFailure { t -> Logger.e(TAG, t) { "capture cache wipe failed on unbind" } }
+        runCatching { mediaRetry.clearAll() }
+            .onFailure { t -> Logger.e(TAG, t) { "media retry queue clear failed on unbind" } }
         withContext(Dispatchers.Main) {
             runCatching {
                 startActivity(

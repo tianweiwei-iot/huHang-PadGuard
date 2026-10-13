@@ -1,6 +1,7 @@
 package com.padguard.child.guard
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -11,10 +12,13 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.padguard.core.common.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.security.MessageDigest
 import java.util.Base64
@@ -35,9 +39,17 @@ import javax.inject.Singleton
  * - 本端校验时把家长输入的明文再算一次 SHA-256 比对；
  * - 不引入盐：保证服务端下发的哈希与本地校验口径完全一致（盐会破坏跨设备一致性）。
  *
- * ## 解锁窗口
- * 家长在 [GuardUnlockActivity] 输对密码后调用 [unlock]，开启 10 分钟的允许窗口，
- * 期间安装/卸载/改设置被放行；超时自动重新锁定。这是「要改设备必须输入密码」的可操作形态。
+ * ## 解锁窗口（W34 修复）
+ * 旧实现只用 `System.currentTimeMillis()`（墙钟）记录解锁到期时间，孩子**回拨系统时间**
+ * 即可让 `now < unlockedUntil` 永远成立 → 永久解锁。现改为**双时钟**：
+ * - 单调时钟（`SystemClock.elapsedRealtime()`）为主，不受手动改时间影响；
+ * - 墙钟（`System.currentTimeMillis()`）为辅，防重启后单调时钟归零导致的"永久解锁"。
+ * 两者任一判定过期即视为过期（见 [isUnlocked] / [Snapshot.isUnlocked]），宁可提前恢复管控也不留真空。
+ *
+ * ## 主线程读取（W34 修复）
+ * 旧实现 `isUnlockedNow/isEnabledNow/isLockedOutNow` 用 `runBlocking(Dispatchers.IO)` 在主线程读 DataStore，
+ * 无障碍服务高频回调下易触发 ANR。现改为：初始化时订阅 DataStore Flow，把最新值写入 [@Volatile] 快照，
+ * 主线程方法只读快照，零挂起。
  */
 private val Context.guardDataStore: DataStore<Preferences> by preferencesDataStore(name = "padguard_guard")
 
@@ -49,43 +61,75 @@ class GuardPasswordManager @Inject constructor(
 
     private val KEY_HASH = stringPreferencesKey("guard_hash")
     private val KEY_ENABLED = booleanPreferencesKey("guard_enabled")
+    /** 解锁窗口到期（墙钟）。W34：与 elapsed 双时钟并用。 */
     private val KEY_UNLOCKED_UNTIL = longPreferencesKey("guard_unlocked_until")
+    /** 解锁窗口到期（单调时钟）。W34 新增：防回拨系统时间永久解锁。 */
+    private val KEY_UNLOCKED_UNTIL_ELAPSED = longPreferencesKey("guard_unlocked_until_elapsed")
     private val KEY_FAIL_COUNT = intPreferencesKey("guard_fail_count")
+    /** 试错锁定到期（墙钟）。W34：与 elapsed 双时钟并用。 */
     private val KEY_LOCKED_UNTIL = longPreferencesKey("guard_locked_until")
+    /** 试错锁定到期（单调时钟）。W34 新增。 */
+    private val KEY_LOCKED_UNTIL_ELAPSED = longPreferencesKey("guard_locked_until_elapsed")
 
     /** 解锁后允许的时长窗口（毫秒）。默认 10 分钟，足够家长完成一次改设置/装应用。 */
     var unlockWindowMs: Long = 10 * 60 * 1000L
 
     data class GuardState(val enabled: Boolean, val unlocked: Boolean)
 
+    /**
+     * 主线程安全的状态快照（W34）。由 init 中订阅 DataStore Flow 持续刷新，
+     * 所有 `*Now()` 方法只读它，绝不挂起。
+     */
+    @Volatile
+    private var snapshot = Snapshot()
+
+    private data class Snapshot(
+        val enabled: Boolean = false,
+        val unlockedUntilElapsed: Long = 0L,
+        val unlockedUntilWall: Long = 0L,
+        val lockedUntilElapsed: Long = 0L,
+        val lockedUntilWall: Long = 0L,
+        val failCount: Int = 0
+    ) {
+        fun isUnlocked(): Boolean {
+            if (!enabled) return false
+            // 双时钟：单调时钟为主（防改时间），墙钟为辅（防重启归零）。任一过期即失效。
+            return unlockedUntilElapsed > 0
+                && SystemClock.elapsedRealtime() < unlockedUntilElapsed
+                && System.currentTimeMillis() < unlockedUntilWall
+        }
+
+        fun isLockedOut(): Boolean {
+            if (lockedUntilElapsed <= 0) return false
+            return SystemClock.elapsedRealtime() < lockedUntilElapsed
+                && System.currentTimeMillis() < lockedUntilWall
+        }
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    init {
+        // 持续把 DataStore 最新值镜像到 @Volatile 快照，避免主线程 runBlocking 读（W34 ANR）。
+        scope.launch {
+            store.data.collect { prefs -> snapshot = snapshotFrom(prefs) }
+        }
+    }
+
     val state: Flow<GuardState> = store.data.map { prefs ->
         val enabled = prefs[KEY_ENABLED] ?: false
-        val until = prefs[KEY_UNLOCKED_UNTIL] ?: 0L
-        GuardState(enabled, enabled && System.currentTimeMillis() < until)
+        GuardState(enabled, isUnlocked(prefs))
     }
 
     /** 是否启用了操作密码（家长端已下发或本地设置） */
     suspend fun isEnabled(): Boolean = (store.data.first()[KEY_ENABLED] ?: false)
 
     /** 当前是否处于「已解锁」窗口内（解锁后才允许安装/卸载/改设置） */
-    suspend fun isUnlocked(): Boolean {
-        val prefs = store.data.first()
-        val enabled = prefs[KEY_ENABLED] ?: false
-        val until = prefs[KEY_UNLOCKED_UNTIL] ?: 0L
-        return enabled && System.currentTimeMillis() < until
-    }
+    suspend fun isUnlocked(): Boolean = isUnlocked(store.data.first())
 
-    /** 同步快捷读取：无障碍服务在主线程事件回调里用，避免挂起。 */
-    fun isUnlockedNow(): Boolean = runCatching {
-        val prefs = runBlocking(Dispatchers.IO) { store.data.first() }
-        val enabled = prefs[KEY_ENABLED] ?: false
-        val until = prefs[KEY_UNLOCKED_UNTIL] ?: 0L
-        enabled && System.currentTimeMillis() < until
-    }.getOrDefault(false)
+    /** 同步快捷读取：无障碍服务在主线程事件回调里用，避免挂起（W34：只读 @Volatile 快照）。 */
+    fun isUnlockedNow(): Boolean = snapshot.isUnlocked()
 
-    fun isEnabledNow(): Boolean = runCatching {
-        runBlocking(Dispatchers.IO) { store.data.first() }[KEY_ENABLED] ?: false
-    }.getOrDefault(false)
+    fun isEnabledNow(): Boolean = snapshot.enabled
 
     /** 服务端下发的密码哈希（SHA-256(明文)），直接落库，明文永不出网。 */
     suspend fun setPasswordHash(protocolHash: String) {
@@ -109,8 +153,10 @@ class GuardPasswordManager @Inject constructor(
             it[KEY_ENABLED] = false
             it[KEY_HASH] = ""
             it[KEY_UNLOCKED_UNTIL] = 0L
+            it[KEY_UNLOCKED_UNTIL_ELAPSED] = 0L
             it[KEY_FAIL_COUNT] = 0
             it[KEY_LOCKED_UNTIL] = 0L
+            it[KEY_LOCKED_UNTIL_ELAPSED] = 0L
         }
     }
 
@@ -127,6 +173,9 @@ class GuardPasswordManager @Inject constructor(
      *
      * 锁定期间即使密码正确也返回 false —— 否则可以"故意错 5 次锁住，
      * 等冷却后用同一个已知密码立刻通过"，限制形同虚设。
+     *
+     * ## 锁定计时（W34 修复）
+     * 锁定到期同样用双时钟（elapsed + wall），回拨系统时间无法提前解除锁定。
      */
     suspend fun verifyWithLimit(plain: String): VerifyResult {
         val prefs = store.data.first()
@@ -134,15 +183,18 @@ class GuardPasswordManager @Inject constructor(
         if (!enabled) return VerifyResult(false, 0, 0L)
 
         val now = System.currentTimeMillis()
-        val lockedUntil = prefs[KEY_LOCKED_UNTIL] ?: 0L
-        if (now < lockedUntil) {
-            return VerifyResult(false, 0, lockedUntil - now)
+        val elapsed = SystemClock.elapsedRealtime()
+        val lockedUntilE = prefs[KEY_LOCKED_UNTIL_ELAPSED] ?: 0L
+        val lockedUntilW = prefs[KEY_LOCKED_UNTIL] ?: 0L
+        if (lockedUntilE > 0 && elapsed < lockedUntilE && now < lockedUntilW) {
+            return VerifyResult(false, 0, (lockedUntilW - now).coerceAtLeast(0L))
         }
 
         val stored = prefs[KEY_HASH].orEmpty()
         if (stored.isNotEmpty() && hash(plain) == stored) {
             store.edit {
                 it[KEY_FAIL_COUNT] = 0
+                it[KEY_LOCKED_UNTIL_ELAPSED] = 0L
                 it[KEY_LOCKED_UNTIL] = 0L
             }
             return VerifyResult(true, MAX_ATTEMPTS, 0L)
@@ -152,7 +204,10 @@ class GuardPasswordManager @Inject constructor(
         val remaining = (MAX_ATTEMPTS - fails).coerceAtLeast(0)
         store.edit {
             it[KEY_FAIL_COUNT] = fails
-            if (remaining == 0) it[KEY_LOCKED_UNTIL] = now + LOCKOUT_MS
+            if (remaining == 0) {
+                it[KEY_LOCKED_UNTIL_ELAPSED] = SystemClock.elapsedRealtime() + LOCKOUT_MS
+                it[KEY_LOCKED_UNTIL] = System.currentTimeMillis() + LOCKOUT_MS
+            }
         }
         Logger.w(TAG) { "guard password wrong: fail=$fails remaining=$remaining locked=${remaining == 0}" }
         return VerifyResult(false, remaining, if (remaining == 0) LOCKOUT_MS else 0L)
@@ -166,23 +221,27 @@ class GuardPasswordManager @Inject constructor(
         val lockedForMs: Long
     )
 
-    /** 同步读：当前是否处于"失败过多锁定期"，无障碍回调用 */
-    fun isLockedOutNow(): Boolean = runCatching {
-        val prefs = runBlocking(Dispatchers.IO) { store.data.first() }
-        System.currentTimeMillis() < (prefs[KEY_LOCKED_UNTIL] ?: 0L)
-    }.getOrDefault(false)
+    /** 同步读：当前是否处于"失败过多锁定期"，无障碍回调用（W34：只读 @Volatile 快照）。 */
+    fun isLockedOutNow(): Boolean = snapshot.isLockedOut()
 
-    /** 解锁：开启一个时间窗口，期间允许安装/卸载/改设置。 */
+    /** 解锁：开启一个时间窗口，期间允许安装/卸载/改设置（W34：双时钟写入）。 */
     suspend fun unlock() {
-        store.edit { it[KEY_UNLOCKED_UNTIL] = System.currentTimeMillis() + unlockWindowMs }
+        val now = System.currentTimeMillis()
+        val elapsed = SystemClock.elapsedRealtime()
+        store.edit {
+            it[KEY_UNLOCKED_UNTIL_ELAPSED] = elapsed + unlockWindowMs
+            it[KEY_UNLOCKED_UNTIL] = now + unlockWindowMs
+        }
     }
 
     /** 立即重新锁定。 */
     suspend fun lockNow() {
         store.edit {
             it[KEY_UNLOCKED_UNTIL] = 0L
+            it[KEY_UNLOCKED_UNTIL_ELAPSED] = 0L
             it[KEY_FAIL_COUNT] = 0
             it[KEY_LOCKED_UNTIL] = 0L
+            it[KEY_LOCKED_UNTIL_ELAPSED] = 0L
         }
     }
 
@@ -193,6 +252,31 @@ class GuardPasswordManager @Inject constructor(
                 .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
         )
     }
+
+    private fun isUnlocked(prefs: Preferences): Boolean {
+        val enabled = prefs[KEY_ENABLED] ?: false
+        if (!enabled) return false
+        val untilElapsed = prefs[KEY_UNLOCKED_UNTIL_ELAPSED] ?: 0L
+        val untilWall = prefs[KEY_UNLOCKED_UNTIL] ?: 0L
+        return untilElapsed > 0
+            && SystemClock.elapsedRealtime() < untilElapsed
+            && System.currentTimeMillis() < untilWall
+    }
+
+    /**
+     * 把 DataStore 首选项映射为 [Snapshot]（W34）。
+     *
+     * 必须是类内成员：[Snapshot] 是私有嵌套类，顶层函数看不见它；
+     * 同时直接用 [KEY_] 常量而不是重复键名字符串——两处字符串漂移过一回（W23 同款事故）。
+     */
+    private fun snapshotFrom(prefs: Preferences): Snapshot = Snapshot(
+        enabled = prefs[KEY_ENABLED] ?: false,
+        unlockedUntilElapsed = prefs[KEY_UNLOCKED_UNTIL_ELAPSED] ?: 0L,
+        unlockedUntilWall = prefs[KEY_UNLOCKED_UNTIL] ?: 0L,
+        lockedUntilElapsed = prefs[KEY_LOCKED_UNTIL_ELAPSED] ?: 0L,
+        lockedUntilWall = prefs[KEY_LOCKED_UNTIL] ?: 0L,
+        failCount = prefs[KEY_FAIL_COUNT] ?: 0
+    )
 
     private fun hash(plain: String): String {
         val md = MessageDigest.getInstance("SHA-256")

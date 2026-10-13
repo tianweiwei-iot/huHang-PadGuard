@@ -71,6 +71,13 @@
       "孩子桌面上能打开的应用"，用 <queries> 声明启动器入口即可完整覆盖，
       无需 QUERY_ALL_PACKAGES（上架高危权限）。
       同时声明 LEANBACK_LAUNCHER 以兼容平板/电视的桌面入口。
+
+      W50：浏览器收口（WebEnforcer.installedBrowsers）用 ACTION_VIEW + https 链接
+      枚举系统里能处理网页的应用，targetSdk 30+ 起同样受包可见性限制约束 ——
+      缺了这条 VIEW/BROWSABLE 声明，queryIntentActivities 恒返回空集，
+      挂起非许可浏览器静默失效（日志只有一行 warn，管控端与家长端都看不到）。
+      DO 设备通常不受此限（设备所有者可见性更宽），但空集时 WebEnforcer 会如实
+      markUnsupported 上报，不再静默。
     -->
     <queries>
         <intent>
@@ -80,6 +87,12 @@
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+            <data android:scheme="http" />
         </intent>
     </queries>
 
@@ -130,6 +143,19 @@
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
+
+    <!--
+      **D4（L-CH-02，上线阻塞）**：MQTT 心跳保活依赖精确闹钟。
+      AlarmPingSender 用 setExactAndAllowWhileIdle 在 Doze 白名单窗口里唤醒进程发 PINGREQ，
+      targetSdk 35 起该接口**必须**持有 SCHEDULE_EXACT_ALARM，否则抛 SecurityException。
+      原 schedule() 被 runCatching 吞掉该异常 → 息屏进入 Doze 后心跳永不再触发 →
+      Broker 约 135s 判设备掉线 → **每晚息屏即脱管，"锁屏没反应"成首批投诉主源**。
+      双保险：①该权限为 normal 级别（随安装授予，无需特殊申报，区别于被刻意排除的
+      REQUEST_IGNORE_BATTERY_OPTIMIZATIONS），此处声明；②AlarmPingSender.schedule()
+      捕获 SecurityException 降级 setAndAllowWhileIdle —— Android 12+ 用户可撤销
+      「闹钟和提醒」，此时时机变钝但心跳不断，不再静默死亡。
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!--
       锁屏/拦截覆盖层不需要 SYSTEM_ALERT_WINDOW：
