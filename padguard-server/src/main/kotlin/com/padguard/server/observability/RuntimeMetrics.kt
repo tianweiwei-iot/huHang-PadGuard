@@ -5,6 +5,7 @@ import ch.qos.logback.classic.LoggerContext
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.AppenderBase
 import com.padguard.server.dto.ServerMetrics
+import com.padguard.server.common.SERVER_ZONE_ID
 import jakarta.annotation.PostConstruct
 import jakarta.servlet.FilterChain
 import jakarta.servlet.http.HttpServletRequest
@@ -18,7 +19,7 @@ import java.time.format.DateTimeFormatter
 import java.util.ArrayDeque
 
 // W81：统一时区为 Asia/Shanghai，避免宿主机 TZ 为 UTC 时日志时间戳偏 8 小时（docker 未锁 TZ 时同样漂移）
-private val HHMMSS: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.of("Asia/Shanghai"))
+private val HHMMSS: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss").withZone(SERVER_ZONE_ID)
 
 /**
  * HTTP 请求量 / 错误率采集（60 秒滑动窗口）。

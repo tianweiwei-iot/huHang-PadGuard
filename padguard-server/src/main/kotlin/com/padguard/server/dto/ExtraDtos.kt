@@ -21,9 +21,6 @@ data class ScreenshotRequestResult(
 data class TaskAcceptedDto(
     val taskId: String, val kind: String, val status: String, val requestedAt: Long
 )
-data class MediaResultDto(
-    val url: String, val mimeType: String, val size: Long, val durationSeconds: Int? = null
-)
 
 /**
  * 截图 / 媒体文件上传回执。
@@ -59,7 +56,7 @@ data class ScreenRecordTaskDto(
 /**
  * 媒体任务（录屏 / 录音）的完整状态，供家长端轮询"停止后拿结果"。
  *
- * 之前只有 Service 层的 [MediaResultDto]，**没有任何 HTTP 接口暴露它** ——
+ * 之前相关结果只有 Service 层内部 DTO，**没有任何 HTTP 接口暴露它** ——
  * 家长端点"停止录屏"后只能拿到 PENDING 的受理回执，永远查不到文件地址，
  * 结果就是"录屏明明录好了，家长端却没有可播放的入口"。
  * 这里把任务状态与文件地址合并成一个 DTO 一次性返回。

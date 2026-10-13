@@ -19,8 +19,11 @@ android {
         applicationId = "com.padguard.child"
         minSdk = project.findProperty("MIN_SDK").toString().toInt()
         targetSdk = project.findProperty("TARGET_SDK").toString().toInt()
-        versionCode = project.findProperty("VERSION_CODE").toString().toInt()
-        versionName = project.findProperty("VERSION_NAME").toString()
+        // W80：属性缺失时不抛裸 NPE——下方 versionCode 单调守卫会以可读的
+        // "versionCode 小于已发布基线" 报错拦住构建，比 Kotlin 空指针栈友好。
+        // 默认值取历史首发版本（低于 baseline，保证缺失即被守卫拦下）。
+        versionCode = project.findProperty("VERSION_CODE")?.toString()?.toInt() ?: 2
+        versionName = project.findProperty("VERSION_NAME")?.toString() ?: "1.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }

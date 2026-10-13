@@ -221,18 +221,28 @@ class AdminServiceTest {
         // 同事新增依赖：邮件（enabled=false 永不发送）、服务档案、可观测性 —— 仅满足构造，不在本测试触发。
         val mailService = MailService(JavaMailSenderImpl(), false, "test@padguard.local", "")
         val serverProfileService = ServerProfileService(settings, adminPerm, objectMapper)
+        val requestMetrics = RequestMetrics()
+        val runtimeLogRing = RuntimeLogRing()
+        // W22：AdminService 新增 env 依赖（示例支付仅允许开发 profile 开启）。
+        // 默认无 active profile，等价于生产口径；activeProfiles 参数供 dev 用例注入。
+        val env = org.springframework.mock.env.MockEnvironment().apply {
+            setActiveProfiles(*activeProfiles.toTypedArray())
+        }
+
+        // W25：AdminService 已拆分为多个领域 @Service，门面仅做委托。测试直接构造各子服务，
+        // 公开方法签名与原本一致（f.svc.* 调用无需改动）。
+        val authS = AdminAuthService(admins, jwt)
+        val auditS = AdminAuditService(adminPerm, admins, users, auditLogs, alerts, auditService)
+        val billingS = AdminBillingService(subs, orders, users, billing, adminPerm, auditService)
+        val rbacS = AdminRbacService(admins, adminPerm, auditService, mailService, settings, objectMapper)
+        val settingsS = AdminSettingsService(adminPerm, settings, billing, objectMapper, auditService, env)
+        val monitorS = AdminServerMonitorService(adminPerm, requestMetrics, runtimeLogRing, dataSource, serverProfileService)
+        val parentS = AdminParentService(users, subs, devices, adminPerm, billing, mailService, billingS, auditService, settings, objectMapper)
+        val deviceS = AdminDeviceService(devices, users, commandService, adminPerm, auditService)
+        val dashboardS = AdminDashboardService(users, devices, subs, orders, alerts, adminPerm, auditS, requestMetrics, runtimeLogRing, dataSource, serverProfileService)
 
         val svc = AdminService(
-            users, devices, subs, orders,
-            admins, overrides, alerts, auditLogs, settings,
-            billing, commandService, jwt, adminPerm, auditService, mailService,
-            objectMapper, dataSource,
-            // W22：AdminService 新增 env 依赖（示例支付仅允许开发 profile 开启）。
-            // 默认无 active profile，等价于生产口径；activeProfiles 参数供 dev 用例注入。
-            org.springframework.mock.env.MockEnvironment().apply {
-                setActiveProfiles(*activeProfiles.toTypedArray())
-            },
-            serverProfileService, RequestMetrics(), RuntimeLogRing()
+            authS, dashboardS, parentS, deviceS, billingS, rbacS, monitorS, auditS, settingsS
         )
 
         // 种入管理员：超管 / 运营 / 审计 / 财务 / 已停用超管

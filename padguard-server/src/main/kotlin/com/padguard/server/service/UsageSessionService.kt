@@ -2,6 +2,7 @@ package com.padguard.server.service
 
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
+import com.padguard.server.common.SERVER_ZONE_ID
 import com.padguard.server.domain.DeviceSetting
 import com.padguard.server.domain.UsageSession
 import com.padguard.server.dto.UsageSessionDto
@@ -33,7 +34,7 @@ class UsageSessionService(
     private val mqttGateway: MqttGateway
 ) {
     private val log = LoggerFactory.getLogger(UsageSessionService::class.java)
-    private val zoneId = ZoneId.of("Asia/Shanghai")
+    private val zoneId = SERVER_ZONE_ID
 
     private fun dayKey(epochMillis: Long): String =
         Instant.ofEpochMilli(epochMillis).atZone(zoneId).toLocalDate().toString()

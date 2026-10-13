@@ -295,18 +295,6 @@ class MonitorService(
         )
     }
 
-    /** 取媒体任务结果（停止录音/录屏后回传文件地址用） */
-    fun getMediaResult(taskId: String): MediaResultDto {
-        val task = mediaTaskRepository.findById(taskId).orElse(null)
-            ?: throw BizException(ParentErr.PARAM_ERROR, "任务不存在", Audience.PARENT)
-        return MediaResultDto(
-            url = task.url ?: "",
-            mimeType = task.mimeType ?: "",
-            size = task.size ?: 0L,
-            durationSeconds = task.durationSeconds
-        )
-    }
-
     private fun pushScreenshotReady(deviceId: String, shot: Screenshot) {
         deviceRepository.findById(deviceId).ifPresent { dev ->
             dev.userId?.let { uid ->

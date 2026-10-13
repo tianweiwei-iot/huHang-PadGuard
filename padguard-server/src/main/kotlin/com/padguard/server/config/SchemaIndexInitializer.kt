@@ -89,7 +89,14 @@ class SchemaIndexInitializer(
             // 媒体任务按「设备 + 状态」轮询取待处理任务（PENDING 优先）
             "CREATE INDEX IF NOT EXISTS idx_media_tasks_device_status ON media_tasks (device_id, status)",
             // 使用时长会话按「日」批量扫描（每日额度重置 / 统计）
-            "CREATE INDEX IF NOT EXISTS idx_usage_sessions_day ON usage_sessions (day_key)"
+            "CREATE INDEX IF NOT EXISTS idx_usage_sessions_day ON usage_sessions (day_key)",
+
+            // W32 续：以下两张表有明确的查询路径，同样补上——
+            // 设备上传文件保留期清理按「设备 + 创建时间」取早于阈值的记录
+            // （E11 RetentionCleanup，无索引时每次清理全表扫 uploaded_files）
+            "CREATE INDEX IF NOT EXISTS idx_uploaded_files_device_created ON uploaded_files (device_id, created_at)",
+            // 解锁工单按「设备 + 状态」轮询（孩子端提交后家长端 10s 级轮询待审批列表）
+            "CREATE INDEX IF NOT EXISTS idx_unlock_tickets_device_status ON unlock_tickets (device_id, status)"
         )
     }
 }

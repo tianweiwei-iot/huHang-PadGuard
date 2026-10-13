@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.RestController
 import java.sql.Connection
 import java.time.Instant
 import java.time.ZoneId
+import com.padguard.server.common.SERVER_ZONE_ID
 import java.time.format.DateTimeFormatter
 import javax.sql.DataSource
 
@@ -82,5 +83,5 @@ class HealthController(private val dataSource: DataSource) {
 
     private fun formatTime(millis: Long): String =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
-            .format(Instant.ofEpochMilli(millis).atZone(ZoneId.of("Asia/Shanghai")))
+            .format(Instant.ofEpochMilli(millis).atZone(SERVER_ZONE_ID))
 }

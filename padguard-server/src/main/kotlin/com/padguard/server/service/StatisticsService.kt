@@ -3,6 +3,7 @@ package com.padguard.server.service
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
+import com.padguard.server.common.SERVER_ZONE_ID
 import com.padguard.server.domain.UsageLog
 import com.padguard.server.dto.*
 import com.padguard.server.repository.AlertRepository
@@ -33,7 +34,7 @@ class StatisticsService(
     private val objectMapper: ObjectMapper,
     private val usageSessionService: UsageSessionService
 ) {
-    private val zone = ZoneId.of("Asia/Shanghai")
+    private val zone = SERVER_ZONE_ID
 
     /**
      * 今日用量缓存：孩子端每 10 秒上行一次，家长端既有 10 秒轮询兜底、又新增 WS 实时推送，

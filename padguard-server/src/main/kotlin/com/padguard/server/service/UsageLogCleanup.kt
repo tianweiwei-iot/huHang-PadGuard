@@ -6,6 +6,7 @@ import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import java.time.Instant
 import java.time.ZoneId
+import com.padguard.server.common.SERVER_ZONE_ID
 import java.time.format.DateTimeFormatter
 
 /**
@@ -31,7 +32,7 @@ class UsageLogCleanup(
     private val usageLogRepository: UsageLogRepository
 ) {
     private val log = LoggerFactory.getLogger(UsageLogCleanup::class.java)
-    private val zone = ZoneId.of("Asia/Shanghai")
+    private val zone = SERVER_ZONE_ID
     private val fmt = DateTimeFormatter.ISO_LOCAL_DATE
 
     @Scheduled(cron = "0 0 4 * * *")
