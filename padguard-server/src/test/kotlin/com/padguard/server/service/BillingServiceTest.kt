@@ -201,6 +201,22 @@ class BillingServiceTest {
         assertFalse(f.svc.plans().any { it.key == Plan.PERMANENT.key }, "收银台套餐列表不应包含永久会员")
     }
 
+    @Test
+    fun `createOrder rejects non-purchasable plans such as PERMANENT to prevent free permanent membership`() {
+        val f = service()
+        // 回归：createOrder 此前只拦截 TRIAL，PERMANENT 仍可被下单成 ¥0 订单，
+        // 经 mockPay/markPaid 即开通永久会员 —— 绕过收费后门。修复后应一律拒绝。
+        val ex = assertThrows(BizException::class.java) {
+            f.svc.createOrder("parent-1", CreateOrderRequest(plan = Plan.PERMANENT.key, channel = "MANUAL"))
+        }
+        assertEquals(ParentErr.PARAM_ERROR, ex.code)
+
+        // 正向对照：可购买套餐仍应能正常下单
+        val ok = f.svc.createOrder("parent-1", CreateOrderRequest(plan = "MONTHLY", channel = "MANUAL"))
+        assertEquals("MONTHLY", f.orders.table.values.first().plan, "订单应记录所购套餐")
+        assertEquals(3800, ok.amountFen)
+    }
+
     // ------------------------------------------------------------ 付费闸门
 
     @Test

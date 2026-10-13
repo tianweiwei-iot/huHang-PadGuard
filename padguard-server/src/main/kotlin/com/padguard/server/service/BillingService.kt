@@ -330,8 +330,12 @@ class BillingService(
     fun createOrder(userId: String, req: CreateOrderRequest): CreateOrderResponse {
         val plan = Plan.of(req.plan)
             ?: throw BizException(ParentErr.PARAM_ERROR, "套餐不存在", Audience.PARENT)
-        if (plan == Plan.TRIAL) {
-            throw BizException(ParentErr.PARAM_ERROR, "试用期无需下单", Audience.PARENT)
+        // 只接受收银台可购买套餐：TRIAL（无需下单）与 PERMANENT（一次性后台开通，不参与下单/
+        // 金额计算，否则可被 ¥0 下单 + mockPay 白嫖永久会员）都不在此列。
+        // 此前只拦截了 TRIAL，PERMANENT 仍能下单 —— 一个 `plan=PERMANENT` 的请求即可生成 ¥0 订单，
+        // 经 mockPay / markPaid 直接开通永久会员，是典型"绕过收费"后门。
+        if (plan !in Plan.purchasable()) {
+            throw BizException(ParentErr.PARAM_ERROR, "该套餐不可购买", Audience.PARENT)
         }
         val channel = req.channel?.let { PayChannel.of(it) }
             ?: throw BizException(ParentErr.PARAM_ERROR, "请选择支付渠道", Audience.PARENT)

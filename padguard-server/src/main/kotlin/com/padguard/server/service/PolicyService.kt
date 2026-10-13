@@ -95,8 +95,12 @@ class PolicyService(
             "curfewEnabled" to (req.curfewEnabled ?: true),
             "curfewStart" to (req.curfewStart?.takeIf { it.isNotBlank() } ?: def.curfewStart),
             "curfewEnd" to (req.curfewEnd?.takeIf { it.isNotBlank() } ?: def.curfewEnd),
-            "dailyLimitMinutes" to (req.dailyLimitMinutes ?: 0),
-            "weekendLimitMinutes" to (req.weekendLimitMinutes ?: 0),
+            // 家长未显式给时长时必须回落到分龄默认（见 MinorModeRequest 注释：null = 沿用分龄默认），
+            // 绝不能写 0 —— 0 会被孩子端当成"整天禁用"，与"用默认档位"的语义完全相反，
+            // 且会让下面 minorModeOf 的 `?: def.dailyLimitMinutes` 兜底失效（0 不是 null，兜底不触发）。
+            // 显式传 0 仍然保留（家长真的要锁死设备）。
+            "dailyLimitMinutes" to (req.dailyLimitMinutes ?: def.dailyLimitMinutes),
+            "weekendLimitMinutes" to (req.weekendLimitMinutes ?: def.dailyLimitMinutes),
             "continuousMinutes" to (req.continuousMinutes ?: 0),
             "restMinutes" to (req.restMinutes ?: 0),
             // 豁免是"今晚"这类一次性动作，只在本次请求带 exemptMinutes 时写入。

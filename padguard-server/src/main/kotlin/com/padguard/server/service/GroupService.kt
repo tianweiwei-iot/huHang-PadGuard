@@ -37,10 +37,22 @@ class GroupService(
         return DeviceGroupDto(g.id, g.name, g.sceneType, 0)
     }
 
-    /** 校验设备归属并返回设备，供分配使用 */
-    fun requireOwnedDevice(ownerUserId: String, deviceId: String) =
-        deviceRepository.findById(deviceId).orElse(null)
+    /**
+     * 校验设备存在**且归属** [ownerUserId]，返回设备实体。
+     *
+     * 注意：方法名带 "Owned"，语义必须是"归属校验"而非仅"存在校验"。
+     * 早期实现只查了存在性，等于一个不带鉴权的 `getDevice`——任何登录家长都能拿着别人的
+     * deviceId 走到后续写操作（如把他人设备挪进自己的分组），是典型的越权（IDOR）隐患。
+     * 这里与 [requireOwnedGroup] 对齐：归属不符一律按"不存在"处理，不泄露设备归属。
+     */
+    fun requireOwnedDevice(ownerUserId: String, deviceId: String): com.padguard.server.domain.Device {
+        val dev = deviceRepository.findById(deviceId).orElse(null)
             ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+        if (dev.userId != ownerUserId) {
+            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+        }
+        return dev
+    }
 
     fun requireOwnedGroup(ownerUserId: String, groupId: String): DeviceGroup {
         val g = groupRepository.findById(groupId).orElse(null)
