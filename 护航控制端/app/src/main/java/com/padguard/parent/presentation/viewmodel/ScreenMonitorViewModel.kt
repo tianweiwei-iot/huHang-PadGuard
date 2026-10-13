@@ -335,15 +335,22 @@ class ScreenMonitorViewModel @Inject constructor(
 
     /**
      * 下发截屏指令并轮询到 READY。
-     * @return READY 的截图；超过等待上限仍 PENDING（被控端离线/未授权）时返回 null
+     * @return 本次请求产生的截图；超过等待上限仍 PENDING（被控端离线/未授权）时返回 null
+     *
+     * W57 修复：只认**本次请求之后**产生的图。
+     * 旧实现每轮轮询都直接取"最新一张 READY"——若历史上截过屏，第一次轮询就会把
+     * 上一轮的旧图（capturedAt 早于本次请求）返回并存入相册，家长以为截的是当下画面，
+     * 实际可能是几分钟前的旧画面。现在以服务端受理时间戳（ack.capturedAt，
+     * 见 ApiDataSource.requestScreenshot 的映射）为下限，capturedAt >= 该值才采用。
      */
     private suspend fun awaitScreenshot(): com.padguard.domain.model.ScreenshotData? {
-        monitorRepository.requestScreenshot(deviceId).getOrNull() ?: return null
+        val ack = monitorRepository.requestScreenshot(deviceId).getOrNull() ?: return null
+        val requestAt = ack.capturedAt
         for (poll in 0 until SCREENSHOT_POLL_TIMES) {
             delay(SCREENSHOT_POLL_INTERVAL_MS)
             val latest = monitorRepository.getScreenshotHistory(deviceId, limit = 1)
                 .getOrNull()?.firstOrNull() ?: continue
-            if (latest.isReady) return latest
+            if (latest.isReady && latest.capturedAt >= requestAt) return latest
         }
         return null
     }
@@ -358,6 +365,8 @@ class ScreenMonitorViewModel @Inject constructor(
         if (deviceId.isBlank()) return
         val settings = _uiState.value.settings
         viewModelScope.launch {
+            // W39：recordResolution / recordWithAudio 为预留字段（wire 兼容继续下发），
+            // 孩子端录屏恒按原生分辨率、不含音轨——UI 已明示，这里不再暗示它们生效。
             monitorRepository.startScreenRecord(deviceId, settings.recordResolution, settings.recordWithAudio)
                 .onSuccess { task ->
                     _uiState.value = _uiState.value.copy(

@@ -246,15 +246,45 @@ class ApiDataSource @Inject constructor(
         raw
     }
 
-    /** 只关心"指令有没有被服务端接受"的写操作（返回体无需解析） */
+    /**
+     * 只关心"指令有没有被服务端接受"的写操作。
+     *
+     * W62 修复前：此处仅判 [Response.isSuccessful]，而服务端对业务失败
+     * （2001 设备不存在 / 2003 不归属 / 4001 订阅过期 …）回落为 HTTP 200 + `{code,message}` 信封，
+     * 于是"订阅过期点同意放行""设备已解绑点锁屏"等全部被误判成功。
+     * 现额外解析信封里的业务 code：非 0 一律按失败上抛，覆盖 11 个指令链路
+     * （unbind/lock/unlock/tempUnlock/审批工单/setControlMode/setMinorMode…）。
+     */
     private suspend fun execRaw(call: suspend () -> Response<okhttp3.ResponseBody>): Result<Unit> {
         return try {
             val resp = call()
-            if (resp.isSuccessful) Result.success(Unit)
-            else Result.failure(Exception("HTTP ${resp.code()}: ${resp.message()}"))
+            if (!resp.isSuccessful) {
+                val err = runCatching { resp.errorBody()?.string() }.getOrNull()
+                Result.failure(Exception("HTTP ${resp.code()}: ${err?.let(::readableError) ?: resp.message()}"))
+            } else {
+                val rawBody = runCatching { resp.body()?.string() }.getOrNull()
+                val bizError = rawBody?.takeIf { it.isNotBlank() }?.let { parseBizError(it) }
+                if (bizError != null) Result.failure(Exception(bizError))
+                else Result.success(Unit)
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * 解析业务信封里的 code；非 0 返回可读错误文案，0 / 缺 code 返回 null（视为成功）。
+     * 仅对"明确带非 0 code"的响应判失败，避免对空响应或无关 JSON 响应体误伤。
+     */
+    private fun parseBizError(raw: String): String? = try {
+        val o = org.json.JSONObject(raw)
+        val code = o.optInt("code", 0)
+        if (code != 0) {
+            val message = o.optString("message").orEmpty()
+            "[$code] ${if (message.isBlank()) "操作未被服务端接受" else message}"
+        } else null
+    } catch (e: Exception) {
+        null
     }
 
     // ==================== AuthRepository ====================
@@ -1215,7 +1245,8 @@ private fun DeviceDto.toDomain(): Device = Device(
     id = id, name = name ?: "未命名设备", deviceId = deviceId, model = model, osVersion = osVersion,
     appVersion = appVersion, onlineStatus = safeEnum(onlineStatus) { DeviceOnlineStatus.UNKNOWN },
     lastOnlineTime = lastOnlineTime, batteryLevel = batteryLevel,
-    controlMode = safeEnum(controlMode) { ControlMode.NORMAL }, groupId = groupId, groupName = groupName,
+    controlMode = safeEnum(controlMode) { ControlMode.NORMAL },
+    sceneMode = safeEnum(sceneMode) { ControlMode.NORMAL }, groupId = groupId, groupName = groupName,
     sceneType = safeEnum(sceneType) { SceneType.FAMILY }, latitude = latitude, longitude = longitude,
     remoteLocked = remoteLocked ?: false,
     childName = childName,
@@ -1468,7 +1499,9 @@ private fun AlertDto.toDomain(): Alert = Alert(
     id = id, deviceId = deviceId, deviceName = deviceName,
     level = safeEnum(level) { AlertLevel.WARNING }, title = title, message = message ?: "",
     status = safeEnum(status) { AlertStatus.ACTIVE }, category = safeEnum(category) { AlertCategory.SYSTEM_ANOMALY },
-    triggeredAt = triggeredAt, acknowledgedAt = acknowledgedAt, resolvedAt = resolvedAt
+    triggeredAt = triggeredAt, acknowledgedAt = acknowledgedAt, resolvedAt = resolvedAt,
+    // D7：保留服务端原始事件类型，见 Alert.categoryRaw 的注释
+    categoryRaw = category
 )
 
 private inline fun <reified T : Enum<T>> safeEnum(value: String?, default: () -> T): T =

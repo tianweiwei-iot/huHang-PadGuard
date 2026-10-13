@@ -192,7 +192,7 @@ class ControlPolicyViewModel @Inject constructor(
                 .orEmpty()
             _uiState.value = _uiState.value.copy(
                 dailyLimitMinutes = limitMinutes ?: _uiState.value.dailyLimitMinutes,
-                device = _uiState.value.device?.copy(controlMode = preset.controlMode),
+                device = _uiState.value.device?.copy(sceneMode = preset.controlMode),
                 toast = "已应用：${preset.displayName}（${preset.controlMode.label()}$limitLabel）"
             )
         }
@@ -203,7 +203,14 @@ class ControlPolicyViewModel @Inject constructor(
     fun toggleAppBlock(app: AppPolicy, blocked: Boolean) {
         viewModelScope.launch {
             val updated = app.copy(isBlocked = blocked)
-            policyRepository.setAppTimeLimit(updated)
+            // W54 修复：应用黑名单开关必须走 updateAppBlacklist（按整包名单一次下发），
+            // 之前误走 setAppTimeLimit 会写成"全局每日总时长"端点（dailyLimitMinutes=null → 全局限额清零），
+            // 且根本不下发任何黑名单 —— 界面说已禁用、孩子端照常能开。
+            val blockedPackages = _uiState.value.installedApps.mapNotNull { a ->
+                val isBlocked = if (a.packageName == app.packageName) blocked else a.isBlocked
+                if (isBlocked) a.packageName else null
+            }
+            policyRepository.updateAppBlacklist(deviceId, blockedPackages)
             _uiState.value = _uiState.value.copy(
                 installedApps = _uiState.value.installedApps.map {
                     if (it.packageName == app.packageName) updated else it
@@ -238,7 +245,9 @@ class ControlPolicyViewModel @Inject constructor(
     fun setAppTimeLimit(app: AppPolicy, minutes: Int?) {
         viewModelScope.launch {
             val updated = app.copy(dailyLimitMinutes = minutes)
-            policyRepository.setAppTimeLimit(updated)
+            // W54 修复：单应用限时改走 setAppLimit（per-app 端点），
+            // 之前误走 setAppTimeLimit 会写入"全局每日总时长"端点，造成单应用限额与全局限额互相覆盖、单应用限额实际不生效。
+            policyRepository.setAppLimit(deviceId, app.packageName, minutes ?: 0)
             _uiState.value = _uiState.value.copy(
                 installedApps = _uiState.value.installedApps.map {
                     if (it.packageName == app.packageName) updated else it
@@ -346,7 +355,7 @@ class ControlPolicyViewModel @Inject constructor(
         viewModelScope.launch {
             policyRepository.setControlMode(deviceId, mode).onSuccess {
                 _uiState.value = _uiState.value.copy(
-                    device = _uiState.value.device?.copy(controlMode = mode),
+                    device = _uiState.value.device?.copy(sceneMode = mode),
                     toast = "已切换为${mode.label()}"
                 )
             }

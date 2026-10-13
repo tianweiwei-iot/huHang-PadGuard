@@ -21,29 +21,41 @@ import javax.inject.Inject
 data class ServerConfig(
     val host: String = "",
     val port: String = "8090",
-    val path: String = "/v1"
+    val path: String = "/v1",
+    /** 协议：http 或 https。解析时保留用户原输入，保存时原样回写，避免 https 被悄悄降级成 http */
+    val scheme: String = "http"
 )
 
 /** 把完整 baseUrl 解析成 地址 / 端口 / 前缀，供高级设置弹窗回显。 */
 fun parseServerConfig(raw: String): ServerConfig {
-    val noScheme = raw.trim().removePrefix("https://").removePrefix("http://")
+    val trimmed = raw.trim()
+    // 先判定协议：用户若填了 https://，解析后必须把 scheme 记下来，
+    // 否则 buildServerConfig 一律回写 http://，等于把加密链路悄悄降级成明文。
+    val scheme = when {
+        trimmed.startsWith("https://", ignoreCase = true) -> "https"
+        trimmed.startsWith("http://", ignoreCase = true) -> "http"
+        else -> "http"
+    }
+    val noScheme = trimmed.removePrefix("https://").removePrefix("http://")
     val slash = noScheme.indexOf('/')
     val authority = if (slash >= 0) noScheme.substring(0, slash) else noScheme
     val pathPart = if (slash >= 0) noScheme.substring(slash) else "/"
     val colon = authority.indexOf(':')
     val host = if (colon >= 0) authority.substring(0, colon) else authority
     val port = if (colon >= 0) authority.substring(colon + 1) else "8090"
-    return ServerConfig(host = host, port = port, path = pathPart)
+    return ServerConfig(host = host, port = port, path = pathPart, scheme = scheme)
 }
 
 /** 由 地址 / 端口 / 前缀 拼回完整 baseUrl；任一不合法返回 null。 */
-fun buildServerConfig(host: String, port: String, path: String): String? {
+fun buildServerConfig(host: String, port: String, path: String, scheme: String = "http"): String? {
     val h = host.trim()
     if (h.isBlank()) return null
     val p = port.trim().toIntOrNull() ?: return null
     if (p <= 0 || p > 65535) return null
     val cleanPath = path.trim().trimStart('/').trimEnd('/').let { if (it.isBlank()) "" else "/$it" }
-    return "http://$h:$p$cleanPath/"
+    // 保留用户选择的协议；不允许凭空降级成 http（默认也是 http，仅当解析时就无 scheme 才落到 http）。
+    val s = if (scheme.equals("https", ignoreCase = true)) "https" else "http"
+    return "$s://$h:$p$cleanPath/"
 }
 
 /**
@@ -75,7 +87,9 @@ data class LoginUiState(
     /** 历史登录账号（最近使用在前），供账号框下拉选择 */
     val history: List<AccountPrefs.SavedAccount> = emptyList(),
     /** 是否"记住密码"；勾选后下次进入自动回填该账号密码 */
-    val rememberPassword: Boolean = false
+    val rememberPassword: Boolean = false,
+    /** B1：忘记密码引导弹窗开关（端 + 服务端均无自动重置端点，引导走客服人工重置） */
+    val showForgotPassword: Boolean = false
 )
 
 @HiltViewModel
@@ -165,6 +179,16 @@ class LoginViewModel @Inject constructor(
         }
     }
 
+    // B1：忘记密码——端 + 服务端均无自助重置端点（W22 后服务端改密需管理员），
+    // 故弹出引导弹窗，引导用户走客服人工重置，而非一个"点了没反应"的死按钮。
+    fun forgotPassword() {
+        _uiState.value = _uiState.value.copy(showForgotPassword = true)
+    }
+
+    fun dismissForgotPassword() {
+        _uiState.value = _uiState.value.copy(showForgotPassword = false)
+    }
+
     fun updatePassword(password: String) {
         _uiState.value = _uiState.value.copy(password = password, error = null)
     }
@@ -222,7 +246,8 @@ class LoginViewModel @Inject constructor(
             _uiState.value = state.copy(isLoading = true, error = null)
             val result = authRepository.register(phone, pwd, state.nickname.trim().ifBlank { null })
             result.onSuccess {
-                accountPrefs.save(phone, pwd, remember = true)
+                // B5：注册时不静默记住密码（无勾选语义）；记住密码仅限登录页用户主动勾选。
+                accountPrefs.save(phone, pwd, remember = false)
                 _uiState.value = _uiState.value.copy(
                     isLoading = true,
                     isLoggedIn = true,

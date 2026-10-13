@@ -102,6 +102,8 @@ data class Device(
     val lastOnlineTime: Long?,      // 最后上线时间戳
     val batteryLevel: Int?,         // 电量 0-100
     val controlMode: ControlMode,
+    /** 家长端切换的管控模式（NORMAL / LEARNING / FOCUS）。W77 修复：此前回显错读 controlMode（孩子端上报的权限等级），导致切换后家长端状态不更新。 */
+    val sceneMode: ControlMode = ControlMode.NORMAL,
     val groupId: String?,           // 所属分组ID
     val groupName: String?,         // 分组名称
     val sceneType: SceneType,
@@ -283,8 +285,28 @@ data class Alert(
     val category: AlertCategory,
     val triggeredAt: Long,
     val acknowledgedAt: Long? = null,
-    val resolvedAt: Long? = null
-)
+    val resolvedAt: Long? = null,
+    /**
+     * D7：服务端原始事件类型（如 PERMISSION_REVOKED / ROOT_DETECTED / ACCESSIBILITY_DISABLED）。
+     *
+     * 为什么在 [category] 之外还要留一份原始串：[AlertCategory] 枚举是早期按"设备离线/应用违规"
+     * 这类粗分类设计的，与孩子端实际上报的事件类型（见服务端 AlertService.EVENT_TITLES）
+     * **对不上**，映射时全部落到 SYSTEM_ANOMALY 兜底 —— 那条路本身没错（title/message 由
+     * 服务端给好了中文），但消费侧想按事件类型做图标/分组时不能依赖这个被磨平的枚举。
+     * 原始串留在这里，前端要用随时可取，不影响既有序列化（新增字段有默认值）。
+     */
+    val categoryRaw: String? = null
+) {
+    /**
+     * 是否需要家长关注（驱动铃铛红点）。
+     *
+     * 口径：未确认（ACTIVE）且级别高于 INFO。INFO 级是例行流水（如"打开黑名单应用"），
+     * 家长看过就算数，不该让红点常驻；CRITICAL/WARNING 级是"管控可能已失效"的信号，
+     * 必须留到家长点"确认收到"为止。
+     */
+    val needsAttention: Boolean
+        get() = status == AlertStatus.ACTIVE && level != AlertLevel.INFO
+}
 
 enum class AlertCategory {
     DEVICE_OFFLINE,                  // 设备离线
@@ -408,6 +430,9 @@ data class LocationInfo(
 
 /**
  * 录屏画质档位
+ *
+ * **W39 预留字段**：档位选择当前未在孩子端生效（录屏恒按屏幕原生分辨率编码），
+ * 家长端 UI 已明示；AAC 音轨混流与画质档位一并排期，上线前本枚举仅作 wire 兼容保留。
  */
 enum class RecordResolution(val label: String, val shortSide: Int) {
     SD_480P("流畅 480P", 480),
@@ -417,13 +442,17 @@ enum class RecordResolution(val label: String, val shortSide: Int) {
 
 /**
  * 屏幕监控设置（家长端可配置项，下发至被管控平板）
+ *
+ * W39 注：[recordResolution] / [recordWithAudio] 为**预留字段**——协议继续收发
+ * （wire 兼容），但孩子端录屏不按档位缩放、不混入音轨；UI 不再提供这两个开关，
+ * 详见《前后端契约对齐确认表》§六 录屏能力矩阵。
  */
 data class ScreenMonitorSettings(
     val deviceId: String,
     val autoRefreshSeconds: Int = 5,                        // 实时画面自动刷新间隔（秒）
     val highDefinition: Boolean = true,                     // 高清画面
-    val recordResolution: RecordResolution = RecordResolution.HD_720P,
-    val recordWithAudio: Boolean = false,                   // 录屏是否同时采集设备声音
+    val recordResolution: RecordResolution = RecordResolution.HD_720P, // W39 预留未生效
+    val recordWithAudio: Boolean = false,                   // W39 预留未生效（录屏不含设备声音）
     val allowRemoteLock: Boolean = true                     // 是否允许远程锁屏
 )
 

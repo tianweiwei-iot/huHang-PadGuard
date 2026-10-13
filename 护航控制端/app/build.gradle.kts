@@ -1,3 +1,7 @@
+// AGP 应用后，脚本顶层的 `java` 会被 JavaPluginExtension 访问器遮蔽，
+// `java.util.Properties` 因此解析失败（Unresolved reference: util）——必须显式 import。
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -43,6 +47,35 @@ android {
         buildConfigField("String", "BASE_URL", "\"http://8.148.68.183:8090/v1/\"")
     }
 
+    signingConfigs {
+        create("release") {
+            // A1：release 签名必须从 local.properties / gradle.properties 或 CI 环境变量注入，禁止把明文密钥写进仓库。
+            // 生成（一次性，妥善保管）：
+            //   keytool -genkeypair -v -keystore release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias padguard
+            // 在 local.properties（不入库）写入：
+            //   RELEASE_STORE_FILE=release-key.jks
+            //   RELEASE_STORE_PASSWORD=******
+            //   RELEASE_KEY_ALIAS=padguard
+            //   RELEASE_KEY_PASSWORD=******
+            val localProps = Properties().apply {
+                val f = rootProject.file("local.properties")
+                if (f.exists()) f.inputStream().use { load(it) }
+            }
+            val ksFile = (findProperty("RELEASE_STORE_FILE") as? String) ?: localProps.getProperty("RELEASE_STORE_FILE")
+            val ksPass = (findProperty("RELEASE_STORE_PASSWORD") as? String) ?: localProps.getProperty("RELEASE_STORE_PASSWORD")
+            val ksAlias = (findProperty("RELEASE_KEY_ALIAS") as? String) ?: localProps.getProperty("RELEASE_KEY_ALIAS")
+            val keyPass = (findProperty("RELEASE_KEY_PASSWORD") as? String) ?: localProps.getProperty("RELEASE_KEY_PASSWORD")
+            if (ksFile != null && ksPass != null && ksAlias != null && keyPass != null) {
+                storeFile = rootProject.file(ksFile)
+                storePassword = ksPass
+                keyAlias = ksAlias
+                keyPassword = keyPass
+            }
+            // 缺字段时此处不抛错（避免连 debug 都跑不起来）；真正的守卫在文件末尾 afterEvaluate：
+            // 仅当真正 assembleRelease 且仍未配置时，才给出明确的"缺签名"报错。
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -51,6 +84,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
         debug {
             isMinifyEnabled = false
@@ -130,4 +164,51 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+}
+
+// A4：高德 Key 注入守卫 + release 签名守卫（仅在实际打 release 包时校验，不影响 debug）。
+// 缺少高德 Key 会导致定位页白屏/无底图（上线事故）；缺少签名则包无法安装。
+afterEvaluate {
+    val rel = android.signingConfigs.findByName("release")
+    if (rel?.storeFile == null) {
+        tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
+            doFirst {
+                throw GradleException(
+                    "release 签名未配置：请在 local.properties 设置 RELEASE_STORE_FILE / RELEASE_STORE_PASSWORD / " +
+                    "RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD，或由 CI 注入同名环境变量。禁止将明文密钥提交到仓库。"
+                )
+            }
+        }
+    }
+    val amapKey = (findProperty("AMAP_KEY") as? String)?.takeIf { it.isNotBlank() }
+        ?: (findProperty("amapKey") as? String)?.takeIf { it.isNotBlank() }
+    if (amapKey.isNullOrBlank()) {
+        tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
+            doFirst {
+                throw GradleException(
+                    "release 缺少高德地图 Key：请用 -PAMAP_KEY=xxx 注入，或在 gradle.properties 写入 amapKey=xxx；" +
+                    "并在高德开放平台控制台把「release keystore 的 SHA1」加入该 Key 的签名绑定，否则定位页白屏/无底图（上线事故）。" +
+                    "debug 构建允许空 Key（回退示意占位图）。"
+                )
+            }
+        }
+    }
+}
+
+// W80：versionCode 单调守卫。CI / 每次构建校验 versionCode 不低于已发布基线，
+// 防止无意回退导致设备把新包当降级拒绝安装（表现：重装了 App 却还是旧行为）。
+// 基线文件 versionCode.baseline 随每次发版手动 +1，并随代码一起提交。
+afterEvaluate {
+    val baselineFile = file("versionCode.baseline")
+    if (baselineFile.exists() && baselineFile.readText().trim().isNotEmpty()) {
+        val baseline = baselineFile.readText().trim().toIntOrNull() ?: 0
+        val current = (findProperty("VERSION_CODE") as? String)?.trim()?.toIntOrNull() ?: 0
+        tasks.named("preBuild") {
+            doLast {
+                check(current >= baseline) {
+                    "W80: versionCode=$current 小于已发布基线 $baseline，禁止回退。请递增 gradle.properties 中的 VERSION_CODE 后再构建。"
+                }
+            }
+        }
+    }
 }

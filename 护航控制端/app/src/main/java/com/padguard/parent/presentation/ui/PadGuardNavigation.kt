@@ -1,5 +1,6 @@
 package com.padguard.presentation.ui
 
+import com.padguard.presentation.ui.profile.AboutScreen
 import com.padguard.presentation.ui.profile.SubscriptionScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -8,6 +9,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -15,12 +17,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.padguard.domain.model.ReportPeriod
+import com.padguard.parent.notification.NotificationHelper
+import com.padguard.parent.presentation.MainActivity
 import com.padguard.parent.presentation.viewmodel.SessionViewModel
 import com.padguard.presentation.ui.alert.AlertCenterScreen
 import com.padguard.presentation.ui.auth.LoginScreen
@@ -33,6 +41,7 @@ import com.padguard.presentation.ui.realtime.LocationScreen
 import com.padguard.presentation.ui.realtime.MessagePublishScreen
 import com.padguard.presentation.ui.realtime.ScreenMonitorScreen
 import com.padguard.presentation.viewmodel.UnlockRequestCenterViewModel
+import com.padguard.presentation.viewmodel.RiskAlertCenterViewModel
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -96,6 +105,8 @@ sealed class Screen(val route: String) {
     }
     object AlertList : Screen("alert_list")
     object Profile : Screen("profile")
+    // D3（L-PA-09）：关于页（此前是「我的」页死入口，现已落地真实页面）
+    object About : Screen("about")
 }
 
 @Composable
@@ -126,13 +137,61 @@ fun PadGuardNavHost(
     // 家长翻到哪个页面都能收到申请，不会被某个页面的销毁打断。
     val unlockVm: UnlockRequestCenterViewModel = hiltViewModel()
     val unlockState by unlockVm.uiState.collectAsState()
+    // D7：风险告警全局轮询（与解锁工单同层级：Activity 作用域，翻到哪个页面都在拉，
+    // 后台时新 CRITICAL 告警转本地通知触达家长）
+    val riskVm: RiskAlertCenterViewModel = hiltViewModel()
+    val riskState by riskVm.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // D1（L-PA-03）：通知点击直达消息中心。
+    // 覆盖两种入口：①冷启动——onCreate 的 intent 就带着 extra；
+    // ②热点击——App 在栈里，SINGLE_TOP 走 MainActivity.onNewIntent → setIntent。
+    // 用 ON_START 观测而非 LaunchedEffect(user)：后者在热点击时不会重组（键没变），
+    // 而回前台必经 ON_START；LifecycleRegistry 会把当前事件补派给新加的观察者，
+    // 冷启动同样不漏。读完立刻移除 extra，防止重复导航。
+    val navHostContext = LocalContext.current
+    // owner 必须在组合作用域里取：DisposableEffect 的块不是 @Composable 上下文
+    val navHostLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(navHostLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    unlockVm.setAppForeground(true)
+                    // D7：风险告警共用同一套前台门控 —— 前台不打扰，退到后台才发通知
+                    riskVm.setAppForeground(true)
+                    // D1：通知点击直达消息中心。冷启动（onCreate intent 带 extra）与
+                    // 热点击（SINGLE_TOP → onNewIntent → setIntent）都必经 ON_START；
+                    // LifecycleRegistry 会把当前事件补派给新观察者，冷启动同样不漏。
+                    val activity = navHostContext as? MainActivity
+                    if (activity?.intent?.getBooleanExtra(NotificationHelper.EXTRA_OPEN_ALERTS, false) == true) {
+                        activity.intent.removeExtra(NotificationHelper.EXTRA_OPEN_ALERTS)
+                        navController.navigate(Screen.AlertList.route)
+                    }
+                }
+                // D1：退到后台才允许本地通知触达（前台已有弹窗，双响是噪音）
+                Lifecycle.Event.ON_STOP -> {
+                    unlockVm.setAppForeground(false)
+                    riskVm.setAppForeground(false)
+                }
+                else -> Unit
+            }
+        }
+        navHostLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { navHostLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // 操作反馈：处理完弹窗即退出，只留一条轻提示，不打断当前所在页面
     LaunchedEffect(unlockState.actionMessage) {
         val msg = unlockState.actionMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         unlockVm.clearActionMessage()
+    }
+
+    // D7：风险告警的确认反馈，与解锁工单共用 snackbar 通道
+    LaunchedEffect(riskState.actionMessage) {
+        val msg = riskState.actionMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(msg)
+        riskVm.clearActionMessage()
     }
 
     // 全局浅灰背景铺在导航根部：登录页、主框架与全部二级页共享同一底色，
@@ -155,8 +214,11 @@ fun PadGuardNavHost(
             startDestination = startDestination
         ) {
         composable(Screen.Login.route) {
+            // D1（L-PA-03）：登录成功后申请通知权限，使"孩子求解锁"能本地触达家长
+            val activity = LocalContext.current as? MainActivity
             LoginScreen(
                 onLoginSuccess = {
+                    activity?.requestNotificationPermissionIfNeeded()
                     navController.navigate(Screen.Main.route) {
                         popUpTo(Screen.Login.route) { inclusive = true }
                     }
@@ -166,7 +228,8 @@ fun PadGuardNavHost(
         composable(Screen.Main.route) {
             MainScreen(
                 rootNavController = navController,
-                unreadAlertCount = unlockState.unreadCount,
+                // D7：铃铛红点合并解锁工单与风险告警两类未读
+                unreadAlertCount = unlockState.unreadCount + riskState.unreadCount,
                 onNavigateToAlerts = { navController.navigate(Screen.AlertList.route) }
             )
         }
@@ -179,8 +242,17 @@ fun PadGuardNavHost(
                 onBack = { navController.popBackStack() },
                 onApprove = { entry, minutes -> unlockVm.approve(entry.ticket, minutes) },
                 onReject = { entry -> unlockVm.reject(entry.ticket) },
-                onRefresh = unlockVm::refresh
+                onRefresh = unlockVm::refresh,
+                // D7：风险告警分区（同一页面承载，根层 VM 已在此处之上取出）
+                riskAlerts = riskState.alerts,
+                riskUnreadCount = riskState.unreadCount,
+                riskProcessing = riskState.processing,
+                onAcknowledgeRisk = { alert -> riskVm.acknowledge(alert) }
             )
+        }
+        // D3（L-PA-09）：关于页落地为真实路由（此前「我的」页的关于入口是静默 no-op）
+        composable(Screen.About.route) {
+            AboutScreen(onBack = { navController.popBackStack() })
         }
         composable(Screen.DeviceDetail.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()

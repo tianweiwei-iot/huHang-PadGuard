@@ -104,14 +104,18 @@ fun DeviceDetailScreen(
                 ChildProfileCard(device)
             }
 
+            // W63 修复：原网格中「重启」「授权」与「定位」一样只弹假 toast（一个请求都不发），
+            // 而同页「一键锁屏」是真链路——同页真假并存最伤信任。现：
+            // - 定位：接真实指令链路（viewModel.locateNow → /v1/monitor/{id}/locate → LOCATE 指令）；
+            // - 重启 / 授权：移出网格，改为下方置灰说明（服务端无 REBOOT 指令；
+            //   临时授权需选时长，正确入口在「管控策略」页与解锁工单中心）。
             QuickCommandGrid(
+                locating = uiState.locating,
                 onCommand = { cmd ->
                     when (cmd) {
                         "一键锁屏" -> viewModel.lockScreen()
-                        "重启" -> viewModel.runCommand("重启设备")
-                        "定位" -> viewModel.runCommand("实时定位")
+                        "定位" -> viewModel.locateNow()
                         "看屏" -> onViewScreen(deviceId)
-                        "授权" -> viewModel.runCommand("临时授权")
                     }
                 }
             )
@@ -388,13 +392,11 @@ private fun StatusChip(label: String, isActive: Boolean) {
 }
 
 @Composable
-private fun QuickCommandGrid(onCommand: (String) -> Unit) {
+private fun QuickCommandGrid(locating: Boolean = false, onCommand: (String) -> Unit) {
     val commands = listOf(
         FeatureItem("一键锁屏", Icons.Default.Lock),
-        FeatureItem("重启", Icons.Default.RestartAlt),
         FeatureItem("定位", Icons.Default.MyLocation),
-        FeatureItem("看屏", Icons.AutoMirrored.Filled.ScreenShare),
-        FeatureItem("授权", Icons.Default.VerifiedUser)
+        FeatureItem("看屏", Icons.AutoMirrored.Filled.ScreenShare)
     )
     SoftCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -407,8 +409,23 @@ private fun QuickCommandGrid(onCommand: (String) -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 userScrollEnabled = false
             ) {
-                items(commands, key = { it.name }) { FeatureGridItem(feature = it, onClick = { onCommand(it.name) }) }
+                items(commands, key = { it.name }) {
+                    FeatureGridItem(feature = it, onClick = { if (it.name != "定位" || !locating) onCommand(it.name) })
+                }
             }
+            // W63：做不到的命令不装样子。远程重启无指令支持；临时授权需选时长。
+            // 移出网格 + 明示真实情况与正确入口，杜绝"界面说成功、后端什么都没发生"。
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "远程重启：暂不支持（设备端无对应能力）",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "临时授权：请在「管控策略」页选择解锁时长，或在解锁工单中心审批",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -81,7 +82,9 @@ data class DeviceDetailUiState(
     // === 操作密码闸门（C 端软拦截方案） ===
     /** 是否已设置操作密码（仅表示家长端下发的意图，设备端是否真正生效以孩子端为准） */
     val guardPasswordSet: Boolean = false,
-    val guardPasswordBusy: Boolean = false
+    val guardPasswordBusy: Boolean = false,
+    /** 正在执行「立即定位」指令链（防连点） */
+    val locating: Boolean = false
 ) {
     /**
      * 当前档位下实际会生效的每日时长。
@@ -293,9 +296,36 @@ class DeviceDetailViewModel @Inject constructor(
         else -> "${actionName}指令已下发，设备尚未响应 —— 设备可能离线，稍后可再试一次"
     }
 
-    /** 通用即时指令（重启/定位/授权等，Mock 阶段仅提示） */
-    fun runCommand(label: String) {
-        _uiState.value = _uiState.value.copy(toast = "已发送：$label")
+    /**
+     * 立即定位（W63 修复：原「定位」按钮只弹"已发送"假 toast，一个请求都不发）。
+     *
+     * 走真实指令链路：POST /v1/monitor/{deviceId}/locate → 服务端下发 LOCATE 指令 →
+     * 孩子端当场补采一次位置并上报。定位是异步的，下发成功后延迟两次拉取最新坐标
+     * （延迟档位与 LocationViewModel.locateNow 一致：3s / 5s，覆盖端上采集+上报时延）。
+     */
+    fun locateNow() {
+        if (deviceId.isBlank()) return
+        if (_uiState.value.locating) return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(locating = true)
+            locationRepository.requestLocate(deviceId)
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(toast = "定位指令已下发，正在获取最新位置…")
+                    delay(3_000)
+                    locationRepository.getDeviceLocation(deviceId)
+                        .onSuccess { _uiState.value = _uiState.value.copy(location = it) }
+                    delay(5_000)
+                    locationRepository.getDeviceLocation(deviceId)
+                        .onSuccess { _uiState.value = _uiState.value.copy(location = it) }
+                    _uiState.value = _uiState.value.copy(locating = false, toast = "位置已更新")
+                }
+                .onFailure {
+                    _uiState.value = _uiState.value.copy(
+                        locating = false,
+                        toast = "定位指令下发失败：${it.message}"
+                    )
+                }
+        }
     }
 
     // ==================== 设备管理面板 ====================

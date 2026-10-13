@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.padguard.domain.repository.DeviceRepository
 import com.padguard.domain.repository.PolicyRepository
 import com.padguard.domain.repository.UnlockTicket
+import com.padguard.parent.notification.NotificationHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -62,7 +63,8 @@ data class UnlockCenterUiState(
 @HiltViewModel
 class UnlockRequestCenterViewModel @Inject constructor(
     private val deviceRepository: DeviceRepository,
-    private val policyRepository: PolicyRepository
+    private val policyRepository: PolicyRepository,
+    private val notificationHelper: NotificationHelper
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UnlockCenterUiState())
@@ -76,6 +78,14 @@ class UnlockRequestCenterViewModel @Inject constructor(
      * 家长看到的就是"我明明点了忽略，它又弹出来了"。
      */
     private val handledInSession = mutableSetOf<String>()
+
+    /**
+     * D1（L-PA-03）：已发过本地通知的工单 ID。
+     * 与 [handledInSession] 分开——后者记"本会话处理过"，这里记"已通知过"，
+     * 避免 10 秒轮询反复堆叠同一条通知。未授权 POST_NOTIFICATIONS 时，
+     * [NotificationHelper.notifyUnlockRequest] 内部静默返回，不会抛异常。
+     */
+    private val notifiedTicketIds = mutableSetOf<String>()
 
     private var pollJob: Job? = null
 
@@ -99,6 +109,19 @@ class UnlockRequestCenterViewModel @Inject constructor(
         }
     }
 
+    /**
+     * D1：App 是否处于前台。
+     * ViewModel 随导航根组合创建（彼时 App 必然可见），故默认 true。
+     * 前台时不发本地通知——弹窗已经在打扰家长了，通知再响一次是噪音；
+     * 只有退到后台（ON_STOP）后轮询仍持活着，新申请才需要通知触达。
+     */
+    private var appInForeground = true
+
+    /** D1：由导航根的生命周期观测回调驱动（ON_START=true / ON_STOP=false）。 */
+    fun setAppForeground(foreground: Boolean) {
+        appInForeground = foreground
+    }
+
     fun refresh() {
         viewModelScope.launch {
             val devices = deviceRepository.getDeviceList().getOrNull() ?: return@launch
@@ -115,6 +138,18 @@ class UnlockRequestCenterViewModel @Inject constructor(
                 .filter { it.ticket.isPending && it.ticket.id !in handledInSession }
                 .minByOrNull { it.ticket.createdAt }
 
+            // D1（L-PA-03）：家长端此前零通知能力——App 在后台/未启动时"孩子求解锁"完全零触达。
+            // 这里对每条新出现的 PENDING 工单发一次本地通知（渠道已在 MainActivity 创建，
+            // 权限在登录后申请）。前台跳过：弹窗已是更强的打扰形式，双响只会让家长烦躁。
+            if (!appInForeground) {
+                entries
+                    .filter { it.ticket.isPending && it.ticket.id !in notifiedTicketIds }
+                    .forEach { entry ->
+                        notificationHelper.notifyUnlockRequest(entry.deviceName, entry.ticket.id)
+                        notifiedTicketIds.add(entry.ticket.id)
+                    }
+            }
+
             _uiState.value = _uiState.value.copy(
                 records = entries,
                 unreadCount = entries.count { it.ticket.isPending },
@@ -130,29 +165,24 @@ class UnlockRequestCenterViewModel @Inject constructor(
      * 而且家长稍后改变主意时，工单如果已被置成终态就再也批不了。
      */
     fun dismiss(ticket: UnlockTicket) {
-        act(ticket) { policyRepository.dismissUnlockTicket(ticket.deviceId, ticket.id) }
-            .invokeOnCompletion {
-                _uiState.value = _uiState.value.copy(
-                    actionMessage = "已忽略，可在消息中心继续处理"
-                )
-            }
+        act(ticket, successMessage = "已忽略，可在消息中心继续处理") {
+            policyRepository.dismissUnlockTicket(ticket.deviceId, ticket.id)
+        }
     }
 
     /** 同意：按申请时长（家长未指定则用孩子申请值，再兜底 30 分钟）下发限时解锁 */
     fun approve(ticket: UnlockTicket, durationMinutes: Int? = null) {
         val minutes = durationMinutes ?: ticket.durationMinutes ?: DEFAULT_UNLOCK_MINUTES
-        act(ticket) { policyRepository.approveUnlockTicket(ticket.deviceId, ticket.id, minutes) }
-            .invokeOnCompletion {
-                _uiState.value = _uiState.value.copy(actionMessage = "已同意放行 $minutes 分钟")
-            }
+        act(ticket, successMessage = "已同意放行 $minutes 分钟") {
+            policyRepository.approveUnlockTicket(ticket.deviceId, ticket.id, minutes)
+        }
     }
 
     /** 拒绝：关闭工单并给孩子下发"申请未通过"（与「忽略」的区别见 [dismiss]） */
     fun reject(ticket: UnlockTicket) {
-        act(ticket) { policyRepository.ignoreUnlockTicket(ticket.deviceId, ticket.id) }
-            .invokeOnCompletion {
-                _uiState.value = _uiState.value.copy(actionMessage = "已拒绝该申请")
-            }
+        act(ticket, successMessage = "已拒绝该申请") {
+            policyRepository.ignoreUnlockTicket(ticket.deviceId, ticket.id)
+        }
     }
 
     fun clearActionMessage() {
@@ -164,9 +194,17 @@ class UnlockRequestCenterViewModel @Inject constructor(
      *
      * 失败也要收起弹窗：一次网络抖动不该让家长被同一个对话框反复卡住，
      * 记录仍在消息中心里，刷新后还能再处理。
+     *
+     * @param successMessage 操作成功时展示的文案
+     *
+     * W58 修复：成败文案在此一次性据实落定。旧实现由调用方在 `invokeOnCompletion` 里
+     * 覆写成功话术 —— 该回调在协程结束后**无条件**执行，失败时也会把
+     * "操作失败：…"盖成"已同意放行 30 分钟"，家长以为批了、实际工单还停在 PENDING，
+     * 孩子端毫无反应。这正是"界面说成功、后端什么都没发生"的假成功形态。
      */
     private fun act(
         ticket: UnlockTicket,
+        successMessage: String,
         block: suspend () -> Result<Unit>
     ): Job = viewModelScope.launch {
         _uiState.value = _uiState.value.copy(processing = true)
@@ -188,14 +226,20 @@ class UnlockRequestCenterViewModel @Inject constructor(
         } catch (t: Throwable) {
             Result.failure(t)
         }
-        outcome.onFailure { e ->
-            _uiState.value = _uiState.value.copy(
-                actionMessage = "操作失败：${e.message ?: "请检查网络后重试"}"
-            )
-        }
+        val message = outcome.fold(
+            onSuccess = { successMessage },
+            onFailure = { e -> "操作失败：${e.message ?: "请检查网络后重试"}" }
+        )
         // 无论成败都记一笔：避免失败后弹窗立刻复活，家长陷入"忽略-又弹-又忽略"的循环
         handledInSession.add(ticket.id)
-        _uiState.value = _uiState.value.copy(popup = null, processing = false)
+        // D1：处理（含忽略）即取消对应本地通知 —— 不清则通知栏长期挂着
+        // "孩子请求解锁"，家长过会儿点开发现孩子早已在用平板，通知与事实不符。
+        notificationHelper.cancelUnlockRequest(ticket.id)
+        _uiState.value = _uiState.value.copy(
+            actionMessage = message,
+            popup = null,
+            processing = false
+        )
         refresh()
     }
 

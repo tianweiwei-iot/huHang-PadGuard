@@ -106,9 +106,10 @@ fun ProfileScreen(
                     ProfileAction.Subscription
                 ),
                 ProfileItem("我的孩子", Icons.Default.ChildCare, "管理被守护设备", ProfileAction.Children),
-                ProfileItem("家庭成员", Icons.Default.People, "多人共管", ProfileAction.Members),
+                // D3（L-PA-09）：家庭成员 / 设置目标页尚未实现，置灰并标注"敬请期待"，避免死入口误导。
+                ProfileItem("家庭成员", Icons.Default.People, "敬请期待", ProfileAction.Members, enabled = false),
                 ProfileItem("护眼设置", Icons.Default.RemoveRedEye, "蓝光 / 距离 / 姿势", ProfileAction.EyeCare),
-                ProfileItem("设置", Icons.Default.Settings, "通用设置", ProfileAction.Settings),
+                ProfileItem("设置", Icons.Default.Settings, "敬请期待", ProfileAction.Settings, enabled = false),
                 // 版本号取 BuildConfig，避免每次发版都漏改这里的硬编码字符串
                 ProfileItem(
                     "关于", Icons.Default.Info,
@@ -187,29 +188,45 @@ private data class ProfileItem(
     val title: String,
     val icon: ImageVector,
     val subtitle: String,
-    val action: ProfileAction
+    val action: ProfileAction,
+    // D3（L-PA-09）：未实现的目标页（家庭成员 / 设置）置灰禁用，避免"点了没反应"误导用户。
+    val enabled: Boolean = true
 )
 
 @Composable
 private fun ProfileListItem(item: ProfileItem, onClick: () -> Unit) {
+    val alpha = if (item.enabled) 1f else 0.4f
     SoftCard(
         modifier = Modifier.fillMaxWidth(),
-        onClick = onClick
+        onClick = if (item.enabled) onClick else ({})
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onClick)
+                .clickable(enabled = item.enabled, onClick = onClick)
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(item.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Icon(item.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary.copy(alpha = alpha))
             Spacer(modifier = Modifier.width(16.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(item.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                Text(item.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                Text(
+                    item.title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)
+                )
+                Text(
+                    item.subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (item.enabled) 0.6f else 0.3f)
+                )
             }
-            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (item.enabled) 0.3f else 0.15f)
+            )
         }
     }
 }

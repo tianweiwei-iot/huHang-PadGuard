@@ -72,7 +72,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.padguard.domain.model.RecordResolution
 import com.padguard.domain.model.ScreenMonitorSettings
 import com.padguard.domain.model.ScreenshotData
 import com.padguard.presentation.ui.theme.PadGuardColors
@@ -527,22 +526,18 @@ private fun ScreenSettingsCard(
             onCheckedChange = { value -> onEdit { it.copy(highDefinition = value) } }
         )
 
-        Text(
-            text = "录屏画质",
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-        )
-        SingleChoiceChips(
-            options = RecordResolution.values().toList(),
-            selected = settings.recordResolution,
-            labelOf = { it.label },
-            onSelect = { value -> onEdit { it.copy(recordResolution = value) } }
+        // W39（决策④-A）：录屏画质档位与"含设备声音"在孩子端均未实现——
+        // 协议字段保留为预留能力，但这里不再给"设了有用"的假开关。
+        // 宁可没有功能，不能假报成功；音轨混流独立排期，上线后此处恢复真实控件。
+        // 能力矩阵见《前后端契约对齐确认表》§七。
+        SettingInfoRow(
+            title = "录屏画质",
+            subtitle = "暂仅支持屏幕原生分辨率；画质档位（480P/720P/1080P）为预留能力，后续版本生效"
         )
 
-        SettingSwitchRow(
+        SettingInfoRow(
             title = "录屏含设备声音",
-            checked = settings.recordWithAudio,
-            onCheckedChange = { value -> onEdit { it.copy(recordWithAudio = value) } }
+            subtitle = "录音混流为预留能力，后续版本上线；需要环境音请使用「远程录音」"
         )
 
         SettingSwitchRow(

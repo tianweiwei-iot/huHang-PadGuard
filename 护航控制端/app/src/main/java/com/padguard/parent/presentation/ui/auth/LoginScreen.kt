@@ -97,13 +97,9 @@ fun LoginScreen(
             Spacer(modifier = Modifier.height(48.dp))
 
             // 登录方式切换（注册模式下隐藏：注册只有一种流程，
-            // 保留"密码/短信"切换会让人误以为存在"短信注册"，而服务端并没有这条分支）
-            if (!uiState.isRegisterMode) {
-                LoginModeToggle(
-                    isSmsMode = uiState.isSmsMode,
-                    onToggle = viewModel::toggleLoginMode
-                )
-            }
+            // B2：短信登录为死 tab（服务端 sms-login-enabled=false 且无短信服务商，发码/校验均为假），
+            // 故不再暴露切换入口，避免用户点到"获取验证码"却永远收不到、或误以为有短信通道。
+            // （LoginModeToggle / toggleLoginMode / SmsLoginForm 暂留作未开通占位，不影响编译。）
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -183,13 +179,34 @@ fun LoginScreen(
                     // 忘记密码（仅登录模式有意义：注册流程里还没有可找回的密码）
                     if (!uiState.isRegisterMode) {
                         TextButton(
-                            onClick = { /* TODO */ },
+                            onClick = viewModel::forgotPassword,
                             modifier = Modifier.align(Alignment.End)
                         ) {
                             Text("忘记密码？", color = MaterialTheme.colorScheme.primary)
                         }
                     }
                 }
+            }
+
+            // B1：忘记密码引导弹窗（客服人工重置流程）
+            if (uiState.showForgotPassword) {
+                AlertDialog(
+                    onDismissRequest = viewModel::dismissForgotPassword,
+                    confirmButton = {
+                        TextButton(onClick = viewModel::dismissForgotPassword) {
+                            Text("我知道了")
+                        }
+                    },
+                    title = { Text("忘记密码") },
+                    text = {
+                        Text(
+                            "当前暂不支持自助找回密码。请联系客服进行人工重置：\n\n" +
+                            "· 提供注册时使用的手机号；\n" +
+                            "· 客服核实身份后为您重置密码。\n\n" +
+                            "客服联系方式请见「我的」页，或邮件至 support@padguard.com。"
+                        )
+                    }
+                )
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -219,12 +236,23 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // D2（L-PA-06）：协议改为可点击，点击跳「简易协议页」（下方 AgreementDialog 承载）。
+            // 此前是纯文本、点击无任何反应，商店隐私审核硬伤（未成年人产品更敏感）。
+            var showAgreement by remember { mutableStateOf(false) }
             Text(
                 text = "登录即表示同意《用户协议》和《隐私政策》",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f),
-                textAlign = TextAlign.Center
+                color = MaterialTheme.colorScheme.primary,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showAgreement = true }
             )
+
+            // D2（L-PA-06）：简易协议页（本地承载，避免依赖尚未备案的域名/URL）。
+            if (showAgreement) {
+                AgreementDialog(onDismiss = { showAgreement = false })
+            }
         }
     }
 }
@@ -695,6 +723,7 @@ fun ServerConfigEditor(
     var host by remember { mutableStateOf(cfg.host) }
     var port by remember { mutableStateOf(cfg.port) }
     var path by remember { mutableStateOf(cfg.path) }
+    var scheme by remember { mutableStateOf(cfg.scheme) }
     var error by remember { mutableStateOf<String?>(null) }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -728,7 +757,25 @@ fun ServerConfigEditor(
             shape = RoundedCornerShape(10.dp)
         )
 
-        val preview = buildServerConfig(host, port, path)
+        // 协议选择：默认回显解析出的 scheme（用户若原本填的是 https，必须保留，不能静默降级成明文 http）
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            listOf("http" to "HTTP", "https" to "HTTPS").forEach { (value, label) ->
+                val selected = scheme == value
+                OutlinedButton(
+                    onClick = { scheme = value; error = null },
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surface
+                    )
+                ) { Text(label) }
+            }
+        }
+
+        val preview = buildServerConfig(host, port, path, scheme)
         Text(
             text = "完整地址：${preview ?: "（请补全地址与端口）"}",
             style = MaterialTheme.typography.bodySmall,
@@ -759,7 +806,7 @@ fun ServerConfigEditor(
             }
             Button(
                 onClick = {
-                    val built = buildServerConfig(host, port, path)
+                    val built = buildServerConfig(host, port, path, scheme)
                     if (built == null) {
                         error = "请填写有效的服务器地址与端口（1–65535）"
                     } else {
@@ -805,6 +852,55 @@ fun ServerConfigDialog(
                 onCancel = onDismiss,
                 modifier = Modifier.verticalScroll(rememberScrollState())
             )
+        }
+    )
+}
+
+/**
+ * D2（L-PA-06）：简易协议页。
+ * 登录页协议文案点击后展示，承载《用户协议》与《隐私政策》要点。
+ * 采用本地文本而非外链 URL：当前域名尚未完成 ICP 备案，外链不可达；
+ * 后续备案完成后可替换为跳转正式协议页。
+ */
+@Composable
+private fun AgreementDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("我已阅读") }
+        },
+        title = { Text("用户协议与隐私政策") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    text = "《用户协议》",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "1. 本软件为家长监护类工具，用于帮助家长管理未成年人所使用的设备。" +
+                        "使用本软件即表示您已了解并同意相关管控功能。\n\n" +
+                        "2. 家长与孩子设备需绑定后使用，绑定关系由家长端发起并建立。\n\n" +
+                        "3. 软件提供的远程锁屏、应用管理、位置查看等能力，仅限于监护目的使用。",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "《隐私政策》",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "1. 我们仅收集为提供监护功能所必需的信息（如设备状态、应用使用时长、位置等），" +
+                        "且均经家长授权后采集。\n\n" +
+                        "2. 位置等敏感信息在设备后台不读取，仅在响应家长指令或回到前台时补传。\n\n" +
+                        "3. 我们不会向第三方出售或非法提供您的个人信息；数据存储与传输遵循相关安全规范。\n\n" +
+                        "4. 您可通过客服申请查询、更正或删除您的个人信息。",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
     )
 }

@@ -127,6 +127,35 @@ fun SettingSwitchRow(
     }
 }
 
+/**
+ * 设置项：标题 + 说明，**不带任何交互控件**（W39）。
+ *
+ * 用于"协议字段已预留、能力尚未上线"的档位/开关：既要把现状如实告诉家长，
+ * 又不能给一个"设了有用"的假开关——那正是审计判定的假成功形态。
+ */
+@Composable
+fun SettingInfoRow(
+    title: String,
+    subtitle: String,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+    }
+}
+
 /** 设置项：标题 + 当前值 + 滑块。 */
 @Composable
 fun SettingSliderRow(

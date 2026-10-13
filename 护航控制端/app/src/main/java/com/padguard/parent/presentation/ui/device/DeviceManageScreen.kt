@@ -446,7 +446,9 @@ private fun AccessMethodScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 TabRow(selectedTabIndex = selectedTab) {
-                    listOf("扫码", "配对码", "局域网", "Excel").forEachIndexed { index, label ->
+                    // D3（L-PA-09）：原「扫码」文案误导——家长端无相机扫码能力，
+                    // 本 Tab 实际是「家长出示二维码、由孩子端扫码绑定」。改为「二维码」避免误解。
+                    listOf("二维码", "配对码", "局域网", "Excel").forEachIndexed { index, label ->
                         Tab(
                             selected = selectedTab == index,
                             onClick = { selectedTab = index },

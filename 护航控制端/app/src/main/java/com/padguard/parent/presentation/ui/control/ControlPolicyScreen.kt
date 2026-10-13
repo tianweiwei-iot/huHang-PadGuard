@@ -473,7 +473,7 @@ private fun SystemPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPol
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("管控模式", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     Spacer(modifier = Modifier.height(8.dp))
-                    val current = uiState.device?.controlMode ?: ControlMode.NORMAL
+                    val current = uiState.device?.sceneMode ?: ControlMode.NORMAL
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         ControlModeChip("正常", current == ControlMode.NORMAL) { viewModel.setControlMode(ControlMode.NORMAL) }
                         ControlModeChip("学习", current == ControlMode.LEARNING) { viewModel.setControlMode(ControlMode.LEARNING) }

@@ -87,6 +87,8 @@ data class DeviceDto(
     val lastOnlineTime: Long?,
     val batteryLevel: Int?,
     val controlMode: String?,   // 后端可能为 null（孩子端尚未上报）
+    /** W77: 家长端切换的管控模式（NORMAL / LEARNING / FOCUS），由服务端 applyMode 落库并随设备详情下发；此前缺失会导致 sceneMode 反序列化被静默丢弃。 */
+    val sceneMode: String?,
     val groupId: String?,
     val groupName: String?,     // 后端当前恒为 null
     val sceneType: String?,
@@ -191,8 +193,10 @@ data class MediaResultDto(
 
 @JsonClass(generateAdapter = true)
 data class StartRecordRequest(
-    val resolution: String,            // "SD_480P" | "HD_720P" | "FHD_1080P"
-    val withAudio: Boolean
+    // W39：以下两个字段为预留（wire 兼容继续下发），孩子端录屏恒按原生分辨率、不含音轨；
+    // 家长端 UI 已明示，详见《前后端契约对齐确认表》§六 录屏能力矩阵。
+    val resolution: String,            // "SD_480P" | "HD_720P" | "FHD_1080P"（预留未生效）
+    val withAudio: Boolean             // 预留未生效（录屏不混入设备声音）
 )
 
 @JsonClass(generateAdapter = true)
@@ -421,6 +425,7 @@ data class ModeChangeRequest(
     val mode: String   // "NORMAL" | "LEARNING" | "FOCUS"
 )
 
+@JsonClass(generateAdapter = true)
 data class TempUnlockRequest(
     val durationMinutes: Int = 30,
     val packageName: String? = null,
@@ -797,6 +802,7 @@ data class AppInstallRequest(
 )
 
 /** 使用权限开关：hidden=true 表示在孩子端隐藏该应用（不显示，但不是卸载） */
+@JsonClass(generateAdapter = true)
 data class AppHiddenRequest(
     val packageName: String,
     val hidden: Boolean = true
@@ -825,6 +831,7 @@ data class BatchSuspendRequest(
 )
 
 /** 批量设置使用权限（隐藏 / 显示）。`all=true` 作用于全部已安装应用（一键授权全部 / 一键取消全部）。 */
+@JsonClass(generateAdapter = true)
 data class AppHiddenBatchRequest(
     val packages: List<String> = emptyList(),
     val hidden: Boolean = true,
@@ -832,6 +839,7 @@ data class AppHiddenBatchRequest(
 )
 
 /** 设置单个应用的每日使用时长上限（分钟，0 = 不限制）。 */
+@JsonClass(generateAdapter = true)
 data class AppLimitRequest(val minutes: Int = 0)
 
 // ---------------------------------------------------------------------------
