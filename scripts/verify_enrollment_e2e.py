@@ -14,9 +14,13 @@
 用法：
     python scripts/verify_enrollment_e2e.py [base_url]
 默认 base_url = http://127.0.0.1:8090
+
+账号默认取本地测试库账号；对生产/其他库验证时用环境变量覆盖（避免硬编码凭据）：
+    E2E_PHONE=138xxxx E2E_PASSWORD=xxxx python3 scripts/verify_enrollment_e2e.py
 """
 
 import json
+import os
 import sys
 import threading
 import time
@@ -24,8 +28,8 @@ import urllib.error
 import urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8090"
-PHONE = "19371581808"
-PASSWORD = "201325"
+PHONE = os.environ.get("E2E_PHONE", "19371581808")
+PASSWORD = os.environ.get("E2E_PASSWORD", "201325")
 
 results = []
 
