@@ -8,6 +8,7 @@ import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
 import org.springframework.web.multipart.MaxUploadSizeExceededException
+import org.springframework.web.servlet.resource.NoResourceFoundException
 
 /** 调用方：决定用哪套响应包装 / 错误码 */
 enum class Audience { PARENT, CHILD }
@@ -223,6 +224,20 @@ class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
             .contentType(MediaType.APPLICATION_JSON)
             .body(ApiResponse<Any>(ParentErr.PARAM_ERROR, "上传文件过大，请调整服务端 multipart 上限后重试"))
+    }
+
+    /**
+     * 静态资源不存在（典型：浏览器打开管理后台时自动请求 favicon.ico）。
+     * 这是正常 404 语义，绝不能落到 [handleOther] 的 ERROR 分支——否则每次有人
+     * 打开后台都刷一条 "unhandled exception" 假告警，上线后真正的 ERROR 会被淹没。
+     */
+    @ExceptionHandler(NoResourceFoundException::class)
+    fun handleNoResource(e: NoResourceFoundException, response: HttpServletResponse): ResponseEntity<*>? {
+        if (!resetIfPossible(response)) return null
+        log.debug("static resource not found: {}", e.message)
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .contentType(MediaType.APPLICATION_JSON)
+            .body(ApiResponse<Any>(ParentErr.PARAM_ERROR, "not found"))
     }
 
     @ExceptionHandler(Exception::class)
