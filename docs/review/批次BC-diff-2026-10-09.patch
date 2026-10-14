@@ -1,0 +1,1349 @@
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/AlertService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/AlertService.kt
+index 99c5d88..b965dcf 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/AlertService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/AlertService.kt
+@@ -133,7 +133,10 @@ class AlertService(
+             "BLOCKED_URL_ACCESS" to ("访问被拦截网址" to "尝试访问被屏蔽的网址"),
+             "TIME_LIMIT_EXCEEDED" to ("使用时长超限" to "今日使用时长已超过限制"),
+             "PERMISSION_REVOKED" to ("权限被撤销" to "管控所需权限被撤销"),
+-            "POLICY_APPLY_FAILED" to ("策略应用失败" to "部分管控策略未能生效")
++            "POLICY_APPLY_FAILED" to ("策略应用失败" to "部分管控策略未能生效"),
++            "ACCESSIBILITY_DISABLED" to ("无障碍服务被关闭" to "操作闸门的系统级拦截已失效，可能被人为关闭"),
++            "USAGE_ACCESS_LOST" to ("使用情况权限被关闭" to "使用情况访问权限被关闭，应用管控与时长统计将失效"),
++            "GUARD_PASSWORD_NOT_SET" to ("操作密码尚未设置" to "管控设备未设置操作密码，设置页无法验证家长身份，请尽快补设")
+         )
+     }
+ }
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/di/GuardInfraModule.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/di/GuardInfraModule.kt"
+new file mode 100644
+index 0000000..7794994
+--- /dev/null
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/di/GuardInfraModule.kt"
+@@ -0,0 +1,25 @@
++package com.padguard.child.di
++
++import com.padguard.child.guard.GuardInfraProbeImpl
++import com.padguard.core.engine.guard.GuardInfraProbe
++import dagger.Binds
++import dagger.Module
++import dagger.hilt.InstallIn
++import dagger.hilt.components.SingletonComponent
++import javax.inject.Singleton
++
++/**
++ * 守护基建探针的绑定（S12）。
++ *
++ * 独立于 [AppModule]：@Binds 需要 abstract class，而 AppModule 是
++ * object + @Provides 的写法，两者不能混在同一个 Module 里 ——
++ * 拆开是 Dagger 的标准做法，不是多余文件。
++ */
++@Module
++@InstallIn(SingletonComponent::class)
++abstract class GuardInfraModule {
++
++    @Binds
++    @Singleton
++    abstract fun bindGuardInfraProbe(impl: GuardInfraProbeImpl): GuardInfraProbe
++}
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/guard/GuardInfraProbeImpl.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/guard/GuardInfraProbeImpl.kt"
+new file mode 100644
+index 0000000..b86a75d
+--- /dev/null
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/guard/GuardInfraProbeImpl.kt"
+@@ -0,0 +1,40 @@
++package com.padguard.child.guard
++
++import android.app.AppOpsManager
++import android.content.Context
++import android.os.Process
++import com.padguard.core.engine.guard.GuardInfraProbe
++import dagger.hilt.android.qualifiers.ApplicationContext
++import javax.inject.Inject
++import javax.inject.Singleton
++
++/**
++ * [GuardInfraProbe] 的 app 层实现（S12）。
++ *
++ * 两项探测的口径来源：
++ * - 无障碍：复用 [GuardA11y.isEnabled]（匹配本包名 + OperationGuardAccessibilityService 类名），
++ *   与 GuardService.ensureGuardInfra、「我的」页状态横幅共用同一判定，避免多处口径漂移；
++ * - Usage Access：AppOpsManager.checkOpNoThrow(OPSTR_GET_USAGE_STATS) == MODE_ALLOWED，
++ *   与 ProfileViewModel.isUsageStatsGranted 同一口径 —— 普通 checkSelfPermission 拿不到
++ *   这个权限的真实状态，必须走 AppOps。
++ */
++@Singleton
++class GuardInfraProbeImpl @Inject constructor(
++    @ApplicationContext private val context: Context
++) : GuardInfraProbe {
++
++    override fun isAccessibilityServiceEnabled(): Boolean =
++        GuardA11y.isEnabled(context)
++
++    override fun isUsageAccessGranted(): Boolean {
++        val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
++            ?: return false
++        return runCatching {
++            appOps.checkOpNoThrow(
++                AppOpsManager.OPSTR_GET_USAGE_STATS,
++                Process.myUid(),
++                context.packageName
++            ) == AppOpsManager.MODE_ALLOWED
++        }.getOrDefault(false)
++    }
++}
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/guard/OperationGuardAccessibilityService.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/guard/OperationGuardAccessibilityService.kt"
+index 96b2074..9832868 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/guard/OperationGuardAccessibilityService.kt"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/guard/OperationGuardAccessibilityService.kt"
+@@ -4,10 +4,17 @@ import android.accessibilityservice.AccessibilityService
+ import android.accessibilityservice.AccessibilityServiceInfo
+ import android.content.Intent
+ import android.view.accessibility.AccessibilityEvent
++import com.padguard.child.di.ApplicationScope
+ import com.padguard.child.ui.lock.LockScreenActivity
+ import com.padguard.core.common.Logger
++import com.padguard.core.data.model.RiskLevel
++import com.padguard.core.data.model.RiskType
++import com.padguard.core.data.repository.AuthRepository
++import com.padguard.core.data.repository.LogRepository
+ import com.padguard.core.engine.lock.LockController
+ import dagger.hilt.android.AndroidEntryPoint
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.launch
+ import javax.inject.Inject
+ 
+ /**
+@@ -50,6 +57,17 @@ class OperationGuardAccessibilityService : AccessibilityService() {
+     @Inject
+     lateinit var lockController: LockController
+ 
++    /** S11：密码未设置提醒走风险告警通道（append 只进行为流水，家长端看不见） */
++    @Inject
++    lateinit var logRepository: LogRepository
++
++    @Inject
++    lateinit var authRepository: AuthRepository
++
++    @Inject
++    @ApplicationScope
++    lateinit var scope: CoroutineScope
++
+     /** 去抖：同一受保护窗口 1.5s 内只拦截一次，避免 performGlobalAction 导致事件风暴。 */
+     private var lastTriggerAt = 0L
+     private var lastTriggerPkg = ""
+@@ -57,6 +75,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
+     /** 锁屏抢占复位去抖：避免每次窗口切换都重拉锁屏造成事件风暴 / 反复重启锁屏页 */
+     private var lastLockRelaunchAt = 0L
+ 
++    /** S11：密码未设置告警的 24h 一次闸 */
++    private var lastPasswordNotSetReportedAt = 0L
++
+     override fun onServiceConnected() {
+         super.onServiceConnected()
+         Logger.i(TAG) { "operation guard accessibility service connected" }
+@@ -92,17 +113,35 @@ class OperationGuardAccessibilityService : AccessibilityService() {
+             return
+         }
+ 
+-        // 密码未启用 → 闸门关闭，不做任何事
+-        if (!manager.isEnabledNow()) return
++        // 当前前台不在管控范围 → 放行。
++        // S11：判定提前到密码闸状态检查之前 —— 拦不拦是「这个界面是否要保护」的问题，
++        // 怎么拦是「密码闸处于什么状态」的问题，两者解耦后，密码未设置时设置页仍有兜底拦截。
++        val reason = decide(pkg) ?: return
++
++        // S11 拆层：密码未设置时的降级拦截。
++        // 设置页必须拦：它正是关闭本无障碍服务的入口，放行等于允许"先关无障碍、
++        // 再解除一切管控"。但密码未设时拉不出验证框（没有可比对的凭据），
++        // 所以只顶回 + 提醒家长尽快补设密码（24h 至多一次）。
++        // 安装器/受管控应用的拦截依赖密码闸验证身份，未设密码时维持放行。
++        if (!manager.isEnabledNow()) {
++            if (reason != REASON_SETTINGS) return
++            val now = System.currentTimeMillis()
++            // 与主路径共用按包名去抖：顶回引发的事件风暴同样需要抑制
++            if (pkg == lastTriggerPkg && now - lastTriggerAt < DEBOUNCE_MS) return
++            lastTriggerAt = now
++            lastTriggerPkg = pkg
++            Logger.i(TAG) { "guarded foreground: $pkg reason=$reason, guard password not set, bouncing back" }
++            performGlobalAction(GLOBAL_ACTION_BACK)
++            reportPasswordNotSet()
++            return
++        }
++
+         // 处于解锁窗口内 → 放行
+         if (manager.isUnlockedNow()) return
+         // 是否在「试错锁定」冷却期：锁定期间仍要顶回（否则等于开闸），
+         // 但不再拉起密码框——孩子此刻无论如何验不过，弹框只会被狂点。
+         val lockedOut = manager.isLockedOutNow()
+ 
+-        // 当前前台不在管控范围 → 放行
+-        val reason = decide(pkg) ?: return
+-
+         val now = System.currentTimeMillis()
+         // 去抖按「包名」而非全局：顶回后用户可能立刻点另一个应用，那次要拦
+         if (pkg == lastTriggerPkg && now - lastTriggerAt < DEBOUNCE_MS) return
+@@ -133,6 +172,33 @@ class OperationGuardAccessibilityService : AccessibilityService() {
+         Logger.w(TAG) { "operation guard accessibility service interrupted" }
+     }
+ 
++    /**
++     * S11：密码未设置提醒，24h 至多一次。
++     *
++     * 这是给**家长**看的告警：无障碍拦截在位、守护基建齐备，密码闸却没启用，
++     * 说明初始配置没做完（或被清除后未补设）。走 raise 而非 append 的原因与
++     * S15（PadGuardDeviceAdminReceiver）相同：告警通道才会出现在家长端，
++     * 行为流水永远无人看。24h 闸与 TamperDetector 的闩锁语义同理 ——
++     * 孩子每次进设置页都报，只会把这条提醒刷成噪音。
++     */
++    private fun reportPasswordNotSet() {
++        val now = System.currentTimeMillis()
++        if (now - lastPasswordNotSetReportedAt < PASSWORD_NOT_SET_INTERVAL_MS) return
++        lastPasswordNotSetReportedAt = now
++        scope.launch {
++            runCatching {
++                logRepository.raise(
++                    type = RiskType.GUARD_PASSWORD_NOT_SET,
++                    level = RiskLevel.NORMAL,
++                    detail = mapOf(
++                        "note" to "操作密码尚未设置，设置页仅能顶回无法验证家长身份，请尽快在控制端补设密码"
++                    ),
++                    deviceId = authRepository.getDeviceId()
++                )
++            }.onFailure { Logger.w(TAG, it) { "failed to raise password-not-set alert" } }
++        }
++    }
++
+     /**
+      * 判定当前前台包名是否需要拦截。
+      *
+@@ -168,6 +234,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
+         private const val REASON_INSTALLER = "installer"
+         private const val REASON_CONTROLLED_APP = "controlled-app"
+ 
++        /** S11：密码未设置告警的最小间隔：24h */
++        private const val PASSWORD_NOT_SET_INTERVAL_MS = 24 * 60 * 60 * 1000L
++
+         /** 受保护的系统设置包名（AOSP + 主流国产 ROM）。 */
+         private val GUARDED_SETTINGS_PACKAGES = setOf(
+             "com.android.settings",
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/service/GuardService.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/service/GuardService.kt"
+index 1cd6395..7196c62 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/service/GuardService.kt"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/service/GuardService.kt"
+@@ -62,6 +62,7 @@ import com.padguard.core.transport.RemoteDataSource
+ import com.padguard.core.transport.TransportSettings
+ import com.padguard.core.transport.http.ApiCode
+ import com.padguard.core.transport.http.ApiResult
++import kotlinx.coroutines.sync.withLock
+ import com.padguard.core.transport.http.CommandsResponse
+ import com.padguard.core.transport.http.CredentialStore
+ import com.padguard.core.transport.http.PolicyFetchResult
+@@ -443,7 +444,13 @@ class GuardService : Service() {
+ 
+             while (isActive) {
+                 val now = SystemClock.elapsedRealtime()
+-                val monitoring = policyEngine.monitoring()
++                // C1'：monitoring() 与其余 7 个子任务同列，必须 runSafely 包裹。
++                // 它读的是 MonitoringEnforcer 的内存快照，正常不会抛 —— 但主循环的死法
++                // 永远来自"现在不会抛的代码将来会抛"，一次异常 = 服务活着但
++                // 采样/心跳/自检/上报全停摆（类注释自述的最危险失效形态）。
++                // 降级值用 MonitoringRuntime() 本身：它与 enforcer 的初始 runtime 同一构造，默认值单源。
++                val monitoring = runSafely("monitoring") { policyEngine.monitoring() }
++                    ?: com.padguard.core.engine.enforcer.MonitoringRuntime()
+ 
+                 // ---------- 每轮必做：采样 + 锁定判定 ----------
+                 // 未绑定时跳过：没有家长就没有管控依据，
+@@ -719,6 +726,9 @@ class GuardService : Service() {
+         }
+     }
+ 
++    /** 上行串行闸（C2'）：uploadPending 有多条触发路径（周期/flushNow/回执/重连），并发跑会重复 take 同一批。 */
++    private val uploadMutex = kotlinx.coroutines.sync.Mutex()
++
+     /** 日志与告警分开上报：告警是高危信号，不能被大批量普通日志的失败拖住 */
+     private suspend fun uploadPending() {
+         if (!credentials.isBound) return
+@@ -730,18 +740,22 @@ class GuardService : Service() {
+         // 家长端的"使用时长统计"永远是 0 —— 这是最容易被忽略的一条断链。
+         runSafely("appUsageReport") { reportAppUsage() }
+ 
+-        val alerts = logRepository.takePendingAlerts()
+-        if (alerts.isNotEmpty()) {
+-            val r = remote.uploadEvents(deviceId, alerts.map { it.copy(deviceId = deviceId) })
+-            if (r.isSuccess) logRepository.markAlertsUploaded(alerts)
+-            else Logger.w(TAG) { "alert upload failed, keep ${alerts.size} pending" }
+-        }
++        // Mutex 串行化是双保险（C2'）：即使并发进入，损失也只是重复发送同批数据
++        // （服务端按 logId/eventId 幂等去重），精确标记本身已保证不错标。
++        uploadMutex.withLock {
++            val alerts = logRepository.takePendingAlerts()
++            if (alerts.items.isNotEmpty()) {
++                val r = remote.uploadEvents(deviceId, alerts.items.map { it.copy(deviceId = deviceId) })
++                if (r.isSuccess) logRepository.markAlertsUploaded(alerts)
++                else Logger.w(TAG) { "alert upload failed, keep ${alerts.size} pending" }
++            }
+ 
+-        val logs = logRepository.takePendingLogs()
+-        if (logs.isNotEmpty()) {
+-            val r = remote.uploadLogs(deviceId, logs)
+-            if (r.isSuccess) logRepository.markLogsUploaded(logs)
+-            else Logger.w(TAG) { "log upload failed, keep ${logs.size} pending" }
++            val logs = logRepository.takePendingLogs()
++            if (logs.items.isNotEmpty()) {
++                val r = remote.uploadLogs(deviceId, logs.items)
++                if (r.isSuccess) logRepository.markLogsUploaded(logs)
++                else Logger.w(TAG) { "log upload failed, keep ${logs.size} pending" }
++            }
+         }
+ 
+         // 兜底：任何"已落库但没入队上行"的临时解锁申请，在每次上报后补一次入队，
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/db/Daos.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/db/Daos.kt"
+index e7e2d98..647a14a 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/db/Daos.kt"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/db/Daos.kt"
+@@ -60,6 +60,21 @@ interface BehaviorLogDao {
+     @Query("DELETE FROM behavior_log WHERE uploaded = 1 AND timestamp < :before")
+     suspend fun deleteUploadedBefore(before: Long)
+ 
++    /**
++     * pending 超限兜底（C2'）：丢弃最旧的 N 条**未上传**普通日志。
++     * 只在 behavior_log 堆积超过软上限时由 [com.padguard.core.data.repository.LogRepository] 触发，
++     * 属于极端离线场景的容量保护 —— 告警表（risk_event）没有对应方法，永不因容量丢弃。
++     */
++    @Query(
++        """
++        DELETE FROM behavior_log WHERE id IN (
++            SELECT id FROM behavior_log WHERE uploaded = 0
++            ORDER BY timestamp ASC LIMIT :count
++        )
++        """
++    )
++    suspend fun deleteOldestPending(count: Int): Int
++
+     @Query("DELETE FROM behavior_log")
+     suspend fun clear()
+ }
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/model/Event.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/model/Event.kt"
+index e5da7eb..1b329d8 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/model/Event.kt"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/model/Event.kt"
+@@ -95,7 +95,20 @@ enum class RiskType {
+     PERMISSION_REVOKED,
+     POLICY_APPLY_FAILED,
+     INVALID_SIGNATURE,
+-    HEARTBEAT_TIMEOUT
++    HEARTBEAT_TIMEOUT,
++
++    /** S12：无障碍服务被关闭 —— 设置页拦截 / 锁屏抢占依赖它，失活 = 拦截层整体失效 */
++    ACCESSIBILITY_DISABLED,
++
++    /** S12：使用情况访问权限被关闭 —— 应用用量采集失明，家长端时长统计失真 */
++    USAGE_ACCESS_LOST,
++
++    /**
++     * S11：操作密码尚未设置 —— 闸门"建好了但没有锁芯"。
++     * 无障碍拦截会把孩子顶离设置页（防先关无障碍再脱管），但没有密码就无法验证
++     * 家长身份，家长自己改设置也要靠密码。这是配置未完成的信号，需提醒家长补设。
++     */
++    GUARD_PASSWORD_NOT_SET
+ }
+ 
+ @Serializable
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/repository/LogRepository.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/repository/LogRepository.kt"
+index 69cb141..030a770 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/repository/LogRepository.kt"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/main/kotlin/com/padguard/core/data/repository/LogRepository.kt"
+@@ -29,6 +29,19 @@ import javax.inject.Singleton
+  * 存储上限保护：日志堆积过多时优先丢弃最旧的普通日志，
+  * 但告警事件（`risk_event` 表）永不因容量而丢弃。
+  */
++/**
++ * take/mark 的精确配对载体（C2'）。
++ *
++ * [entityIds] 是 Room 自增主键 —— take 时从实体上直接带出，mark 时按它精确回写。
++ * 此前 mark* 是"重查一次 pending 前 N 条"当刚上报批次：take 与 mark 之间若有并发
++ * 插入/并发 take（uploadPending 有 5 条触发路径），重查窗口会包含**不属于本批**的新行，
++ * 把从未上传的日志错标成已上传，且这类丢失静默无声 —— 告警"永不丢弃"的承诺就此破产。
++ */
++data class PendingBatch<T>(val items: List<T>, val entityIds: List<Long>) {
++    val isEmpty: Boolean get() = items.isEmpty()
++    val size: Int get() = items.size
++}
++
+ @Singleton
+ class LogRepository @Inject constructor(
+     private val logDao: BehaviorLogDao,
+@@ -76,24 +89,27 @@ class LogRepository @Inject constructor(
+ 
+     suspend fun pendingCount(): Int = logDao.pendingCount()
+ 
+-    suspend fun takePendingLogs(limit: Int = UPLOAD_BATCH_SIZE): List<BehaviorLog> =
+-        logDao.pending(limit).map { entity ->
+-            BehaviorLog(
+-                logId = entity.logId,
+-                type = runCatching { LogType.valueOf(entity.type) }.getOrDefault(LogType.APP_USAGE),
+-                timestamp = entity.timestamp,
+-                payload = decodePayload(entity.payloadJson),
+-                uploaded = false
+-            )
+-        }
++    suspend fun takePendingLogs(limit: Int = UPLOAD_BATCH_SIZE): PendingBatch<BehaviorLog> {
++        val entities = logDao.pending(limit)
++        return PendingBatch(
++            items = entities.map { entity ->
++                BehaviorLog(
++                    logId = entity.logId,
++                    type = runCatching { LogType.valueOf(entity.type) }.getOrDefault(LogType.APP_USAGE),
++                    timestamp = entity.timestamp,
++                    payload = decodePayload(entity.payloadJson),
++                    uploaded = false
++                )
++            },
++            entityIds = entities.map { it.id }
++        )
++    }
+ 
+-    suspend fun markLogsUploaded(logs: List<BehaviorLog>) {
+-        if (logs.isEmpty()) return
+-        // takePendingLogs 按时间正序取，这里重取同样窗口的自增 id 即为刚上报的那批。
+-        // 配合服务端 logId 幂等去重，即使标记范围略有偏差也不会造成数据丢失或重复统计。
+-        val ids = logDao.pending(logs.size).map { it.id }
+-        logDao.markUploaded(ids)
+-        Logger.v("LogRepository") { "marked ${ids.size} logs uploaded" }
++    /** 按 take 时带出的自增主键精确标记 —— 与 [PendingBatch] 成对使用，无重查窗口 */
++    suspend fun markLogsUploaded(batch: PendingBatch<BehaviorLog>) {
++        if (batch.entityIds.isEmpty()) return
++        logDao.markUploaded(batch.entityIds)
++        Logger.v("LogRepository") { "marked ${batch.entityIds.size} logs uploaded" }
+     }
+ 
+     // ==================== 告警事件 ====================
+@@ -124,21 +140,26 @@ class LogRepository @Inject constructor(
+         return event
+     }
+ 
+-    suspend fun takePendingAlerts(limit: Int = ALERT_BATCH_SIZE): List<RiskEvent> =
+-        riskDao.pending(limit).map { entity ->
+-            RiskEvent(
+-                eventId = entity.eventId,
+-                deviceId = "",
+-                type = runCatching { RiskType.valueOf(entity.type) }.getOrDefault(RiskType.POLICY_APPLY_FAILED),
+-                level = runCatching { RiskLevel.valueOf(entity.level) }.getOrDefault(RiskLevel.NORMAL),
+-                timestamp = entity.timestamp,
+-                detail = decodePayload(entity.detailJson)
+-            )
+-        }
++    suspend fun takePendingAlerts(limit: Int = ALERT_BATCH_SIZE): PendingBatch<RiskEvent> {
++        val entities = riskDao.pending(limit)
++        return PendingBatch(
++            items = entities.map { entity ->
++                RiskEvent(
++                    eventId = entity.eventId,
++                    deviceId = "",
++                    type = runCatching { RiskType.valueOf(entity.type) }.getOrDefault(RiskType.POLICY_APPLY_FAILED),
++                    level = runCatching { RiskLevel.valueOf(entity.level) }.getOrDefault(RiskLevel.NORMAL),
++                    timestamp = entity.timestamp,
++                    detail = decodePayload(entity.detailJson)
++                )
++            },
++            entityIds = entities.map { it.id }
++        )
++    }
+ 
+-    suspend fun markAlertsUploaded(events: List<RiskEvent>) {
+-        val uploaded = riskDao.pending(events.size).map { it.id }
+-        riskDao.markUploaded(uploaded)
++    suspend fun markAlertsUploaded(batch: PendingBatch<RiskEvent>) {
++        if (batch.entityIds.isEmpty()) return
++        riskDao.markUploaded(batch.entityIds)
+     }
+ 
+     suspend fun pendingAlertCount(): Int = riskDao.pendingCount()
+@@ -233,6 +254,9 @@ class LogRepository @Inject constructor(
+         RiskType.USB_DEBUG_ENABLED -> "检测到 USB 调试被打开"
+         RiskType.PERMISSION_REVOKED -> "管控权限被削弱"
+         RiskType.POLICY_APPLY_FAILED -> "部分管控项需重新下发"
++        RiskType.ACCESSIBILITY_DISABLED -> "无障碍服务被关闭"
++        RiskType.USAGE_ACCESS_LOST -> "使用情况权限被关闭"
++        RiskType.GUARD_PASSWORD_NOT_SET -> "操作密码尚未设置"
+         RiskType.INVALID_SIGNATURE -> "指令签名校验失败"
+         RiskType.HEARTBEAT_TIMEOUT -> "与服务端通信超时"
+     }
+@@ -250,9 +274,16 @@ class LogRepository @Inject constructor(
+     }
+ 
+     private suspend fun trimIfOverflow() {
+-        if (logDao.pendingCount() > MAX_PENDING_LOGS) {
+-            // 极端离线场景下的兜底：丢弃最旧的已上传日志释放空间
+-            logDao.deleteUploadedBefore(System.currentTimeMillis())
++        val pending = logDao.pendingCount()
++        if (pending <= MAX_PENDING_LOGS) return
++        // 离线数日的极端兜底：pending 超限时**丢弃最旧的未上传普通日志**，防表无限膨胀。
++        // 此前实现删的是"已上传"日志 —— 已上传的本就有 purge 兜着，pending 却永不清，
++        // 与"未上传数据永不清理"的承诺拼起来 = 超限保护形同虚设（R6 登记项）。
++        // 告警（risk_event）不在本清理范围内：告警永不因容量而丢弃。
++        val excess = pending - MAX_PENDING_LOGS
++        val removed = logDao.deleteOldestPending(excess)
++        if (removed > 0) {
++            Logger.w("LogRepository") { "pending logs overflow: dropped $removed oldest unsent logs" }
+         }
+     }
+ 
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/test/kotlin/com/padguard/core/data/repository/LogRepositoryTest.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/test/kotlin/com/padguard/core/data/repository/LogRepositoryTest.kt"
+new file mode 100644
+index 0000000..946d4c0
+--- /dev/null
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/data/src/test/kotlin/com/padguard/core/data/repository/LogRepositoryTest.kt"
+@@ -0,0 +1,197 @@
++package com.padguard.core.data.repository
++
++import com.padguard.core.common.Logger
++import com.padguard.core.data.db.BehaviorLogDao
++import com.padguard.core.data.db.BehaviorLogEntity
++import com.padguard.core.data.db.RiskEventDao
++import com.padguard.core.data.db.RiskEventEntity
++import com.padguard.core.data.model.LogType
++import com.padguard.core.data.model.RiskLevel
++import com.padguard.core.data.model.RiskType
++import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.map
++import kotlinx.coroutines.runBlocking
++import org.junit.After
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Before
++import org.junit.Test
++
++/**
++ * [LogRepository] take/mark 精确配对（C2'）与容量保护的 JVM 行为测试。
++ *
++ * 核心回归点 —— **take 与 mark 之间有并发插入时不丢数据**：
++ * 旧实现 mark 时"重查一次 pending 前 N 条"当刚上报批次，take 与 mark 之间
++ * 新插入的行会被错标成已上传（静默丢失），而本批次的原始行反而滞留 pending。
++ * 新实现 mark 按 take 时带出的自增主键精确回写，本测试用内存 fake DAO 复刻
++ * "take → 并发插入 → mark" 时序，断言新行仍 pending、本批全部已标记。
++ *
++ * fake DAO 说明：Room @Dao 是纯接口，内存 List 语义即可满足被测路径；
++ * 不引入 Robolectric / Room 测试框架 —— 这里要钉住的是**仓库层的配对逻辑**，
++ * 不是 SQL 本身。
++ */
++class LogRepositoryTest {
++
++    private var originalLoggerEnabled = true
++
++    /** 内存版 BehaviorLogDao：自增 id + uploaded 过滤，语义与 SQL 一致 */
++    private class FakeLogDao : BehaviorLogDao {
++        val rows = mutableListOf<BehaviorLogEntity>()
++        private var nextId = 1L
++
++        override suspend fun pending(limit: Int): List<BehaviorLogEntity> =
++            rows.filter { !it.uploaded }.sortedBy { it.timestamp }.take(limit)
++
++        override suspend fun pendingCount(): Int = rows.count { !it.uploaded }
++
++        override fun observePendingCount(): Flow<Int> =
++            MutableStateFlow(rows).map { list -> list.count { !it.uploaded } }
++
++        override fun observeRecentOfType(type: String, limit: Int): Flow<List<BehaviorLogEntity>> =
++            MutableStateFlow(rows).map { list ->
++                list.filter { it.type == type }.sortedByDescending { it.timestamp }.take(limit)
++            }
++
++        override suspend fun insert(entity: BehaviorLogEntity): Long {
++            val withId = entity.copy(id = nextId++)
++            rows.add(withId)
++            return withId.id
++        }
++
++        override suspend fun insertAll(entities: List<BehaviorLogEntity>) {
++            entities.forEach { insert(it) }
++        }
++
++        override suspend fun markUploaded(ids: List<Long>) {
++            val set = ids.toSet()
++            rows.replaceAll { if (it.id in set) it.copy(uploaded = true) else it }
++        }
++
++        override suspend fun deleteUploadedBefore(before: Long) {
++            val victims = rows.filter { it.uploaded && it.timestamp < before }
++            rows.removeAll(victims.toSet())
++        }
++
++        override suspend fun deleteOldestPending(count: Int): Int {
++            val victims = rows.filter { !it.uploaded }.sortedBy { it.timestamp }.take(count)
++            rows.removeAll(victims.toSet())
++            return victims.size
++        }
++
++        override suspend fun clear() = rows.clear()
++    }
++
++    /** 内存版 RiskEventDao：同上 */
++    private class FakeRiskDao : RiskEventDao {
++        val rows = mutableListOf<RiskEventEntity>()
++        private var nextId = 1L
++
++        override suspend fun pending(limit: Int): List<RiskEventEntity> =
++            rows.filter { !it.uploaded }.sortedBy { it.timestamp }.take(limit)
++
++        override suspend fun pendingCount(): Int = rows.count { !it.uploaded }
++
++        override fun observeRecent(limit: Int): Flow<List<RiskEventEntity>> =
++            MutableStateFlow(rows).map { list -> list.sortedByDescending { it.timestamp }.take(limit) }
++
++        override suspend fun insert(entity: RiskEventEntity): Long {
++            val withId = entity.copy(id = nextId++)
++            rows.add(withId)
++            return withId.id
++        }
++
++        override suspend fun markUploaded(ids: List<Long>) {
++            val set = ids.toSet()
++            rows.replaceAll { if (it.id in set) it.copy(uploaded = true) else it }
++        }
++
++        override suspend fun deleteUploadedBefore(before: Long) {
++            val victims = rows.filter { it.uploaded && it.timestamp < before }
++            rows.removeAll(victims.toSet())
++        }
++    }
++
++    private lateinit var logDao: FakeLogDao
++    private lateinit var riskDao: FakeRiskDao
++    private lateinit var repo: LogRepository
++
++    @Before
++    fun setUp() {
++        originalLoggerEnabled = Logger.enabled
++        Logger.enabled = false
++        logDao = FakeLogDao()
++        riskDao = FakeRiskDao()
++        repo = LogRepository(logDao, riskDao)
++    }
++
++    @After
++    fun tearDown() {
++        Logger.enabled = originalLoggerEnabled
++    }
++
++    private fun logEntity(logId: String, ts: Long) = BehaviorLogEntity(
++        logId = logId, type = LogType.APP_USAGE.name, timestamp = ts, payloadJson = "{}"
++    )
++
++    private fun alertEntity(eventId: String, ts: Long) = RiskEventEntity(
++        eventId = eventId, type = RiskType.UNINSTALL_ATTEMPT.name,
++        level = RiskLevel.HIGH.name, timestamp = ts, detailJson = "{}"
++    )
++
++    @Test
++    fun `rows inserted between take and mark stay pending - only the taken batch is marked`() = runBlocking {
++        // 批次 A：两条
++        logDao.insert(logEntity("L1", 1_000L))
++        logDao.insert(logEntity("L2", 2_000L))
++        val batchA = repo.takePendingLogs()
++        assertEquals(2, batchA.size)
++
++        // 模拟上传期间的新上行（并发插入）
++        logDao.insert(logEntity("L3", 3_000L))
++        logDao.insert(logEntity("L4", 4_000L))
++
++        // 标记批次 A：只有 L1/L2 被标记，新行必须仍然 pending
++        repo.markLogsUploaded(batchA)
++
++        assertEquals("并发插入的行不应被错标", 2, logDao.pendingCount())
++        val stillPending = logDao.pending(10).map { it.logId }
++        assertEquals(listOf("L3", "L4"), stillPending)
++    }
++
++    @Test
++    fun `alert take and mark use the same precise pairing`() = runBlocking {
++        riskDao.insert(alertEntity("E1", 1_000L))
++        riskDao.insert(alertEntity("E2", 2_000L))
++        val batch = repo.takePendingAlerts()
++        assertEquals(2, batch.size)
++
++        riskDao.insert(alertEntity("E3", 3_000L))
++
++        repo.markAlertsUploaded(batch)
++
++        assertEquals(1, riskDao.pendingCount())
++        assertEquals("E3", riskDao.pending(10).single().eventId)
++    }
++
++    @Test
++    fun `empty batch mark is a no-op`() = runBlocking {
++        val empty = repo.takePendingLogs()
++        assertTrue(empty.isEmpty)
++        repo.markLogsUploaded(empty) // 不应抛异常、不应触发 DAO
++        repo.markAlertsUploaded(repo.takePendingAlerts())
++        assertEquals(0, logDao.pendingCount())
++    }
++
++    @Test
++    fun `trim drops oldest pending normal logs only when over soft cap`() = runBlocking {
++        // 直塞 50_001 条 pending，再走一次 append 触发 trim：
++        // append 先插入再裁剪 → pending = 50_002，excess = 2（MAX_PENDING_LOGS = 50_000），
++        // 应删除最旧的 2 条（B0、B1），回落到软上限。
++        repeat(50_001) { i -> logDao.insert(logEntity("B$i", i.toLong())) }
++        repo.append(LogType.APP_USAGE, emptyMap())
++        assertEquals("超限后应回落到软上限 50_000", 50_000L, logDao.pendingCount().toLong())
++        val remaining = logDao.pending(3).map { it.logId }
++        assertEquals("被丢弃的应是最旧的 B0/B1", listOf("B2", "B3", "B4"), remaining)
++    }
++}
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/build.gradle.kts" "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/build.gradle.kts"
+index d52f86d..db4a10d 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/build.gradle.kts"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/build.gradle.kts"
+@@ -43,4 +43,7 @@ dependencies {
+ 
+     // 纯逻辑（ScheduleEvaluator）的 JVM 单元测试，无需 Robolectric
+     testImplementation(libs.junit)
++    // TamperDetector 依赖 final 类 DeviceAdminBridge / Context，
++    // Mockito 5 默认 inline mockmaker 可直接 mock final 类
++    testImplementation(libs.mockito.core)
+ }
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/main/kotlin/com/padguard/core/engine/guard/GuardInfraProbe.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/main/kotlin/com/padguard/core/engine/guard/GuardInfraProbe.kt"
+new file mode 100644
+index 0000000..42ff611
+--- /dev/null
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/main/kotlin/com/padguard/core/engine/guard/GuardInfraProbe.kt"
+@@ -0,0 +1,23 @@
++package com.padguard.core.engine.guard
++
++/**
++ * 守护基建状态探针（S12 / N2 接口下沉）。
++ *
++ * ## 为什么是接口而不是直接写检测逻辑
++ * "我方无障碍服务是否启用""使用情况访问权限是否还在"这两项检测**实现上依赖 app 层**：
++ * - 无障碍：必须拿得到本 App 的 Service 组件名（`com.padguard.child.guard.*`），
++ *   core/engine 无法（也不应）反向依赖 app 层；
++ * - Usage Access：AppOpsManager 的查询本身可用 Context 做，但与无障碍同属
++ *   "守护基建是否还在"的语义，两处检查口径应收敛在一处。
++ *
++ * 因此接口定义在 core/engine（被 [TamperDetector] 消费），实现放 app 层经 Hilt 绑定注入 ——
++ * 依赖方向保持 core ← app，不出现反向依赖，也让 JVM 单元测试可以用假探针驱动 TamperDetector。
++ */
++interface GuardInfraProbe {
++
++    /** 我方的无障碍服务当前是否处于启用状态 */
++    fun isAccessibilityServiceEnabled(): Boolean
++
++    /** 使用情况访问权限（Usage Access）当前是否已授予 */
++    fun isUsageAccessGranted(): Boolean
++}
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/main/kotlin/com/padguard/core/engine/guard/TamperDetector.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/main/kotlin/com/padguard/core/engine/guard/TamperDetector.kt"
+index 795acc2..8f2d1d1 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/main/kotlin/com/padguard/core/engine/guard/TamperDetector.kt"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/main/kotlin/com/padguard/core/engine/guard/TamperDetector.kt"
+@@ -42,6 +42,7 @@ import kotlin.math.abs
+ class TamperDetector @Inject constructor(
+     @ApplicationContext private val context: Context,
+     private val admin: DeviceAdminBridge,
++    private val probe: GuardInfraProbe,
+     private val timeProvider: TimeProvider
+ ) {
+ 
+@@ -50,6 +51,11 @@ class TamperDetector @Inject constructor(
+     private var lastControlMode: ControlMode? = null
+     private var rootReported = false
+ 
++    // 守护基建告警的一次性闩锁：只在「由好变坏」的那一刻报一次，
++    // 恢复后复位 —— 若每轮自检都报，家长端会被同一条告警刷屏。
++    private var accessibilityLostReported = false
++    private var usageLostReported = false
++
+     /**
+      * 执行一轮检测。
+      *
+@@ -64,6 +70,7 @@ class TamperDetector @Inject constructor(
+         detectDebugChannels(findings)
+         if (policy.blockRoot) detectRoot(findings)
+         detectRestrictionLoss(policy, systemLock, findings)
++        detectGuardInfra(findings)
+ 
+         if (findings.isNotEmpty()) {
+             Logger.w(TAG) { "tamper findings: ${findings.map { it.type }}" }
+@@ -247,6 +254,48 @@ class TamperDetector @Inject constructor(
+         )
+     }
+ 
++    /**
++     * 守护基建存活检测（S12）。
++     *
++     * 无障碍服务（操作密码闸门的系统级拦截硬依赖）与 Usage Access
++     * （应用管控探不到前台包名的直接原因）被用户在设置里关掉后，
++     * 终端不会崩溃、心跳照常 —— 不主动核对，家长会以为管控仍在生效。
++     *
++     * 闩锁语义：丢失的那一刻报一次，之后每轮扫描保持静默；
++     * 权限恢复后复位，再次丢失会重新报。设备重启不复位（重启不会自动恢复权限，
++     * 复位只会造成重启后同一条告警再刷一次）。
++     */
++    private fun detectGuardInfra(findings: MutableList<TamperFinding>) {
++        val a11yEnabled = runCatching { probe.isAccessibilityServiceEnabled() }.getOrDefault(false)
++        val usageGranted = runCatching { probe.isUsageAccessGranted() }.getOrDefault(false)
++
++        if (a11yEnabled) {
++            accessibilityLostReported = false
++        } else if (!accessibilityLostReported) {
++            accessibilityLostReported = true
++            findings += TamperFinding(
++                type = RiskType.ACCESSIBILITY_DISABLED,
++                level = RiskLevel.HIGH,
++                detail = mapOf(
++                    "note" to "操作闸门的系统级拦截已失效，孩子可在设置中绕过密码闸门，请引导孩子重新开启"
++                )
++            )
++        }
++
++        if (usageGranted) {
++            usageLostReported = false
++        } else if (!usageLostReported) {
++            usageLostReported = true
++            findings += TamperFinding(
++                type = RiskType.USAGE_ACCESS_LOST,
++                level = RiskLevel.NORMAL,
++                detail = mapOf(
++                    "note" to "使用情况访问权限被关闭，应用管控与时长统计将静默失效，请引导孩子重新授权"
++                )
++            )
++        }
++    }
++
+     private fun isInstalled(packageName: String): Boolean = runCatching {
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+             context.packageManager.getPackageInfo(
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/test/kotlin/com/padguard/core/engine/guard/TamperDetectorTest.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/test/kotlin/com/padguard/core/engine/guard/TamperDetectorTest.kt"
+new file mode 100644
+index 0000000..7026ef3
+--- /dev/null
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/engine/src/test/kotlin/com/padguard/core/engine/guard/TamperDetectorTest.kt"
+@@ -0,0 +1,132 @@
++package com.padguard.core.engine.guard
++
++import android.content.Context
++import com.padguard.core.common.Logger
++import com.padguard.core.common.TimeProvider
++import com.padguard.core.data.model.RiskLevel
++import com.padguard.core.data.model.RiskType
++import com.padguard.core.data.model.policy.ControlMode
++import com.padguard.core.data.model.policy.SecurityPolicy
++import com.padguard.core.data.model.policy.SystemLockPolicy
++import com.padguard.core.engine.admin.DeviceAdminBridge
++import kotlinx.coroutines.flow.MutableStateFlow
++import org.junit.After
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Before
++import org.junit.Test
++import org.mockito.Mockito
++
++/**
++ * [TamperDetector] 守护基建检测（S12）的 JVM 行为测试。
++ *
++ * 重点验证 [TamperDetector.detectGuardInfra] 的**闩锁语义**：
++ * - 丢失那一刻报一次（无障碍 = HIGH，Usage Access = NORMAL）；
++ * - 之后每轮扫描保持静默（防刷屏）；
++ * - 权限恢复后闩锁复位，再次丢失会重新报告。
++ *
++ * JVM rig 说明：
++ * - Context / DeviceAdminBridge 是 final 类，Mockito 5 inline mockmaker 直接 mock；
++ *   未 stub 的行为全部落在 runCatching 兜底或默认返回值上，不干扰被测路径；
++ * - 关闭 Logger（android.util.Log 在 JVM 是 stub）；
++ * - SecurityPolicy 显式关掉 antiClockTamper/blockRoot，把被测面隔离到守护基建检测。
++ */
++class TamperDetectorTest {
++
++    private var originalLoggerEnabled = true
++
++    /** 无障碍 / Usage Access 状态可随手翻转的假探针 */
++    private class FakeProbe(
++        var a11y: Boolean = true,
++        var usage: Boolean = true
++    ) : GuardInfraProbe {
++        override fun isAccessibilityServiceEnabled(): Boolean = a11y
++        override fun isUsageAccessGranted(): Boolean = usage
++    }
++
++    @Before
++    fun setUp() {
++        originalLoggerEnabled = Logger.enabled
++        Logger.enabled = false
++    }
++
++    @After
++    fun tearDown() {
++        Logger.enabled = originalLoggerEnabled
++    }
++
++    private fun detector(probe: GuardInfraProbe): TamperDetector {
++        val context = Mockito.mock(Context::class.java)
++        val admin = Mockito.mock(DeviceAdminBridge::class.java)
++        Mockito.`when`(admin.refreshControlMode()).thenReturn(ControlMode.LEGACY)
++        Mockito.`when`(admin.controlMode).thenReturn(MutableStateFlow(ControlMode.LEGACY))
++        return TamperDetector(context, admin, probe, TimeProvider())
++    }
++
++    /** 关掉与本测试无关的检测面，隔离守护基建断言 */
++    private fun policy() = SecurityPolicy(antiClockTamper = false, blockRoot = false)
++
++    @Test
++    fun `accessibility loss reports once at HIGH then stays silent until recovery`() {
++        val probe = FakeProbe(a11y = false, usage = true)
++        val det = detector(probe)
++
++        // 第 1 轮：报告 HIGH
++        val first = det.detect(policy(), SystemLockPolicy())
++        val finding = first.firstOrNull { it.type == RiskType.ACCESSIBILITY_DISABLED }
++        assertTrue("丢失时应报告 ACCESSIBILITY_DISABLED", finding != null)
++        assertEquals(RiskLevel.HIGH, finding!!.level)
++
++        // 第 2 轮：闩锁生效，不再重复报告
++        assertTrue(
++            "闩锁期内不应重复报告",
++            det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.ACCESSIBILITY_DISABLED }
++        )
++
++        // 恢复 → 复位
++        probe.a11y = true
++        assertTrue(
++            "恢复后不应残留告警",
++            det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.ACCESSIBILITY_DISABLED }
++        )
++
++        // 再次丢失 → 重新报告（复位语义）
++        probe.a11y = false
++        assertTrue(
++            "复位后再次丢失应重新报告",
++            det.detect(policy(), SystemLockPolicy()).any { it.type == RiskType.ACCESSIBILITY_DISABLED }
++        )
++    }
++
++    @Test
++    fun `usage access loss reports once at NORMAL then stays silent until recovery`() {
++        val probe = FakeProbe(a11y = true, usage = false)
++        val det = detector(probe)
++
++        val finding = det.detect(policy(), SystemLockPolicy())
++            .firstOrNull { it.type == RiskType.USAGE_ACCESS_LOST }
++        assertTrue("丢失时应报告 USAGE_ACCESS_LOST", finding != null)
++        assertEquals("Usage Access 丢失为 NORMAL（采集失明但闸门未失守）", RiskLevel.NORMAL, finding!!.level)
++
++        assertTrue(
++            det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.USAGE_ACCESS_LOST }
++        )
++
++        probe.usage = true
++        assertTrue(
++            det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.USAGE_ACCESS_LOST }
++        )
++
++        probe.usage = false
++        assertTrue(
++            det.detect(policy(), SystemLockPolicy()).any { it.type == RiskType.USAGE_ACCESS_LOST }
++        )
++    }
++
++    @Test
++    fun `healthy infra produces no findings at all`() {
++        val det = detector(FakeProbe(a11y = true, usage = true))
++        val findings = det.detect(policy(), SystemLockPolicy())
++        assertTrue("基建健康时不应有任何发现（含其它检测面的 mock 噪音）: ${findings.map { it.type }}", findings.isEmpty())
++    }
++}
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/transport/src/test/kotlin/com/padguard/core/transport/http/ApiCallerTest.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/transport/src/test/kotlin/com/padguard/core/transport/http/ApiCallerTest.kt"
+index a2d6281..5dd6bbc 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/core/transport/src/test/kotlin/com/padguard/core/transport/http/ApiCallerTest.kt"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/core/transport/src/test/kotlin/com/padguard/core/transport/http/ApiCallerTest.kt"
+@@ -56,7 +56,10 @@ class ApiCallerTest {
+     fun `successful response syncs server time via TimeProvider`() = runBlocking {
+         val tp = TimeProvider()
+         val caller = ApiCaller(tp)
+-        val serverTime = 1_700_000_000_000L
++        // serverTime 用「当前墙钟 + 60s」构造而非固定历史时间戳：
++        // TimeProvider 有 24h 脏样本拒收（防时钟被改到离谱值，正确行为），
++        // 固定 2023 年的值随日历前进终将跨过阈值 —— 测试在某一天后必然失败。
++        val serverTime = System.currentTimeMillis() + 60_000L
+         caller.call("t") { Response.success(ApiEnvelope(code = ApiCode.OK, data = "x", serverTime = serverTime)) }
+         assertTrue("now() 应约等于 serverTime", kotlin.math.abs(tp.now() - serverTime) < 5000)
+     }
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/gradle/libs.versions.toml" "b/\346\212\244\350\210\252\346\210\220\351\225\277/gradle/libs.versions.toml"
+index 4a3c3b5..867bc8f 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/gradle/libs.versions.toml"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/gradle/libs.versions.toml"
+@@ -28,6 +28,9 @@ coroutines = "1.9.0"
+ 
+ paho = "1.2.5"
+ 
++# JVM 单元测试 mock（Mockito 5 默认 inline mockmaker，可直接 mock final 类）
++mockito = "5.14.2"
++
+ [libraries]
+ # AndroidX 基础
+ androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version = "1.15.0" }
+@@ -84,6 +87,7 @@ paho-service = { group = "org.eclipse.paho", name = "org.eclipse.paho.client.mqt
+ 
+ # 测试
+ junit = { group = "junit", name = "junit", version = "4.13.2" }
++mockito-core = { group = "org.mockito", name = "mockito-core", version.ref = "mockito" }
+ 
+ [plugins]
+ android-application = { id = "com.android.application", version.ref = "agp" }
+diff --git "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/AndroidManifest.xml" "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/AndroidManifest.xml"
+index f173ff3..17f9fad 100644
+--- "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/AndroidManifest.xml"
++++ "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/AndroidManifest.xml"
+@@ -14,7 +14,7 @@
+ 
+     <application
+         android:name=".PadGuardApplication"
+-        android:allowBackup="true"
++        android:allowBackup="false"
+         android:icon="@mipmap/ic_launcher"
+         android:label="@string/app_name"
+         android:roundIcon="@mipmap/ic_launcher_round"
+diff --git "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/data/remote/TokenAuthenticator.kt" "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/data/remote/TokenAuthenticator.kt"
+index 5a88eb0..2ab8ebc 100644
+--- "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/data/remote/TokenAuthenticator.kt"
++++ "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/data/remote/TokenAuthenticator.kt"
+@@ -3,43 +3,95 @@ package com.padguard.parent.data.remote
+ import com.padguard.data.api.AuthApi
+ import com.padguard.parent.data.auth.TokenManager
+ import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
+ import okhttp3.Authenticator
+ import okhttp3.Request
+ import okhttp3.Response
+ import okhttp3.Route
+ 
+ /**
+- * 令牌自动续期（OkHttp Authenticator）。
++ * 令牌自动续期（OkHttp Authenticator）（P1' 全量重写）。
+  *
+- * 当响应返回 401 时，使用 refreshToken 调用 /auth/refresh 获取新令牌并写入 [TokenManager]，
+- * 随后用新令牌重试原请求。使用独立的无鉴权客户端（[AuthApi] 来自 base Retrofit）发起刷新，
+- * 避免与带鉴权客户端形成循环依赖。若刷新失败或无 refreshToken，则清空登录态并返回 null（放弃重试）。
++ * 旧实现的三个问题，重写后逐一收口：
++ *
++ * 1. **无单飞（最严重）**：首页并发请求（设备列表 + 今日用量 + 消息数…）在 token
++ *    过期时会**同时**收到 401，各自触发一次 /auth/refresh。refresh token 若是
++ *    一次性的（服务端轮换），先返回的那个会把后返回的作废 —— 用户被随机登出。
++ *    现在用 [refreshMutex] 收敛为单飞：第一个进锁的负责刷新，其余等锁后
++ *    发现 token 已变，直接拿最新 token 重试，不再重复刷新。
++ *
++ * 2. **刷新失败一律清登录态**：旧代码只要 `!isSuccessful` 就 clear()，
++ *    服务端 5xx 抖动 / 网络闪断也会把用户登出 —— 这是"服务端打了个喷嚏，
++ *    客户端把用户扫地出门"。现在只有**凭据本身失效**（HTTP 401/403，
++ *    或业务码明确拒绝）才清登录态；5xx / 网络异常只放弃本次重试，
++ *    登录态保留，下一个请求到来时会再次尝试刷新。
++ *
++ * 3. **无重试上限**：authenticate 返回非 null OkHttp 就会用新请求重试，
++ *    重试的响应仍可能触发 authenticate。靠 [response.priorResponse] 判断
++ *    "这条响应已经是重试的产物" —— 是则直接放弃，杜绝循环。
+  */
+ class TokenAuthenticator(
+     private val tokenManager: TokenManager,
+     private val authApi: AuthApi
+ ) : Authenticator {
+ 
++    /** 401 风暴收敛：同一时刻只允许一个线程真正发起 refresh */
++    private val refreshMutex = Mutex()
++
+     override fun authenticate(route: Route?, response: Response): Request? {
+-        val refreshToken = runBlocking { tokenManager.getRefreshToken() } ?: return null
++        // 该响应已经是"用新 token 重试过一次"的产物 → 新 token 也无效，放弃。
++        if (response.priorResponse != null) return null
+ 
+-        val refreshResp = runBlocking { authApi.refreshToken(refreshToken) }
+-        if (!refreshResp.isSuccessful) {
+-            runBlocking { tokenManager.clear() }
+-            return null
+-        }
+-        val body = refreshResp.body() ?: return null
+-        if (body.code != 0 || body.data == null) {
+-            runBlocking { tokenManager.clear() }
+-            return null
+-        }
++        // 原请求携带的（已过期的）token，用于判断"锁内 token 是否已被别人刷新"
++        val staleToken = response.request.header("Authorization")
++            ?.removePrefix("Bearer ")
++            ?.takeIf { it.isNotBlank() }
+ 
+-        val newAccess = body.data.token
+-        val newRefresh = body.data.refreshToken
+-        runBlocking { tokenManager.saveTokens(newAccess, newRefresh) }
++        return runBlocking {
++            refreshMutex.withLock {
++                // 单飞关键段：等锁期间可能已有并发请求完成刷新。
++                // tokenManager 里的 token 与本次请求携带的不一致 → 已刷新，直接重试。
++                val current = tokenManager.getAccessToken()
++                if (!current.isNullOrBlank() && current != staleToken) {
++                    return@withLock requestWithToken(response.request, current)
++                }
+ 
+-        return response.request.newBuilder()
+-            .header("Authorization", "Bearer $newAccess")
+-            .build()
++                val refreshToken = tokenManager.getRefreshToken()
++                    ?: return@withLock null
++
++                val refreshResp = try {
++                    authApi.refreshToken(refreshToken)
++                } catch (e: Exception) {
++                    // 网络异常 / 反序列化异常 ≠ 凭据失效：保留登录态，放弃本次重试。
++                    // 下一个请求再 401 时会重新尝试刷新。
++                    null
++                } ?: return@withLock null
++
++                if (!refreshResp.isSuccessful) {
++                    // 只有 401/403 才说明 refresh token 确认失效（服务端已拒绝凭据本身）；
++                    // 5xx 等是服务端暂时性问题，清登录态会造成"抖动即登出"。
++                    if (refreshResp.code() == 401 || refreshResp.code() == 403) {
++                        tokenManager.clear()
++                    }
++                    return@withLock null
++                }
++
++                val body = refreshResp.body()
++                if (body == null || body.code != 0 || body.data == null) {
++                    // HTTP 层成功但业务层拒绝：refresh token 已被服务端作废，清登录态。
++                    tokenManager.clear()
++                    return@withLock null
++                }
++
++                tokenManager.saveTokens(body.data.token, body.data.refreshToken)
++                requestWithToken(response.request, body.data.token)
++            }
++        }
+     }
++
++    private fun requestWithToken(request: Request, token: String): Request =
++        request.newBuilder()
++            .header("Authorization", "Bearer $token")
++            .build()
+ }
+diff --git "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/data/remote/UsagePushClient.kt" "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/data/remote/UsagePushClient.kt"
+index 412bf3c..45e511c 100644
+--- "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/data/remote/UsagePushClient.kt"
++++ "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/data/remote/UsagePushClient.kt"
+@@ -81,11 +81,17 @@ class UsagePushClient @Inject constructor(
+     @Synchronized
+     private fun connect() {
+         if (webSocket != null) return
++        // token 拿不到（登录态刚被清 / 刷新尚未完成）→ 不连也不排重连：
++        // 登录态 collector（isLoggedInFlow）在重新登录时会再次驱动 connect()，
++        // 在这里硬排重连只会对着空 token 无限空转。
+         val token = runBlocking { tokenManager.getAccessToken() } ?: return
+         val url = buildWsUrl(token) ?: return
+         val request = Request.Builder().url(url).build()
+         webSocket = wsClient.newWebSocket(request, listener)
+-        reconnectAttempts = 0
++        // P2'：不要在这里复位 reconnectAttempts。
++        // connect() 也是断线退避重连的入口，在这里复位会让每次重连都从 1s 重新起算，
++        // 指数退避形同虚设（服务端长时间宕机时变成 1s 一次的固定频率打点）。
++        // 复位只属于 onOpen —— 连接真正建立才算"恢复健康"。
+     }
+ 
+     @Synchronized
+diff --git "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/presentation/ui/device/DeviceManageScreen.kt" "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/presentation/ui/device/DeviceManageScreen.kt"
+index 22dcc9e..3377cf0 100644
+--- "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/presentation/ui/device/DeviceManageScreen.kt"
++++ "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/presentation/ui/device/DeviceManageScreen.kt"
+@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.graphics.Color
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.text.input.PasswordVisualTransformation
+ import androidx.compose.ui.text.style.TextOverflow
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+@@ -178,6 +179,81 @@ fun DeviceManageScreen(
+             }
+         )
+     }
++
++    // S11：绑定成功后的操作密码补设弹窗
++    uiState.postBindDevice?.let { device ->
++        PostBindPasswordDialog(
++            device = device,
++            busy = uiState.postBindBusy,
++            onConfirm = { pw -> viewModel.confirmPostBindPassword(device, pw) },
++            onSkip = viewModel::dismissPostBindPassword
++        )
++    }
++}
++
++/**
++ * 绑定后强制引导：为新接入的设备设置操作密码（S11）。
++ *
++ * 校验口径与设备详情页 GuardPasswordCard 一致（4~32 位）。
++ * 「跳过」保留但不隐匿：文案直接说明跳过的后果，避免家长误以为绑定即管控完成。
++ */
++@Composable
++private fun PostBindPasswordDialog(
++    device: Device,
++    busy: Boolean,
++    onConfirm: (String) -> Unit,
++    onSkip: () -> Unit
++) {
++    var pw by remember(device.id) { mutableStateOf("") }
++    var pw2 by remember(device.id) { mutableStateOf("") }
++    val canSubmit = pw.length in 4..32 && pw == pw2
++
++    AlertDialog(
++        onDismissRequest = { /* 不点按钮不关闭：这是一次显式的引导步骤 */ },
++        title = { Text("设置操作密码") },
++        text = {
++            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
++                Text(
++                    "「${device.name}」接入成功。建议立即设置操作密码：设置后，孩子在平板上进入系统设置、" +
++                        "卸载/安装应用都必须输入此密码。",
++                    style = MaterialTheme.typography.bodySmall
++                )
++                OutlinedTextField(
++                    value = pw,
++                    onValueChange = { if (it.length <= 32) pw = it },
++                    modifier = Modifier.fillMaxWidth(),
++                    singleLine = true,
++                    label = { Text("家长密码（4~32 位）") },
++                    visualTransformation = PasswordVisualTransformation()
++                )
++                OutlinedTextField(
++                    value = pw2,
++                    onValueChange = { if (it.length <= 32) pw2 = it },
++                    modifier = Modifier.fillMaxWidth(),
++                    singleLine = true,
++                    label = { Text("确认密码") },
++                    visualTransformation = PasswordVisualTransformation(),
++                    supportingText = {
++                        if (pw2.isNotEmpty() && pw != pw2) Text("两次输入不一致", color = PadGuardColors.WarningRed)
++                    }
++                )
++            }
++        },
++        confirmButton = {
++            Button(
++                onClick = { onConfirm(pw) },
++                enabled = !busy && canSubmit,
++                shape = RoundedCornerShape(10.dp)
++            ) {
++                Text(if (busy) "同步中…" else "设置并同步")
++            }
++        },
++        dismissButton = {
++            TextButton(onClick = onSkip, enabled = !busy) {
++                Text("暂不设置", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
++            }
++        }
++    )
+ }
+ 
+ // ==================== 汇总概览 ====================
+diff --git "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/presentation/viewmodel/DeviceManageViewModel.kt" "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/presentation/viewmodel/DeviceManageViewModel.kt"
+index c1c52a3..fd2f47a 100644
+--- "a/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/presentation/viewmodel/DeviceManageViewModel.kt"
++++ "b/\346\212\244\350\210\252\346\216\247\345\210\266\347\253\257/app/src/main/java/com/padguard/parent/presentation/viewmodel/DeviceManageViewModel.kt"
+@@ -10,6 +10,7 @@ import com.padguard.domain.model.DeviceImportRow
+ import com.padguard.domain.model.DeviceImportResult
+ import com.padguard.domain.model.LanDevice
+ import com.padguard.domain.repository.DeviceRepository
++import com.padguard.domain.repository.PolicyRepository
+ import dagger.hilt.android.lifecycle.HiltViewModel
+ import dagger.hilt.android.qualifiers.ApplicationContext
+ import kotlinx.coroutines.flow.MutableStateFlow
+@@ -41,12 +42,16 @@ data class DeviceManageUiState(
+     val importError: String? = null,
+     // 编辑 / 删除
+     val editingDevice: Device? = null,
+-    val deletingDevice: Device? = null
++    val deletingDevice: Device? = null,
++    // S11：绑定成功后弹出「设置操作密码」步骤（设备尚未设置操作密码时）
++    val postBindDevice: Device? = null,
++    val postBindBusy: Boolean = false
+ )
+ 
+ @HiltViewModel
+ class DeviceManageViewModel @Inject constructor(
+     private val deviceRepository: DeviceRepository,
++    private val policyRepository: PolicyRepository,
+     private val importFileParser: DeviceImportFileParser,
+     @ApplicationContext private val appContext: Context
+ ) : ViewModel() {
+@@ -91,6 +96,7 @@ class DeviceManageViewModel @Inject constructor(
+                 .onSuccess {
+                     showToast("已接入：${it.name}")
+                     closeAccessSheet()
++                    maybePromptPostBindPassword(it)
+                 }
+                 .onFailure { showToast(it.message ?: "扫码接入失败") }
+         }
+@@ -102,6 +108,7 @@ class DeviceManageViewModel @Inject constructor(
+                 .onSuccess {
+                     showToast("已接入：${it.name}")
+                     closeAccessSheet()
++                    maybePromptPostBindPassword(it)
+                 }
+                 .onFailure { showToast(it.message ?: "配对码接入失败") }
+         }
+@@ -127,6 +134,7 @@ class DeviceManageViewModel @Inject constructor(
+                     _uiState.value = _uiState.value.copy(
+                         lanDevices = _uiState.value.lanDevices.filterNot { d -> d.deviceId == lanDevice.deviceId }
+                     )
++                    maybePromptPostBindPassword(it)
+                 }
+                 .onFailure { showToast(it.message ?: "接入失败") }
+         }
+@@ -211,6 +219,51 @@ class DeviceManageViewModel @Inject constructor(
+         }
+     }
+ 
++    // ==================== S11：绑定后强制设密码步骤 ====================
++
++    /**
++     * 绑定成功后的「操作密码」补设引导（S11 家长侧）。
++     *
++     * 为什么是"引导"而不是硬闸：密码设置走服务端下发，若设备离线/接口失败，
++     * 硬闸会把家长卡死在流程里。这里的"强制"体现在：绑定成功即打断当前操作弹出对话框，
++     * 明确给出「跳过」按钮但文案说明后果 —— 既有仪式感，又不制造死路。
++     * 已设密码的设备（重新接入/换绑）不重复打扰。
++     */
++    private fun maybePromptPostBindPassword(device: Device) {
++        if (device.guardPasswordSet) return
++        _uiState.value = _uiState.value.copy(postBindDevice = device)
++    }
++
++    /** 在绑定后弹窗里确认设置操作密码（口径与设备详情页 GuardPasswordCard 一致：4~32 位） */
++    fun confirmPostBindPassword(device: Device, password: String) {
++        if (password.length !in 4..32) return
++        _uiState.value = _uiState.value.copy(postBindBusy = true)
++        viewModelScope.launch {
++            policyRepository.setGuardPassword(device.id, password, clear = false)
++                .onSuccess {
++                    _uiState.value = _uiState.value.copy(
++                        postBindBusy = false,
++                        postBindDevice = null,
++                        toast = "操作密码已设置，已同步到孩子端"
++                    )
++                }
++                .onFailure {
++                    _uiState.value = _uiState.value.copy(
++                        postBindBusy = false,
++                        toast = it.message ?: "设置失败，请稍后在设备详情页重试"
++                    )
++                }
++        }
++    }
++
++    /** 跳过补设：只关闭弹窗并说明后果，设备保持「未设密码」状态（设备详情页可随时补） */
++    fun dismissPostBindPassword() {
++        _uiState.value = _uiState.value.copy(
++            postBindDevice = null,
++            toast = "已跳过。未设操作密码前，孩子端设置页仅能顶回、无法验证家长身份"
++        )
++    }
++
+     fun clearToast() {
+         _uiState.value = _uiState.value.copy(toast = null)
+     }

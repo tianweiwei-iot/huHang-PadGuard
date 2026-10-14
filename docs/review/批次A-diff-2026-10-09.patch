@@ -1,0 +1,1892 @@
+diff --git a/padguard-admin/index.html b/padguard-admin/index.html
+index 07b1e91..70ed008 100644
+--- a/padguard-admin/index.html
++++ b/padguard-admin/index.html
+@@ -20,12 +20,12 @@
+       </div>
+       <form id="login-form" class="login-form" autocomplete="off" data-page-node-id="l0rAmNvmEhCkdOxP63XHDC">
+         <label data-page-node-id="pltR6m9VnFMLaSvLhGszWm">管理员账号
+-          <input type="text" id="login-username" placeholder="请输入管理员账号" value="admin" data-page-node-id="ZGJDnupwhkUw0TRrxEN3rr" />
++          <input type="text" id="login-username" placeholder="请输入管理员账号" data-page-node-id="ZGJDnupwhkUw0TRrxEN3rr" />
+         </label>
+         <label data-page-node-id="8bPhZFFgqpevxaWBXKLLlj">密码
+-          <input type="password" id="login-password" placeholder="请输入密码" value="admin123" data-page-node-id="yuNcnONK1W08ZndL5342GL" />
++          <input type="password" id="login-password" placeholder="请输入密码" data-page-node-id="yuNcnONK1W08ZndL5342GL" />
+         </label>
+-        <div class="login-hint" data-page-node-id="KEQhOb1ttQhLK7NyHvG0gd">请使用服务端初始化的管理员账号登录（默认 admin）。若提示“无法连接服务端”，请改用 <b>http://服务器地址:8090/admin/</b> 打开本后台。</div>
++        <div class="login-hint" data-page-node-id="KEQhOb1ttQhLK7NyHvG0gd">请使用服务端初始化的管理员账号登录（初始口令见服务端工作目录的《管理员初始密码》文件）。若提示“无法连接服务端”，请改用 <b>http://服务器地址:8090/admin/</b> 打开本后台。</div>
+         <button type="submit" class="btn btn-primary btn-block" data-page-node-id="utnfW46CQFECvZmiDMpUtl">登 录</button>
+       </form>
+       <div class="login-foot" data-page-node-id="fQpkEd2mQVFwtpEBN6fJw6">© 2026 PadGuard · 守护孩子数字成长</div>
+diff --git a/padguard-server/build.gradle.kts b/padguard-server/build.gradle.kts
+index 2834db0..86508e2 100644
+--- a/padguard-server/build.gradle.kts
++++ b/padguard-server/build.gradle.kts
+@@ -21,6 +21,11 @@ dependencies {
+     runtimeOnly("com.h2database:h2")
+     implementation("org.springframework.security:spring-security-crypto:6.3.1")
+ 
++    // Resilience4j（S14 限流）：只用核心 ratelimiter 模块。
++    // 动态 key（按 IP / 账号）只能编程式经 Registry 管理，注解式 starter 不适用；
++    // 核心模块即 Resilience4j 官方对动态场景的标准用法。
++    implementation("io.github.resilience4j:resilience4j-ratelimiter:2.2.0")
++
+     // JWT (parent auth) — jjwt 0.12.x
+     implementation("io.jsonwebtoken:jjwt-api:0.12.6")
+     runtimeOnly("io.jsonwebtoken:jjwt-impl:0.12.6")
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/common/Core.kt b/padguard-server/src/main/kotlin/com/padguard/server/common/Core.kt
+index 2c5c731..03c0d7f 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/common/Core.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/common/Core.kt
+@@ -31,6 +31,8 @@ object ParentErr {
+     const val DEVICE_LIMIT_EXCEEDED = 4002
+     const val ORDER_NOT_FOUND = 4003
+     const val ORDER_STATE_INVALID = 4004
++    /** S14 限流：触发频控（登录 / 绑定等爆破面） */
++    const val TOO_MANY_REQUESTS = 1004
+     const val SERVER_ERROR = 5001
+ }
+ 
+@@ -47,6 +49,8 @@ object ChildErr {
+     /** 可绑定设备数已达套餐上限 */
+     const val DEVICE_LIMIT_EXCEEDED = 40305
+     const val TIME_OUT_OF_SYNC = 40901
++    /** S14 限流：绑定等匿名入口触发频控 */
++    const val TOO_MANY_REQUESTS = 40902
+     const val SERVER_ERROR = 50000
+ }
+ 
+@@ -119,6 +123,9 @@ class GlobalExceptionHandler {
+         //   "已绑定"的假象里（例如服务端换库后设备记录已不存在）。
+         val status = when {
+             e.audience == Audience.PARENT && e.code == ParentErr.UNAUTHORIZED -> HttpStatus.UNAUTHORIZED
++            // S14 限流：必须是 429，客户端与网关才能识别"稍后重试"语义，重试退避才不会变成立即重打
++            e.code == ParentErr.TOO_MANY_REQUESTS || e.code == ChildErr.TOO_MANY_REQUESTS ->
++                HttpStatus.TOO_MANY_REQUESTS
+             // 越权（含后台 RBAC 闸门拒绝、家长端"资源不属于当前用户"）必须落到 403：
+             // HTTP 状态码是网关 / 前端拦截器判断成败的首要依据，回 200 会让越权操作被误判为"成功"，
+             // 管理端 http() 在 !res.ok 时直接抛错、家长端 ApiDataSource 在 !isSuccessful 时走错误分支——
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/config/AdminDataInitializer.kt b/padguard-server/src/main/kotlin/com/padguard/server/config/AdminDataInitializer.kt
+index 6595de6..5dd6009 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/config/AdminDataInitializer.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/config/AdminDataInitializer.kt
+@@ -6,47 +6,121 @@ import com.padguard.server.security.Passwords
+ import org.slf4j.LoggerFactory
+ import org.springframework.boot.ApplicationArguments
+ import org.springframework.boot.ApplicationRunner
++import org.springframework.core.env.Environment
+ import org.springframework.stereotype.Component
++import java.io.File
++import java.security.SecureRandom
+ import java.util.*
+ 
+ /**
+  * 管控后台管理员种子化（独立组件）。
+  *
+- * 设计取舍：不改动既有 [com.padguard.server.config.DataInitializer]（含敏感初始化逻辑），
+- * 而是用一个独立、职责单一的 Runner 在**首次启动且 admins 表为空**时，种入一个初始超级管理员。
+- * 这样：
++ * ## 设计取舍
++ * 不改动既有 [DataInitializer]（含敏感初始化逻辑），用一个独立、职责单一的 Runner 管理管理员账号：
+  * 1. 真实部署不会因缺管理员而无法登录后台；
+  * 2. 清库 / 重新部署后可自动恢复入口账号，避免"后台锁死"；
+  * 3. 与既有初始化逻辑解耦，互不污染，降低回归风险。
+  *
+- * 种子账号固定为 admin / admin123（角色 super）。上线后请立即在后台修改密码，
+- * 或在 [com.padguard.server.service.AdminService] 中替换为从环境变量注入的强口令。
++ * ## 弱口令收口（与 DataInitializer 家长侧同口径）
++ * `admin/admin123` 此前对所有环境无条件播种且**无任何强制重置机制**——家长侧演示账号
++ * 有"识别出厂弱口令并强制重置"的处理，管理员侧此前漏配，等于把后台全权入口的默认凭据
++ * 永久印在页面上（index.html 登录表单还预填了这对凭据）。现对齐为：
++ * - local profile：保留 admin/admin123 便于联调；
++ * - 正式部署首次启动（admins 表为空）：随机生成强口令并写入本地文件（不硬编码）；
++ * - 正式部署存量库：识别仍在使用 admin123 的管理员并**强制重置**，随机新口令落盘。
+  */
+ @Component
+ class AdminDataInitializer(
+-    private val adminRepository: AdminRepository
++    private val adminRepository: AdminRepository,
++    private val env: Environment
+ ) : ApplicationRunner {
+ 
+     private val log = LoggerFactory.getLogger(AdminDataInitializer::class.java)
+ 
+     override fun run(args: ApplicationArguments?) {
+-        if (adminRepository.count() > 0) {
+-            log.info("admins 表已存在数据，跳过种子化")
++        if (adminRepository.count() == 0L) {
++            if (env.activeProfiles.contains(PROFILE_LOCAL)) {
++                seedFactoryAdmin()
++            } else {
++                seedInitialAdmin()
++            }
+             return
+         }
+-        val admin = Admin(
+-            id = "A" + UUID.randomUUID().toString().replace("-", ""),
+-            username = "admin",
+-            passwordHash = Passwords.encode("admin123"),
+-            displayName = "初始超级管理员",
+-            email = null,
+-            role = "super",
+-            status = "active",
+-            mfaEnabled = false,
+-            lastLoginAt = null,
+-            createdAt = System.currentTimeMillis()
+-        )
+-        adminRepository.save(admin)
+-        log.warn("已种入初始后台管理员：用户名=admin / 密码=admin123（角色=super）。请尽快登录后台修改密码！")
++        if (!env.activeProfiles.contains(PROFILE_LOCAL)) {
++            forceResetFactoryPassword()
++        }
++    }
++
++    private fun seedFactoryAdmin() {
++        adminRepository.save(newAdmin(FACTORY_PASSWORD))
++        log.warn("已种入初始后台管理员（仅 local 联调）：用户名=admin（角色=super）")
++    }
++
++    private fun seedInitialAdmin() {
++        val password = randomPassword()
++        adminRepository.save(newAdmin(password))
++        writeInitialPasswordFile("admin", password, reset = false)
++        log.warn("已创建初始后台管理员 admin，随机口令已写入 {}（请登录后立即修改并删除该文件）", INITIAL_PASSWORD_FILE)
++    }
++
++    /** 正式部署：识别仍在使用出厂弱口令的管理员并强制重置（每次启动幂等检查） */
++    private fun forceResetFactoryPassword() {
++        val weak = adminRepository.findAll().filter { Passwords.matches(FACTORY_PASSWORD, it.passwordHash) }
++        if (weak.isEmpty()) return
++        val password = randomPassword()
++        weak.forEach { admin ->
++            admin.passwordHash = Passwords.encode(password)
++            adminRepository.save(admin)
++            log.warn("管理员 {} 仍在使用出厂弱口令，已强制重置", admin.username)
++        }
++        writeInitialPasswordFile(weak.joinToString(",") { it.username }, password, reset = true)
++    }
++
++    private fun newAdmin(password: String) = Admin(
++        id = "A" + UUID.randomUUID().toString().replace("-", ""),
++        username = "admin",
++        passwordHash = Passwords.encode(password),
++        displayName = "初始超级管理员",
++        email = null,
++        role = "super",
++        status = "active",
++        mfaEnabled = false,
++        lastLoginAt = null,
++        createdAt = System.currentTimeMillis()
++    )
++
++    /**
++     * 把初始/重置后的明文口令写入服务端工作目录（与家长侧 writeInitialPasswordFile 同思路）：
++     * 口令不能硬编码，也不能只打日志（管理员不会去翻日志），"随机生成 + 落显眼文件 + 日志提示路径"
++     * 是既安全又可用的组合。多个账号共用同一批重置时共用一个新口令。
++     */
++    private fun writeInitialPasswordFile(usernames: String, password: String, reset: Boolean) {
++        val file = File(INITIAL_PASSWORD_FILE)
++        runCatching {
++            file.writeText(
++                """
++                PadGuard 管理员初始口令
++                ============================
++                账号：$usernames
++                初始密码：$password
++
++                ${if (reset) "检测到上述账号仍在使用出厂弱口令，已强制重置为上述随机口令。" else ""}
++                请登录后台后立即修改密码。
++                此文件包含明文口令，妥善保管，用后可删除。
++                """.trimIndent(), Charsets.UTF_8
++            )
++        }.onFailure { log.error("写入管理员初始密码文件失败: {}", it.message) }
++    }
++
++    private fun randomPassword(): String {
++        val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
++        val rnd = SecureRandom()
++        return (1..16).map { alphabet[rnd.nextInt(alphabet.length)] }.joinToString("")
++    }
++
++    companion object {
++        private const val PROFILE_LOCAL = "local"
++        const val FACTORY_PASSWORD = "admin123"
++        const val INITIAL_PASSWORD_FILE = "管理员初始密码-请登录后修改.txt"
+     }
+ }
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/config/DataInitializer.kt b/padguard-server/src/main/kotlin/com/padguard/server/config/DataInitializer.kt
+index d9591c2..b07d6b5 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/config/DataInitializer.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/config/DataInitializer.kt
+@@ -39,7 +39,16 @@ class DataInitializer(
+     @EventListener(ApplicationReadyEvent::class)
+     fun seed() {
+         seedParentAccount()
+-        seedTestAccount()
++        if (env.activeProfiles.contains(PROFILE_LOCAL)) {
++            // 测试账号（PERMANENT 永久订阅）只允许在 local 联调环境播种。
++            // 此前它对所有环境无条件生效，等于随安装包分发一个永久全功能账号，
++            // 密码还随源码/安装包分发 —— 与演示账号属同一类漏洞，收口到同一处理口径。
++            seedTestAccount()
++        } else {
++            // 已部署库里若已存在仍在用出厂弱口令的测试账号，强制重置 ——
++            // 光"跳过播种"挡不住存量库（与 seedParentAccount 对 admin123 的处理同口径）。
++            resetTestAccountIfPresent()
++        }
+         seedPolicyTemplates()
+         runCatching { contentFilterService.seedDictionaries() }
+             .onFailure { log.warn("seed content dictionaries failed: {}", it.message) }
+@@ -76,11 +85,20 @@ class DataInitializer(
+         }
+     }
+ 
++    /** 正式部署：识别仍在使用出厂弱口令的测试账号并强制重置（与演示账号同口径） */
++    private fun resetTestAccountIfPresent() {
++        val existing = userRepository.findByPhone(TEST_ACCOUNT_PHONE) ?: return
++        if (!Passwords.matches(TEST_ACCOUNT_PASSWORD, existing.passwordHash)) return
++        val password = randomPassword()
++        userRepository.save(existing.apply { passwordHash = Passwords.encode(password) })
++        writeInitialPasswordFile(existing.phone, password, forceReset = true)
++    }
++
+     /** 为已有账号强制重置口令并落盘，返回新明文口令。 */
+     private fun seedInitialAdminPassword(user: User): String {
+         val password = randomPassword()
+         userRepository.save(user)
+-        writeInitialPasswordFile(password, forceReset = true)
++        writeInitialPasswordFile(user.phone, password, forceReset = true)
+         return password
+     }
+ 
+@@ -114,7 +132,7 @@ class DataInitializer(
+                 createdAt = System.currentTimeMillis()
+             )
+         )
+-        writeInitialPasswordFile(password, forceReset = false)
++        writeInitialPasswordFile(DEFAULT_ADMIN_PHONE, password, forceReset = false)
+     }
+ 
+     /**
+@@ -124,14 +142,14 @@ class DataInitializer(
+      * 拿不到密码就进不去家长端，系统等于锁死。而口令不能硬编码（那正是本次要修的漏洞），
+      * 所以"随机生成 + 落到显眼的文件 + 日志提示路径"是唯一既安全又可用的组合。
+      */
+-    private fun writeInitialPasswordFile(password: String, forceReset: Boolean) {
++    private fun writeInitialPasswordFile(phone: String, password: String, forceReset: Boolean) {
+         val file = File(INITIAL_PASSWORD_FILE)
+         runCatching {
+             file.writeText(
+                 """
+-                PadGuard 初始家长账号
++                PadGuard 初始账号口令
+                 ============================
+-                手机号：$DEFAULT_ADMIN_PHONE
++                手机号：$phone
+                 初始密码：$password
+ 
+                 ${if (forceReset) "检测到该账号仍在使用出厂弱口令，已强制重置为上述随机口令。" else ""}
+@@ -141,8 +159,8 @@ class DataInitializer(
+             )
+         }.onFailure { log.error("写入初始密码文件失败: {}", it.message) }
+         log.warn(
+-            "家长账号 phone={} 的口令已写入 {}（请登录后立即修改该文件并删除）",
+-            DEFAULT_ADMIN_PHONE, file.absolutePath
++            "账号 phone={} 的口令已写入 {}（请登录后立即修改该文件并删除）",
++            phone, file.absolutePath
+         )
+     }
+ 
+@@ -185,7 +203,7 @@ class DataInitializer(
+                 updatedAt = now
+             )
+         )
+-        log.warn("已播种测试账号：手机号={} / 密码={} / 永久会员（请在验收后尽快修改密码）", phone, TEST_ACCOUNT_PASSWORD)
++        log.warn("已播种测试账号：手机号={} / 永久会员（仅限 local 联调环境）", phone)
+     }
+ 
+     /** 去掉了 0/O、1/l/I 等易看错的字符，避免家长照抄时反复失败 */
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/config/ProdConfigAssertion.kt b/padguard-server/src/main/kotlin/com/padguard/server/config/ProdConfigAssertion.kt
+new file mode 100644
+index 0000000..6cff8bd
+--- /dev/null
++++ b/padguard-server/src/main/kotlin/com/padguard/server/config/ProdConfigAssertion.kt
+@@ -0,0 +1,53 @@
++package com.padguard.server.config
++
++import org.slf4j.LoggerFactory
++import org.springframework.boot.ApplicationArguments
++import org.springframework.boot.ApplicationRunner
++import org.springframework.core.env.Environment
++import org.springframework.stereotype.Component
++
++/**
++ * 生产配置断言：把"配置错误只能靠运行时撞上才知道"前移到启动期 fail-fast。
++ *
++ * 当前断言项：
++ * 1. mock-pay 开关 —— 该开关打开时 PaymentVerifier 放行**所有**支付回调（等价于
++ *    免费开通任意订阅）。local/dev 联调用它没问题，但正式部署若误开，比不开鉴权更糟。
++ * 2. JWT 密钥来源 —— 未显式注入时首启随机生成写本地文件，家庭/私域部署可接受
++ *    （同机才可读）；云端多实例/容器部署密钥会随实例漂移，必须环境变量统一注入，
++ *    这里给出显式提醒（不阻断，家庭单机是合法形态）。
++ *
++ * 与 server-guard.ps1"防呆前置"同一思路：把人肉检查变成机器门禁。
++ */
++@Component
++class ProdConfigAssertion(
++    private val env: Environment
++) : ApplicationRunner {
++
++    private val log = LoggerFactory.getLogger(ProdConfigAssertion::class.java)
++
++    override fun run(args: ApplicationArguments?) {
++        val profiles = env.activeProfiles.toList()
++        val isDevLike = profiles.any { it in DEV_PROFILES }
++
++        val mockPay = env.getProperty("padguard.billing.mock-pay-enabled", Boolean::class.java, false)
++        if (mockPay && !isDevLike) {
++            throw IllegalStateException(
++                "启动中止：padguard.billing.mock-pay-enabled=true 且当前非开发 profile（$profiles）。" +
++                    "该开关会放行所有支付回调（白嫖订阅），正式部署严禁开启。"
++            )
++        }
++
++        val jwtSecret = env.getProperty("padguard.jwt.secret")?.trim().orEmpty()
++        if (jwtSecret.isBlank()) {
++            log.warn(
++                "padguard.jwt.secret 未显式注入，将首启随机生成写本地文件。" +
++                    "私域单机部署可接受；云端/多实例部署必须用环境变量统一注入同一把强密钥，" +
++                    "否则各实例 token 互不认、重启后全部掉线。当前 profiles={}", profiles
++            )
++        }
++    }
++
++    private companion object {
++        val DEV_PROFILES = setOf("local", "dev")
++    }
++}
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/config/WebConfig.kt b/padguard-server/src/main/kotlin/com/padguard/server/config/WebConfig.kt
+index ed6b9b0..a33b1d4 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/config/WebConfig.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/config/WebConfig.kt
+@@ -64,6 +64,10 @@ class WebConfig(
+                 // 注册必须放行：注册是「无 token 也能调」的公开入口，否则新用户永远注册不了。
+                 // 登录/注册是仅有的两个公开端点，其余 /v1/auth/**（如 logout）仍要求已登录。
+                 "/v1/auth/register",
++                // 支付回调必须放行：网关侧服务器-to-服务器调用不带家长 JWT，
++                // 其合法性由 PaymentVerifier 验签保证（BillingController 注释声明的意图，
++                // 此前漏配在本清单 —— 真实渠道回调会被这里 401 掉）。
++                "/v1/billing/notify",
+                 "/v1/files/**",
+                 // 公开服务器信息端点：客户端绑定引导/信息展示需匿名读取
+                 "/v1/server/info",
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/controller/AdminController.kt b/padguard-server/src/main/kotlin/com/padguard/server/controller/AdminController.kt
+index 11c6efc..416a88d 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/controller/AdminController.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/controller/AdminController.kt
+@@ -2,6 +2,7 @@ package com.padguard.server.controller
+ 
+ import com.padguard.server.common.ApiResponse
+ import com.padguard.server.dto.*
++import com.padguard.server.security.RateLimit
+ import com.padguard.server.service.AdminService
+ import org.springframework.web.bind.annotation.*
+ 
+@@ -12,7 +13,9 @@ import org.springframework.web.bind.annotation.*
+  * 与 [com.padguard.server.security.AdminPermissionService] 在链路上兜住：
+  * - 登录接口 `/v1/admin/login` 在 [com.padguard.server.config.WebConfig] 中已排除鉴权；
+  * - 其余端点经 AdminAuthInterceptor 注入 request attribute "adminId"，并强校验 scope=admin；
+- * - 所有**写操作**的 RBAC 闸门在 [AdminService] 内部首行 `require(adminId, area, action)` 处执行，
++ * - 所有**写操作**的 RBAC 闸门在 [AdminService] 内部首行 `require(adminId, area, action)` 处执行；
++ * - 所有**读操作**（S13）同样在 [AdminService] 首行过 `require(adminId, area, "read")`，
++ *   敏感列表（家长手机号、订单、审计）不再对无 read 权限的角色可见；
+  *   前端仅做 UI 隐藏，越权请求到后端必被 FORBIDDEN 拒绝。
+  *
+  * 因此本 Controller 只负责参数绑定与转发，不在控制器层重复做权限判断（避免两处闸门漂移）。
+@@ -20,18 +23,24 @@ import org.springframework.web.bind.annotation.*
+ @RestController
+ @RequestMapping("/v1/admin")
+ class AdminController(
+-    private val adminService: AdminService
++    private val adminService: AdminService,
++    private val rateLimit: RateLimit
+ ) {
+ 
+     // ---------- 登录（免鉴权） ----------
+     @PostMapping("/login")
+-    fun login(@RequestBody req: AdminLoginRequest): ApiResponse<AdminLoginResponse> =
+-        ApiResponse.ok(adminService.login(req.username, req.password))
++    fun login(@RequestBody req: AdminLoginRequest, httpRequest: jakarta.servlet.http.HttpServletRequest): ApiResponse<AdminLoginResponse> =
++        ApiResponse.ok(
++            run {
++                rateLimit.require("admin_login", httpRequest, req.username)
++                adminService.login(req.username, req.password)
++            }
++        )
+ 
+     // ---------- 仪表盘 ----------
+     @GetMapping("/dashboard")
+     fun dashboard(@RequestAttribute("adminId") adminId: String): ApiResponse<DashboardResponse> =
+-        ApiResponse.ok(adminService.dashboard())
++        ApiResponse.ok(adminService.dashboard(adminId))
+ 
+     // ---------- 家长账号 ----------
+     @GetMapping("/parents")
+@@ -40,13 +49,13 @@ class AdminController(
+         @RequestParam(required = false) keyword: String?,
+         @RequestParam(required = false) status: String?,
+         @RequestParam(required = false) plan: String?
+-    ): ApiResponse<List<ParentRow>> = ApiResponse.ok(adminService.listParents(keyword, status, plan))
++    ): ApiResponse<List<ParentRow>> = ApiResponse.ok(adminService.listParents(adminId, keyword, status, plan))
+ 
+     @GetMapping("/parents/{id}")
+     fun parentDetail(
+         @RequestAttribute("adminId") adminId: String,
+         @PathVariable id: String
+-    ): ApiResponse<ParentDetail?> = ApiResponse.ok(adminService.parentDetail(id))
++    ): ApiResponse<ParentDetail?> = ApiResponse.ok(adminService.parentDetail(adminId, id))
+ 
+     @PostMapping("/parents")
+     fun createParent(
+@@ -91,7 +100,7 @@ class AdminController(
+         @RequestAttribute("adminId") adminId: String,
+         @RequestParam(required = false) keyword: String?,
+         @RequestParam(required = false) online: String?
+-    ): ApiResponse<List<DeviceRow>> = ApiResponse.ok(adminService.listDevices(keyword, online))
++    ): ApiResponse<List<DeviceRow>> = ApiResponse.ok(adminService.listDevices(adminId, keyword, online))
+ 
+     @PostMapping("/devices/{id}/lock")
+     fun lockDevice(
+@@ -108,19 +117,19 @@ class AdminController(
+     // ---------- 订阅计费 ----------
+     @GetMapping("/billing/plans")
+     fun listPlans(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AdminPlanDto>> =
+-        ApiResponse.ok(adminService.listPlans())
++        ApiResponse.ok(adminService.listPlans(adminId))
+ 
+     @GetMapping("/billing/subscriptions")
+     fun listSubscriptions(
+         @RequestAttribute("adminId") adminId: String,
+         @RequestParam(required = false) status: String?
+-    ): ApiResponse<List<SubRow>> = ApiResponse.ok(adminService.listSubscriptions(status))
++    ): ApiResponse<List<SubRow>> = ApiResponse.ok(adminService.listSubscriptions(adminId, status))
+ 
+     @GetMapping("/billing/orders")
+     fun listOrders(
+         @RequestAttribute("adminId") adminId: String,
+         @RequestParam(required = false) status: String?
+-    ): ApiResponse<List<OrderRow>> = ApiResponse.ok(adminService.listOrders(status))
++    ): ApiResponse<List<OrderRow>> = ApiResponse.ok(adminService.listOrders(adminId, status))
+ 
+     @PostMapping("/billing/subscriptions/manual")
+     fun manualActivate(
+@@ -136,12 +145,12 @@ class AdminController(
+ 
+     @GetMapping("/billing/revenue")
+     fun revenue(@RequestAttribute("adminId") adminId: String): ApiResponse<List<RevenueMonth>> =
+-        ApiResponse.ok(adminService.revenue())
++        ApiResponse.ok(adminService.revenue(adminId))
+ 
+     // ---------- RBAC ----------
+     @GetMapping("/rbac/roles")
+     fun listRoles(@RequestAttribute("adminId") adminId: String): ApiResponse<*> =
+-        ApiResponse.ok(adminService.listRoles())
++        ApiResponse.ok(adminService.listRoles(adminId))
+ 
+     @PutMapping("/rbac/roles")
+     fun saveRole(
+@@ -151,7 +160,7 @@ class AdminController(
+ 
+     @GetMapping("/rbac/admins")
+     fun listAdmins(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AdminDto>> =
+-        ApiResponse.ok(adminService.listAdmins())
++        ApiResponse.ok(adminService.listAdmins(adminId))
+ 
+     @PostMapping("/rbac/admins")
+     fun createAdmin(
+@@ -188,18 +197,18 @@ class AdminController(
+     // ---------- 服务端监控 ----------
+     @GetMapping("/server/metrics")
+     fun serverMetrics(@RequestAttribute("adminId") adminId: String): ApiResponse<ServerMetrics> =
+-        ApiResponse.ok(adminService.serverMetrics())
++        ApiResponse.ok(adminService.serverMetrics(adminId))
+ 
+     // ---------- 审计 / 告警 ----------
+     @GetMapping("/audit")
+     fun audit(
+         @RequestAttribute("adminId") adminId: String,
+         @RequestParam(required = false) area: String?
+-    ): ApiResponse<List<AuditItem>> = ApiResponse.ok(adminService.audit(area))
++    ): ApiResponse<List<AuditItem>> = ApiResponse.ok(adminService.audit(adminId, area))
+ 
+     @GetMapping("/alerts")
+     fun alerts(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AlertItem>> =
+-        ApiResponse.ok(adminService.alerts())
++        ApiResponse.ok(adminService.alerts(adminId))
+ 
+     @PostMapping("/alerts/{id}/close")
+     fun closeAlert(
+@@ -210,7 +219,7 @@ class AdminController(
+     // ---------- 系统设置 ----------
+     @GetMapping("/settings")
+     fun settings(@RequestAttribute("adminId") adminId: String): ApiResponse<AdminSettingsDto> =
+-        ApiResponse.ok(adminService.settings())
++        ApiResponse.ok(adminService.settings(adminId))
+ 
+     @PutMapping("/settings")
+     fun saveSettings(
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/controller/BillingController.kt b/padguard-server/src/main/kotlin/com/padguard/server/controller/BillingController.kt
+index 1b669a1..9a44241 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/controller/BillingController.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/controller/BillingController.kt
+@@ -78,7 +78,7 @@ class BillingController(
+     fun mockPay(
+         @RequestAttribute("userId") userId: String,
+         @PathVariable orderNo: String
+-    ) = ApiResponse.ok(billingService.mockPay(orderNo))
++    ) = ApiResponse.ok(billingService.mockPay(userId, orderNo))
+ 
+     /**
+      * 支付回调统一入口（无鉴权：支付网关的异步回调带不来家长 JWT，验签是它的唯一信任依据）。
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/controller/ChildControllers.kt b/padguard-server/src/main/kotlin/com/padguard/server/controller/ChildControllers.kt
+index 941ecc8..06acbd9 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/controller/ChildControllers.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/controller/ChildControllers.kt
+@@ -4,6 +4,7 @@ import com.padguard.server.common.DeviceApiResponse
+ import com.padguard.server.dto.*
+ import com.padguard.server.service.*
+ import com.padguard.server.mqtt.ChildUplinkHandler
++import com.padguard.server.security.RateLimit
+ import org.springframework.http.MediaType
+ import org.springframework.web.bind.annotation.*
+ import org.springframework.web.context.request.async.DeferredResult
+@@ -14,15 +15,29 @@ import org.springframework.web.multipart.MultipartFile
+ class ChildDeviceController(
+     private val deviceService: DeviceService,
+     private val policyService: PolicyService,
+-    private val policyExtensionService: PolicyExtensionService
++    private val policyExtensionService: PolicyExtensionService,
++    private val rateLimit: RateLimit
+ ) {
+     @PostMapping("/bind")
+-    fun bind(@RequestBody req: BindRequest) = DeviceApiResponse.ok(deviceService.bindChild(req))
++    fun bind(@RequestBody req: BindRequest, httpRequest: jakarta.servlet.http.HttpServletRequest) =
++        DeviceApiResponse.ok(
++            run {
++                // 绑定码可匿名穷举，限流必须先于任何查询（S14）
++                rateLimit.require("bind", httpRequest, req.bindCode, com.padguard.server.common.Audience.CHILD)
++                deviceService.bindChild(req)
++            }
++        )
+ 
+     /** 账号密码绑定：孩子端输入家长手机号 + 密码，免配对码完成绑定（方式④） */
+     @PostMapping("/bind-by-account")
+-    fun bindByAccount(@RequestBody req: BindByAccountRequest) =
+-        DeviceApiResponse.ok(deviceService.bindChildByAccount(req))
++    fun bindByAccount(@RequestBody req: BindByAccountRequest, httpRequest: jakarta.servlet.http.HttpServletRequest) =
++        DeviceApiResponse.ok(
++            run {
++                // 家长密码可匿名穷举，与登录同型爆破面（S14）
++                rateLimit.require("bind_by_account", httpRequest, req.phone, com.padguard.server.common.Audience.CHILD)
++                deviceService.bindChildByAccount(req)
++            }
++        )
+ 
+     @GetMapping("/time")
+     fun time() = DeviceApiResponse.ok(mapOf("serverTime" to System.currentTimeMillis()))
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/controller/ParentControllers.kt b/padguard-server/src/main/kotlin/com/padguard/server/controller/ParentControllers.kt
+index 643cb0c..abafeb5 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/controller/ParentControllers.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/controller/ParentControllers.kt
+@@ -13,15 +13,22 @@ import com.padguard.server.service.GroupService
+ import com.padguard.server.service.PolicyExtensionService
+ import com.padguard.server.service.PolicyService
+ import com.padguard.server.security.GuardPasswords
++import com.padguard.server.security.RateLimit
+ import org.slf4j.LoggerFactory
+ import org.springframework.web.bind.annotation.*
+ 
+ @RestController
+ @RequestMapping("/v1/auth")
+-class AuthController(private val authService: AuthService) {
++class AuthController(private val authService: AuthService, private val rateLimit: RateLimit) {
+ 
+     @PostMapping("/login/password")
+-    fun loginPassword(@RequestBody req: LoginPasswordRequest) = ApiResponse.ok(authService.loginWithPassword(req))
++    fun loginPassword(@RequestBody req: LoginPasswordRequest, httpRequest: jakarta.servlet.http.HttpServletRequest) =
++        ApiResponse.ok(
++            run {
++                rateLimit.require("login", httpRequest, req.phone)
++                authService.loginWithPassword(req)
++            }
++        )
+ 
+     @PostMapping("/register")
+     fun register(@RequestBody req: RegisterRequest) = ApiResponse.ok(authService.register(req))
+@@ -347,5 +354,5 @@ class PolicyController(
+ 
+     @GetMapping("/commands/{msgId}")
+     fun command(@RequestAttribute("userId") userId: String, @PathVariable msgId: String) =
+-        ApiResponse.ok(commandService.getCommand(msgId))
++        ApiResponse.ok(commandService.getCommand(userId, msgId))
+ }
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/controller/ParentExtendedControllers.kt b/padguard-server/src/main/kotlin/com/padguard/server/controller/ParentExtendedControllers.kt
+index a973b20..fdc75e9 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/controller/ParentExtendedControllers.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/controller/ParentExtendedControllers.kt
+@@ -23,7 +23,7 @@ class ParentMonitorController(
+ 
+     @GetMapping("/{deviceId}/location")
+     fun location(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+-        ApiResponse.ok(geofenceService.currentLocation(deviceId))
++        ApiResponse.ok(geofenceService.currentLocation(userId, deviceId))
+ 
+     /**
+      * 家长点"立即定位"：下发 LOCATE 指令，让端上马上补采一次位置。
+@@ -103,19 +103,19 @@ class ParentLocationController(private val geofenceService: GeofenceService) {
+ 
+     @GetMapping("/{deviceId}/current")
+     fun current(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+-        ApiResponse.ok(geofenceService.currentLocation(deviceId))
++        ApiResponse.ok(geofenceService.currentLocation(userId, deviceId))
+ 
+     @GetMapping("/{deviceId}/geofence")
+     fun geofence(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+-        ApiResponse.ok(geofenceService.getGeofence(deviceId))
++        ApiResponse.ok(geofenceService.getGeofence(userId, deviceId))
+ 
+     @PutMapping("/{deviceId}/geofence")
+     fun updateGeofence(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: GeofenceDto) =
+-        ApiResponse.ok(geofenceService.updateGeofence(deviceId, req))
++        ApiResponse.ok(geofenceService.updateGeofence(userId, deviceId, req))
+ 
+     @GetMapping("/{deviceId}/track")
+     fun track(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestParam(required = false, defaultValue = "200") limit: Int) =
+-        ApiResponse.ok(geofenceService.trackHistory(deviceId, limit))
++        ApiResponse.ok(geofenceService.trackHistory(userId, deviceId, limit))
+ }
+ 
+ // ==================== 策略扩展（时段/应用/上网/模板） ====================
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/mqtt/ChildUplinkHandler.kt b/padguard-server/src/main/kotlin/com/padguard/server/mqtt/ChildUplinkHandler.kt
+index e70fe67..40437ba 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/mqtt/ChildUplinkHandler.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/mqtt/ChildUplinkHandler.kt
+@@ -94,8 +94,31 @@ class ChildUplinkHandler(
+         }
+     }
+ 
++    /**
++     * ack 状态机（S6）。三条硬约束：
++     *
++     * 1. **双键匹配**：按 msgId + deviceId 查指令。只按 msgId 查的话，任何知道别人 msgId
++     *    的设备都能伪造回执（MQTT 上行无来源校验），把别人的指令改成 SUCCESS。
++     * 2. **白名单**：只接受孩子端契约 [com.padguard.core.data.model.AckStatus] 定义过的
++     *    5 种状态（SUCCESS/FAILED/UNSUPPORTED/DUPLICATED/REJECTED）+ 服务端 EXPIRED 之外的
++     *    任意垃圾值一律丢弃，避免脏状态进库后家长端轮询逻辑失明。
++     * 3. **单向流转**：终态（SUCCESS/UNSUPPORTED/DUPLICATED/REJECTED/EXPIRED）不可再被覆盖。
++     *    EXPIRED 是服务端 sweeper 判定的最终结论，之后才慢悠悠到达的回执不能"复活"指令；
++     *    FAILED 不算终态 —— 孩子端 FAILED 会带 retryCount<3 重试，允许 FAILED -> SUCCESS 升级。
++     */
+     private fun applyAck(deviceId: String, ack: AckPacket) {
+-        val cmd = commandRepository.findByMsgId(ack.msgId) ?: return
++        val cmd = commandRepository.findByMsgIdAndDeviceId(ack.msgId, deviceId) ?: run {
++            log.warn("ack dropped: msgId={} not found on device {}", ack.msgId, deviceId)
++            return
++        }
++        if (ack.status !in ACK_ALLOWED_STATUSES) {
++            log.warn("ack dropped: msgId={} illegal status={}", ack.msgId, ack.status)
++            return
++        }
++        if (cmd.status in ACK_TERMINAL_STATUSES) {
++            log.info("ack ignored: msgId={} already terminal status={}", ack.msgId, cmd.status)
++            return
++        }
+         cmd.status = ack.status
+         cmd.executedAt = ack.executedAt
+         // P0-5：回执里的错误码 / 描述一并落库，家长端才能看到"指令为什么没生效"。
+@@ -113,6 +136,14 @@ class ChildUplinkHandler(
+         }
+     }
+ 
++    companion object {
++        /** 孩子端契约 AckStatus 全集（护航成长 core/data Command.kt:156） */
++        val ACK_ALLOWED_STATUSES = setOf("SUCCESS", "FAILED", "UNSUPPORTED", "DUPLICATED", "REJECTED")
++
++        /** 终态：一旦到达不可回退。FAILED 可重试所以不在内；EXPIRED 是服务端 sweeper 结论。 */
++        val ACK_TERMINAL_STATUSES = setOf("SUCCESS", "UNSUPPORTED", "DUPLICATED", "REJECTED", "EXPIRED")
++    }
++
+     private fun handleHeartbeat(deviceId: String, json: String) {
+         val hb = objectMapper.readValue(json, HeartbeatDto::class.java)
+         deviceService.applyHeartbeat(deviceId, hb)
+@@ -142,18 +173,33 @@ class ChildUplinkHandler(
+         val fresh = candidates.filter { it.eventId !in existing }
+         if (fresh.isEmpty()) return 0 to events.size
+ 
+-        deviceEventRepository.saveAll(fresh.map { ev ->
+-            DeviceEvent(
+-                id = UUID.randomUUID().toString(), deviceId = deviceId, eventId = ev.eventId,
+-                type = ev.type, level = ev.level, timestamp = ev.timestamp,
+-                detailJson = objectMapper.writeValueAsString(ev.detail ?: emptyMap<String, Any?>())
+-            )
+-        })
++        // S8：批量写入；并发上报同一 eventId 撞 unique 约束时降级为逐行 ON CONFLICT DO NOTHING。
++        // 告警与 WS 推送只作用于**真正落库**的事件，保持「去重作用在整条链路」的语义不变。
++        val inserted = try {
++            deviceEventRepository.saveAll(fresh.map { ev ->
++                DeviceEvent(
++                    id = UUID.randomUUID().toString(), deviceId = deviceId, eventId = ev.eventId,
++                    type = ev.type, level = ev.level, timestamp = ev.timestamp,
++                    detailJson = objectMapper.writeValueAsString(ev.detail ?: emptyMap<String, Any?>())
++                )
++            })
++            fresh
++        } catch (e: org.springframework.dao.DataIntegrityViolationException) {
++            log.warn("device_events 批量写入撞唯一约束（并发上报竞态），降级逐行 upsert: {}", e.message)
++            fresh.filter { ev ->
++                deviceEventRepository.insertIgnoreConflict(
++                    id = UUID.randomUUID().toString(), deviceId = deviceId, eventId = ev.eventId,
++                    type = ev.type, level = ev.level,
++                    detailJson = objectMapper.writeValueAsString(ev.detail ?: emptyMap<String, Any?>()),
++                    timestamp = ev.timestamp
++                ) > 0
++            }
++        }
+ 
+         // 高危事件落告警并推 WS。
+         // 去重作用在**整条链路**上，而不是只挡住落库：MQTT QoS1 与 HTTP 重试都会让同一条
+         // 事件重复到达，只挡落库却照常告警的话，一次重传就给家长推一条重复告警。
+-        fresh.forEach { ev ->
++        inserted.forEach { ev ->
+             alertService.createFromEvent(deviceId, ev.type, ev.level, ev.detail)
+             deviceService.getUserId(deviceId)?.let { userId ->
+                 webSocketPush.pushToUser(userId, mapOf(
+@@ -162,7 +208,7 @@ class ChildUplinkHandler(
+                 ))
+             }
+         }
+-        return fresh.size to (events.size - fresh.size)
++        return inserted.size to (events.size - inserted.size)
+     }
+ 
+     private fun handleStatus(deviceId: String, json: String) {
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/mqtt/DevChildSimulator.kt b/padguard-server/src/main/kotlin/com/padguard/server/mqtt/DevChildSimulator.kt
+index 6d2faf3..f20b03d 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/mqtt/DevChildSimulator.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/mqtt/DevChildSimulator.kt
+@@ -26,8 +26,15 @@ import java.util.UUID
+  * 开发用"孩子端模拟器"：无真实被管控端时，自动订阅下行指令并回执 ack，
+  * 便于在本地演示"绑定 -> 锁屏 -> ack 回显"主链路闭环。
+  * 由 padguard.dev.child-simulator=true 开启；生产环境务必关闭。
++ *
++ * ## 双保险门控
++ * 仅靠配置开关不够：配置文件随安装包分发，生产环境误开 = 模拟器订阅**全租户所有设备**
++ * 的下行指令并抢先回 SUCCESS，指令状态机被彻底污染（家长看到"执行成功"，真实设备根本
++ * 没执行）。因此再加 @Profile 限制 —— 组件只在 local/dev 装配，生产 profile 下即使开关
++ * 被误配，该 Bean 也根本不存在。
+  */
+ @Component
++@org.springframework.context.annotation.Profile("local", "dev")
+ class DevChildSimulator(
+     @Value("\${padguard.mqtt.broker-url}") private val brokerUrl: String,
+     @Value("\${padguard.mqtt.tenant:default}") private val tenant: String,
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/repository/Repositories.kt b/padguard-server/src/main/kotlin/com/padguard/server/repository/Repositories.kt
+index 91f1b80..a2f6218 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/repository/Repositories.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/repository/Repositories.kt
+@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Modifying
+ import org.springframework.data.jpa.repository.Query
+ import org.springframework.data.repository.query.Param
+ import org.springframework.stereotype.Repository
++import org.springframework.transaction.annotation.Transactional
+ 
+ @Repository
+ interface UserRepository : JpaRepository<User, String> {
+@@ -60,6 +61,10 @@ interface PolicyRepository : JpaRepository<Policy, String> {
+ @Repository
+ interface CommandRepository : JpaRepository<Command, String> {
+     fun findByMsgId(msgId: String): Command?
++
++    /** ack 状态机（S6）：msgId + deviceId 双键匹配，跨设备伪造的回执查不到记录 */
++    fun findByMsgIdAndDeviceId(msgId: String, deviceId: String): Command?
++
+     fun findByDeviceIdOrderByCreatedAtDesc(deviceId: String): List<Command>
+ 
+     /**
+@@ -143,6 +148,32 @@ interface UsageLogRepository : JpaRepository<UsageLog, String> {
+     @Query("select l.logId from UsageLog l where l.logId in :logIds")
+     fun findExistingLogIds(@Param("logIds") logIds: Collection<String>): Set<String>
+ 
++    /**
++     * 逐行幂等 upsert（S8 批写竞态的降级路径）。
++     *
++     * 常规路径是「一次查重 + 一次批量 saveAll」；但查重与写入之间存在竞态窗口：
++     * 同一 logId 的两次并发上报可能都通过查重，后提交者撞 unique 约束导致**整批**失败。
++     * 命中约束时降级为本方法逐行 `ON CONFLICT DO NOTHING`（H2 2.2.x 与 PG16 均支持），
++     * 只跳过真正已存在的行。仅竞态时触发，不影响常规批量性能。
++     */
++    @Modifying
++    @Transactional
++    @Query(
++        value = "insert into usage_logs (id, device_id, log_id, type, \"timestamp\", payload_json, received_at) " +
++                "values (:id, :deviceId, :logId, :type, :timestamp, :payloadJson, :receivedAt) " +
++                "on conflict (log_id) do nothing",
++        nativeQuery = true
++    )
++    fun insertIgnoreConflict(
++        @Param("id") id: String,
++        @Param("deviceId") deviceId: String,
++        @Param("logId") logId: String,
++        @Param("type") type: String?,
++        @Param("timestamp") timestamp: Long?,
++        @Param("payloadJson") payloadJson: String?,
++        @Param("receivedAt") receivedAt: Long
++    ): Int
++
+     /**
+      * 设备易主（孤儿回收 / 跨账号复用）或解绑时，清掉该设备的全部历史用量日志，
+      * 避免新账号继承上一任记录。
+@@ -209,4 +240,26 @@ interface DeviceEventRepository : JpaRepository<DeviceEvent, String> {
+      */
+     @Query("select e.eventId from DeviceEvent e where e.eventId in :eventIds")
+     fun findExistingEventIds(@Param("eventIds") eventIds: Collection<String>): Set<String>
++
++    /**
++     * 逐行幂等 upsert（S8，与 [UsageLogRepository.insertIgnoreConflict] 同款）：
++     * event_id 竞态并发上报时整批撞 unique 约束，降级为逐行 ON CONFLICT DO NOTHING。
++     */
++    @Modifying
++    @Transactional
++    @Query(
++        value = "insert into device_events (id, device_id, event_id, type, \"level\", detail_json, \"timestamp\") " +
++                "values (:id, :deviceId, :eventId, :type, :level, :detailJson, :timestamp) " +
++                "on conflict (event_id) do nothing",
++        nativeQuery = true
++    )
++    fun insertIgnoreConflict(
++        @Param("id") id: String,
++        @Param("deviceId") deviceId: String,
++        @Param("eventId") eventId: String,
++        @Param("type") type: String?,
++        @Param("level") level: String?,
++        @Param("detailJson") detailJson: String?,
++        @Param("timestamp") timestamp: Long?
++    ): Int
+ }
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/security/AdminAuthInterceptor.kt b/padguard-server/src/main/kotlin/com/padguard/server/security/AdminAuthInterceptor.kt
+index 4969b9d..ac48c46 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/security/AdminAuthInterceptor.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/security/AdminAuthInterceptor.kt
+@@ -37,7 +37,7 @@ class AdminAuthInterceptor(
+             throw BizException(ParentErr.UNAUTHORIZED, "invalid admin token", Audience.PARENT)
+         }
+         val adminId = try {
+-            jwt.parseUserId(token)
++            jwt.parseAdminToken(token)
+         } catch (e: Exception) {
+             throw BizException(ParentErr.UNAUTHORIZED, "invalid token", Audience.PARENT)
+         }
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/security/DeviceOwnershipGuard.kt b/padguard-server/src/main/kotlin/com/padguard/server/security/DeviceOwnershipGuard.kt
+new file mode 100644
+index 0000000..2b6ce78
+--- /dev/null
++++ b/padguard-server/src/main/kotlin/com/padguard/server/security/DeviceOwnershipGuard.kt
+@@ -0,0 +1,38 @@
++package com.padguard.server.security
++
++import com.padguard.server.common.Audience
++import com.padguard.server.common.BizException
++import com.padguard.server.common.ParentErr
++import com.padguard.server.domain.Device
++import com.padguard.server.repository.DeviceRepository
++import org.springframework.stereotype.Component
++
++/**
++ * 设备归属校验的唯一入口。
++ *
++ * ## 为什么必须收敛为一个组件
++ * 此前各业务 Service 各自复制了一份私有 `requireOwned`（最多时 8 份），实现细节靠
++ * 人肉保持一致 —— GeofenceService 正是"漏抄了一份"的产物：位置/轨迹/围栏全线无归属
++ * 校验，任何登录家长可读取任意设备的实时位置与轨迹、可改写他人电子围栏（IDOR）。
++ * 复制粘贴模式的必然结果就是漏网，根治方法是逻辑只存在一份。
++ *
++ * 用法：注入本组件，业务入口处调用 [requireOwned]；
++ * 需要设备实体的场景直接使用返回值，避免二次查询。
++ */
++@Component
++class DeviceOwnershipGuard(
++    private val deviceRepository: DeviceRepository
++) {
++    /**
++     * 校验设备存在且归属 [userId]；不满足即抛业务异常。
++     * 错误码与历史实现一致（DEVICE_NOT_FOUND / DEVICE_NOT_OWNED），客户端无感。
++     */
++    fun requireOwned(userId: String, deviceId: String): Device {
++        val dev = deviceRepository.findById(deviceId).orElse(null)
++            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
++        if (dev.userId != userId) {
++            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
++        }
++        return dev
++    }
++}
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/security/Interceptors.kt b/padguard-server/src/main/kotlin/com/padguard/server/security/Interceptors.kt
+index 480b2af..3879a10 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/security/Interceptors.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/security/Interceptors.kt
+@@ -34,7 +34,7 @@ class ParentAuthInterceptor(
+             throw BizException(ParentErr.UNAUTHORIZED, "missing or invalid Authorization", Audience.PARENT)
+         }
+         val userId = try {
+-            jwt.parseUserId(auth.substring(7))
++            jwt.parseAccessToken(auth.substring(7))
+         } catch (e: Exception) {
+             throw BizException(ParentErr.UNAUTHORIZED, "invalid token", Audience.PARENT)
+         }
+@@ -74,7 +74,7 @@ class FileAccessInterceptor(
+         val auth = request.getHeader("Authorization")
+         val token = auth?.takeIf { it.startsWith("Bearer ") }?.substring(7)
+         val matchedParent = token
+-            ?.let { runCatching { jwt.parseUserId(it) }.getOrNull() }
++            ?.let { runCatching { jwt.parseAccessToken(it) }.getOrNull() }
+             ?.takeIf { runCatching { users.existsById(it) }.getOrDefault(false) }
+         if (matchedParent != null) {
+             request.setAttribute("fileViewerUserId", matchedParent)
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/security/JwtTokenProvider.kt b/padguard-server/src/main/kotlin/com/padguard/server/security/JwtTokenProvider.kt
+index e70f765..ceedf6e 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/security/JwtTokenProvider.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/security/JwtTokenProvider.kt
+@@ -75,10 +75,27 @@ class JwtTokenProvider(
+         .signWith(key)
+         .compact()
+ 
+-    fun parseUserId(token: String): String =
+-        Jwts.parser().verifyWith(key).build().parseSignedClaims(token).payload.subject
++    /**
++     * 按令牌类型解析。三类令牌（家长 access / refresh、管理员）用同一密钥签发，
++     * 仅靠 typ 声明区分 —— 此前 parseUserId 只验签不验 typ，导致：
++     * 30 天的 refresh token 可当 access token 调全部业务接口；
++     * access token 可被拿去无限续期；管理员令牌可通过家长 WS 握手。
++     * 现在调用方必须声明自己期望的令牌类型，类型不符一律拒绝。
++     */
++    fun parseAccessToken(token: String): String = parseWithTyp(token, "access")
++
++    fun parseRefreshToken(token: String): String = parseWithTyp(token, "refresh")
+ 
+-    fun isValid(token: String): Boolean = runCatching { parseUserId(token) }.isSuccess
++    fun parseAdminToken(token: String): String = parseWithTyp(token, "admin_access")
++
++    private fun parseWithTyp(token: String, expectedTyp: String): String {
++        val claims = Jwts.parser().verifyWith(key).build().parseSignedClaims(token).payload
++        val typ = claims["typ"] as? String
++        if (typ != expectedTyp) {
++            throw io.jsonwebtoken.JwtException("token typ mismatch: expected=$expectedTyp actual=$typ")
++        }
++        return claims.subject
++    }
+ 
+     /**
+      * 签发管理员令牌。与家长令牌用同一密钥，但带 `scope=admin` 声明，
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/security/RateLimit.kt b/padguard-server/src/main/kotlin/com/padguard/server/security/RateLimit.kt
+new file mode 100644
+index 0000000..6466ba0
+--- /dev/null
++++ b/padguard-server/src/main/kotlin/com/padguard/server/security/RateLimit.kt
+@@ -0,0 +1,75 @@
++package com.padguard.server.security
++
++import com.padguard.server.common.Audience
++import com.padguard.server.common.BizException
++import com.padguard.server.common.ChildErr
++import com.padguard.server.common.ClientIps
++import com.padguard.server.common.ParentErr
++import io.github.resilience4j.ratelimiter.RateLimiter
++import io.github.resilience4j.ratelimiter.RateLimiterConfig
++import io.github.resilience4j.ratelimiter.RateLimiterRegistry
++import io.github.resilience4j.ratelimiter.RequestNotPermitted
++import jakarta.servlet.http.HttpServletRequest
++import org.springframework.stereotype.Component
++import java.time.Duration
++
++/**
++ * 匿名可爆破入口的限流闸门（S14）。
++ *
++ * 覆盖四个入口：家长登录 `/v1/auth/login/password`、后台登录 `/v1/admin/login`、
++ * 孩子端绑定 `/api/v1/device/bind`（绑定码可匿名穷举）与 `/api/v1/device/bind-by-account`
++ * （家长密码可匿名穷举，与登录同型爆破面，一并收口）。
++ *
++ * 维度：**IP + 账号双计数**。只按 IP 限，同一 NAT（家庭路由器很常见）下一个孩子端
++ * 重装重试几次就把全家 IP 打满；只按账号限，攻击者换 IP 绕过。两者独立计数互不影响。
++ *
++ * 实现：Resilience4j `RateLimiterRegistry` 编程式动态 key（官方对动态场景的标准用法，
++ * 注解式 starter 只适合静态命名限流器）。阈值先宽（10 次/分钟），上线后按数据收紧。
++ * 超限抛 [BizException]，经 [com.padguard.server.common.GlobalExceptionHandler] 落 429。
++ */
++@Component
++class RateLimit {
++
++    private val registry = RateLimiterRegistry.of(
++        RateLimiterConfig.custom()
++            .limitForPeriod(LIMIT_PER_MINUTE)
++            .limitRefreshPeriod(Duration.ofMinutes(1))
++            // 不排队：超限立即拒绝。登录/绑定场景排队重试只会让攻击者的请求堆积在服务端。
++            .timeoutDuration(Duration.ZERO)
++            .build()
++    )
++
++    /**
++     * 限流检查；超限抛 TOO_MANY_REQUESTS。
++     *
++     * @param scenario 场景名（login / admin_login / bind / bind_by_account），隔离各入口计数
++     * @param account  账号维度键（手机号 / 用户名 / 绑定码），空则只按 IP 计数
++     */
++    fun require(scenario: String, request: HttpServletRequest, account: String? = null, audience: Audience = Audience.PARENT) {
++        val ip = ClientIps.of(request) ?: "unknown"
++        check(registry.rateLimiter("$scenario:ip:$ip"), audience)
++        if (!account.isNullOrBlank()) check(registry.rateLimiter("$scenario:acc:$account"), audience)
++    }
++
++    private fun check(limiter: RateLimiter, audience: Audience) {
++        // acquirePermission 返回 boolean（false = 超限）；RequestNotPermitted 由装饰器层抛出，
++        // 直接调用必须自己判返回值 —— timeoutDuration=0 时超限立即返回 false，不排队。
++        val permitted = try {
++            limiter.acquirePermission()
++        } catch (e: RequestNotPermitted) {
++            false
++        }
++        if (!permitted) {
++            throw BizException(
++                if (audience == Audience.CHILD) ChildErr.TOO_MANY_REQUESTS else ParentErr.TOO_MANY_REQUESTS,
++                "请求过于频繁，请一分钟后再试",
++                audience
++            )
++        }
++    }
++
++    companion object {
++        /** 阈值先宽：10 次/分钟/维度（实施方案 S14：上线后按数据收紧） */
++        private const val LIMIT_PER_MINUTE = 10
++    }
++}
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/AdminService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/AdminService.kt
+index 4fe244f..97ffe2f 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/AdminService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/AdminService.kt
+@@ -168,7 +168,10 @@ class AdminService(
+ 
+     // ============================ 仪表盘 ============================
+ 
+-    fun dashboard(): DashboardResponse {
++    fun dashboard(adminId: String): DashboardResponse {
++        // S13：仪表盘是跨领域聚合（含服务器状态），统一挂 server:read。
++        // 默认五个内置角色的权限矩阵均含 server:read，不受影响；自定义角色需在 RBAC 矩阵中显式勾选。
++        adminPerm.require(adminId, "server", "read")
+         val users = userRepository.findAll()
+         val parentsTotal = users.size.toLong()
+         val parentsActive = users.count { (it.status ?: "active") == "active" }.toLong()
+@@ -191,7 +194,7 @@ class AdminService(
+ 
+         val alertsOpen = alertRepository.countByStatus("ACTIVE")
+ 
+-        val recent = audit(null).take(6)
++        val recent = auditInternal(null).take(6)
+ 
+         return DashboardResponse(
+             kpis = Kpis(
+@@ -250,7 +253,9 @@ class AdminService(
+ 
+     // ============================ 家长账号 ============================
+ 
+-    fun listParents(keyword: String?, status: String?, plan: String?): List<ParentRow> {
++    fun listParents(adminId: String, keyword: String?, status: String?, plan: String?): List<ParentRow> {
++        // S13：读操作同样过 RBAC 闸门 —— 列表里含家长手机号等敏感数据，只读角色之外不应可见
++        adminPerm.require(adminId, "parents", "read")
+         var users = userRepository.findAll()
+         if (!status.isNullOrBlank()) users = users.filter { (it.status ?: "active") == status }
+         if (!plan.isNullOrBlank()) {
+@@ -283,7 +288,8 @@ class AdminService(
+         )
+     }
+ 
+-    fun parentDetail(id: String): ParentDetail? {
++    fun parentDetail(adminId: String, id: String): ParentDetail? {
++        adminPerm.require(adminId, "parents", "read")
+         val u = userRepository.findById(id).orElse(null) ?: return null
+         val sub = subscriptionRepository.findByUserId(id)
+         val devices = deviceRepository.findByUserId(id).map {
+@@ -385,7 +391,8 @@ class AdminService(
+ 
+     // ============================ 设备 ============================
+ 
+-    fun listDevices(keyword: String?, online: String?): List<DeviceRow> {
++    fun listDevices(adminId: String, keyword: String?, online: String?): List<DeviceRow> {
++        adminPerm.require(adminId, "devices", "read")
+         val users = userRepository.findAll()
+         val userMap = users.associateBy { it.id }
+         var devs = deviceRepository.findAll()
+@@ -439,14 +446,18 @@ class AdminService(
+ 
+     // ============================ 订阅计费 ============================
+ 
+-    fun listPlans(): List<AdminPlanDto> = billingService.plans().map { p ->
+-        AdminPlanDto(
+-            id = p.key, name = p.label, priceFen = p.amountFen, deviceLimit = p.deviceLimit,
+-            features = PLAN_FEATURES[p.key] ?: emptyList()
+-        )
++    fun listPlans(adminId: String): List<AdminPlanDto> {
++        adminPerm.require(adminId, "billing", "read")
++        return billingService.plans().map { p ->
++            AdminPlanDto(
++                id = p.key, name = p.label, priceFen = p.amountFen, deviceLimit = p.deviceLimit,
++                features = PLAN_FEATURES[p.key] ?: emptyList()
++            )
++        }
+     }
+ 
+-    fun listSubscriptions(status: String?): List<SubRow> {
++    fun listSubscriptions(adminId: String, status: String?): List<SubRow> {
++        adminPerm.require(adminId, "billing", "read")
+         var subs = subscriptionRepository.findAllByOrderByExpiredAtDesc()
+         if (!status.isNullOrBlank()) subs = subs.filter { subStatusLower(it.status) == status.lowercase() }
+         val userMap = userRepository.findAll().associateBy { it.id }
+@@ -461,7 +472,8 @@ class AdminService(
+         }
+     }
+ 
+-    fun listOrders(status: String?): List<OrderRow> {
++    fun listOrders(adminId: String, status: String?): List<OrderRow> {
++        adminPerm.require(adminId, "billing", "read")
+         var orders = paymentOrderRepository.findAllByOrderByCreatedAtDesc()
+         if (!status.isNullOrBlank()) orders = orders.filter { orderStatusLower(it.status) == status.lowercase() }
+         val userMap = userRepository.findAll().associateBy { it.id }
+@@ -528,11 +540,17 @@ class AdminService(
+         return mapOf("ok" to true)
+     }
+ 
+-    fun revenue(): List<RevenueMonth> = lastMonthsRevenue(12)
++    fun revenue(adminId: String): List<RevenueMonth> {
++        adminPerm.require(adminId, "billing", "read")
++        return lastMonthsRevenue(12)
++    }
+ 
+     // ============================ RBAC ============================
+ 
+-    fun listRoles() = adminPerm.listRoles()
++    fun listRoles(adminId: String): List<AdminRoles.RoleDef> {
++        adminPerm.require(adminId, "rbac", "read")
++        return adminPerm.listRoles()
++    }
+ 
+     @Transactional
+     fun saveRole(adminId: String, role: AdminRolePrivilegesDto): Map<String, Any> {
+@@ -542,7 +560,10 @@ class AdminService(
+         return mapOf("ok" to true)
+     }
+ 
+-    fun listAdmins(): List<AdminDto> = adminRepository.findAll().map { toAdminDto(it) }
++    fun listAdmins(adminId: String): List<AdminDto> {
++        adminPerm.require(adminId, "rbac", "read")
++        return adminRepository.findAll().map { toAdminDto(it) }
++    }
+ 
+     @Transactional
+     fun createAdmin(adminId: String, req: AdminCreateRequest): Map<String, Any> {
+@@ -641,7 +662,8 @@ class AdminService(
+ 
+     // ============================ 服务端监控 ============================
+ 
+-    fun serverMetrics(): ServerMetrics {
++    fun serverMetrics(adminId: String): ServerMetrics {
++        adminPerm.require(adminId, "server", "read")
+         val rt = Runtime.getRuntime()
+         val usedMb = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024)
+         val maxMb = rt.maxMemory() / (1024 * 1024)
+@@ -666,7 +688,13 @@ class AdminService(
+ 
+     // ============================ 审计 / 告警 ============================
+ 
+-    fun audit(area: String?): List<AuditItem> {
++    /** 对外审计查询：过 audit:read 闸门后委托内部实现（S13 读闸门） */
++    fun audit(adminId: String, area: String?): List<AuditItem> {
++        adminPerm.require(adminId, "audit", "read")
++        return auditInternal(area)
++    }
++
++    private fun auditInternal(area: String?): List<AuditItem> {
+         val admins = adminRepository.findAll().associateBy { it.id }
+         val users = userRepository.findAll().associateBy { it.id }
+         val rows = auditLogRepository.findAllByOrderByCreatedAtDesc().take(200)
+@@ -716,7 +744,9 @@ class AdminService(
+         else -> "" to action
+     }
+ 
+-    fun alerts(): List<AlertItem> {
++    fun alerts(adminId: String): List<AlertItem> {
++        // 告警归属 audit 领域（与 closeAlert 的 audit:write 同域），读侧只需 audit:read
++        adminPerm.require(adminId, "audit", "read")
+         val users = userRepository.findAll().associateBy { it.id }
+         return alertRepository.findAll().map { a ->
+             val level = when (a.level.uppercase()) {
+@@ -747,7 +777,8 @@ class AdminService(
+ 
+     // ============================ 系统设置 ============================
+ 
+-    fun settings(): AdminSettingsDto {
++    fun settings(adminId: String): AdminSettingsDto {
++        adminPerm.require(adminId, "settings", "read")
+         val store = loadSettingsStore()
+         val plans = billingService.plans().map { p ->
+             val price = store.planPrices[p.key] ?: p.amountFen
+@@ -777,7 +808,7 @@ class AdminService(
+         )
+         systemSettingRepository.save(SystemSetting("admin.settings", objectMapper.writeValueAsString(next)))
+         auditService.record(adminId, null, AdminAudit.SETTINGS_WRITE, targetType = "settings", targetId = "admin.settings", detail = "修改系统设置")
+-        return settings()
++        return settings(adminId)
+     }
+ 
+     private data class SettingsStore(
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/AppManageService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/AppManageService.kt
+index 154e7ef..2393a8d 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/AppManageService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/AppManageService.kt
+@@ -43,6 +43,7 @@ import java.util.UUID
+ class AppManageService(
+     private val fileStorageService: FileStorageService,
+     private val deviceRepository: DeviceRepository,
++    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
+     private val installedAppRepository: InstalledAppRepository,
+     private val appPolicyRepository: AppPolicyRepository,
+     private val commandService: CommandService,
+@@ -427,13 +428,13 @@ class AppManageService(
+ 
+     // ==================== 工具 ====================
+ 
+-    private fun requireOwned(userId: String, deviceId: String) {
+-        val dev = deviceRepository.findById(deviceId).orElse(null)
+-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+-        if (dev.userId != userId) {
+-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+-        }
+-    }
++    /**
++     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现）。
++     * 此前这里是逐 Service 复制的私有副本，复制粘贴模式必然漏网 ——
++     * GeofenceService 正是漏抄的一份，造成位置/围栏全线 IDOR。逻辑现在只存在一份。
++     */
++    private fun requireOwned(userId: String, deviceId: String) =
++        ownershipGuard.requireOwned(userId, deviceId)
+ 
+     private companion object {
+         const val SELF_PACKAGE = "com.padguard.child"
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/AuthService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/AuthService.kt
+index 73be71f..c1f6e0d 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/AuthService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/AuthService.kt
+@@ -106,7 +106,7 @@ class AuthService(
+ 
+     fun refresh(refreshToken: String): TokenResponse {
+         val userId = try {
+-            jwt.parseUserId(refreshToken)
++            jwt.parseRefreshToken(refreshToken)
+         } catch (e: Exception) {
+             throw BizException(ParentErr.UNAUTHORIZED, "refresh 失效", Audience.PARENT)
+         }
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/BillingService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/BillingService.kt
+index 598ced6..ed6199e 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/BillingService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/BillingService.kt
+@@ -407,11 +407,17 @@ class BillingService(
+         return statusOf(userId)
+     }
+ 
+-    /** 模拟支付：仅开发环境开启，生产必须关闭，否则等于绕过收费 */
+-    fun mockPay(orderNo: String): SubscriptionDto {
++    /** 模拟支付：仅开发环境开启，生产必须关闭，否则等于绕过收费（S16 补归属校验） */
++    fun mockPay(userId: String, orderNo: String): SubscriptionDto {
+         if (!mockPayEnabled) {
+             throw BizException(ParentErr.PARAM_ERROR, "模拟支付未开启", Audience.PARENT)
+         }
++        val order = paymentOrderRepository.findByOrderNo(orderNo)
++            ?: throw BizException(ParentErr.ORDER_NOT_FOUND, "订单不存在", Audience.PARENT)
++        // S16：mockPay 可把任意订单置为已支付，无归属校验时知道 orderNo 就能替别人"付款"
++        if (order.userId != userId) {
++            throw BizException(ParentErr.DEVICE_NOT_OWNED, "订单不属于当前用户", Audience.PARENT)
++        }
+         return markPaid(orderNo, "MOCK")
+     }
+ 
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/CommandService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/CommandService.kt
+index 73b6980..f11762f 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/CommandService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/CommandService.kt
+@@ -9,6 +9,7 @@ import com.padguard.server.dto.CommandPacket
+ import com.padguard.server.mqtt.MqttGateway
+ import com.padguard.server.repository.CommandRepository
+ import com.padguard.server.repository.DeviceRepository
++import com.padguard.server.security.DeviceOwnershipGuard
+ import com.padguard.server.service.AuditAction
+ import com.padguard.server.service.AuditService
+ import com.fasterxml.jackson.databind.ObjectMapper
+@@ -29,7 +30,8 @@ class CommandService(
+     private val mqttGateway: MqttGateway,
+     private val objectMapper: ObjectMapper,
+     private val expiredCommandSweeper: ExpiredCommandSweeper,
+-    private val auditService: AuditService
++    private val auditService: AuditService,
++    private val ownershipGuard: DeviceOwnershipGuard
+ ) {
+     /**
+      * 家长端下发指令：构造指令包(HMAC 签名) -> 落库 -> 经 MQ/M轮询下发。
+@@ -74,9 +76,17 @@ class CommandService(
+         return CommandDto(msgId, type, "PENDING", strPayload, now, null)
+     }
+ 
+-    fun getCommand(msgId: String): CommandDto {
++    /**
++     * 查询指令状态（S16 归属校验）。
++     *
++     * 指令 payload 里可能带设备信息，msgId 可枚举猜测；无归属校验时任何家长
++     * 能凭 msgId 查到别人设备的指令内容。先按 msgId 查到指令，再经统一归属闸门
++     * 校验指令所属设备确属当前用户，否则按"不存在"处理（不泄露存在性）。
++     */
++    fun getCommand(userId: String, msgId: String): CommandDto {
+         val cmd = commandRepository.findByMsgId(msgId)
+             ?: throw BizException(ParentErr.PARAM_ERROR, "指令不存在", Audience.PARENT)
++        ownershipGuard.requireOwned(userId, cmd.deviceId)
+         val payloadMap = cmd.payloadJson?.let {
+             runCatching { objectMapper.readValue(it, Map::class.java) as Map<String, Any?> }.getOrNull()
+         }
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/ContentFilterService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/ContentFilterService.kt
+index 870d2a3..00b1935 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/ContentFilterService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/ContentFilterService.kt
+@@ -34,6 +34,7 @@ import jakarta.annotation.PostConstruct
+ @Service
+ class ContentFilterService(
+     private val deviceRepository: DeviceRepository,
++    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
+     private val deviceSettingRepository: DeviceSettingRepository,
+     private val urlCategoryRepository: UrlCategoryRepository,
+     private val sensitiveWordRepository: SensitiveWordRepository,
+@@ -176,13 +177,12 @@ class ContentFilterService(
+     private fun deviceSettingOf(deviceId: String): DeviceSetting =
+         deviceSettingRepository.findById(deviceId).orElse(DeviceSetting(deviceId = deviceId))
+ 
+-    private fun requireOwned(userId: String, deviceId: String) {
+-        val dev = deviceRepository.findById(deviceId).orElse(null)
+-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+-        if (dev.userId != userId) {
+-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+-        }
+-    }
++    /**
++     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
++     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
++     */
++    private fun requireOwned(userId: String, deviceId: String) =
++        ownershipGuard.requireOwned(userId, deviceId)
+ 
+     private fun now() = System.currentTimeMillis()
+ 
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/DeviceMgmtService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/DeviceMgmtService.kt
+index afbdaa0..183d877 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/DeviceMgmtService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/DeviceMgmtService.kt
+@@ -26,6 +26,7 @@ import java.util.UUID
+ class DeviceMgmtService(
+     private val fileStorageService: FileStorageService,
+     private val deviceRepository: DeviceRepository,
++    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
+     private val installedAppRepository: InstalledAppRepository,
+     private val appCatalogRepository: AppCatalogRepository,
+     private val appDistributionRepository: AppDistributionRepository,
+@@ -313,11 +314,10 @@ class DeviceMgmtService(
+         errorMessage = r.errorMessage, createdAt = r.createdAt, finishedAt = r.finishedAt
+     )
+ 
+-    private fun requireOwned(userId: String, deviceId: String) {
+-        val dev = deviceRepository.findById(deviceId).orElse(null)
+-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+-        if (dev.userId != userId) {
+-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+-        }
+-    }
++    /**
++     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
++     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
++     */
++    private fun requireOwned(userId: String, deviceId: String) =
++        ownershipGuard.requireOwned(userId, deviceId)
+ }
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/DeviceService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/DeviceService.kt
+index 31f9e74..4f732e9 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/DeviceService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/DeviceService.kt
+@@ -31,6 +31,7 @@ import java.util.concurrent.ConcurrentHashMap
+ @Service
+ class DeviceService(
+     private val deviceRepository: DeviceRepository,
++    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
+     private val bindCodeService: BindCodeService,
+     private val policyService: PolicyService,
+     private val webSocketPush: WebSocketPushService,
+@@ -180,7 +181,13 @@ class DeviceService(
+      *
+      * 与 [bindChild] 的唯一区别是归属家长的确认方式（账号密码 vs 一次性绑定码），
+      * 设备台账、令牌下发、默认策略等后续逻辑完全复用，避免两套实现漂移。
++     *
++     * 必须整体事务（与 [bindChild] 同口径）：建设备台账 + createDefault 策略 + audit
++     * 要么全成要么全败。注意 @Transactional 必须加在这个**外部入口**上 ——
++     * 若只加在被内部自调用的 bindChildWithUser 上，Spring 同类自调用不走代理，
++     * 事务注解会静默失效（bindChild 路径不受影响：其自身注解已覆盖整个流程）。
+      */
++    @Transactional
+     fun bindChildByAccount(req: com.padguard.server.dto.BindByAccountRequest): BindResult {
+         val user = userRepository.findByPhone(req.phone.trim())
+             ?: throw BizException(ChildErr.TOKEN_INVALID, "家长账号不存在", Audience.CHILD)
+@@ -439,14 +446,12 @@ class DeviceService(
+         deviceRepository.save(dev)
+     }
+ 
+-    private fun requireOwned(userId: String, deviceId: String): Device {
+-        val dev = deviceRepository.findById(deviceId).orElse(null)
+-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+-        if (dev.userId != userId) {
+-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+-        }
+-        return dev
+-    }
++    /**
++     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
++     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
++     */
++    private fun requireOwned(userId: String, deviceId: String): Device =
++        ownershipGuard.requireOwned(userId, deviceId)
+ 
+     fun applyHeartbeatOnline(deviceId: String) {
+         deviceRepository.findById(deviceId).ifPresent { dev ->
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/GeofenceService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/GeofenceService.kt
+index 9bb97c9..b034243 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/GeofenceService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/GeofenceService.kt
+@@ -12,6 +12,7 @@ import com.padguard.server.dto.TrackPointDto
+ import com.padguard.server.repository.DeviceRepository
+ import com.padguard.server.repository.GeofenceRepository
+ import com.padguard.server.repository.LocationTrackRepository
++import com.padguard.server.security.DeviceOwnershipGuard
+ import org.springframework.data.domain.PageRequest
+ import org.springframework.stereotype.Service
+ import java.util.UUID
+@@ -22,11 +23,11 @@ class GeofenceService(
+     private val deviceRepository: DeviceRepository,
+     private val locationTrackRepository: LocationTrackRepository,
+     private val geofenceRepository: GeofenceRepository,
+-    private val alertService: AlertService
++    private val alertService: AlertService,
++    private val ownershipGuard: DeviceOwnershipGuard
+ ) {
+-    fun currentLocation(deviceId: String): LocationDto {
+-        val dev = deviceRepository.findById(deviceId).orElse(null)
+-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
++    fun currentLocation(userId: String, deviceId: String): LocationDto {
++        val dev = ownershipGuard.requireOwned(userId, deviceId)
+         val latest = locationTrackRepository
+             .findByDeviceIdOrderByTsDesc(deviceId, PageRequest.of(0, 1)).firstOrNull()
+         val lat = latest?.lat ?: dev.latitude ?: 0.0
+@@ -37,8 +38,9 @@ class GeofenceService(
+         )
+     }
+ 
+-    fun trackHistory(deviceId: String, limit: Int): List<TrackPointDto> =
+-        locationTrackRepository
++    fun trackHistory(userId: String, deviceId: String, limit: Int): List<TrackPointDto> {
++        ownershipGuard.requireOwned(userId, deviceId)
++        return locationTrackRepository
+             .findByDeviceIdOrderByTsDesc(deviceId, PageRequest.of(0, limit.coerceAtLeast(1)))
+             .map {
+                 TrackPointDto(
+@@ -46,8 +48,10 @@ class GeofenceService(
+                     accuracy = it.accuracy?.toFloat(), timestamp = it.ts ?: 0
+                 )
+             }
++    }
+ 
+-    fun getGeofence(deviceId: String): GeofenceDto {
++    fun getGeofence(userId: String, deviceId: String): GeofenceDto {
++        ownershipGuard.requireOwned(userId, deviceId)
+         val g = geofenceRepository.findById(deviceId).orElse(null)
+         return if (g != null) GeofenceDto(
+             deviceId = deviceId, enabled = g.enabled, name = g.name,
+@@ -59,7 +63,8 @@ class GeofenceService(
+         )
+     }
+ 
+-    fun updateGeofence(deviceId: String, req: GeofenceDto): GeofenceDto {
++    fun updateGeofence(userId: String, deviceId: String, req: GeofenceDto): GeofenceDto {
++        ownershipGuard.requireOwned(userId, deviceId)
+         val g = geofenceRepository.findById(deviceId).orElse(Geofence(deviceId = deviceId))
+         g.enabled = req.enabled
+         g.name = req.name
+@@ -68,7 +73,7 @@ class GeofenceService(
+         g.radiusMeters = req.radiusMeters
+         g.alertOnExit = req.alertOnExit
+         geofenceRepository.save(g)
+-        return getGeofence(deviceId)
++        return getGeofence(userId, deviceId)
+     }
+ 
+     /**
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/IngestService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/IngestService.kt
+index 1e7e856..9df50fc 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/IngestService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/IngestService.kt
+@@ -60,26 +60,40 @@ class IngestService(
+         }
+ 
+         val now = System.currentTimeMillis()
+-        usageLogRepository.saveAll(
+-            fresh.map { item ->
++        // S8：批量写入；若并发上报同一 logId 撞 unique 约束导致整批失败，
++        // 降级为逐行 ON CONFLICT DO NOTHING，只跳过真正已存在的行。
++        val inserted = try {
++            usageLogRepository.saveAll(fresh.map { item ->
+                 UsageLog(
+                     id = UUID.randomUUID().toString(), deviceId = req.deviceId, logId = item.logId,
+                     type = item.type, timestamp = item.timestamp,
+                     payloadJson = item.payload?.let { objectMapper.writeValueAsString(it) },
+                     receivedAt = now
+                 )
++            })
++            fresh
++        } catch (e: org.springframework.dao.DataIntegrityViolationException) {
++            log.warn("usage_logs 批量写入撞唯一约束（并发上报竞态），降级逐行 upsert: {}", e.message)
++            fresh.filter { item ->
++                usageLogRepository.insertIgnoreConflict(
++                    id = UUID.randomUUID().toString(), deviceId = req.deviceId, logId = item.logId,
++                    type = item.type, timestamp = item.timestamp,
++                    payloadJson = item.payload?.let { objectMapper.writeValueAsString(it) },
++                    receivedAt = now
++                ) > 0
+             }
+-        )
++        }
++
+         // 只对真正新增的日志建工单；重复上报不应刷出一堆解锁工单
+-        fresh.filter { it.type == "UNLOCK_REQUEST" }
++        inserted.filter { it.type == "UNLOCK_REQUEST" }
+             .forEach { unlockService.createFromRequest(req.deviceId, it.payload) }
+ 
+         // 今日用量看板实时推送：孩子端上行了用量类日志，立即把最新今日快照经 WS 推给家长端，
+         // 家长端无需轮询即实时刷新（"今日平板使用情况"实时 + 不占轮询资源）。
+         // 推送失败绝不拖累入库：整段兜底，且只在确有 usage 变化时触发。
+-        pushTodayIfNeeded(req.deviceId, fresh)
++        pushTodayIfNeeded(req.deviceId, inserted)
+ 
+-        return mapOf("accepted" to fresh.size, "duplicated" to items.size - fresh.size)
++        return mapOf("accepted" to inserted.size, "duplicated" to items.size - inserted.size)
+     }
+ 
+     /**
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/MessageService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/MessageService.kt
+index a4cd47d..a964f87 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/MessageService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/MessageService.kt
+@@ -15,6 +15,7 @@ import java.util.UUID
+ @Service
+ class MessageService(
+     private val deviceRepository: DeviceRepository,
++    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
+     private val commandService: CommandService,
+     private val publishedMessageRepository: PublishedMessageRepository
+ ) {
+@@ -69,11 +70,10 @@ class MessageService(
+         fullScreen = m.fullScreen, publishedAt = m.publishedAt
+     )
+ 
+-    private fun requireOwned(userId: String, deviceId: String) {
+-        val dev = deviceRepository.findById(deviceId).orElse(null)
+-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+-        if (dev.userId != userId) {
+-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+-        }
+-    }
++    /**
++     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
++     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
++     */
++    private fun requireOwned(userId: String, deviceId: String) =
++        ownershipGuard.requireOwned(userId, deviceId)
+ }
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/MonitorService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/MonitorService.kt
+index 6cd6420..f85a13f 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/MonitorService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/MonitorService.kt
+@@ -19,6 +19,7 @@ import java.util.UUID
+ @Service
+ class MonitorService(
+     private val deviceRepository: DeviceRepository,
++    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
+     private val commandService: CommandService,
+     private val screenshotRepository: ScreenshotRepository,
+     private val mediaTaskRepository: MediaTaskRepository,
+@@ -299,11 +300,10 @@ class MonitorService(
+     private fun deviceSettingOf(deviceId: String): DeviceSetting =
+         deviceSettingRepository.findById(deviceId).orElse(DeviceSetting(deviceId = deviceId))
+ 
+-    private fun requireOwned(userId: String, deviceId: String) {
+-        val dev = deviceRepository.findById(deviceId).orElse(null)
+-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+-        if (dev.userId != userId) {
+-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+-        }
+-    }
++    /**
++     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
++     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
++     */
++    private fun requireOwned(userId: String, deviceId: String) =
++        ownershipGuard.requireOwned(userId, deviceId)
+ }
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/PolicyExtensionService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/PolicyExtensionService.kt
+index 3318ef8..30ef79e 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/PolicyExtensionService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/PolicyExtensionService.kt
+@@ -23,6 +23,7 @@ import java.util.UUID
+ @Transactional
+ class PolicyExtensionService(
+     private val deviceRepository: DeviceRepository,
++    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
+     private val policyRepository: PolicyRepository,
+     private val appPolicyRepository: AppPolicyRepository,
+     private val timeRestrictionRepository: TimeRestrictionRepository,
+@@ -599,13 +600,12 @@ class PolicyExtensionService(
+     private fun deviceSettingOf(deviceId: String): DeviceSetting =
+         deviceSettingRepository.findById(deviceId).orElse(DeviceSetting(deviceId = deviceId))
+ 
+-    private fun requireOwned(userId: String, deviceId: String) {
+-        val dev = deviceRepository.findById(deviceId).orElse(null)
+-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+-        if (dev.userId != userId) {
+-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+-        }
+-    }
++    /**
++     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
++     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
++     */
++    private fun requireOwned(userId: String, deviceId: String) =
++        ownershipGuard.requireOwned(userId, deviceId)
+ 
+     private companion object {
+         /** 护眼滤镜强度的有效区间：孩子端按此映射遮罩透明度，两端必须同源。 */
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/service/StatisticsService.kt b/padguard-server/src/main/kotlin/com/padguard/server/service/StatisticsService.kt
+index 0aef020..d700c21 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/service/StatisticsService.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/service/StatisticsService.kt
+@@ -24,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap
+ @Service
+ class StatisticsService(
+     private val deviceRepository: DeviceRepository,
++    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
+     private val usageLogRepository: UsageLogRepository,
+     private val deviceEventRepository: DeviceEventRepository,
+     private val alertRepository: AlertRepository,
+@@ -306,13 +307,12 @@ class StatisticsService(
+     private fun parsePayload(log: UsageLog): Map<String, Any?> =
+         log.payloadJson?.let { runCatching { objectMapper.readValue(it, Map::class.java) as Map<String, Any?> }.getOrNull() } ?: emptyMap()
+ 
+-    private fun requireOwned(userId: String, deviceId: String) {
+-        val dev = deviceRepository.findById(deviceId).orElse(null)
+-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+-        if (dev.userId != userId) {
+-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+-        }
+-    }
++    /**
++     * 设备归属校验已收敛至 [com.padguard.server.security.DeviceOwnershipGuard]（唯一实现），
++     * 消除逐 Service 复制私有副本的漏网风险（详见该组件类注释）。
++     */
++    private fun requireOwned(userId: String, deviceId: String) =
++        ownershipGuard.requireOwned(userId, deviceId)
+ 
+     private fun range(days: Int): Pair<Long, Long> {
+         val end = LocalDate.now(zone).plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+diff --git a/padguard-server/src/main/kotlin/com/padguard/server/ws/DeviceWebSocketHandler.kt b/padguard-server/src/main/kotlin/com/padguard/server/ws/DeviceWebSocketHandler.kt
+index d5133f4..4ef7a08 100644
+--- a/padguard-server/src/main/kotlin/com/padguard/server/ws/DeviceWebSocketHandler.kt
++++ b/padguard-server/src/main/kotlin/com/padguard/server/ws/DeviceWebSocketHandler.kt
+@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component
+ @Component
+ class DeviceWebSocketHandler(
+     private val jwt: JwtTokenProvider,
++    private val users: com.padguard.server.repository.UserRepository,
+     private val webSocketPush: WebSocketPushService
+ ) : WebSocketHandler {
+ 
+@@ -20,8 +21,13 @@ class DeviceWebSocketHandler(
+ 
+     override fun afterConnectionEstablished(session: WebSocketSession) {
+         val token = session.uri?.query?.let { parseToken(it) }
++        // 必须是 access token（refresh/管理员令牌不得建立家长推送通道），
++        // 且账号必须真实存在 —— 与 ParentAuthInterceptor 的"幽灵账号"防护同口径。
+         val userId = if (token != null) {
+-            try { jwt.parseUserId(token) } catch (e: Exception) { null }
++            try {
++                val parsed = jwt.parseAccessToken(token)
++                if (users.existsById(parsed)) parsed else null
++            } catch (e: Exception) { null }
+         } else null
+ 
+         if (userId == null) {
+diff --git a/padguard-server/src/test/kotlin/com/padguard/server/service/AdminServiceTest.kt b/padguard-server/src/test/kotlin/com/padguard/server/service/AdminServiceTest.kt
+index e9e025e..b8d7282 100644
+--- a/padguard-server/src/test/kotlin/com/padguard/server/service/AdminServiceTest.kt
++++ b/padguard-server/src/test/kotlin/com/padguard/server/service/AdminServiceTest.kt
+@@ -57,6 +57,8 @@ class AdminServiceTest {
+         override fun countByUserId(userId: String) = table.values.count { it.userId == userId }.toLong()
+         override fun countByOnlineStatus(onlineStatus: String) = table.values.count { it.onlineStatus == onlineStatus }.toLong()
+         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
++        override fun findByLastActiveAtGreaterThan(since: Long) =
++            table.values.filter { (it.lastActiveAt ?: 0L) > since }
+     }
+ 
+     private class FakeSubRepo : FakeJpaRepository<Subscription, String>(), SubscriptionRepository {
+@@ -103,6 +105,11 @@ class AdminServiceTest {
+         override fun findByUserIdAndDeviceIdAndStatus(userId: String, deviceId: String, status: String, pageable: Pageable) = emptyList<Alert>()
+         override fun findByUserIdAndDeviceId(userId: String, deviceId: String, pageable: Pageable) = emptyList<Alert>()
+         override fun countByUserIdAndStatusAndDeviceId(userId: String, status: String, deviceId: String) = 0L
++        override fun deleteByDeviceId(deviceId: String): Int {
++            val before = table.size
++            table.values.removeIf { it.deviceId == deviceId }
++            return before - table.size
++        }
+     }
+ 
+     private class FakeAuditLogRepo : FakeJpaRepository<AuditLog, String>(), AuditLogRepository {
+@@ -126,12 +133,19 @@ class AdminServiceTest {
+         override val table = LinkedHashMap<String, Command>()
+         override fun idOf(e: Command) = e.id
+         override fun findByMsgId(msgId: String): Command? = table.values.firstOrNull { it.msgId == msgId }
++        override fun findByMsgIdAndDeviceId(msgId: String, deviceId: String): Command? =
++            table.values.firstOrNull { it.msgId == msgId && it.deviceId == deviceId }
+         override fun findByDeviceIdOrderByCreatedAtDesc(deviceId: String) =
+             table.values.filter { it.deviceId == deviceId }.sortedByDescending { it.createdAt }
+         override fun findByDeviceIdOrderByCreatedAtAsc(deviceId: String) =
+             table.values.filter { it.deviceId == deviceId }.sortedBy { it.createdAt }
+         override fun findPendingForPolling(deviceId: String, status: String, now: Long, cursor: Long, pageable: Pageable) = emptyList<Command>()
+         override fun findExpiredPending(deviceId: String, status: String, now: Long) = emptyList<Command>()
++        override fun deleteByDeviceId(deviceId: String): Int {
++            val before = table.size
++            table.values.removeIf { it.deviceId == deviceId }
++            return before - table.size
++        }
+     }
+ 
+     private class FakeScreenshotRepo : FakeJpaRepository<Screenshot, String>(), ScreenshotRepository {
+@@ -139,6 +153,11 @@ class AdminServiceTest {
+         override fun idOf(e: Screenshot) = e.id
+         override fun findByDeviceIdOrderByCapturedAtDesc(deviceId: String, pageable: Pageable) = emptyList<Screenshot>()
+         override fun findFirstByDeviceIdAndShotId(deviceId: String, shotId: String): Screenshot? = null
++        override fun deleteByDeviceId(deviceId: String): Int {
++            val before = table.size
++            table.values.removeIf { it.deviceId == deviceId }
++            return before - table.size
++        }
+     }
+ 
+     // ----------------------------- 测试夹具 -----------------------------
+@@ -176,7 +195,10 @@ class AdminServiceTest {
+         val adminPerm = AdminPermissionService(admins, overrides, objectMapper)
+         val mqtt = MqttGateway(null, objectMapper, "default")
+         val sweeper = ExpiredCommandSweeper(commands, screenshots, objectMapper)
+-        val commandService = CommandService(devices, commands, mqtt, objectMapper, sweeper, auditService)
++        val commandService = CommandService(
++            devices, commands, mqtt, objectMapper, sweeper, auditService,
++            com.padguard.server.security.DeviceOwnershipGuard(devices)
++        )
+         // 密钥仅用于构造；createAdmin 不签发令牌，不会真正用到。
+         val jwt = JwtTokenProvider("padguard-unit-test-secret-0123456789abcdef", 120, 30)
+         // 仅 dbUp() 用到；该方法以 runCatching 包裹，getConnection 抛错时回落 false，不影响写操作测试。
+diff --git a/padguard-server/src/test/kotlin/com/padguard/server/service/AuthServiceTest.kt b/padguard-server/src/test/kotlin/com/padguard/server/service/AuthServiceTest.kt
+index 5b4403b..fdca7ae 100644
+--- a/padguard-server/src/test/kotlin/com/padguard/server/service/AuthServiceTest.kt
++++ b/padguard-server/src/test/kotlin/com/padguard/server/service/AuthServiceTest.kt
+@@ -60,6 +60,8 @@ class AuthServiceTest {
+         override fun countByUserId(userId: String) = table.values.count { it.userId == userId }.toLong()
+         override fun countByOnlineStatus(onlineStatus: String) = table.values.count { it.onlineStatus == onlineStatus }.toLong()
+         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
++        override fun findByLastActiveAtGreaterThan(since: Long) =
++            table.values.filter { (it.lastActiveAt ?: 0L) > since }
+     }
+ 
+     private fun fixture(): Triple<AuthService, FakeUserRepo, FakeSubRepo> {
+diff --git a/padguard-server/src/test/kotlin/com/padguard/server/service/BillingServiceTest.kt b/padguard-server/src/test/kotlin/com/padguard/server/service/BillingServiceTest.kt
+index c513f2a..f2abc43 100644
+--- a/padguard-server/src/test/kotlin/com/padguard/server/service/BillingServiceTest.kt
++++ b/padguard-server/src/test/kotlin/com/padguard/server/service/BillingServiceTest.kt
+@@ -72,6 +72,7 @@ class BillingServiceTest {
+         override fun findByUserId(userId: String): List<Device> = emptyList()
+         override fun findByDeviceSn(deviceSn: String): List<Device> = emptyList()
+         override fun countByOnlineStatus(onlineStatus: String): Long = 0L
++        override fun findByLastActiveAtGreaterThan(since: Long): List<Device> = emptyList()
+     }
+ 
+     /** 一套内存依赖，各用例独立构造。 */
+@@ -430,7 +431,17 @@ class BillingServiceTest {
+     fun `mock pay is disabled by default so production cannot be bypassed`() {
+         val f = service(mockPayEnabled = false)
+         // 生产环境若开着模拟支付，任何人都能免费续费
+-        assertThrows(BizException::class.java) { f.svc.mockPay(f.order("MONTHLY")) }
++        assertThrows(BizException::class.java) { f.svc.mockPay("parent-1", f.order("MONTHLY")) }
++    }
++
++    @Test
++    fun `mock pay rejects orders belonging to another user (s16 ownership)`() {
++        val f = service(mockPayEnabled = true)
++        val orderNo = f.order("MONTHLY") // 订单归属 parent-1
++        val ex = assertThrows(BizException::class.java) { f.svc.mockPay("someone-else", orderNo) }
++        assertEquals(com.padguard.server.common.ParentErr.DEVICE_NOT_OWNED, ex.code, "他人订单不得被替付")
++        val paid = f.svc.mockPay("parent-1", orderNo)
++        assertEquals(true, paid.active, "归属人本人 mock 支付应正常开通")
+     }
+ 
+     // ------------------------------------------------------------ 支付回调验签
+diff --git "a/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/receiver/PadGuardDeviceAdminReceiver.kt" "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/receiver/PadGuardDeviceAdminReceiver.kt"
+index a5c9184..e22badb 100644
+--- "a/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/receiver/PadGuardDeviceAdminReceiver.kt"
++++ "b/\346\212\244\350\210\252\346\210\220\351\225\277/app/src/main/kotlin/com/padguard/child/receiver/PadGuardDeviceAdminReceiver.kt"
+@@ -7,7 +7,6 @@ import android.content.Intent
+ import com.padguard.child.di.ApplicationScope
+ import com.padguard.child.service.GuardService
+ import com.padguard.core.common.Logger
+-import com.padguard.core.data.model.LogType
+ import com.padguard.core.data.model.RiskLevel
+ import com.padguard.core.data.model.RiskType
+ import com.padguard.core.data.repository.AuthRepository
+@@ -64,13 +63,23 @@ class PadGuardDeviceAdminReceiver : DeviceAdminReceiver() {
+      *
+      * 返回的文案不是装饰：这是唯一一次能让家长/学生看到后果的机会。
+      * 写清"会做什么"而不是空喊警告，实际劝退效果更好。
++     *
++     * S15：停用尝试必须走 raise（高危告警通道），不能只 append 普通日志。
++     * append 只进行为流水、不进告警流，家长端永远看不到"孩子在尝试脱管"——
++     * 而停用尝试恰恰是最值得家长立即介入的信号。复用 UNINSTALL_ATTEMPT 类型
++     * （语义同为"尝试解除管控"，不再扩枚举），detail 里用 action 区分具体动作。
+      */
+     override fun onDisableRequested(context: Context, intent: Intent): CharSequence {
+         Logger.w(TAG) { "device admin disable requested" }
+         recordAsync {
+-            logRepository.append(
+-                type = LogType.SETTING_CHANGE_ATTEMPT,
+-                payload = mapOf("action" to "disableDeviceAdminRequested")
++            logRepository.raise(
++                type = RiskType.UNINSTALL_ATTEMPT,
++                level = RiskLevel.HIGH,
++                detail = mapOf(
++                    "action" to "disableDeviceAdminRequested",
++                    "note" to "正在尝试停用设备管理器（管控能力将大幅降级）"
++                ),
++                deviceId = authRepository.getDeviceId()
+             )
+         }
+         return context.getString(com.padguard.child.R.string.admin_disable_warning)
