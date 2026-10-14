@@ -425,7 +425,12 @@ data class LocationInfo(
     val longitude: Double,
     val address: String?,
     val accuracy: Float?,
-    val timestamp: Long
+    val timestamp: Long,
+    /**
+     * 该点是否"实时采集"：null/true=刚拿到的新坐标；false=孩子端无新坐标、降级上传的缓存旧点。
+     * false 时界面明确提示"缓存位置，可能不准确"，避免历史位置被误当实时。
+     */
+    val fresh: Boolean? = null
 )
 
 /**

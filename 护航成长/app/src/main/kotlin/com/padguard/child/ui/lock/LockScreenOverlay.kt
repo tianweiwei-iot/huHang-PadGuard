@@ -10,6 +10,7 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -97,6 +98,13 @@ class LockScreenOverlay @Inject constructor(
             wm.addView(view, params)
             root = view
             Logger.i(TAG) { "lock overlay shown" }
+            // WindowManager 浮窗不会像 Activity 那样自动弹出软键盘；必须主动把焦点交给
+            // 输入框并显式 showSoftInput，否则"申请解锁理由"输入框点不出键盘。
+            view.post {
+                val et = view.findViewById<EditText?>(ID_INPUT)
+                et?.requestFocus()
+                et?.let { showKeyboard(it) }
+            }
         }.onFailure {
             // 部分 ROM 在后台任务栈里 addView 会抛 BadTokenException。
             // 这里吞掉是有意的：失败不影响其他管控能力，下次状态翻转会重试。
@@ -156,11 +164,18 @@ class LockScreenOverlay @Inject constructor(
         })
 
         val input = EditText(context).apply {
+            id = ID_INPUT
             hint = "申请解锁的理由（可不填）"
             setHintTextColor("#FF9E9E9E".toColorInt())
             setTextColor(Color.WHITE)
             inputType = InputType.TYPE_CLASS_TEXT
             setPadding(0, (16 * density).toInt(), 0, 0)
+            // 浮窗 EditText 必须主动请求焦点并弹 IME：WindowManager 浮窗不像 Activity 那样
+            // 自动弹出软键盘。若只 addView 不显式 showSoftInput，输入框获得焦点却无键盘，
+            // 表现为"键盘用不了"。点击时再补一次，避免初次自动弹失败。
+            setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) showKeyboard(this)
+            }
         }
         container.addView(input)
 
@@ -204,6 +219,12 @@ class LockScreenOverlay @Inject constructor(
         android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_SHORT).show()
     }
 
+    /** 在 WindowManager 浮窗里显式弹起软键盘（浮窗不会自动弹 IME）。 */
+    private fun showKeyboard(editText: EditText) {
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.showSoftInput(editText, InputMethodManager.SHOW_IMPLICIT)
+    }
+
     private fun overlayType(): Int =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -214,6 +235,7 @@ class LockScreenOverlay @Inject constructor(
         const val TAG = "LockScreenOverlay"
         val BG_COLOR = "#F21B1B1B".toColorInt()
         const val ID_DETAIL = 0x00D0_0001
+        const val ID_INPUT = 0x00D0_0002
         /** 与 LockScreenActivity 的默认申请时长保持一致 */
         const val DEFAULT_REQUEST_MINUTES = 30
 

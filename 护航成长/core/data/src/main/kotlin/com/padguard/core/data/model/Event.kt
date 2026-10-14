@@ -171,7 +171,13 @@ data class LocationInfo(
     @SerialName("lng") val lng: Double,
     @SerialName("accuracy") val accuracy: Float = 0f,
     @SerialName("ts") val ts: Long,
-    @SerialName("provider") val provider: String = ""
+    @SerialName("provider") val provider: String = "",
+    /**
+     * true=当场向系统要到的新坐标；false=系统无新坐标、降级上传的缓存旧点。
+     * 配合 [ts] 使用真实采集时间（fix.time）而非上报时刻，家长端据此判断位置是否新鲜，
+     * 避免"历史位置被误显示为刚刚更新"。
+     */
+    @SerialName("fresh") val fresh: Boolean = true
 )
 
 /** 绑定响应（对应接口契约 §2.2） */

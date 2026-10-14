@@ -184,25 +184,31 @@ class SecurityEnforcer @Inject constructor(
             admin.setPermittedAccessibilityServices(allowedAccessibility)
         )
 
+        // 已启用的输入法清单是白名单唯一的安全基准：绝不可下发一个不含任何「当前可用 IME」的列表。
+        val enabledImes = runCatching {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE)
+                as? android.view.inputmethod.InputMethodManager
+            imm?.enabledInputMethodList?.map { it.packageName }.orEmpty()
+        }.getOrDefault(emptyList())
+
+        if (enabledImes.isEmpty()) {
+            // 设备当前没有任何已启用的输入法：若保留旧白名单（可能只含一个已失效的 IME），
+            // 设备将彻底无法输入，属于变砖级故障。主动解除限制，让系统默认输入法可被重新启用，
+            // 下一轮策略应用会基于真实可用 IME 重新收敛到安全白名单。
+            report.record("security.imeWhitelist(unset)", admin.setPermittedInputMethods(null))
+            return
+        }
+
+        // 默认输入法可能为空（部分 ROM DEFAULT_INPUT_METHOD 暂不可读），但 enabledImes 非空即安全；
+        // 白名单必须包含「当前默认 IME + 所有已启用 IME」，确保正在使用的输入法永远不被禁用。
         val currentIme = runCatching {
             android.provider.Settings.Secure.getString(
                 context.contentResolver,
                 android.provider.Settings.Secure.DEFAULT_INPUT_METHOD
             )?.substringBefore('/')
         }.getOrNull()
-
-        if (currentIme.isNullOrBlank()) {
-            // 读不到默认输入法时**不下发白名单**：下发空列表会把当前输入法一起禁掉
-            report.markUnsupported("security.imeWhitelist", "无法解析默认输入法，跳过以避免设备无法输入")
-        } else {
-            val enabledImes = runCatching {
-                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE)
-                    as? android.view.inputmethod.InputMethodManager
-                imm?.enabledInputMethodList?.map { it.packageName }.orEmpty()
-            }.getOrDefault(emptyList())
-            val allowedImes = (listOf(currentIme) + enabledImes).distinct()
-            report.record("security.imeWhitelist(${allowedImes.size})", admin.setPermittedInputMethods(allowedImes))
-        }
+        val allowedImes = (listOfNotNull(currentIme).filter { it.isNotBlank() } + enabledImes).distinct()
+        report.record("security.imeWhitelist(${allowedImes.size})", admin.setPermittedInputMethods(allowedImes))
     }
 
     /** 日志保留天数的安全下限：太短会导致告警在上报前就被清掉 */

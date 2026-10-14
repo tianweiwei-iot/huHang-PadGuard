@@ -303,7 +303,7 @@ data class LogsRequest(val deviceId: String, val logs: List<LogItem>)
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class LocationPoint(
     val lat: Double? = null, val lng: Double? = null, val accuracy: Double? = null,
-    val ts: Long? = null, val provider: String? = null
+    val ts: Long? = null, val provider: String? = null, val fresh: Boolean? = null
 )
 
 @JsonIgnoreProperties(ignoreUnknown = true)

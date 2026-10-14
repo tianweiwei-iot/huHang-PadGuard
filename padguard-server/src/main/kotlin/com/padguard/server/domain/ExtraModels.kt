@@ -68,6 +68,15 @@ class LocationTrack(
     var ts: Long? = null,
     /** 逆地理编码得到的文字地址（WGS-84 坐标经高德 Web 接口反查）。缺 Key 或反查失败时为空。 */
     @Column(name = "address", length = 255) var address: String? = null,
+    /**
+     * 该点是否为"实时采集"：true=当场拿到的新坐标；false=系统无新坐标、降级上传的缓存旧点。
+     *
+     * 根因修复：旧实现把缓存点的上报时间错写成"当前时刻"，服务端据此把它当成"刚刚更新"，
+     * 家长端于是看到几分钟甚至几小时前的旧位置却以为是实时。本列如实记录新鲜度，
+     * false 时家长端会明确提示"缓存位置，可能不准确"，不再误导。
+     * 可空 + 默认 true：ddl-auto=update 给存量行填 NULL，读取时按"新鲜"兜底，不误报警。
+     */
+    @Column(name = "fresh") @org.hibernate.annotations.ColumnDefault("true") var fresh: Boolean? = null,
     @Column(name = "received_at") var receivedAt: Long = 0
 )
 

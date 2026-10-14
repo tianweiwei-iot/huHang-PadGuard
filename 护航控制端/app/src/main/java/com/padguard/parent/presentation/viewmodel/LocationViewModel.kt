@@ -254,8 +254,10 @@ class LocationViewModel @Inject constructor(
         const val TRACK_HISTORY_LIMIT = 9000
         /** 下发定位指令后首次回拉位置的延时（毫秒）。 */
         const val LOCATE_FIRST_PULL_DELAY_MS = 3_000L
-        /** 首次回拉后再次补拉一次的延时（毫秒）。 */
-        const val LOCATE_SECOND_PULL_DELAY_MS = 5_000L
+        /** 首次回拉后再次补拉一次的延时（毫秒）。
+         *  孩子端"立即定位"主动要新坐标的最长等待为 12s（室内 GPS 冷启动常更久），
+         *  此处延到 13s 以覆盖该窗口，确保慢速修复点已入库再回拉，避免家长看到旧位置。 */
+        const val LOCATE_SECOND_PULL_DELAY_MS = 13_000L
     }
 }
 

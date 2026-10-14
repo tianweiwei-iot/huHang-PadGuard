@@ -1270,7 +1270,7 @@ private fun ScreenMonitorSettings.toDto(): ScreenMonitorSettingsDto = ScreenMoni
 )
 
 private fun LocationDto.toDomain(): LocationInfo = LocationInfo(
-    latitude = latitude, longitude = longitude, address = address, accuracy = accuracy, timestamp = timestamp
+    latitude = latitude, longitude = longitude, address = address, accuracy = accuracy, timestamp = timestamp, fresh = fresh
 )
 
 private fun GeofenceZoneDto.toDomain(): GeofenceConfig = GeofenceConfig(
@@ -1418,7 +1418,7 @@ private fun WebPolicyDto.toDomain(): com.padguard.parent.domain.model.WebPolicy 
 
 private fun LocationTrackPointDto.toDomain(): LocationInfo = LocationInfo(
     latitude = latitude, longitude = longitude, address = address,
-    accuracy = accuracy, timestamp = timestamp
+    accuracy = accuracy, timestamp = timestamp, fresh = fresh
 )
 
 private fun PolicyTemplateDto.toDomain(): com.padguard.parent.domain.repository.PolicyTemplate =

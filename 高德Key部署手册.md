@@ -124,6 +124,12 @@ curl -s http://127.0.0.1:8090/health
 2. **Android Key 绑 SHA1**：debug 与 release 签名不同；用 debug 自测、release 发包却只绑了 debug SHA1，会导致正式包底图不加载。按「双 SHA1」处理最稳。
 3. **Web 服务 Key 配额/IP 白名单**：服务端调用，建议限 IP + 关注日调用额度，避免被刷。
 4. **覆盖运行实例属高风险操作**：执行前须确认目标 PID 就是服务端，并确认允许停机窗口。
+5. **⚠️ Web Key 与 Android Key 是两套、不可互相替换（灰屏头号诱因）**：
+   - 服务端 `padguard.amap.web-key` 必须填**「Web 服务」类型** Key（用于逆地理编码反查文字地址）；
+   - 家长端 `-PAMAP_KEY` 必须填**「Android 平台」类型** Key（用于底图渲染），且绑定包名 `com.padguard.parent` + 签名 SHA1。
+   - 把 Web Key 当 Android Key 注入 → 高德底图瓦片请求 401/403 → **地图灰屏、什么都没有**；
+     反之把 Android Key 配到服务端 Web 接口 → 逆地理鉴权失败、地址恒为 null。两者用途与平台类型完全不同，申请时务必分开建两个 Key（见第一节 Key 1 / Key 2）。
+   - 此外，家长端已加"底图加载看门狗"：若 8 秒内底图未就绪（密钥无效/SHA1 不符/网络受限），自动回退示意占位图并提示"请检查高德控制台 Key 配置"，不再静默灰屏。
 
 ---
 

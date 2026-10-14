@@ -122,6 +122,13 @@ enum class SpecialPermission(
      *
      * 无障碍页例外：它不接受 package data，只能进「无障碍」总页后手工找到服务条目，
      * 这是系统限制，无法再优化。
+     *
+     * **绝不能加 FLAG_ACTIVITY_NEW_TASK**（与 [com.padguard.child.permission.DeviceAdminRequest]
+     * 类注释结论一致）：本方法产出的 Intent 一律由授权页经
+     * `registerForActivityResult(StartActivityForResult)` 拉起，落在 App 自身任务栈内即可。
+     * 一旦带 NEW_TASK，设置页会被开到另一个任务栈，与结果契约冲突——系统立刻回传
+     * RESULT_CANCELED 且设置页打不开（或直接弹回授权页），正是"点了去开启却没进页面、
+     * 又回到原窗口"的根因。
      */
     fun settingsIntent(context: Context): Intent = when (this) {
         USAGE_STATS -> Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
@@ -140,7 +147,7 @@ enum class SpecialPermission(
                 ).flattenToString()
             )
         }
-    }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
 
     companion object {
         fun fromKey(key: String): SpecialPermission? = values().firstOrNull { it.key == key }
@@ -184,7 +191,7 @@ enum class SpecialPermission(
                 OVERLAY -> Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
                 INSTALL_PACKAGES -> Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
                 ACCESSIBILITY -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-            }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             val fbProbe = runCatching { fallback.resolveActivity(context.packageManager) }.getOrNull()
             if (fbProbe != null) {
                 Logger.w(TAG) { "settings for ${perm.key} fell back to list page (ROM quirk)" }

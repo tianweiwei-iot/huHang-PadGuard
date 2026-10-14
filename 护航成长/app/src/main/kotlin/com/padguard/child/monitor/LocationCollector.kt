@@ -119,9 +119,16 @@ class LocationCollector @Inject constructor(
     suspend fun collectAndUpload(
         freshnessMs: Long = DEFAULT_FRESHNESS_MS,
         requestTimeoutMs: Long = DEFAULT_REQUEST_TIMEOUT_MS,
-        minDistanceMeters: Float = 0f
+        minDistanceMeters: Float = 0f,
+        /**
+         * 允许在后台采集。仅当调用方正处于"定位类型前台服务"上下文时（如收到家长端
+         * "立即定位"指令、且守护服务已声明 foregroundServiceType=location）才传 true。
+         * 此时 Android 把位置访问视为"使用中"，无需申请 ACCESS_BACKGROUND_LOCATION（合规）。
+         * 周期上报 [LocationAutoReporter] 始终传 false（仅前台采集，省电且不刷屏）。
+         */
+        allowBackground: Boolean = false
     ): LocationOutcome {
-        if (!AppForeground.isForeground) {
+        if (!AppForeground.isForeground && !allowBackground) {
             // 不是"做不到"，而是"此刻系统不允许"。搁置一条待办，前台回来补做。
             pending.set(true)
             Logger.i(TAG) { "location requested while backgrounded: deferred to foreground" }
@@ -144,8 +151,7 @@ class LocationCollector @Inject constructor(
             return LocationOutcome.Failure(LocationFailure.NOT_BOUND)
         }
 
-        val fix = resolveLocation(manager, freshnessMs, requestTimeoutMs)
-        if (fix == null) {
+        val (fix, isFresh) = resolveLocation(manager, freshnessMs, requestTimeoutMs) ?: run {
             Logger.w(TAG) { "no location available (neither cached nor fresh)" }
             return LocationOutcome.Failure(LocationFailure.NO_FIX)
         }
@@ -159,12 +165,16 @@ class LocationCollector @Inject constructor(
         }
 
         pending.set(false)
+        // 关键修复：ts 必须写"坐标真实采集时间"fix.time，而不是上报时刻。
+        // 旧实现写 timeProvider.now()，会把缓存旧点的时间抹成"刚刚"，
+        // 服务端据此误判为实时，家长端于是看到历史位置。isFresh=false 时家长端明确提示"缓存位置"。
         val point = LocationInfo(
             lat = fix.latitude,
             lng = fix.longitude,
             accuracy = if (fix.hasAccuracy()) fix.accuracy else 0f,
-            ts = timeProvider.now(),
-            provider = fix.provider.orEmpty()
+            ts = fix.time,
+            provider = fix.provider.orEmpty(),
+            fresh = isFresh
         )
 
         return when (val result = remote.uploadLocations(deviceId, listOf(point))) {
@@ -197,20 +207,26 @@ class LocationCollector @Inject constructor(
         }
     }
 
-    /** 先取最新缓存，不够新鲜就主动要一个新的，都拿不到才返回 null。 */
+    /**
+     * 先取最新缓存，不够新鲜就主动要一个新的；都拿不到才返回 null。
+     * 返回 [Pair]：坐标 + 是否"实时采集"（true=拿到新坐标；false=降级使用了缓存旧点）。
+     */
     private suspend fun resolveLocation(
         manager: LocationManager,
         freshnessMs: Long,
         timeoutMs: Long
-    ): Location? {
+    ): Pair<Location, Boolean>? {
         val cached = latestCached(manager)
         val age = cached?.let { timeProvider.now() - it.time } ?: Long.MAX_VALUE
         if (cached != null && age <= freshnessMs) {
             Logger.d(TAG) { "using cached fix from ${cached.provider}, age=${age / 1000}s" }
-            return cached
+            return cached to true
         }
         Logger.d(TAG) { "cached fix stale (age=${age / 1000}s), requesting fresh update" }
-        return requestFreshFix(manager, timeoutMs) ?: cached
+        val freshFix = requestFreshFix(manager, timeoutMs)
+        if (freshFix != null) return freshFix to true
+        // 超时且无新坐标：降级为缓存点，但如实标记为"非实时"，让家长端知道这可能是旧位置。
+        return cached?.let { it to false }
     }
 
     /** 所有 provider 的缓存点里**时间戳最新**的那个（早期实现按固定顺序取第一个非空，可能拿回一个很旧的点）。 */

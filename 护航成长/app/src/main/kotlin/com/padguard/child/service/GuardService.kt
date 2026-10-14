@@ -33,6 +33,7 @@ import com.padguard.child.guard.GuardPasswordManager
 import com.padguard.child.maintain.AppInstaller
 import com.padguard.child.monitor.AppInventoryCollector
 import com.padguard.child.monitor.DeviceSnapshotCollector
+import com.padguard.child.AppForeground
 import com.padguard.child.monitor.ForegroundAppMonitor
 import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.monitor.LocationCollector
@@ -1209,7 +1210,11 @@ class GuardService : Service() {
                     // 家长点了"立即定位"就是要新鲜的：缓存点超过 15 秒就主动向系统要一个新的，
                     // 最长等 12 秒（室内 GPS 冷启动常常更久，超时后降级为缓存点并如实带回时间戳）。
                     freshnessMs = 15_000L,
-                    requestTimeoutMs = 12_000L
+                    requestTimeoutMs = 12_000L,
+                    // 后台（屏幕熄灭但未退出）时：守护服务已声明 foregroundServiceType=location，
+                    // 借"定位类型前台服务"上下文采集，Android 视为"使用中"，无需 ACCESS_BACKGROUND_LOCATION（合规）。
+                    // 真正退出/被杀则收不到本指令，自然走不到这里；此处不再返回 BACKGROUND_RESTRICTED 而空转。
+                    allowBackground = !AppForeground.isForeground
                 )) {
                     LocationOutcome.Success ->
                         reportEffectResult(effect.msgId, "locate", true, "已上报")
@@ -1351,10 +1356,21 @@ class GuardService : Service() {
      * 而管控服务必须 7×24 常驻，用 dataSync 会在半天后被系统掐掉。
      * API 29–33 没有 specialUse，用 dataSync 且当年无时长限制，是安全的。
      */
-    private fun fgsType(): Int = when {
-        Build.VERSION.SDK_INT >= 34 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        else -> 0
+    private fun fgsType(): Int {
+        val base = when {
+            Build.VERSION.SDK_INT >= 34 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            else -> 0
+        }
+        // 定位类型：让孩子端在后台（屏幕熄灭但未退出）收到"立即定位"指令时，
+        // 借由常驻前台服务读取位置——Android 将此视为"使用中"，从而豁免 ACCESS_BACKGROUND_LOCATION
+        // （该权限对儿童向 App 受限）。这是合规且主流的家长管控定位方案。
+        // API 29 以下无前台服务类型概念，且后台定位限制本身从 API 29 才引入，故仅 Q+ 叠加。
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            base or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+        } else {
+            base
+        }
     }
 
     private fun buildNotification(): Notification {

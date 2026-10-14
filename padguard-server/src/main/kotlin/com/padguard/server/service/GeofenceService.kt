@@ -42,7 +42,8 @@ class GeofenceService(
         return LocationDto(
             latitude = lat, longitude = lng, address = latest?.address,
             accuracy = latest?.accuracy?.toFloat(),
-            timestamp = latest?.ts ?: System.currentTimeMillis()
+            timestamp = latest?.ts ?: System.currentTimeMillis(),
+            fresh = latest?.fresh
         )
     }
 
@@ -62,7 +63,8 @@ class GeofenceService(
             TrackPointDto(
                 latitude = it.lat ?: 0.0, longitude = it.lng ?: 0.0,
                 address = it.address,
-                accuracy = it.accuracy?.toFloat(), timestamp = it.ts ?: 0
+                accuracy = it.accuracy?.toFloat(), timestamp = it.ts ?: 0,
+                fresh = it.fresh
             )
         }
     }

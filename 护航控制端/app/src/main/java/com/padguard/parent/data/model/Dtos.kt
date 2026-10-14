@@ -198,7 +198,8 @@ data class LocationDto(
     val longitude: Double,
     val address: String?,
     val accuracy: Float?,
-    val timestamp: Long
+    val timestamp: Long,
+    val fresh: Boolean? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -354,7 +355,8 @@ data class LocationTrackPointDto(
     val longitude: Double,
     val address: String?,
     val accuracy: Float?,
-    val timestamp: Long
+    val timestamp: Long,
+    val fresh: Boolean? = null
 )
 
 // ==================== 策略相关 DTO ====================

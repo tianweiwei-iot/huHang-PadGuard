@@ -130,7 +130,6 @@ fun PermissionGuideScreen(
                             if (!vm.ensureGuardUnlocked()) return@Button
                             val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
                                 data = android.net.Uri.fromParts("package", context.packageName, null)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             }
                             runCatching { context.startActivity(intent) }
                                 .onFailure { e ->
@@ -154,7 +153,6 @@ fun PermissionGuideScreen(
                         onClick = {
                             if (!vm.ensureGuardUnlocked()) return@Button
                             val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             runCatching { context.startActivity(intent) }
                                 .onFailure { e ->
                                     Toast.makeText(context, "无法打开电池优化设置：${e.message}", Toast.LENGTH_LONG).show()

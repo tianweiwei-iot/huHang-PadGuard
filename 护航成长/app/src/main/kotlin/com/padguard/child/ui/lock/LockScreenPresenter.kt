@@ -4,6 +4,7 @@ import android.content.Context
 import com.padguard.core.common.Logger
 import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,10 +51,31 @@ class LockScreenPresenter @Inject constructor(
     @ApplicationContext private val context: Context,
     private val overlay: LockScreenOverlay,
     private val notifier: LockScreenNotifier,
-    private val admin: DeviceAdminBridge
+    private val admin: DeviceAdminBridge,
+    private val lockController: LockController
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    init {
+        // 以「权威锁屏状态」为唯一真相：只要 lockController 判定未锁定，无论内存态
+        // desiredDetail 是否残留、外部 dismiss() 是否曾被漏调，都强制收起浮窗与常驻通知。
+        // 这从源头消除「锁屏浮窗被 reenforce() 基于陈旧内存态无限重铺为全屏常驻」的故障——
+        // 那种常驻会全屏挡住所有界面并吃掉输入焦点，表现为「孩子端任何输入框都弹不出键盘」。
+        scope.launch {
+            lockController.state.collect { state ->
+                if (!state.locked) {
+                    desiredDetail = null
+                    escalationJob?.cancel()
+                    escalationJob = null
+                    systemLockPushed = false
+                    notifier.cancel()
+                    LockScreenActivity.dismiss(context)
+                    overlay.dismiss()
+                }
+            }
+        }
+    }
 
     /** 当前应处于锁定态的说明文案；非空即代表"应该锁着" */
     @Volatile

@@ -158,6 +158,7 @@ class IngestService(
                     id = UUID.randomUUID().toString(), deviceId = req.deviceId,
                     lat = p.lat, lng = p.lng, accuracy = p.accuracy,
                     provider = p.provider, ts = p.ts, address = null,
+                    fresh = p.fresh,
                     receivedAt = System.currentTimeMillis()
                 )
             }
