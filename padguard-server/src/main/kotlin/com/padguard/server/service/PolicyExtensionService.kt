@@ -443,6 +443,17 @@ class PolicyExtensionService(
                 "start" to it.startTime, "end" to it.endTime, "action" to "UNLOCK"
             )
         }
+        // 家长授权意图（唯一权威）：installed_apps.hidden = true 即"已取消授权"。
+        //
+        // 为什么必须随策略包整体下发：`SET_APP_HIDDEN` 是逐包的即时指令，
+        // 设备离线或指令丢失时孩子端会永久停在旧状态，而服务端已记成"已取消授权"，
+        // 两端分裂且无从自愈。策略包每轮都会下发，是权威意图最合适的载体——
+        // 孩子端按它全量对齐本地意图账本即可收敛。
+        // 只取仍安装在设备上的包：已卸载的只剩历史台账，不该再驱动孩子端门禁。
+        val revokedPackages = installedAppRepository.findByDeviceId(deviceId)
+            .filter { it.hidden && it.installed }
+            .map { it.packageName }
+
         val webUrls = settings.webBlockedUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
         // 内容管控：安全搜索开关 + 实际应屏蔽的分类集合（默认屏蔽 ∪ 家长自定义）。
         // 孩子端 WebEnforcer 据此对主流搜索引擎注入 safe 参数、拦截命中分类的网址。
@@ -508,7 +519,10 @@ class PolicyExtensionService(
                 "installPolicy" to mapOf(
                     "requirePasswordOnInstall" to (settings.requirePasswordOnInstall ?: true),
                     "requirePasswordOnUninstall" to (settings.requirePasswordOnUninstall ?: true)
-                )
+                ),
+                // 服务端权威的「已取消授权」集合。孩子端每轮策略应用时据此对齐本地意图账本，
+                // 使"取消授权"不再依赖逐条指令一定能送达。
+                "hiddenPackages" to revokedPackages
             ),
             "appLimit" to mapOf(
                 "enabled" to (settings.timeControlEnabled ?: true),

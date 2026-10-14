@@ -38,8 +38,22 @@ import javax.inject.Singleton
  *
  * ## 被隐藏的应用
  * 隐藏后应用从启动器消失，意图反查自然也查不到它。
- * 这类包由 [DeviceAdminBridge.hiddenPackages] 本地记账补回，
- * 否则家长一关权限，这个应用就从列表里凭空消失、再也找不回来。
+ * 这类包由 [DeviceAdminBridge.systemHiddenPackages] 本地记账补回，
+ * 否则应用一被系统隐藏，就从列表里凭空消失、再也找不回来。
+ *
+ * ## `hidden` 字段的语义（重要）
+ * 上报的 `hidden` 是**家长授权意图的回显**（读授权意图账本），
+ * 不是"是否出现在启动器"的观测值。
+ *
+ * 早期实现写的是 `hidden = !hasLauncher`，即"启动器里查不到就算已取消授权"。
+ * 这条推导在本产品里恒为 false：产品已改为**密码门禁模型**——取消授权的应用
+ * 图标照常显示、打开时才弹家长密码（见 CommandExecutor.setAppHidden）。
+ * 于是设备永远上报"已授权"，服务端又按"以设备上报为准"回写，
+ * 家长刚点的「一键取消全部授权」在下一个上报周期被整体覆盖回"已授权"，
+ * 现场表现就是"取消授权十秒后自己恢复了"。
+ *
+ * 授权状态属于**家长意图**，设备是执行者不是裁判：这里只如实回显
+ * 本机已生效的意图，供服务端做一致性诊断，不参与授权判定。
  *
  * ## 性能
  * 意图解析与图标编码都是跨进程 + 解码操作，上百个包时是百毫秒级，
@@ -69,7 +83,9 @@ class AppInventoryCollector @Inject constructor(
                 candidates[pkg] = true
             }
         }
-        for (pkg in runCatching { admin.hiddenPackages() }.getOrDefault(emptySet())) {
+        // 被系统隐藏的包不在启动器里，靠系统隐藏态账本补回，避免被误判为"已卸载"。
+        // 注意：这里读的是**系统隐藏态**，与家长授权意图是两份互不相干的账本。
+        for (pkg in runCatching { admin.systemHiddenPackages() }.getOrDefault(emptySet())) {
             if (!candidates.containsKey(pkg)) candidates[pkg] = false
         }
 
@@ -90,7 +106,8 @@ class AppInventoryCollector @Inject constructor(
                     installTime = info?.firstInstallTime?.takeIf { it > 0 },
                     updateTime = info?.lastUpdateTime?.takeIf { it > 0 },
                     iconBase64 = app?.let { iconBase64(pm, it) },
-                    hidden = !hasLauncher
+                    // 回显本机已生效的**家长授权意图**，而不是由启动器可见性反推。
+                    hidden = admin.isHidden(pkg)
                 )
             )
         }

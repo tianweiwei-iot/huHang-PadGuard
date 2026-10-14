@@ -112,9 +112,18 @@ class AppManageService(
                 // 只在字段真的变了时才写库：孩子端上报频率不低，
                 // 无条件 save 会让每次上报都产生 N 条 UPDATE，白白拖慢数据库。
                 val iconChanged = url != null && hash != current.iconHash
-                // 隐藏状态永远以设备上报为准：家长可能在设备离线时点过开关，
-                // 服务端若只记住自己的值，就会显示一个"已经不生效"的状态。
-                val hiddenChanged = item.hidden != null && item.hidden != current.hidden
+                // 注意：`hidden` 是**家长授权意图**，服务端是唯一权威，**不采纳设备上报值**。
+                //
+                // 早期这里写着"隐藏状态永远以设备上报为准"，并把上报值无条件回写。
+                // 那是一条反向的控制流：孩子端上报的 hidden 是观测值（由"是否出现在启动器"反推），
+                // 而本产品早已改为**密码门禁模型**——取消授权的应用图标照常显示、打开时才弹密码，
+                // 于是设备上报的 hidden 恒为 false。后果是家长点完「一键取消全部授权」，
+                // 下一个上报周期（约十秒）被设备上报整体覆盖回"已授权"，
+                // 现场即"取消授权后十秒自动恢复"。
+                //
+                // 正确的职责划分：家长写意图、设备执行并回执。设备没有资格改写家长意图。
+                // 上报值只用于一致性诊断（下方 warn），不参与状态判定。
+                val hiddenDrift = item.hidden != null && item.hidden != current.hidden
                 // 被隐藏的应用读不到包信息（Android 11+ 的包可见性对隐藏包同样生效），
                 // 上报里只剩一个裸包名。这时绝不能拿"包名当应用名、0 当版本号"去覆盖已有记录：
                 // 家长端点一次"关闭使用权限"，列表里的"计算器"就会退化成一串包名，
@@ -129,8 +138,16 @@ class AppManageService(
                     current.versionCode != nextVersionCode ||
                     current.installed != true ||
                     current.updateTime != item.updateTime ||
-                    iconChanged ||
-                    hiddenChanged
+                    iconChanged
+                // 注意：`changed` 刻意不含 hidden —— 授权意图不因设备上报而改变。
+                if (hiddenDrift) {
+                    // 不一致说明指令尚未送达或尚未生效。只告警，由策略包收敛，
+                    // 绝不在此反向改写家长意图（那等于让设备否决家长的点击）。
+                    log.warn(
+                        "authz intent not applied yet on device {}: pkg={}, intent={}, deviceReports={}",
+                        deviceId, pkg, current.hidden, item.hidden
+                    )
+                }
                 if (changed) {
                     current.appName = nextName
                     current.versionName = nextVersionName
@@ -143,7 +160,7 @@ class AppManageService(
                         current.iconUrl = url
                         current.iconHash = hash
                     }
-                    if (hiddenChanged) current.hidden = item.hidden ?: current.hidden
+                    // hidden 由家长端意图独家维护，上报路径不写。
                     toUpdate.add(current)
                     updated++
                 }
@@ -162,6 +179,8 @@ class AppManageService(
                 mapOf(CommandKey.PACKAGE_NAME to pkg, CommandKey.HIDDEN to true)
             )
         }
+        // 新装应用默认未授权，同样要把意图写进策略包，避免只靠逐条指令送达。
+        if (newHiddenPackages.isNotEmpty()) policyExtensionService.rebuildPolicy(deviceId)
 
         // 本次没出现的包 = 已被卸载，置 installed=false（保留审计痕迹，不删除）
         for ((pkg, entity) in existing) {
@@ -311,6 +330,9 @@ class AppManageService(
                 CommandKey.HIDDEN to req.hidden
             )
         )
+        // 授权意图已变更，必须重建策略包：策略包里的 `app.hiddenPackages` 是权威意图的载体，
+        // 孩子端靠它做全量对齐。少了这一步，离线期间错过的指令永远不会补上。
+        policyExtensionService.rebuildPolicy(deviceId)
     }
 
     /**
@@ -343,6 +365,9 @@ class AppManageService(
             )
             sent++
         }
+        // 只重建一次：策略包携带的是全量权威意图集合，与本次改了多少个包无关。
+        // 放在循环里会对 N 个应用重建 N 次策略包，白白放大 DB 与 MQTT 开销。
+        if (sent > 0) policyExtensionService.rebuildPolicy(deviceId)
         return sent
     }
 

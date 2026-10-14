@@ -56,9 +56,43 @@ class DeviceAdminBridge @Inject constructor(
     private val dpm: DevicePolicyManager =
         context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
 
-    /** 见 [recordHidden]：系统无"列出隐藏应用"接口，只能本地记账 */
-    private val hiddenPrefs by lazy {
-        context.getSharedPreferences("padguard_hidden_apps", Context.MODE_PRIVATE)
+    // -----------------------------------------------------------------------
+    // 两份**互不共享**的本地账本。
+    //
+    // 历史事故：早期二者共用 `padguard_hidden_apps` 一个 SharedPreferences，
+    // 于是「家长授权意图」与「系统隐藏态」互相改写，直接造成
+    // 「一键取消全部授权 → 约 10 秒后全部自动恢复授权」。链路如下：
+    //   ① CommandExecutor.setAppHidden 先 persistHidden(pkg,true) 写入意图；
+    //   ② 紧接着为落实"密码门禁模型"调用 setApplicationHidden(pkg,false)，
+    //      其 `.also { recordHidden(pkg,false) }` 把 ① 刚写的意图**当场删除**；
+    //   ③ 台账上报又以"是否出现在启动器"反推 hidden，图标未隐藏 → 恒上报 false；
+    //   ④ 服务端按"设备上报为准"覆盖家长意图 → 家长端开关弹回"已授权"。
+    // 根因不是某一行写错，而是**一个字段承载两种语义、两个写入者**。
+    // 因此这里从源头拆开：谁的事实谁管，彼此永不相写。
+    // -----------------------------------------------------------------------
+
+    /**
+     * 账本一：**家长授权意图**（唯一由 `SET_APP_HIDDEN` 指令写入）。
+     *
+     * 语义是「家长是否取消了该应用的使用授权」，与设备有没有 Device Owner、
+     * 图标有没有真的隐藏**完全无关**——非 DO 设备上它靠无障碍密码门禁生效。
+     * 只有 [persistHidden] / [clearAuthzIntent] 能改它，
+     * 系统调用结果（[setApplicationHidden]）与策略自检都不得触碰。
+     */
+    private val authzPrefs by lazy {
+        context.getSharedPreferences("padguard_app_authz", Context.MODE_PRIVATE)
+    }
+
+    /**
+     * 账本二：**系统隐藏态**（唯一由 [setApplicationHidden] 写入）。
+     *
+     * 系统没有"列出所有被隐藏应用"的接口，而 Android 11+ 的包可见性限制又让
+     * `getInstalledPackages` 拿不到全量列表 —— 两边一叠加，隐藏后的应用就再也无法枚举：
+     * 启动器里查不到它（隐藏的本意），包列表里也看不到它（可见性限制）。
+     * 只能自己记账：谁被我们藏过，就记在这里，台账采集时补回列表。
+     */
+    private val sysHiddenPrefs by lazy {
+        context.getSharedPreferences("padguard_sys_hidden", Context.MODE_PRIVATE)
     }
 
     /**
@@ -423,57 +457,93 @@ class DeviceAdminBridge @Inject constructor(
         return runCatching { dpm.isPackageSuspended(admin, packageName) }.getOrDefault(false)
     }
 
-    /** 隐藏应用：更彻底（图标消失、无法启动），用于必须完全屏蔽的系统应用 */
+    /**
+     * 系统级隐藏 / 取消隐藏应用（图标消失、无法启动），用于必须完全屏蔽的应用。
+     *
+     * 只维护**系统隐藏态账本**（[sysHiddenPrefs]）；绝不触碰家长授权意图账本
+     * （[authzPrefs]）——否则"为了弹密码门禁而把图标显示回来"会把家长的
+     * "取消授权"意图连带抹掉（这是授权自动恢复事故的直接成因）。
+     */
     fun setApplicationHidden(packageName: String, hidden: Boolean): OpResult =
         guarded("setApplicationHidden:$packageName=$hidden") {
             val admin = requireAdmin()
             require(can(Capability.HIDE_PACKAGES)) { "requires DO/PO" }
             val ok = dpm.setApplicationHidden(admin, packageName, hidden)
             require(ok) { "setApplicationHidden returned false (package missing?)" }
-        }.also { if (it is OpResult.Ok) recordHidden(packageName, hidden) }
+        }.also { if (it is OpResult.Ok) recordSystemHidden(packageName, hidden) }
 
-    /**
-     * 本地记录"我们隐藏过哪些应用"。
-     *
-     * 系统没有"列出所有被隐藏应用"的接口，而 Android 11+ 的包可见性限制又让
-     * `getInstalledPackages` 拿不到全量列表 —— 两边一叠加，隐藏后的应用就再也无法枚举：
-     * 启动器里查不到它（隐藏的本意），包列表里也看不到它（可见性限制）。
-     * 只能自己记账：谁被我们藏过，就记在这里，台账采集时补回列表。
-     */
-    private fun recordHidden(packageName: String, hidden: Boolean) {
+    /** 只写系统隐藏态账本 */
+    private fun recordSystemHidden(packageName: String, hidden: Boolean) {
         runCatching {
-            hiddenPrefs.edit().apply {
+            sysHiddenPrefs.edit().apply {
                 if (hidden) putBoolean(packageName, true) else remove(packageName)
             }.apply()
         }
     }
 
-    /** 被本应用隐藏、因此已从启动器消失的包名集合 */
-    fun hiddenPackages(): Set<String> = runCatching {
-        hiddenPrefs.all.filterValues { it == true }.keys
+    /** 被本应用隐藏、因此已从启动器消失的包名集合（系统隐藏态，非授权意图） */
+    fun systemHiddenPackages(): Set<String> = runCatching {
+        sysHiddenPrefs.all.filterValues { it == true }.keys
     }.getOrDefault(emptySet())
 
-    /** 从本地隐藏台账中删除一条记录（应用已卸载、或已不在隐藏态时清理残留） */
-    fun forgetHidden(packageName: String) {
-        runCatching { hiddenPrefs.edit().remove(packageName).apply() }
+    /** 从系统隐藏态账本中删除一条记录（应用已卸载、或已不在隐藏态时清理残留） */
+    fun forgetSystemHidden(packageName: String) {
+        runCatching { sysHiddenPrefs.edit().remove(packageName).apply() }
     }
 
     /**
-     * 记录"家长关闭/开启某应用使用权限"的意图，与设备是否 Device Owner 无关。
+     * 记录"家长关闭 / 开启某应用使用权限"的**意图**，与设备是否 Device Owner 无关。
+     *
+     * 这是本端对"授权状态"的唯一本地事实来源，且只由服务端 `SET_APP_HIDDEN`
+     * 指令驱动——设备不自行推断、不因系统隐藏态变化而改写。
      *
      * 非 DO 设备无法真正隐藏应用（[setApplicationHidden] 会回 UNSUPPORTED），
      * 但"关闭权限 = 打开需密码"这条软拦截闸门不依赖 DO，必须在此落地，
      * 否则非 DO 设备上"关闭权限"会既不隐藏、也不弹密码（完全失效）。
-     * 因此无论 DO 是否可用都把意图记到账本，供 [AppGuardPolicyStore.isHiddenControlled] 判定。
      */
     fun persistHidden(packageName: String, hidden: Boolean) {
-        recordHidden(packageName, hidden)
+        runCatching {
+            authzPrefs.edit().apply {
+                if (hidden) putBoolean(packageName, true) else remove(packageName)
+            }.apply()
+        }
     }
 
-    /** 家长是否关闭了该应用的使用权限（本地意图记账，不依赖 DO 隐藏能力） */
+    /** 家长是否关闭了该应用的使用权限（本地意图账本，不依赖 DO 隐藏能力） */
     fun isHidden(packageName: String): Boolean = runCatching {
-        hiddenPrefs.getBoolean(packageName, false)
+        authzPrefs.getBoolean(packageName, false)
     }.getOrDefault(false)
+
+    /** 当前处于"已被取消授权"的包名集合 */
+    fun revokedPackages(): Set<String> = runCatching {
+        authzPrefs.all.filterValues { it == true }.keys
+    }.getOrDefault(emptySet())
+
+    /**
+     * 把家长授权意图**整体收敛**到给定集合。
+     *
+     * 服务端是授权状态的唯一权威（见 `InstalledApp.hidden`），策略包携带权威集合，
+     * 孩子端每轮策略应用都按它对齐本地意图账本。这样即使某条 `SET_APP_HIDDEN`
+     * 指令因离线丢失，下一轮策略也会把意图补齐——收敛而非各记一套。
+     *
+     * @param revoked 应处于"已取消授权"的包名集合；只覆盖本次集合涉及的包，
+     *                集合外的既有记录保持不动（台账里没有的包不该被凭空授权）。
+     */
+    fun reconcileAuthzIntent(revoked: Set<String>, known: Set<String>) {
+        runCatching {
+            authzPrefs.edit().apply {
+                for (pkg in known) {
+                    if (pkg in revoked) putBoolean(pkg, true) else remove(pkg)
+                }
+            }.apply()
+        }
+    }
+
+    /** 清空两份账本（解绑 / 关闭管控时调用） */
+    fun clearHiddenLedgers() {
+        runCatching { authzPrefs.edit().clear().apply() }
+        runCatching { sysHiddenPrefs.edit().clear().apply() }
+    }
 
     /**
      * 应用当前是否被隐藏。
@@ -523,7 +593,9 @@ class DeviceAdminBridge @Inject constructor(
         guarded("setPermittedInputMethods=${packages?.size ?: "unlimited"}") {
             val admin = requireAdmin()
             require(can(Capability.USER_RESTRICTIONS)) { "requires DO/PO" }
-            val ok = dpm.setPermittedInputMethods(admin, packages)
+            // 空列表 = 禁用全部输入法 = 设备变砖；一律按「解除限制」处理。
+            val safe = if (packages.isNullOrEmpty()) null else packages
+            val ok = dpm.setPermittedInputMethods(admin, safe)
             require(ok) { "system rejected input method whitelist (active IME not in list)" }
         }
 
@@ -622,11 +694,13 @@ class DeviceAdminBridge @Inject constructor(
             }
         }
 
-        // 3b：恢复被本应用隐藏的应用
-        val hidden = (hiddenPackages() + launchable.filter { isApplicationHidden(it) }).toSet()
+        // 3b：恢复被本应用隐藏的应用（系统隐藏态账本）
+        val hidden = (systemHiddenPackages() + launchable.filter { isApplicationHidden(it) }).toSet()
         hidden.forEach { p ->
             results += "unhide:$p" to setApplicationHidden(p, false)
         }
+        // 3b-2：解绑即管控关系终结，家长授权意图一并清空，避免残留门禁把应用锁死
+        clearHiddenLedgers()
 
         // 3c：还原相机 / 截屏
         results += "camera" to setCameraDisabled(false)

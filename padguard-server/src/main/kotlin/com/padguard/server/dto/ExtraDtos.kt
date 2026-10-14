@@ -76,11 +76,11 @@ data class ScreenMonitorSettingsDto(
 // ============ 定位 / 围栏 ============
 data class LocationDto(
     val latitude: Double, val longitude: Double, val address: String? = null,
-    val accuracy: Float? = null, val timestamp: Long
+    val accuracy: Float? = null, val timestamp: Long, val fresh: Boolean? = null
 )
 data class TrackPointDto(
     val latitude: Double, val longitude: Double, val address: String? = null,
-    val accuracy: Float? = null, val timestamp: Long
+    val accuracy: Float? = null, val timestamp: Long, val fresh: Boolean? = null
 )
 /** 电子围栏（多围栏）。[id] 为空表示"新建"，由服务端生成。 */
 data class GeofenceZoneDto(
@@ -333,9 +333,20 @@ data class AppInventoryItem(
     /** 48dp PNG 图标的 Base64（不带 data: 前缀） */
     val iconBase64: String? = null,
     /**
-     * 当前是否被隐藏。
-     * 孩子端主动上报，用于纠正服务端状态：若家长在设备离线时改了开关，
-     * 设备重新上报时会以设备真实状态为准，避免"服务端显示已隐藏、实际还看得见"。
+     * 孩子端**已生效**的授权状态回显（true = 已取消授权 / 未授权）。
+     *
+     * ## 语义（曾因含混引发线上事故，务必按此理解）
+     * 这是设备在**回报自己执行到了哪一步**，不是上报"应该是怎样"。
+     * 授权状态的唯一权威是服务端的 `InstalledApp.hidden`（家长意图），
+     * 本字段**不得**反向覆盖它。
+     *
+     * 历史实现把它当成"设备真实状态为准"来纠正服务端，方向是反的：
+     * 本产品早已改为**密码门禁模型**（取消授权的应用图标照常显示、打开才弹密码），
+     * 孩子端据此上报的值恒为 false，于是家长点完「一键取消全部授权」
+     * 在下一个上报周期被整体覆盖回"已授权" —— 即"取消授权十秒后自动恢复"。
+     *
+     * 现在仅用于一致性诊断（与权威意图不一致时告警，说明指令尚未送达），
+     * 真正的收敛由策略包 `app.hiddenPackages` 完成。
      */
     val hidden: Boolean? = null
 )

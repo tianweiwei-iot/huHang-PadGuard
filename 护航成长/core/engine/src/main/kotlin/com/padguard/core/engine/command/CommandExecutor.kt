@@ -495,6 +495,12 @@ class CommandExecutor @Inject constructor(
         val hidden = command.payloadBoolean(KEY_HIDDEN, true)
         // 先把"取消/恢复授权"的意图记到账本：这是无障碍密码门禁的唯一事实来源，不依赖 DO 隐藏能力；
         // 非 DO 设备无法真正隐藏应用，但门禁照样生效；DO 设备也不再隐藏，让门禁能拦下并弹密码。
+        //
+        // 该意图写入**授权意图账本**，与"系统隐藏态账本"互不相通：
+        // 下方为落实"图标可见 + 打开弹密码"而调用的 setApplicationHidden(pkg, false)
+        // 只会改写后者，不会再抹掉这里刚写入的授权意图。
+        // （历史事故：两份账本合并时，这一步会把家长刚取消的授权当场删除，
+        //   表现为"取消授权后应用仍然可用"。）
         admin.persistHidden(pkg, hidden)
         if (!admin.can(Capability.HIDE_PACKAGES)) {
             // 非 DO 设备：真实隐藏不可用，但密码闸门已通过 persistHidden 生效；

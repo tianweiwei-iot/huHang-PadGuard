@@ -237,7 +237,22 @@ data class AppPolicy(
      *
      * 因此默认关闭（只拦安装/卸载），由家长按需开启 —— 不能替家长决定使用强度。
      */
-    @SerialName("requirePasswordOnLaunch") val requirePasswordOnLaunch: Boolean = false
+    @SerialName("requirePasswordOnLaunch") val requirePasswordOnLaunch: Boolean = false,
+    /**
+     * **服务端权威**的「已取消授权」包名集合（对应服务端 `InstalledApp.hidden = true`）。
+     *
+     * ## 为什么要随策略包下发
+     * `SET_APP_HIDDEN` 是逐包的即时指令；设备离线或指令丢失时，孩子端会永久停在旧状态，
+     * 而服务端已记成"已取消授权" —— 两端各记一套、无从收敛。
+     * 授权状态属于**家长意图**，服务端是唯一权威；策略包把它整体带下来，
+     * 孩子端每轮应用策略时对齐本地意图账本，天然自愈。
+     *
+     * ## 为什么可为 null
+     * `null` 表示"本策略包不含该字段"（老版本服务端 / 默认包）。
+     * 此时**不得**据此收敛本地账本——否则会把已取消授权的应用凭空全部放行。
+     * 只有字段存在时才做全量对齐。
+     */
+    @SerialName("hiddenPackages") val hiddenPackages: List<String>? = null
 )
 
 @Serializable

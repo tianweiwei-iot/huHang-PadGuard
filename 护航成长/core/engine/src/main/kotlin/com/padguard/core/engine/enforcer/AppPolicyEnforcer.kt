@@ -61,6 +61,11 @@ class AppPolicyEnforcer @Inject constructor(
         val protectedSet = buildProtectedSet()
         val launchable = launchablePackages()
 
+        // 先把「家长授权意图」对齐到服务端权威集合，再做名单管控。
+        // 顺序不能反：授权意图决定的是"要不要密码门禁"，名单决定的是"要不要系统隐藏"，
+        // 二者作用于两份互不相干的账本（见 reconcileAuthzIntent）。
+        reconcileAuthzIntent(policy, launchable)
+
         val target = when (policy.mode) {
             AppListMode.BLACKLIST -> policy.blacklist.toSet() - protectedSet
             AppListMode.WHITELIST -> (launchable - policy.whitelist.toSet()) - protectedSet
@@ -110,6 +115,28 @@ class AppPolicyEnforcer @Inject constructor(
     }
 
     /**
+     * 把「家长授权意图」收敛到服务端权威集合。
+     *
+     * ## 为什么需要这一步（授权自动恢复的另一半根因）
+     * 指令是逐包的、可能丢；服务端记的意图是全量的、不会丢。
+     * 只靠 `SET_APP_HIDDEN` 指令维护本地意图账本，一旦某条指令在设备离线时错过，
+     * 孩子端就永久停在"已授权"，而家长端显示"已取消授权" —— 两端分裂且无法自愈。
+     * 策略包每轮都会下发，天然是权威意图的载体，用它做全量对齐即可收敛。
+     *
+     * ## 为什么只在字段存在时对齐
+     * [AppPolicy.hiddenPackages] 为 null 表示服务端尚未下发该字段（老版本 / 默认包），
+     * 此时本地账本是唯一可信来源，绝不能被空集合覆盖成"全部已授权"。
+     */
+    private fun reconcileAuthzIntent(policy: AppPolicy, launchable: Set<String>) {
+        val revoked = policy.hiddenPackages ?: return
+        // 对齐范围 = 本机已知的候选包 ∪ 服务端点名的包：
+        // 既纠正本机已有记录，也让服务端新点名、本机尚未采集到的包立刻生效。
+        val known = launchable + admin.systemHiddenPackages() + admin.revokedPackages() + revoked
+        admin.reconcileAuthzIntent(revoked.toSet(), known)
+        Logger.i(TAG) { "authz intent reconciled: revoked=${revoked.size}, known=${known.size}" }
+    }
+
+    /**
      * 隐藏被管控的应用：图标从桌面消失、无法启动 —— 即产品要求的"孩子端不可见"。
      *
      * 差集以 [DeviceAdminBridge.hiddenPackages] 的本地记账为准，而不是进程内变量：
@@ -122,7 +149,11 @@ class AppPolicyEnforcer @Inject constructor(
         // getApplicationInfo 直接抛 NameNotFoundException，导致 isInstalled 返回 false，
         // 进而被过滤出 toUnhide，取消隐藏的循环根本不会执行：表现就是"把应用移出黑名单后，
         // 它永久从桌面消失、再也放不回来"（复现：隐藏 WPS → 解除黑名单 → WPS 永远隐藏）。
-        val ledger = admin.hiddenPackages()
+        // 只处理**系统隐藏态**账本：它是"我们把哪些包的图标藏起来了"的记账，
+        // 与"家长取消了哪些应用的授权"是两回事。
+        // 历史上二者共用一份账本，于是策略自检会把不在管控目标里的包
+        // 从"家长授权意图"账本中清掉——家长刚取消的授权被自检悄悄恢复。
+        val ledger = admin.systemHiddenPackages()
         val actuallyHidden = ledger.filter { admin.isApplicationHidden(it) }.toSet()
         val toUnhide = actuallyHidden - target
         val toHide = target - actuallyHidden
@@ -138,8 +169,9 @@ class AppPolicyEnforcer @Inject constructor(
 
         // 清理残留台账：曾经记录隐藏、但当前既不在隐藏态也不在管控目标的包
         //（典型场景：应用已被卸载）。不清理会让失效记录越积越多，且下次 apply 仍会误判。
+        // 只清系统隐藏态账本——家长授权意图不属于"残留"，无权在此清理。
         for (pkg in ledger) {
-            if (pkg !in actuallyHidden && pkg !in target) admin.forgetHidden(pkg)
+            if (pkg !in actuallyHidden && pkg !in target) admin.forgetSystemHidden(pkg)
         }
 
         var hidden = 0
@@ -338,7 +370,7 @@ class AppPolicyEnforcer @Inject constructor(
      */
     private fun isPresentOnDevice(packageName: String): Boolean {
         if (isInstalled(packageName)) return true
-        return packageName in admin.hiddenPackages() && admin.isApplicationHidden(packageName)
+        return packageName in admin.systemHiddenPackages() && admin.isApplicationHidden(packageName)
     }
 
     private fun isInstalled(packageName: String): Boolean = runCatching {
