@@ -68,9 +68,33 @@ class GuardPasswordManager @Inject constructor(
     private val KEY_LOCKED_UNTIL = longPreferencesKey("guard_locked_until")
     /** 试错锁定到期（单调时钟）。 */
     private val KEY_LOCKED_UNTIL_ELAPSED = longPreferencesKey("guard_locked_until_elapsed")
+    /** 应用访问放行：被放行的包名（一次验证只放行一个应用）。 */
+    private val KEY_APP_ACCESS_PKG = stringPreferencesKey("guard_app_access_pkg")
+    /** 应用访问放行到期（墙钟）。 */
+    private val KEY_APP_ACCESS_UNTIL = longPreferencesKey("guard_app_access_until")
+    /** 应用访问放行到期（单调时钟）。 */
+    private val KEY_APP_ACCESS_UNTIL_ELAPSED = longPreferencesKey("guard_app_access_until_elapsed")
 
     /** 解锁后允许的时长窗口（毫秒）。默认 10 分钟，足够家长完成一次改设置/装应用。 */
     var unlockWindowMs: Long = 10 * 60 * 1000L
+
+    /**
+     * 「打开某个受管控应用」验证通过后，放行的**兜底上限**（毫秒）。
+     *
+     * ## 真正的失效时机不是这个时间
+     * 放行的正常失效由**前台切换**触发：孩子一旦离开该应用（回桌面、切到别的应用），
+     * 无障碍服务立即调用 [revokeAppAccessIfNot] 作废放行 —— 语义就是"每次打开都要验证"。
+     * 若用固定时长当失效条件，孩子玩到一半、应用内部切换界面时放行会突然过期，
+     * 表现为"正玩着被莫名其妙顶回桌面"。
+     *
+     * ## 那这个上限防的是什么
+     * 放行状态持久化在 DataStore 里，若缺少时间上限，会出现"昨晚授权的游戏今早还能免密打开"
+     * 这类跨会话残留。这里设一个远长于单次连续使用的兜底上限，只在极端残留时兜底。
+     *
+     * 与 [unlockWindowMs] 是两套完全不同的授权：这里只授予「打开这一个应用」，
+     * 绝不授予安装 / 卸载 / 改系统设置的能力，也不放行其它应用。
+     */
+    var appAccessGrantMaxMs: Long = 8 * 60 * 60 * 1000L
 
     data class GuardState(val enabled: Boolean, val unlocked: Boolean)
 
@@ -87,7 +111,10 @@ class GuardPasswordManager @Inject constructor(
         val unlockedUntilWall: Long = 0L,
         val lockedUntilElapsed: Long = 0L,
         val lockedUntilWall: Long = 0L,
-        val failCount: Int = 0
+        val failCount: Int = 0,
+        val appAccessPkg: String = "",
+        val appAccessUntilElapsed: Long = 0L,
+        val appAccessUntilWall: Long = 0L
     ) {
         fun isUnlocked(): Boolean {
             if (!enabled) return false
@@ -101,6 +128,18 @@ class GuardPasswordManager @Inject constructor(
             if (lockedUntilElapsed <= 0) return false
             return SystemClock.elapsedRealtime() < lockedUntilElapsed
                 && System.currentTimeMillis() < lockedUntilWall
+        }
+
+        /**
+         * 该包是否处于「家长刚验证通过」的应用访问放行窗口内。
+         *
+         * 只认**同一个包**：一次验证只放行一个应用，不是全局开闸。
+         */
+        fun isAppAccessGranted(pkg: String): Boolean {
+            if (pkg.isEmpty() || pkg != appAccessPkg) return false
+            if (appAccessUntilElapsed <= 0) return false
+            return SystemClock.elapsedRealtime() < appAccessUntilElapsed
+                && System.currentTimeMillis() < appAccessUntilWall
         }
     }
 
@@ -155,6 +194,9 @@ class GuardPasswordManager @Inject constructor(
             it[KEY_FAIL_COUNT] = 0
             it[KEY_LOCKED_UNTIL] = 0L
             it[KEY_LOCKED_UNTIL_ELAPSED] = 0L
+            it[KEY_APP_ACCESS_PKG] = ""
+            it[KEY_APP_ACCESS_UNTIL] = 0L
+            it[KEY_APP_ACCESS_UNTIL_ELAPSED] = 0L
         }
     }
 
@@ -222,6 +264,80 @@ class GuardPasswordManager @Inject constructor(
     /** 同步读：当前是否处于"失败过多锁定期"，无障碍回调用（只读 @Volatile 快照）。 */
     fun isLockedOutNow(): Boolean = snapshot.isLockedOut()
 
+    /**
+     * 同步读：该应用当前是否已被家长验证放行（只读 @Volatile 快照，主线程判定用）。
+     *
+     * 注意这**不是** [isUnlockedNow]：解锁窗口放行的是安装/卸载/改设置这类设备操作，
+     * 而这里放行的是「打开这一个应用」，两者不可互相推导。
+     */
+    fun isAppAccessGrantedNow(pkg: String): Boolean = snapshot.isAppAccessGranted(pkg)
+
+    /**
+     * 授予对**单个应用**的访问放行（家长在门禁里输对密码之后调用）。
+     *
+     * ## 为什么必须与 [unlock] 分开
+     * 早期实现把"打开一个受管控应用"的验证结果写成 [unlock]（10 分钟全局解锁窗口），
+     * 后果有二，都是权限放大：
+     * 1. 孩子只要知道这一次密码，接下来 10 分钟内可以自由安装 / 卸载 / 改系统设置；
+     * 2. 放行面覆盖所有受管控应用，而不只是家长刚验证的那一个。
+     * 这里改为「一次验证 → 放行一个包」，且完全不触碰解锁窗口。
+     *
+     * ## 为什么写库后要立刻同步镜像快照
+     * DataStore 的 Flow 回灌是异步的，而放行后目标应用会**立刻**启动，
+     * 无障碍服务会在毫秒级内收到该包的窗口事件。若等 Flow 回灌，
+     * 判定读到的仍是旧快照 → 应用刚起来就被顶回，表现为"输对密码也打不开"。
+     * 因此这里在持久化成功后同步更新 @Volatile 快照，保证判定先于启动生效。
+     */
+    suspend fun grantAppAccess(pkg: String) {
+        val untilWall = System.currentTimeMillis() + appAccessGrantMaxMs
+        val untilElapsed = SystemClock.elapsedRealtime() + appAccessGrantMaxMs
+        store.edit {
+            it[KEY_APP_ACCESS_PKG] = pkg
+            it[KEY_APP_ACCESS_UNTIL_ELAPSED] = untilElapsed
+            it[KEY_APP_ACCESS_UNTIL] = untilWall
+        }
+        snapshot = snapshot.copy(
+            appAccessPkg = pkg,
+            appAccessUntilElapsed = untilElapsed,
+            appAccessUntilWall = untilWall
+        )
+    }
+
+    /**
+     * 前台已切到别的包 → 作废上一次的应用访问放行（**主线程同步生效**）。
+     *
+     * 这是"每次打开都要验证"的执行点：孩子离开被放行的应用（回桌面、切到其它应用），
+     * 这次授权即结束，下次再点该应用必须重新输密码。
+     *
+     * 必须先同步清快照再异步落盘：无障碍服务在收到窗口事件的同一帧内就要做放行判定，
+     * 若等 DataStore 落盘，这一帧的判定读到的仍是旧快照。
+     */
+    fun revokeAppAccessIfNot(pkg: String) {
+        val granted = snapshot.appAccessPkg
+        if (granted.isEmpty() || granted == pkg) return
+        Logger.d(TAG) { "app access grant revoked: left $granted, now $pkg" }
+        snapshot = snapshot.copy(appAccessPkg = "", appAccessUntilElapsed = 0L, appAccessUntilWall = 0L)
+        scope.launch {
+            runCatching {
+                store.edit {
+                    it[KEY_APP_ACCESS_PKG] = ""
+                    it[KEY_APP_ACCESS_UNTIL] = 0L
+                    it[KEY_APP_ACCESS_UNTIL_ELAPSED] = 0L
+                }
+            }.onFailure { Logger.w(TAG, it) { "failed to persist app access revoke" } }
+        }
+    }
+
+    /** 收回应用访问放行（家长重新上锁、设备解绑时调用；等价于"刚才那次授权作废"）。 */
+    suspend fun revokeAppAccess() {
+        store.edit {
+            it[KEY_APP_ACCESS_PKG] = ""
+            it[KEY_APP_ACCESS_UNTIL_ELAPSED] = 0L
+            it[KEY_APP_ACCESS_UNTIL] = 0L
+        }
+        snapshot = snapshot.copy(appAccessPkg = "", appAccessUntilElapsed = 0L, appAccessUntilWall = 0L)
+    }
+
     /** 解锁：开启一个时间窗口，期间允许安装/卸载/改设置（双时钟写入）。 */
     suspend fun unlock() {
         val now = System.currentTimeMillis()
@@ -240,7 +356,12 @@ class GuardPasswordManager @Inject constructor(
             it[KEY_FAIL_COUNT] = 0
             it[KEY_LOCKED_UNTIL] = 0L
             it[KEY_LOCKED_UNTIL_ELAPSED] = 0L
+            // 重新上锁同时作废单次应用放行：家长已明确要求收紧，不应留下遗留授权
+            it[KEY_APP_ACCESS_PKG] = ""
+            it[KEY_APP_ACCESS_UNTIL] = 0L
+            it[KEY_APP_ACCESS_UNTIL_ELAPSED] = 0L
         }
+        snapshot = snapshot.copy(appAccessPkg = "", appAccessUntilElapsed = 0L, appAccessUntilWall = 0L)
     }
 
     /** 跳到解锁界面（APP 内部发起下载/安装/卸载/设置前、或无障碍拦截时由家长在 App 内调起）。 */
@@ -273,7 +394,10 @@ class GuardPasswordManager @Inject constructor(
         unlockedUntilWall = prefs[KEY_UNLOCKED_UNTIL] ?: 0L,
         lockedUntilElapsed = prefs[KEY_LOCKED_UNTIL_ELAPSED] ?: 0L,
         lockedUntilWall = prefs[KEY_LOCKED_UNTIL] ?: 0L,
-        failCount = prefs[KEY_FAIL_COUNT] ?: 0
+        failCount = prefs[KEY_FAIL_COUNT] ?: 0,
+        appAccessPkg = prefs[KEY_APP_ACCESS_PKG].orEmpty(),
+        appAccessUntilElapsed = prefs[KEY_APP_ACCESS_UNTIL_ELAPSED] ?: 0L,
+        appAccessUntilWall = prefs[KEY_APP_ACCESS_UNTIL] ?: 0L
     )
 
     private fun hash(plain: String): String {

@@ -51,12 +51,41 @@ class KidHomeViewModel @Inject constructor(
     /** 家长入口是否需要密码（未启用操作密码时直接放行） */
     suspend fun isGuardEnabled(): Boolean = guard.isEnabled()
 
+    /**
+     * 密码闸门本体，供桌面**就地**弹出应用门禁对话框使用。
+     *
+     * 之所以直接暴露它而不是再包一层：校验与限次逻辑必须只有一份实现，
+     * 桌面弹框与无障碍浮层用的是同一个 [GuardPasswordManager]，
+     * 任何中间封装都会让两条路径的口径悄悄分叉。
+     */
+    val passwordManager: GuardPasswordManager get() = guard
+
     /** 校验家长密码，用于进入管理界面（带失败限次） */
     suspend fun verifyParent(plain: String) = guard.verifyWithLimit(plain)
+
+    /** 该包是否属于「家长已取消授权」（用于门禁文案如实区分授权取消与仅需验证）。 */
+    fun isRevoked(pkg: String): Boolean = appGuard.isHiddenControlled(pkg)
+
+    /**
+     * 门禁验证通过后打开应用：**先落放行，再启动**。
+     *
+     * 顺序不可颠倒 —— 应用一启动，无障碍服务立刻就会收到该包的窗口事件；
+     * 若放行尚未生效，孩子会看到"密码输对了，应用刚起来又被顶回桌面"。
+     */
+    fun openAfterGrant(pkg: String) {
+        viewModelScope.launch {
+            guard.grantAppAccess(pkg)
+            launchApp(pkg)
+        }
+    }
 
     /** 拉取并过滤桌面应用。进入桌面与每次回到桌面都应调用。 */
     fun reload() {
         viewModelScope.launch(Dispatchers.IO) {
+            // 回到自家桌面即意味着"上一次打开应用"已结束：作废那次放行，
+            // 下次点同一应用必须重新验证。无障碍服务只盯非自家包的前台变化，
+            // 自家桌面这一侧必须由这里补上，否则孩子回桌面后再点就能免密进入。
+            runCatching { guard.revokeAppAccess() }
             val items = runCatching { buildAllowedApps() }.getOrElse { emptyList() }
             // 二级兜底：万一上面仍异常，退化为显示全部已安装应用，绝不空白
             val safe = if (items.isEmpty()) fallbackAllApps() else items
@@ -121,8 +150,11 @@ class KidHomeViewModel @Inject constructor(
      * 确保「桌面点开」与「最近任务/通知点开」（无障碍兜底）行为统一，不会一边免密一边要密：
      * - 系统关键包（防砖名单）→ 不拦；
      * - 处于解锁窗口内（家长刚输过密码）→ 放行，含取消授权的应用；
+     * - 家长刚针对这个包验证通过（[GuardPasswordManager.isAppAccessGrantedNow]）→ 放行，
+     *   只放行这一个包，不波及安装/卸载/改设置；
      * - 家长"取消授权"（hidden）→ 未解锁时一律经过门禁（最严，且不因未设家长密码而漏放）：
-     *   已设密码 → 弹框输对后自动打开；未设密码 → 门禁界面提示"需家长设置密码"，不直接放行。
+     *   已设密码 → 桌面上就地弹密码框，输对后自动打开；
+     *   未设密码 → 同一弹框改为提示"需家长设置密码"，不直接放行。
      *   这是"授权已取消"的底线语义，不依赖「打开应用也要密码」开关（见 [AppGuardPolicyStore.isHiddenControlled]）；
      * - 其余受管控应用：依赖「打开应用也要密码」开关 + 家长密码，二者缺一不可，否则不拦；
      * - 系统关键包（防砖名单）→ 不拦。
@@ -132,6 +164,8 @@ class KidHomeViewModel @Inject constructor(
      */
     fun needsLaunchGuard(pkg: String): Boolean {
         if (appGuard.isSystemCritical(pkg)) return false
+        // 家长刚在门禁里针对**这个包**验证通过 → 放行（只针对这一个应用，不是全局开闸）
+        if (guard.isAppAccessGrantedNow(pkg)) return false
         // 处于解锁窗口内（家长刚输过密码）→ 放行，含取消授权的应用
         if (guard.isUnlockedNow()) return false
         // 取消授权的应用：未解锁时一律经过门禁（最严，且不因未设家长密码而漏放）。

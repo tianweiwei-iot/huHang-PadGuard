@@ -35,7 +35,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -44,7 +43,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.padguard.child.ui.theme.PadGuardTheme
-import com.padguard.child.guard.GuardUnlockActivity
+import com.padguard.child.guard.AppAccessGateDialog
+import com.padguard.child.guard.AppAccessNoPasswordDialog
+import com.padguard.child.guard.AppAccessReason
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
 
@@ -59,6 +60,11 @@ import kotlinx.coroutines.launch
  * ## 它不能单独让管控生效
  * 这里只是"可视网关"。孩子若从最近任务 / 通知 / 其他桌面启动违禁应用，
  * 仍由 [com.padguard.child.guard.OperationGuardAccessibilityService] 顶回。两者叠加才是闭环。
+ *
+ * ## 需要密码时弹在哪里
+ * 点开受管控应用就在**本桌面上就地弹密码框**（[com.padguard.child.guard.AppAccessGateDialog]），
+ * 不跳转到任何管控系统页面 —— 门禁属于"点图标"这一刻，桌面必须始终在背后可见。
+ * 从最近任务 / 通知启动的路径由无障碍服务拉起浮层 Activity 覆盖，两者共用同一套校验组件。
  * 真正不可绕过需要 Device Owner（Kiosk）——本 Activity 已保留 HOME 类目供 KioskEnforcer 反查。
  *
  * ## 防砖
@@ -88,7 +94,15 @@ private fun KidLauncherScreen(
     vm: KidHomeViewModel = hiltViewModel()
 ) {
     var showParentDialog by remember { mutableStateOf(false) }
-    val context = LocalContext.current
+    /**
+     * 当前正在等待家长验证的应用包名；非空即在**本桌面上**就地弹出门禁对话框。
+     *
+     * 这里刻意不再 `startActivity` 跳转到管控系统的解锁页：应用门禁发生在"点桌面图标"这一刻，
+     * 正确形态是桌面上浮出一个密码框，而不是把人带到另一个页面去。
+     * （从最近任务 / 通知 / 系统桌面启动的路径由无障碍服务用浮层 Activity 覆盖，
+     * 与本对话框共用同一套校验组件，行为一致。）
+     */
+    var gatePackage by remember { mutableStateOf<String?>(null) }
 
     // 进入与每次回到桌面都刷新名单：singleTask 复用时不会重建，靠 Lifecycle 监听 onResume
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -100,9 +114,10 @@ private fun KidLauncherScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    val apps = vm.apps
+
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(modifier = Modifier.fillMaxSize()) {
-            val apps = vm.apps
             if (apps.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("暂无可用应用", style = MaterialTheme.typography.bodyLarge)
@@ -120,14 +135,10 @@ private fun KidLauncherScreen(
                             app = app,
                             onClick = {
                                 val pkg = app.packageName
-                                // 受管控且家长开启「打开应用也要密码」时，先拉起统一密码界面，
-                                // 验证通过由 GuardUnlockActivity 自动打开目标应用；否则直接启动。
+                                // 需要门禁时只在桌面上就地弹出密码框，绝不跳转页面；
+                                // 验证通过由 ViewModel 先落放行再启动，否则直接启动。
                                 if (vm.needsLaunchGuard(pkg)) {
-                                    context.startActivity(
-                                        Intent(context, GuardUnlockActivity::class.java)
-                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                            .putExtra(GuardUnlockActivity.EXTRA_LAUNCH_PACKAGE, pkg)
-                                    )
+                                    gatePackage = pkg
                                 } else {
                                     vm.launchApp(pkg)
                                 }
@@ -156,6 +167,31 @@ private fun KidLauncherScreen(
                 onOpenManagement()
             }
         )
+    }
+
+    // 应用门禁：就地弹在桌面上。桌面仍在背后可见，关闭即回到桌面，没有页面跳转。
+    gatePackage?.let { pkg ->
+        val label = apps.firstOrNull { it.packageName == pkg }?.label ?: pkg
+        val reason = if (vm.isRevoked(pkg)) AppAccessReason.REVOKED else AppAccessReason.CONTROLLED
+        if (vm.passwordManager.isEnabledNow()) {
+            AppAccessGateDialog(
+                appLabel = label,
+                reason = reason,
+                manager = vm.passwordManager,
+                onDismiss = { gatePackage = null },
+                onGranted = {
+                    gatePackage = null
+                    vm.openAfterGrant(pkg)
+                }
+            )
+        } else {
+            // 密码未启用：如实告知家长需要去设置，而不是弹一个注定验不过的密码框
+            AppAccessNoPasswordDialog(
+                appLabel = label,
+                reason = reason,
+                onDismiss = { gatePackage = null }
+            )
+        }
     }
 }
 

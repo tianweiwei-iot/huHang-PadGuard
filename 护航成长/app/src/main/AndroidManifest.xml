@@ -103,6 +103,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- API 34+ 声明 foregroundServiceType="location" 必须配套此权限，否则启动前台服务报 SecurityException -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -225,6 +227,20 @@
             android:excludeFromRecents="true"
             android:theme="@style/Theme.PadGuard.Lock" />
 
+        <!--
+          应用访问门禁：打开受管控应用时的密码框，**浮在桌面之上**（透明浮层主题）。
+          与下方 GuardUnlockActivity 的分工：
+          - 本界面 = 打开某一个应用（验证通过只放行这一个包，不开全局解锁窗口）；
+          - GuardUnlockActivity = 安装/卸载/改系统设置（验证通过开 10 分钟设备操作解锁窗口）。
+          由无障碍服务在拦截时拉起；自家孩子桌面则直接就地弹同款对话框，不经由此界面。
+        -->
+        <activity
+            android:name=".guard.AppAccessGateActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.PadGuard.Gate" />
+
         <!-- 应用违规拦截覆盖层 -->
         <activity
             android:name=".ui.block.AppBlockActivity"
@@ -258,7 +274,7 @@
         <service
             android:name=".service.GuardService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|specialUse">
+            android:foregroundServiceType="dataSync|specialUse|location">
             <!-- API 34+ 用 specialUse 必须声明子类型理由，否则安装/启动报 SecurityException -->
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

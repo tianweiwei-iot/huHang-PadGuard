@@ -22,4 +22,27 @@
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="28">shortEdges</item>
     </style>
+
+    <!--
+      应用访问门禁（AppAccessGateActivity）用的**透明浮层**主题。
+
+      与 Theme.PadGuard.Lock 的根本区别：Lock 是全屏覆盖（锁屏就该占满，杜绝从状态栏逃逸），
+      而门禁只是桌面上浮出的一个对话框 —— 桌面必须保持可见，孩子/家长看到的应当是
+      "桌面上弹了个密码框"，而不是"被带进了管控系统的某个页面"。
+
+      关键属性：
+      - windowIsTranslucent + windowBackground 透明：让背后的桌面透出来；
+      - backgroundDimEnabled：给桌面加一层压暗，突出卡片，同时明确"当前不可操作桌面"；
+      - windowContentOverlay=@null：去掉默认阴影/遮罩，避免透明窗口上出现灰底；
+      - 状态栏保持可见（不设 windowFullscreen）：门禁不该伪装成锁屏，
+        它只是短暂打断，保留状态栏能让孩子明白设备并未被锁死。
+    -->
+    <style name="Theme.PadGuard.Gate" parent="Theme.PadGuard">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="28">shortEdges</item>
+    </style>
 </resources>

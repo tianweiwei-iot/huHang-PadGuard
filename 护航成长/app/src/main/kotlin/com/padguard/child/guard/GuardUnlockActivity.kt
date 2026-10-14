@@ -23,21 +23,27 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.padguard.child.ui.theme.PadGuardTheme
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * 操作密码解锁界面（覆盖层，复用锁屏主题）。
+ * **设备操作**解锁界面（安装 / 卸载 / 改系统设置）。
  *
- * 家长在此输入密码 → 校验通过 → [GuardPasswordManager.unlock] 开启允许窗口，
- * 之后一段时间内允许安装/卸载/改设置（由 [OperationGuardAccessibilityService] 放行）。
- * 若已处于解锁窗口，则显示「重新锁定」入口。
+ * ## 职责边界（重要）
+ * 本界面只管「设备操作」这一类：家长输对密码 → [GuardPasswordManager.unlock] 开启
+ * 10 分钟解锁窗口 → 期间放行安装 / 卸载 / 改设置。
+ *
+ * **打开应用**的门禁不在这里，而是 [AppAccessGateActivity]（浮层）与
+ * [com.padguard.child.KidHomeActivity] 的就地对话框，它们走
+ * [GuardPasswordManager.grantAppAccess]，只放行一个包。
+ *
+ * 历史上这两件事曾被塞进同一个界面：结果"打开一个应用"被迫继承了本页面
+ * 的全屏形态（孩子看到的像是进了管控系统），且顺带拿到 10 分钟设备操作解锁
+ * （权限放大）。现已按语义拆开，两边不再共用入口。
  *
  * 注意：这是「家长」操作入口，孩子不知道密码，因此打开设置/安装被拦截时，
  * 只有当家长能在此输对密码才能放行。
@@ -50,53 +56,29 @@ class GuardUnlockActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 可选：孩子从桌面点开「受管控且需密码」的应用时传入，
-        // 解锁成功后自动打开该应用（避免"输完密码还要再点一次"）。
-        val launchPackage = intent.getStringExtra(EXTRA_LAUNCH_PACKAGE)
         if (!manager.isEnabledNow()) {
-            // 未设置「设备操作密码」：取消授权的应用仍硬拦截，这里只告知家长需先设置密码，
-            // 不直接放行（严格做到授权管控）。设置/安装等其它入口无密码可验，直接关闭。
-            if (launchPackage != null) {
-                setContent { NeedPasswordNoticeScreen(onClose = { finish() }) }
-            } else {
-                finish()
-            }
+            // 未设置「设备操作密码」：没有可比对凭据，拉起也没有意义，直接收起。
+            finish()
             return
         }
         setContent {
             GuardUnlockScreen(
                 manager = manager,
-                launchPackage = launchPackage,
                 onClose = { finish() }
             )
         }
-    }
-
-    companion object {
-        /** 解锁成功后要自动打开的目标应用包名（孩子桌面点开受管控应用时传入） */
-        const val EXTRA_LAUNCH_PACKAGE = "extra_launch_package"
     }
 }
 
 @Composable
 private fun GuardUnlockScreen(
     manager: GuardPasswordManager,
-    launchPackage: String?,
     onClose: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
     var password by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var locked by remember { mutableStateOf(manager.isLockedOutNow()) }
-
-    // 文案随场景切换：被管控应用入口 → 打开校验；系统/安装拦截入口 → 操作解锁。
-    val title = if (launchPackage != null) "打开应用需要验证" else "设备操作已上锁"
-    val desc = if (launchPackage != null) {
-        "请输入管理密码以打开该应用。"
-    } else {
-        "要安装/卸载应用或修改系统设置，请输入家长密码。"
-    }
 
     PadGuardTheme {
         Column(
@@ -104,10 +86,10 @@ private fun GuardUnlockScreen(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(title, style = MaterialTheme.typography.headlineSmall)
+            Text("设备操作已上锁", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
-                desc,
+                "要安装/卸载应用或修改系统设置，请输入家长密码。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
             )
@@ -131,12 +113,6 @@ private fun GuardUnlockScreen(
                         val r = manager.verifyWithLimit(password)
                         if (r.ok) {
                             manager.unlock()
-                            // 孩子从桌面点开受管控应用时，解锁后自动打开目标应用
-                            launchPackage?.let { pkg ->
-                                context.packageManager.getLaunchIntentForPackage(pkg)
-                                    ?.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    ?.let { context.startActivity(it) }
-                            }
                             onClose()
                         } else {
                             // 如实告知剩余次数：既避免把孩子引到"无限重试"，
@@ -162,39 +138,6 @@ private fun GuardUnlockScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("取消")
-            }
-        }
-    }
-}
-
-/**
- * 未设置「设备操作密码」时，孩子点开"取消授权"应用的提示页（硬拦截，不直接放行）。
- *
- * 严格做到授权管控：应用已取消授权，但本地没有可比对密码，无法核验身份；
- * 因此不能放行，只能提示家长先在控制端设置「设备操作密码」后才会真正生效。
- */
-@Composable
-private fun NeedPasswordNoticeScreen(onClose: () -> Unit) {
-    PadGuardTheme {
-        Column(
-            modifier = Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text("应用已取消授权", style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "该应用已被家长取消使用授权，需输入家长设定的「设备操作密码」才能打开。\n" +
-                    "当前尚未设置设备操作密码，请家长在控制端「设备详情」中先设置，方可生效。",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-            )
-            Spacer(Modifier.height(20.dp))
-            Button(
-                onClick = onClose,
-                modifier = Modifier.fillMaxWidth().height(52.dp)
-            ) {
-                Text("我知道了")
             }
         }
     }
