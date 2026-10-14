@@ -61,12 +61,18 @@
     tb.querySelectorAll("[data-act='del']").forEach(b => b.onclick = () => delParent(b.dataset.id));
   }
 
-  function resetPwd(id) {
-    PG.ui.confirm("重置密码", "将为 " + id + " 生成随机强密码并强制下次登录修改。", async () => {
+  async function resetPwd(id) {
+    // 展示用手机号取自服务端（此前直接拼 id，弹窗里是一串 UUID）
+    const p = await PG.api.getParent(id).catch(() => null);
+    const phone = (p && p.phone) || id;
+    // 注意：后端目前没有"强制下次登录修改"的实现，文案必须如实，不得承诺不存在的约束
+    PG.ui.confirm("重置密码", "将为家长 " + U.esc(phone) + " 生成随机强密码（明文仅显示一次），原密码立即失效。请转告家长并提醒其尽快修改。", async () => {
       const r = await PG.api.resetParentPwd(id);
-      const m = PG.ui.modal({ title: "新密码", body: '<div class="stat-line"><span>账号</span><span>' + U.esc(id) + '</span></div><div class="stat-line"><span>临时密码</span><span style="font-family:monospace;color:var(--brand)">' + U.esc(r.newPwd || "PG" + Math.floor(100000 + Math.random() * 900000)) + '</span></div><p class="muted" style="font-size:12px">请通过安全渠道发送给家长，并提醒及时修改。</p>', foot: '<button class="btn btn-primary" id="ok">知道了</button>' });
+      const emailed = r && r.emailed;
+      // newPwd 缺失时显示 "—"（绝不能现场编一个假密码展示）
+      const m = PG.ui.modal({ title: "新密码", body: '<div class="stat-line"><span>账号</span><span>' + U.esc(phone) + '</span></div><div class="stat-line"><span>临时密码</span><span style="font-family:monospace;color:var(--brand)">' + U.esc(r.newPwd || "—") + '</span></div><p class="muted" style="font-size:12px">' + (emailed ? "新密码已同步发送至家长登记邮箱。" : "请通过安全渠道发送给家长，并提醒其尽快修改。") + '</p>', foot: '<button class="btn btn-primary" id="ok">知道了</button>' });
       m.el.querySelector("#ok").onclick = m.close;
-      PG.ui.toast("ok", "密码已重置", id);
+      PG.ui.toast("ok", "密码已重置", phone);
     });
   }
 
