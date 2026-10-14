@@ -60,8 +60,10 @@
 
   function mini(label, val) { return '<div class="mini-stat"><span class="ms-val">' + val + '</span><span class="ms-label">' + label + '</span></div>'; }
 
-  function openManual() {
-    const plans = PG.Mock.PLANS.filter(p => p.id !== "free").map(p => '<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + '</option>').join("");
+  async function openManual() {
+    // 套餐取自服务端真实可购套餐（Mock 已清空，用 PG.Mock.PLANS 会得到空下拉——与 parents.js 同款修复）
+    const list = ((await PG.api.listPlans()) || []).filter(p => p.id !== "free");
+    const plans = list.map(p => '<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + (p.priceFen ? '（' + U.money(p.priceFen) + '/期）' : '') + '</option>').join("");
     const m = PG.ui.modal({
       title: "手动开通 / 延长订阅", width: 460,
       body: `<div class="field"><label>家长手机号</label><input id="m-phone" placeholder="如 13800000000"></div>
@@ -74,7 +76,12 @@
     m.el.querySelector("#m-ok").onclick = async () => {
       const phone = m.el.querySelector("#m-phone").value.trim();
       if (!/^1\d{10}$/.test(phone)) { PG.ui.toast("err", "手机号格式不正确"); return; }
-      await PG.api.manualActivate(phone, m.el.querySelector("#m-plan").value, parseInt(m.el.querySelector("#m-days").value) || 365);
+      try {
+        await PG.api.manualActivate(phone, m.el.querySelector("#m-plan").value, parseInt(m.el.querySelector("#m-days").value) || 365);
+      } catch (e) {
+        PG.ui.toast("err", (e && e.message) ? e.message : "开通失败，请重试");
+        return;
+      }
       m.close(); PG.ui.toast("ok", "订阅已开通", phone); PG.router.refresh();
     };
   }
