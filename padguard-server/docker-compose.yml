@@ -39,6 +39,10 @@ services:
       emqx:
         condition: service_started
     environment:
+      # 容器 OS 默认 UTC：不锁 TZ 时，JVM 默认时区跟着变 UTC，
+      # 导致 docker logs 时间戳、@Scheduled cron 触发点、依赖 systemDefault() 的
+      # 统计口径全部偏 8 小时。这里与 docker-compose.prod.yml 口径保持一致。
+      TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/padguard
       SPRING_DATASOURCE_USERNAME: padguard
       SPRING_DATASOURCE_PASSWORD: padguard

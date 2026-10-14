@@ -1,6 +1,7 @@
 package com.padguard.server.domain
 
 import jakarta.persistence.*
+import org.hibernate.annotations.ColumnDefault
 
 @Entity
 @Table(name = "users")
@@ -129,15 +130,63 @@ class Device(
     @Column(name = "created_at") var createdAt: Long = 0
 )
 
+/**
+ * 一次「设备接入」。
+ *
+ * 这是家长把一台平板纳管的**唯一入口状态机**：家长端发起 → 出示二维码/配对码 →
+ * 孩子端消费 → 服务端落设备并回写 → 家长端收到结果。全程只有这一个实体在流转，
+ * 二维码与配对码都只是它的呈现形式（[pairingCode] 的两种表达），
+ * 因此"二维码里的码和显示的配对码不是同一个"在模型层面不可能发生。
+ *
+ * 状态机见 [com.padguard.server.service.EnrollmentService] 的 STATE_* 常量：
+ * PENDING →（孩子端消费）→ BOUND；或（超时）→ EXPIRED；或（家长主动作废）→ CANCELLED。
+ */
 @Entity
-@Table(name = "bind_codes")
-class BindCode(
-    @Id var code: String = "",
+@Table(name = "enrollment_sessions")
+class EnrollmentSession(
+    /** 会话身份：家长端订阅与服务端推送都以此为键，与短码解耦 */
+    @Id var id: String = "",
     @Column(name = "user_id") var userId: String = "",
+    /**
+     * 孩子端输入/扫码用的 6 位短码。
+     *
+     * 对外仍是 6 位数字（孩子端契约 `BindRequest.bindCode` 不变，孩子端无需改动），
+     * 但它现在是**会话的一个属性**而不是会话本身 —— 换码不影响会话身份，家长端仍订阅同一个 [id]。
+     */
+    @Column(name = "pairing_code") var pairingCode: String = "",
+    var state: String = "PENDING",
+    /** 绑定结果：设备台账归属在这里，不再回写到凭证上 */
     @Column(name = "device_id") var deviceId: String? = null,
     @Column(name = "expires_at") var expiresAt: Long = 0,
-    var used: Boolean = false,
-    @Column(name = "created_at") var createdAt: Long = 0
+    @Column(name = "bound_at") var boundAt: Long? = null,
+    @Column(name = "created_at") var createdAt: Long = 0,
+    /**
+     * 乐观锁版本号：**本次接入的所有写入都经由这个实体**，并发安全由它保证。
+     *
+     * 为什么必须有它（一个真实踩过并在线上复现的坑）：
+     * 早期版本用一条 `@Modifying` 条件 UPDATE 抢占会话（`update ... set state='BOUND'
+     * where pairing_code=? and state='PENDING'`），再由另一处 `save()` 回写绑定结果。
+     * 两条写路径指向同一行，而 `@Modifying` 绕过持久化上下文——缓存里的实体仍是 PENDING，
+     * 随后回写 `deviceId` 的 `save()` 在提交时做脏检查，把整行（含 state）写回库，
+     * 于是数据库里刚被 SQL 改成 BOUND 的状态被覆盖回 PENDING。
+     * 表现为：设备明明绑上了、deviceId 也回写了，家长端查询却永远停在"等待孩子扫码"。
+     *
+     * 加了它之后，抢占不再需要绕过实体的 SQL：状态迁移直接在实体上做，
+     * 提交时 Hibernate 发出 `update ... where id=? and revision=?`，
+     * 两个孩子端同时提交同一短码时，后提交者影响行数为 0 → 乐观锁冲突 → 整笔事务回滚，
+     * 与原来那条条件 UPDATE 的排他性等价，但写路径只剩一条，不可能再互相覆盖。
+     *
+     * 默认值 0 必须写在注解上：本项目的两条部署路径都要能建出这一列 ——
+     * 生产（PostgreSQL + Flyway）由 V2026101302 施加，单机/家庭部署（H2 + ddl-auto=update）
+     * 由 Hibernate 补列。后者生成的是 `alter table ... add column revision bigint not null`，
+     * 表里一旦已经有历史会话行，无默认值的 NOT NULL 加列会在启动时直接失败
+     * （`NULL not allowed for column "revision"`），而失败被 Hibernate 记为 WARN 不阻断启动，
+     * 于是列静默缺失、后续所有接入请求才报错 —— 属于要等到用户使用时才炸的延迟故障。
+     */
+    @Version
+    @Column(name = "revision", nullable = false)
+    @ColumnDefault("0")
+    var revision: Long = 0
 )
 
 @Entity

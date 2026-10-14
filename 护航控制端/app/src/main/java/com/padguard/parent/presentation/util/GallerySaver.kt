@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.provider.MediaStore
 import dagger.hilt.android.qualifiers.ApplicationContext
+import com.padguard.parent.util.DISPLAY_TIME_ZONE
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -71,6 +72,8 @@ class GallerySaver @Inject constructor(
     }
 
     private companion object {
-        val FILE_FORMAT = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+        // 文件名时间戳同样按北京时间：否则家长在图库里看到的
+        // "截图_20261013_000500" 与服务端记录的下单/回放时间会差 8 小时，排查时极易误判。
+        val FILE_FORMAT = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).apply { timeZone = DISPLAY_TIME_ZONE }
     }
 }

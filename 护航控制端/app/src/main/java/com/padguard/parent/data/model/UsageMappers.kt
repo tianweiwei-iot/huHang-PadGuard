@@ -2,6 +2,7 @@ package com.padguard.parent.data.model
 
 import com.padguard.parent.domain.model.AppUsage
 import com.padguard.parent.domain.model.UsageStats
+import com.padguard.parent.util.DISPLAY_TIME_ZONE
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -34,5 +35,7 @@ fun AppUsageDto.toDomain(): AppUsage = AppUsage(
     launchCount = launchCount
 )
 
+// 按服务端 aggregation 口径（北京时间）显示：使用 begin/end 毫秒来自服务端按 Asia/Shanghai 的按天聚合，
+// 界面若按设备时区格式化，设备时区非北京时间时会出现"服务端算今天、界面显示昨天"。
 private fun clockOf(millis: Long): String =
-    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(millis))
+    SimpleDateFormat("HH:mm:ss", Locale.CHINA).apply { timeZone = DISPLAY_TIME_ZONE }.format(Date(millis))

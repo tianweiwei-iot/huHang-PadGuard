@@ -27,6 +27,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.child.ui.components.Glyph
 import com.padguard.child.ui.components.GlyphKind
+import com.padguard.child.util.DISPLAY_TIME_ZONE
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -172,6 +173,9 @@ private fun formatTime(millis: Long): String {
         diff < 60_000L -> "刚刚"
         diff < 3_600_000L -> "${diff / 60_000L} 分钟前"
         diff < 86_400_000L -> "${diff / 3_600_000L} 小时前"
-        else -> SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(millis))
+        // 钉死北京时间，与服务端下发的创建时间口径一致。
+        else -> SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+            .apply { timeZone = DISPLAY_TIME_ZONE }
+            .format(Date(millis))
     }
 }

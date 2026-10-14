@@ -82,17 +82,29 @@ interface DeviceRepository {
 
     // === 设备接入（对标 MDM Enrollment：扫码 / 配对码 / 局域网发现 / 批量导入） ===
 
-    /** 生成待扫码绑定的二维码载荷（家长端展示，被控平板扫码后回报） */
-    suspend fun generateBindQrPayload(): Result<String>
+    /**
+     * 打开（或复用）一次设备接入：一次拿到二维码与接入码（同源）。
+     *
+     * 幂等 —— 已有进行中的接入时返回同一个会话，避免家长"退出去再进来"
+     * 把孩子手里刚扫到的码作废。
+     */
+    suspend fun openEnrollment(): Result<Enrollment>
 
-    /** 解析被控平板二维码载荷并绑定设备 */
-    suspend fun bindByQrPayload(payload: String, alias: String?): Result<Device>
+    /**
+     * 查询本次接入的当前状态；`null` 表示当前没有任何接入会话。
+     *
+     * 这是 WS 推送的必然正确兜底：推送可能丢，查询不会说谎。
+     */
+    suspend fun currentEnrollment(): Result<Enrollment?>
 
-    /** 生成 6 位配对码 */
-    suspend fun generatePairingCode(): Result<String>
+    /** 换一个接入码（原码立即作废） */
+    suspend fun refreshEnrollment(): Result<Enrollment>
 
-    /** 通过配对码绑定设备 */
-    suspend fun bindByPairingCode(code: String, alias: String?): Result<Device>
+    /** 作废本次接入 */
+    suspend fun cancelEnrollment(): Result<Unit>
+
+    /** 接入完成的实时通知（服务端推送驱动；[currentEnrollment] 是它的兜底） */
+    fun observeEnrollmentCompleted(): Flow<EnrollmentCompleted>
 
     /** 发现同一局域网内的待接入平板 */
     suspend fun discoverLanDevices(): Result<List<LanDevice>>

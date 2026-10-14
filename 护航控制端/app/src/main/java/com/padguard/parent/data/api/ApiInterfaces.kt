@@ -108,23 +108,32 @@ interface DeviceApi {
     ): Response<ApiResponse<DeviceDto>>
 
     /**
-     * 生成 6 位一次性绑定码（10 分钟有效）。
-     * 真实绑定由孩子端拿此码调用 /api/v1/device/bind 完成，家长端仅负责下发。
+     * 打开（或复用）一次设备接入，一次拿到会话 ID、6 位接入码与二维码载荷。
+     *
+     * 二维码与接入码由服务端保证同源 —— 家长端不得为两个展示位置各调一次，
+     * 否则就会拿到两个不同的码（"二维码里的码和显示的配对码不是同一个"的成因）。
+     * 幂等：已有进行中的接入时直接复用，退出页面再进来不会把孩子手里的码作废。
      */
-    @POST("devices/bind-code")
-    suspend fun generateBindCode(): Response<ApiResponse<BindCodeResponse>>
+    @POST("devices/enrollments")
+    suspend fun openEnrollment(): Response<ApiResponse<EnrollmentDto>>
 
     /**
-     * 查询绑定码状态，供家长端判定孩子端是否已完成绑定。
+     * 查询本次接入的当前状态。
      *
-     * 不能直接"等设备列表里出现新 deviceId"来判定：重绑同一台平板时，
-     * 服务端按硬件指纹复用台账、deviceId 不变，那样判定必然超时，
-     * 表现为"孩子端明明绑上了，家长端却提示绑定未成功"。
+     * 这是 WS 推送之外的兜底：推送可能因断线丢失，查询永远拿得到真实状态。
+     * 判定"接入成功"必须看会话状态，而不是"设备列表里出现了新 deviceId"——
+     * 重绑同一台平板时服务端复用台账、deviceId 不变，只看列表永远等不到新设备。
      */
-    @GET("devices/bind-code/{code}/status")
-    suspend fun getBindCodeStatus(
-        @Path("code") code: String
-    ): Response<ApiResponse<BindCodeStatusResponse>>
+    @GET("devices/enrollments/current")
+    suspend fun currentEnrollment(): Response<ApiResponse<EnrollmentDto?>>
+
+    /** 换一个接入码（原码立即作废） */
+    @POST("devices/enrollments/refresh")
+    suspend fun refreshEnrollment(): Response<ApiResponse<EnrollmentDto>>
+
+    /** 作废本次接入 */
+    @DELETE("devices/enrollments/current")
+    suspend fun cancelEnrollment(): Response<okhttp3.ResponseBody>
 
     /**
      * 解绑设备。

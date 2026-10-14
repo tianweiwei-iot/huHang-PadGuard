@@ -48,7 +48,10 @@ import com.padguard.parent.data.model.InstalledAppDto
 import com.padguard.parent.data.model.SuspendRequest
 import com.padguard.parent.data.model.AppUsageDto
 import com.padguard.parent.data.model.AssignGroupRequest
-import com.padguard.parent.data.model.BindCodeResponse
+import com.padguard.parent.data.model.EnrollmentDto
+import com.padguard.parent.domain.model.Enrollment
+import com.padguard.parent.domain.model.EnrollmentCompleted
+import com.padguard.parent.domain.model.EnrollmentState
 import com.padguard.parent.data.model.BrowserDisableRequest
 import com.padguard.parent.data.model.CloseAlertRequest
 import com.padguard.parent.data.model.CreateGroupRequest
@@ -150,8 +153,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -195,12 +200,29 @@ class ApiDataSource @Inject constructor(
     private val authenticatedClient: OkHttpClient,
     private val retrofit: Retrofit,
     private val serverPrefs: com.padguard.parent.di.ServerPrefs,
-    private val staticConfigCache: StaticConfigCache
+    private val staticConfigCache: StaticConfigCache,
+    /** 服务端实时推送通道：接入完成等事件由它驱动，查询接口退化为兜底 */
+    private val parentPushClient: ParentPushClient
 ) : AuthRepository, DeviceRepository, MonitorRepository, PolicyRepository,
     StatisticsRepository, AlertRepository, MessageRepository, LocationRepository,
     BillingRepository {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 设备台账变化必须驱动内存列表流刷新。
+     *
+     * 孩子端完成接入后，家长端列表若不刷新，家长就会看到"孩子端明明绑上了，
+     * 设备列表里却没有这台设备"。台账变化的源头是接入完成事件，
+     * 因此在这里订阅它并刷新列表，而不是让每个页面各想办法。
+     */
+    init {
+        scope.launch {
+            parentPushClient.messages
+                .filterIsInstance<ParentPushMessage.DeviceEnrolled>()
+                .collect { refreshDeviceList() }
+        }
+    }
 
     // ==================== 统一请求封装 ====================
 
@@ -413,50 +435,39 @@ class ApiDataSource @Inject constructor(
 
     // ----- 设备接入 -----
 
-    override suspend fun generateBindQrPayload(): Result<String> =
-        exec { deviceApi.generateBindCode() }.map { resp ->
-            val code = resp.data?.bindCode ?: throw Exception("生成绑定码失败")
-            "padguard://bind?code=$code"
+    /**
+     * 打开（或复用）接入会话：一次拿到二维码与接入码。
+     *
+     * 不做"二维码和配对码各请求一次"这种事 —— 两者同源是服务端保证的，
+     * 端上只需要渲染，不需要（也不应该）自己拼装或二次请求。
+     */
+    override suspend fun openEnrollment(): Result<Enrollment> =
+        exec { deviceApi.openEnrollment() }.mapCatching { resp ->
+            resp.data?.toDomain() ?: throw Exception("服务端未返回接入信息")
         }
 
-    override suspend fun bindByQrPayload(payload: String, alias: String?): Result<Device> {
-        val code = parseBindCode(payload)
-            ?: return Result.failure(IllegalArgumentException("二维码无效，请扫描孩子端展示的接入码"))
-        return bindByPairingCode(code, alias)
-    }
+    /** 查询接入进展（推送丢失时的兜底，永远以服务端状态为准） */
+    override suspend fun currentEnrollment(): Result<Enrollment?> =
+        exec { deviceApi.currentEnrollment() }.map { resp -> resp.data?.toDomain() }
 
-    override suspend fun generatePairingCode(): Result<String> =
-        exec { deviceApi.generateBindCode() }.map { resp ->
-            resp.data?.bindCode ?: throw Exception("生成配对码失败")
+    override suspend fun refreshEnrollment(): Result<Enrollment> =
+        exec { deviceApi.refreshEnrollment() }.mapCatching { resp ->
+            resp.data?.toDomain() ?: throw Exception("服务端未返回接入信息")
         }
 
-    override suspend fun bindByPairingCode(code: String, alias: String?): Result<Device> {
-        if (!code.matches(Regex("\\d{6}"))) {
-            return Result.failure(IllegalArgumentException("配对码为 6 位数字，请重新输入"))
-        }
-        // 真实绑定由孩子端拿 code 调 /api/v1/device/bind 完成。
-        //
-        // 判定方式必须是"轮询这个码的状态"，而不是"等设备列表里出现新 deviceId"：
-        // 孩子端重装 / 重新扫码时，服务端按硬件指纹复用同一条台账，deviceId 根本不变，
-        // 只看列表就永远等不到新设备 —— 表现为孩子端已经绑上并开始上报心跳，
-        // 家长端却一直提示绑定未成功。绑定结果由服务端回写到码上，这里问码最准。
-        repeat(BIND_POLL_ATTEMPTS) {
-            delay(BIND_POLL_INTERVAL_MS)
-            val st = exec { deviceApi.getBindCodeStatus(code) }.getOrNull()?.data ?: return@repeat
-            when (st.state) {
-                STATE_BOUND -> {
-                    val boundId = st.deviceId ?: return@repeat
-                    // 台账可能还没落定，拉一次列表确认；取不到就下一轮再试
-                    val dev = exec { deviceApi.getDeviceList() }.getOrNull()?.data
-                        ?.firstOrNull { d -> d.deviceId == boundId }
-                    if (dev != null) return Result.success(dev.toDomain())
-                }
-                STATE_EXPIRED ->
-                    return Result.failure(Exception("配对码已失效，请重新生成后再让孩子端扫一次"))
-            }
-        }
-        return Result.failure(Exception("等待孩子端完成绑定超时，请确认孩子端已输入该配对码"))
-    }
+    override suspend fun cancelEnrollment(): Result<Unit> =
+        execRaw { deviceApi.cancelEnrollment() }
+
+    /**
+     * 接入完成的实时事件。
+     *
+     * 家长端不必轮询"孩子绑上没"：服务端在孩子端完成绑定时主动推 `device.enrolled`。
+     * 推送丢失时由 [currentEnrollment] 兜底 —— 快路径与兜底路径职责分明。
+     */
+    override fun observeEnrollmentCompleted(): Flow<EnrollmentCompleted> =
+        parentPushClient.messages
+            .filterIsInstance<ParentPushMessage.DeviceEnrolled>()
+            .map { EnrollmentCompleted(sessionId = it.sessionId, deviceId = it.deviceId) }
 
     override suspend fun discoverLanDevices(): Result<List<com.padguard.parent.domain.model.LanDevice>> =
         exec { deviceApi.discoverLanDevices() }.map { it.data.orEmpty().map { d -> d.toDomain() } }
@@ -1131,22 +1142,6 @@ class ApiDataSource @Inject constructor(
 
     // ==================== 辅助 ====================
 
-    private fun parseBindCode(payload: String): String? {
-        val trimmed = payload.trim()
-        if (trimmed.matches(Regex("\\d{6}"))) return trimmed
-        // 兼容 "padguard://bind?code=XXXX" 形式（孩子端扫码/ NFC 亦解析此格式）
-        if (trimmed.startsWith("padguard://bind")) {
-            val q = trimmed.substringAfter("?", "")
-            val params = q.split("&").mapNotNull { kv ->
-                val pair = kv.split("=", limit = 2)
-                if (pair.size == 2) pair[0] to pair[1] else null
-            }.toMap()
-            val code = params["code"] ?: params["bindCode"]
-            if (code != null && code.matches(Regex("\\d{6}"))) return code
-        }
-        return null
-    }
-
     /**
      * 把服务端返回的相对图片地址拼成可加载的绝对地址。
      *
@@ -1190,19 +1185,7 @@ class ApiDataSource @Inject constructor(
         private const val MAX_FRAME_BYTES = 5 * 1024 * 1024
 
         private const val POLL_INTERVAL_MS = 10_000L
-        /**
-         * 绑定等待窗口 = 45 × 2s = 90 秒。
-         * 原来只有 20 × 2s = 40 秒：家长生成码后，孩子要经历"切到孩子端 → 扫码/输入 → 绑定"，
-         * 40 秒经常不够，家长就会在孩子还没扫完时先超时。绑定码本身 10 分钟有效，
-         * 90 秒足够覆盖正常操作，又不至于让界面像卡死。
-         */
-        private const val BIND_POLL_ATTEMPTS = 45
-        private const val BIND_POLL_INTERVAL_MS = 2_000L
         private const val ALERT_POLL_INTERVAL_MS = 15_000L
-
-        // 绑定码状态，与服务端 BindCodeService 保持一致
-        private const val STATE_BOUND = "BOUND"
-        private const val STATE_EXPIRED = "EXPIRED"
     }
 
     // ------------------------------------------------------------------ 订阅与计费
@@ -1463,7 +1446,9 @@ private fun AppUsageDto.toDomain(): AppUsage = AppUsage(
 )
 
 private fun clockOf(millis: Long): String =
-    java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(millis))
+    java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.CHINA)
+        .apply { timeZone = com.padguard.parent.util.DISPLAY_TIME_ZONE }
+        .format(java.util.Date(millis))
 
 private fun DailyUsageDto.toDomain(): DailyUsage = DailyUsage(date = date, usageMinutes = usageMinutes, violationCount = violationCount)
 

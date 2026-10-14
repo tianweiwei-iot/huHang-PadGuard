@@ -13,8 +13,8 @@ import com.padguard.parent.domain.repository.MinorMode
 import com.padguard.parent.domain.repository.PolicyRepository
 import com.padguard.parent.domain.repository.StatisticsRepository
 import com.padguard.parent.domain.repository.UnlockTicket
-import com.padguard.parent.data.remote.UsagePushClient
-import com.padguard.parent.data.remote.UsagePushMessage
+import com.padguard.parent.data.remote.ParentPushClient
+import com.padguard.parent.data.remote.ParentPushMessage
 import com.padguard.parent.presentation.util.TimeFormat
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -77,7 +77,7 @@ class HomeViewModel @Inject constructor(
     private val deviceRepository: DeviceRepository,
     private val statisticsRepository: StatisticsRepository,
     private val policyRepository: PolicyRepository,
-    private val usagePushClient: UsagePushClient
+    private val parentPushClient: ParentPushClient
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(HomeUiState())
@@ -94,7 +94,7 @@ class HomeViewModel @Inject constructor(
         // - 主通道 = WS 推送（孩子端上行用量即推今日快照，毫秒级、零轮询资源），见 observeUsagePush；
         // - 兜底 = 降频轮询（30s），WS 临时断开时仍保证看板不陈旧，用完即弃不长期占资源。
         // 同时拉起家长端 WS 客户端（按登录态/服务器地址自动连接，幂等）。
-        usagePushClient.start()
+        parentPushClient.start()
         observeUsagePush()
         startUsageRefreshLoop()
     }
@@ -249,8 +249,8 @@ class HomeViewModel @Inject constructor(
      */
     private fun observeUsagePush() {
         viewModelScope.launch {
-            usagePushClient.messages.collect { msg ->
-                if (msg is UsagePushMessage.UsageToday) {
+            parentPushClient.messages.collect { msg ->
+                if (msg is ParentPushMessage.UsageToday) {
                     val sel = _uiState.value.selectedDeviceId ?: return@collect
                     if (msg.deviceId != sel) return@collect
                     val topApp = msg.stats.appUsages.firstOrNull()

@@ -1,5 +1,6 @@
 package com.padguard.parent.presentation.ui.device
 
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -32,7 +33,10 @@ import com.padguard.parent.domain.model.DeviceOnlineStatus
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.presentation.util.QrCodeGenerator
+import com.padguard.parent.domain.model.Enrollment
 import com.padguard.parent.presentation.viewmodel.DeviceManageViewModel
+import com.padguard.parent.presentation.viewmodel.EnrollmentUi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 
 /**
@@ -147,8 +151,8 @@ fun DeviceManageScreen(
         AccessMethodScreen(
             uiState = uiState,
             onClose = viewModel::closeAccessSheet,
-            onBindByQr = viewModel::bindByQrPayload,
-            onBindByPairingCode = viewModel::bindByPairingCode,
+            onReloadEnrollment = viewModel::reloadEnrollment,
+            onRefreshEnrollmentCode = viewModel::refreshEnrollmentCode,
             onScanLan = viewModel::scanLanDevices,
             onBindLan = viewModel::bindLanDevice,
             onFilePicked = viewModel::onImportFilePicked,
@@ -408,14 +412,23 @@ private fun ManagedDeviceCard(
 private fun AccessMethodScreen(
     uiState: com.padguard.parent.presentation.viewmodel.DeviceManageUiState,
     onClose: () -> Unit,
-    onBindByQr: (String) -> Unit,
-    onBindByPairingCode: (String) -> Unit,
+    onReloadEnrollment: () -> Unit,
+    onRefreshEnrollmentCode: () -> Unit,
     onScanLan: () -> Unit,
     onBindLan: (com.padguard.parent.domain.model.LanDevice) -> Unit,
     onFilePicked: (android.net.Uri, String) -> Unit,
     onConfirmImport: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
+    // 接入码倒计时的时基：每秒推进一次。用单调时钟而非墙上时钟，
+    // 用户在手机上改系统时间也不会让倒计时跳变。
+    var nowRealtime by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowRealtime = SystemClock.elapsedRealtime()
+            delay(1_000)
+        }
+    }
 
     // 全屏覆盖：直接铺满整个屏幕，承载接入新设备的全部内容（替代原底部弹层）。
     // 自带顶栏与关闭按钮；绑定成功后由 ViewModel 直接 closeAccessSheet 退出，无需二次确认。
@@ -446,9 +459,9 @@ private fun AccessMethodScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 TabRow(selectedTabIndex = selectedTab) {
-                    // 原「扫码」文案误导——家长端无相机扫码能力，
-                    // 本 Tab 实际是「家长出示二维码、由孩子端扫码绑定」。改为「二维码」避免误解。
-                    listOf("二维码", "配对码", "局域网", "Excel").forEachIndexed { index, label ->
+                    // 前两个 Tab 是同一个接入会话的两种出示方式：
+                    // 家长端无相机扫码能力，二维码是"给孩子端扫"，接入码是"给孩子端输入"。
+                    listOf("二维码", "接入码", "局域网", "Excel").forEachIndexed { index, label ->
                         Tab(
                             selected = selectedTab == index,
                             onClick = { selectedTab = index },
@@ -458,8 +471,12 @@ private fun AccessMethodScreen(
                 }
 
                 when (selectedTab) {
-                    0 -> QrAccessPanel(uiState, onBindByQr)
-                    1 -> PairingCodeAccessPanel(uiState, onBindByPairingCode)
+                    0 -> EnrollmentQrPanel(
+                        uiState.enrollment, nowRealtime, onReloadEnrollment, onRefreshEnrollmentCode
+                    )
+                    1 -> EnrollmentPairingPanel(
+                        uiState.enrollment, nowRealtime, onReloadEnrollment, onRefreshEnrollmentCode
+                    )
                     2 -> LanAccessPanel(uiState, onScanLan, onBindLan)
                     3 -> ExcelImportPanel(uiState, onFilePicked, onConfirmImport)
                 }
@@ -468,21 +485,124 @@ private fun AccessMethodScreen(
     }
 }
 
-// ---- 方式一：扫码接入 ----
+// ---- 接入会话：二维码（方式一）与接入码（方式二）同源 ----
 
+/**
+ * 接入会话的展示宿主：二维码与接入码共用同一份会话状态。
+ *
+ * 加载 / 失败 / 过期三种非正常态统一在这里呈现，两个 Tab 因此不可能出现
+ * "一个还在转圈、另一个已经显示"的分裂状态，也不可能出现错误被静默吞掉 ——
+ * 每条失败都必须显示原因，并给出可执行的下一步（重试 / 换码）。
+ */
 @Composable
-private fun QrAccessPanel(
-    uiState: com.padguard.parent.presentation.viewmodel.DeviceManageUiState,
-    onBindByQr: (String) -> Unit
+private fun EnrollmentHost(
+    state: EnrollmentUi,
+    nowRealtime: Long,
+    onReload: () -> Unit,
+    onRefreshCode: () -> Unit,
+    content: @Composable (Enrollment, Long) -> Unit
 ) {
-    var manualPayload by remember { mutableStateOf("") }
-    val qrBitmap = remember(uiState.qrPayload) {
-        uiState.qrPayload?.let { QrCodeGenerator.generate(it, 512) }
-    }
-
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        when (state) {
+            EnrollmentUi.Idle, EnrollmentUi.Loading -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(200.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator()
+                        Text(
+                            "正在生成接入码…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+            }
+
+            is EnrollmentUi.Failed -> {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("未能获取接入信息", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            state.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Button(onClick = onReload, modifier = Modifier.fillMaxWidth()) { Text("重试") }
+                    }
+                }
+            }
+
+            is EnrollmentUi.Active -> {
+                // 剩余时长按服务端时钟 + 本地单调流逝推算，不受用户改系统时间影响
+                val remainingSeconds =
+                    (state.enrollment.remainingMillis(nowRealtime) / 1000).coerceAtLeast(0)
+                if (state.expired || remainingSeconds <= 0) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("接入码已失效", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "接入码 10 分钟内有效。换一个后，请让孩子端使用新码重新接入。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                            )
+                            Button(onClick = onRefreshCode, modifier = Modifier.fillMaxWidth()) {
+                                Text("换一个接入码")
+                            }
+                        }
+                    }
+                } else {
+                    content(state.enrollment, remainingSeconds)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = onRefreshCode) { Text("换一个接入码") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 方式一：家长出示二维码，由孩子端扫描 */
+@Composable
+private fun EnrollmentQrPanel(
+    state: EnrollmentUi,
+    nowRealtime: Long,
+    onReload: () -> Unit,
+    onRefreshCode: () -> Unit
+) {
+    EnrollmentHost(state, nowRealtime, onReload, onRefreshCode) { enrollment, remaining ->
+        val qrBitmap = remember(enrollment.qrPayload) {
+            QrCodeGenerator.generate(enrollment.qrPayload, 512)
+        }
         Text(
-            "方式一：在平板「护航学生端 → 设备绑定」打开接入码，用本机扫码；或将平板展示的绑定码粘贴到下方输入框。",
+            "在平板「护航学生端 → 设备绑定」选择扫码，扫描下方二维码即可完成接入。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
         )
@@ -499,86 +619,67 @@ private fun QrAccessPanel(
                     modifier = Modifier.size(190.dp)
                 )
             } else {
-                CircularProgressIndicator()
+                Text(
+                    "二维码生成失败，请重试",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
-        OutlinedTextField(
-            value = manualPayload,
-            onValueChange = { manualPayload = it },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("绑定码 / 二维码内容") },
-            singleLine = true,
-            shape = RoundedCornerShape(12.dp)
+        Text(
+            "二维码 ${formatRemaining(remaining)}后失效",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
-        Button(
-            onClick = { onBindByQr(manualPayload) },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = manualPayload.isNotBlank(),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(Icons.Default.QrCodeScanner, contentDescription = null)
-            Spacer(modifier = Modifier.width(6.dp))
-            Text("确认接入")
-        }
     }
 }
 
-// ---- 方式二：配对码接入 ----
-
+/** 方式二：家长出示 6 位接入码，由孩子端输入（与二维码同源同值） */
 @Composable
-private fun PairingCodeAccessPanel(
-    uiState: com.padguard.parent.presentation.viewmodel.DeviceManageUiState,
-    onBindByPairingCode: (String) -> Unit
+private fun EnrollmentPairingPanel(
+    state: EnrollmentUi,
+    nowRealtime: Long,
+    onReload: () -> Unit,
+    onRefreshCode: () -> Unit
 ) {
-    var code by remember { mutableStateOf("") }
-
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    EnrollmentHost(state, nowRealtime, onReload, onRefreshCode) { enrollment, remaining ->
         Text(
-            "方式二：在平板「护航学生端 → 设备绑定」查看 6 位配对码，输入后即可接入；也可将本机配对码输入到平板完成反向绑定。",
+            "在平板「护航学生端 → 设备绑定」选择输入绑定码，填入下方 6 位接入码即可完成接入。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
         )
-        uiState.pairingCode?.let { current ->
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text("本机配对码", style = MaterialTheme.typography.labelSmall)
-                    Text(
-                        text = current,
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 8.sp
-                    )
-                }
+                Text("本次接入码", style = MaterialTheme.typography.labelSmall)
+                Text(
+                    text = enrollment.pairingCode,
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 8.sp
+                )
             }
         }
-        OutlinedTextField(
-            value = code,
-            onValueChange = { if (it.length <= 6) code = it.filter { c -> c.isDigit() } },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("输入平板配对码（6 位数字）") },
-            singleLine = true,
-            shape = RoundedCornerShape(12.dp)
+        Text(
+            "接入码 ${formatRemaining(remaining)}后失效",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
-        Button(
-            onClick = { onBindByPairingCode(code) },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = code.length == 6,
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(Icons.Default.Password, contentDescription = null)
-            Spacer(modifier = Modifier.width(6.dp))
-            Text("确认接入")
-        }
     }
+}
+
+private fun formatRemaining(seconds: Long): String {
+    val m = seconds / 60
+    val s = seconds % 60
+    return if (m > 0) "${m} 分 ${s} 秒 " else "${s} 秒 "
 }
 
 // ---- 方式三：局域网发现 ----

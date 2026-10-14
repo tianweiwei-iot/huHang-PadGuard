@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.padguard.child.util.DISPLAY_TIME_ZONE
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -153,7 +154,9 @@ class UnlockRequestViewModel @Inject constructor(
         /** 常用理由，点一下即填，降低孩子的输入成本（尤其是小学阶段） */
         val QUICK_REASONS = listOf("要查学习资料", "老师布置的作业", "需要联系家长", "上网课")
 
+        // 钉死北京时间：申请时间要与家长端/服务端记录（Asia/Shanghai）显示一致。
         private val TIME_FORMAT = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+            .apply { timeZone = DISPLAY_TIME_ZONE }
     }
 }
 

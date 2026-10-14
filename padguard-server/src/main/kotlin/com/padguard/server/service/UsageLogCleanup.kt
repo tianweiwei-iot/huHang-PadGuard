@@ -6,6 +6,7 @@ import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import java.time.Instant
 import java.time.ZoneId
+import com.padguard.server.common.SERVER_ZONE
 import com.padguard.server.common.SERVER_ZONE_ID
 import java.time.format.DateTimeFormatter
 
@@ -35,7 +36,9 @@ class UsageLogCleanup(
     private val zone = SERVER_ZONE_ID
     private val fmt = DateTimeFormatter.ISO_LOCAL_DATE
 
-    @Scheduled(cron = "0 0 4 * * *")
+    // zone 必须显式钉死：不带 zone 的 cron 走 JVM 默认时区，容器未设 TZ 时为 UTC，
+    // 直观后果是"凌晨 4 点跑的历史清理"实际在北京时间中午 12 点执行，恰好压到使用高峰。
+    @Scheduled(cron = "0 0 4 * * *", zone = SERVER_ZONE)
     fun cleanup() {
         val threshold = System.currentTimeMillis() - RETENTION_DAYS * 86_400_000L
         runCatching {

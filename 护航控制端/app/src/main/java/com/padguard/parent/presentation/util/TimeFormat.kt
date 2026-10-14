@@ -1,5 +1,6 @@
 package com.padguard.parent.presentation.util
 
+import com.padguard.parent.util.DISPLAY_TIME_ZONE
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -30,6 +31,15 @@ object TimeFormat {
 
     /** 2 位补零，保持时钟的 `XX` 形态。 */
     private fun pad2(n: Int): String = n.toString().padStart(2, '0')
+
+    /**
+     * 统一构造 SimpleDateFormat：固定挂上服务端口径的北京时区。
+     *
+     * 不挂时区时 SimpleDateFormat 取 JVM/设备默认时区；设备时区被改到境外后，
+     * 同一个毫秒时间戳在界面上显示的时间会与服务端聚合结果（Asia/Shanghai）不一致。
+     */
+    private fun sdf(pattern: String): SimpleDateFormat =
+        SimpleDateFormat(pattern, Locale.CHINA).apply { timeZone = DISPLAY_TIME_ZONE }
 
     /**
      * 时钟（时刻）格式化：把时间点转成固定三段的 `XX时YY分ZZ秒`（24 小时制）。
@@ -78,7 +88,7 @@ object TimeFormat {
 
     /** 时刻：毫秒时间戳 -> 固定三段 `XX时YY分ZZ秒`（24 小时制）。 */
     fun formatClockFromMillis(millis: Long): String =
-        formatClock(SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(Date(millis)))
+        formatClock(sdf("HH:mm:ss").format(Date(millis)))
 
     /**
      * 时刻（紧凑）：毫秒时间戳 -> `HH:mm`。
@@ -87,18 +97,18 @@ object TimeFormat {
      * 家长往往只能看到开始时间、看不到结束时间。这里只保留时和分。
      */
     fun formatHourMinute(millis: Long): String =
-        SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(millis))
+        sdf("HH:mm").format(Date(millis))
 
     /** 日期 + 时刻：毫秒时间戳 -> `MM月dd日 XX时YY分ZZ秒`。 */
     fun formatDateTimeFromMillis(millis: Long): String =
-        SimpleDateFormat("MM月dd日 ", Locale.CHINA).format(Date(millis)) + formatClockFromMillis(millis)
+        sdf("MM月dd日 ").format(Date(millis)) + formatClockFromMillis(millis)
 
     // ===================== 日期（保持原有行为） =====================
 
     fun formatFullDate(date: String): String {
         return try {
-            val input = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).parse(date)
-            SimpleDateFormat("MM月dd日", Locale.CHINA).format(input ?: return date)
+            val input = sdf("yyyy-MM-dd").parse(date)
+            sdf("MM月dd日").format(input ?: return date)
         } catch (e: Exception) {
             date
         }
@@ -106,8 +116,8 @@ object TimeFormat {
 
     fun formatShortDate(date: String): String {
         return try {
-            val input = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).parse(date)
-            SimpleDateFormat("MM/dd", Locale.CHINA).format(input ?: return date)
+            val input = sdf("yyyy-MM-dd").parse(date)
+            sdf("MM/dd").format(input ?: return date)
         } catch (e: Exception) {
             date
         }
@@ -115,8 +125,8 @@ object TimeFormat {
 
     fun formatWeekday(date: String): String {
         return try {
-            val input = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).parse(date)
-            SimpleDateFormat("EEEE", Locale.CHINA).format(input ?: return date)
+            val input = sdf("yyyy-MM-dd").parse(date)
+            sdf("EEEE").format(input ?: return date)
         } catch (e: Exception) {
             date
         }

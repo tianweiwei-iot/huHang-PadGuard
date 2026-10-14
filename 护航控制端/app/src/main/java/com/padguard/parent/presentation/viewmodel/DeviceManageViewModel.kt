@@ -8,31 +8,55 @@ import com.padguard.parent.data.importer.DeviceImportFileParser
 import com.padguard.parent.domain.model.Device
 import com.padguard.parent.domain.model.DeviceImportRow
 import com.padguard.parent.domain.model.DeviceImportResult
+import com.padguard.parent.domain.model.Enrollment
+import com.padguard.parent.domain.model.EnrollmentState
 import com.padguard.parent.domain.model.LanDevice
 import com.padguard.parent.domain.repository.DeviceRepository
 import com.padguard.parent.domain.repository.PolicyRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * 设备管理 ViewModel
- * 承载：设备台账列表（实时流）、四种接入方式（扫码/配对码/局域网发现/Excel 导入）、
- * 重命名与解绑（增删改查）。
+ * 接入会话的界面状态。
+ *
+ * 单一真相源：二维码 Tab 与配对码 Tab 读的是**同一个** [Active.enrollment]，
+ * 因此两者永远同源 —— 这是"二维码里的码和显示的配对码不是一个"在端上的根治点
+ * （服务端侧由接入会话实体保证，见 EnrollmentService）。
+ *
+ * 状态显式可枚举是为了消灭"静默失败"：加载中、失败、进行中、已过期都有对应的界面，
+ * 任何错误都必须落到 [Failed] 并给出重试入口，不允许停留在转圈里。
  */
+sealed interface EnrollmentUi {
+    /** 尚未发起（接入页未打开） */
+    data object Idle : EnrollmentUi
+
+    data object Loading : EnrollmentUi
+
+    /** 失败：必须显示原因 + 重试，不允许静默 */
+    data class Failed(val message: String) : EnrollmentUi
+
+    /**
+     * 已拿到连接信息，等待孩子端接入。
+     * [expired] 由剩余时长推导，界面据此提示"换一个接入码"。
+     */
+    data class Active(val enrollment: Enrollment, val expired: Boolean = false) : EnrollmentUi
+}
+
 data class DeviceManageUiState(
     val toast: String? = null,
     val accessSheetVisible: Boolean = false,
-    // 扫码接入
-    val qrPayload: String? = null,
-    // 配对码接入
-    val pairingCode: String? = null,
+    /** 接入会话：二维码与配对码的唯一来源 */
+    val enrollment: EnrollmentUi = EnrollmentUi.Idle,
     // 局域网发现
     val lanDevices: List<LanDevice> = emptyList(),
     val lanScanning: Boolean = false,
@@ -63,55 +87,104 @@ class DeviceManageViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(DeviceManageUiState())
     val uiState: StateFlow<DeviceManageUiState> = _uiState.asStateFlow()
 
-    // ==================== 接入弹窗 ====================
+    /** 接入监听（推送 + 查询兜底）的生命周期跟随接入页，关闭即取消 */
+    private var enrollmentJob: Job? = null
+
+    // ==================== 接入页 ====================
 
     fun openAccessSheet() {
-        _uiState.value = DeviceManageUiState(accessSheetVisible = true)
-        loadQrPayload()
-        loadPairingCode()
+        _uiState.value = DeviceManageUiState(
+            accessSheetVisible = true,
+            enrollment = EnrollmentUi.Loading
+        )
+        reloadEnrollment()
+        watchEnrollment()
     }
 
     fun closeAccessSheet() {
+        enrollmentJob?.cancel()
+        enrollmentJob = null
         _uiState.value = DeviceManageUiState()
     }
 
-    private fun loadQrPayload() {
+    /** 重新获取接入信息（失败重试 / 过期后换码都走这里） */
+    fun reloadEnrollment() {
+        _uiState.value = _uiState.value.copy(enrollment = EnrollmentUi.Loading)
         viewModelScope.launch {
-            deviceRepository.generateBindQrPayload()
-                .onSuccess { _uiState.value = _uiState.value.copy(qrPayload = it) }
-        }
-    }
-
-    private fun loadPairingCode() {
-        viewModelScope.launch {
-            deviceRepository.generatePairingCode()
-                .onSuccess { _uiState.value = _uiState.value.copy(pairingCode = it) }
-        }
-    }
-
-    /** 家长端扫描被控平板二维码后回调（Mock 实现支持手动输入载荷模拟扫码） */
-    fun bindByQrPayload(payload: String) {
-        viewModelScope.launch {
-            deviceRepository.bindByQrPayload(payload.trim(), alias = null)
-                .onSuccess {
-                    showToast("已接入：${it.name}")
-                    closeAccessSheet()
-                    maybePromptPostBindPassword(it)
+            deviceRepository.openEnrollment()
+                .onSuccess { e -> applyEnrollment(e) }
+                .onFailure { e ->
+                    _uiState.value = _uiState.value.copy(
+                        enrollment = EnrollmentUi.Failed(e.message ?: "无法获取接入信息，请检查网络后重试")
+                    )
                 }
-                .onFailure { showToast(it.message ?: "扫码接入失败") }
         }
     }
 
-    fun bindByPairingCode(code: String) {
+    /** 主动换一个接入码（原码立即作废）：怀疑码已泄露、或孩子端一直绑不上时用 */
+    fun refreshEnrollmentCode() {
         viewModelScope.launch {
-            deviceRepository.bindByPairingCode(code.trim(), alias = null)
-                .onSuccess {
-                    showToast("已接入：${it.name}")
-                    closeAccessSheet()
-                    maybePromptPostBindPassword(it)
-                }
-                .onFailure { showToast(it.message ?: "配对码接入失败") }
+            deviceRepository.refreshEnrollment()
+                .onSuccess { e -> applyEnrollment(e); showToast("已更换接入码，请让孩子端使用新码") }
+                .onFailure { e -> showToast(e.message ?: "换码失败，请稍后重试") }
         }
+    }
+
+    private fun applyEnrollment(e: Enrollment) {
+        _uiState.value = _uiState.value.copy(enrollment = EnrollmentUi.Active(e))
+    }
+
+    /**
+     * 监听接入进展：推送为快路径，查询为兜底。
+     *
+     * 为什么还需要轮询：WS 可能因断线/后台被杀而丢事件，而"孩子到底绑上没"这件事
+     * 必须有确定答案。查询间隔取 3 秒——足够快（家长几乎无感），又不至于明显耗电。
+     */
+    private fun watchEnrollment() {
+        enrollmentJob?.cancel()
+        enrollmentJob = viewModelScope.launch {
+            launch {
+                deviceRepository.observeEnrollmentCompleted()
+                    .collect { event -> onEnrolled(event.deviceId) }
+            }
+            while (isActive) {
+                delay(ENROLLMENT_POLL_INTERVAL_MS)
+                val current = _uiState.value.enrollment as? EnrollmentUi.Active ?: continue
+                val state = deviceRepository.currentEnrollment().getOrNull() ?: continue
+                when (state.state) {
+                    EnrollmentState.BOUND -> state.deviceId?.let { onEnrolled(it) }
+                    EnrollmentState.PENDING -> {
+                        // 会话被换过码（或刚从过期恢复）→ 以服务端为准刷新展示
+                        if (state.sessionId != current.enrollment.sessionId) applyEnrollment(state)
+                    }
+                    EnrollmentState.EXPIRED, EnrollmentState.CANCELLED -> {
+                        if (!current.expired) {
+                            _uiState.value = _uiState.value.copy(
+                                enrollment = EnrollmentUi.Active(state, expired = true)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** 孩子端完成接入：关页、提示、刷新台账、按需引导设置操作密码 */
+    private suspend fun onEnrolled(deviceId: String) {
+        if (_uiState.value.enrollment !is EnrollmentUi.Active) return
+        deviceRepository.getDeviceList()
+            .onSuccess { list ->
+                val device = list.firstOrNull { it.id == deviceId }
+                enrollmentJob?.cancel()
+                enrollmentJob = null
+                _uiState.value = _uiState.value.copy(
+                    accessSheetVisible = false,
+                    enrollment = EnrollmentUi.Idle,
+                    toast = device?.let { "已接入：${it.name}" } ?: "设备已接入"
+                )
+                if (device != null) maybePromptPostBindPassword(device)
+            }
+            .onFailure { e -> showToast(e.message ?: "设备已接入，但刷新设备列表失败") }
     }
 
     fun scanLanDevices() {
@@ -132,9 +205,6 @@ class DeviceManageViewModel @Inject constructor(
                 .onSuccess {
                     showToast("已接入：${it.name}")
                     closeAccessSheet()
-                    _uiState.value = _uiState.value.copy(
-                        lanDevices = _uiState.value.lanDevices.filterNot { d -> d.deviceId == lanDevice.deviceId }
-                    )
                     maybePromptPostBindPassword(it)
                 }
                 .onFailure { showToast(it.message ?: "接入失败") }
@@ -271,5 +341,15 @@ class DeviceManageViewModel @Inject constructor(
 
     private fun showToast(message: String) {
         _uiState.value = _uiState.value.copy(toast = message)
+    }
+
+    override fun onCleared() {
+        enrollmentJob?.cancel()
+        super.onCleared()
+    }
+
+    companion object {
+        /** 接入进展的查询兜底间隔（推送正常时它只是空转一次查询，代价极低） */
+        private const val ENROLLMENT_POLL_INTERVAL_MS = 3_000L
     }
 }

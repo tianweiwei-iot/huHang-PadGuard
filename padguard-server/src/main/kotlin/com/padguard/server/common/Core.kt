@@ -1,6 +1,7 @@
 package com.padguard.server.common
 
 import jakarta.servlet.http.HttpServletResponse
+import org.springframework.dao.OptimisticLockingFailureException
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
@@ -180,6 +181,30 @@ class GlobalExceptionHandler {
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(ApiResponse<Any>(e.code, e.message))
         }
+    }
+
+    /**
+     * 乐观锁冲突：并发写同一条记录时后到者失败。
+     *
+     * 目前唯一带 `@Version` 的实体是接入会话，因此这里的冲突只有一个来源 ——
+     * 两个孩子端几乎同时提交同一个接入码。前一个事务把会话置为 BOUND 并提交，
+     * 后一个事务提交时 `revision` 已不匹配，影响行数为 0，Hibernate 抛本异常、
+     * 整笔事务（含它刚建立的设备台账）回滚。
+     *
+     * 必须翻译成业务语义：落到 [ChildErr.BIND_CODE_EXPIRED]（与"码已被使用"同一错误码），
+     * 孩子端据此提示家长刷新接入码重试；若让它冒到兜底分支变成 500，
+     * 用户看到的是"服务器错误"，而真实原因只是慢了一步。
+     */
+    @ExceptionHandler(OptimisticLockingFailureException::class)
+    fun handleOptimisticLock(
+        e: OptimisticLockingFailureException,
+        response: HttpServletResponse
+    ): ResponseEntity<*>? {
+        if (!resetIfPossible(response)) return null
+        log.warn("concurrent update conflict, later writer rejected: {}", e.message)
+        return ResponseEntity.status(HttpStatus.OK)
+            .contentType(MediaType.APPLICATION_JSON)
+            .body(DeviceApiResponse<Any>(ChildErr.BIND_CODE_EXPIRED, "接入码已被使用，请在家长端重新获取"))
     }
 
     /**

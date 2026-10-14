@@ -38,19 +38,40 @@ interface DeviceRepository : JpaRepository<Device, String> {
 }
 
 @Repository
-interface BindCodeRepository : JpaRepository<BindCode, String> {
-    /**
-     * 原子抢占：把"未使用且未过期"的码置为已用，返回受影响行数（0 = 没抢到）。
+interface EnrollmentSessionRepository : JpaRepository<EnrollmentSession, String> {
+    /*
+     * 这里刻意**没有**"按短码抢占会话"的条件 UPDATE。
      *
-     * 为什么不能先查后写：并发下两个请求会同时读到 `used=false`，然后都判定自己抢到了，
-     * 结果是同一个码绑两次。只有带条件的 UPDATE 能真正排他 —— 数据库保证同一行的
-     * 两次 UPDATE 串行生效，第二次的影响行数必为 0。
+     * 曾经有过，并且它制造了一个线上缺陷：`@Modifying` 的批量 UPDATE 绕过持久化上下文，
+     * 数据库里 state 已变成 BOUND，但同一个事务里缓存的实体仍是 PENDING；
+     * 随后为回写 device_id 而执行的 save() 在提交时做脏检查，把整行写回，
+     * 于是 state 被覆盖回 PENDING —— 设备绑上了，家长端却永远停在"等待孩子扫码"。
+     *
+     * 现在状态迁移只在实体上做，排他性由 [EnrollmentSession.revision]（@Version）保证：
+     * 两个孩子端同时提交同一短码时，后提交者的 `update ... where id=? and revision=?`
+     * 影响行数为 0，触发乐观锁冲突并回滚整笔事务。写入路径只剩一条，不可能再互相覆盖。
      */
-    @Modifying
-    @Query("update BindCode b set b.used = true where b.code = :code and b.used = false and b.expiresAt >= :now")
-    fun claimIfUnused(@Param("code") code: String, @Param("now") now: Long): Int
 
-    fun existsByCode(code: String): Boolean
+    fun findByPairingCode(code: String): EnrollmentSession?
+
+    /** 家长名下最近一条仍处于 PENDING 的会话（同一家长同时只应有一个进行中的接入） */
+    fun findFirstByUserIdAndStateOrderByCreatedAtDesc(userId: String, state: String): EnrollmentSession?
+
+    /** 家长名下最近一条会话（无论状态）：家长端查询接入进展的兜底入口 */
+    fun findFirstByUserIdOrderByCreatedAtDesc(userId: String): EnrollmentSession?
+
+    fun existsByPairingCode(code: String): Boolean
+
+    /**
+     * 清理已结束的历史会话（保留最近 [com.padguard.server.service.EnrollmentService] 定义的窗口）。
+     *
+     * 会话不清理会让短码唯一约束的碰撞概率随存量单调上升，最终表现为"生成接入码失败"。
+     */
+    // flushAutomatically：删除前先把上下文中未落库的会话变更写下去，
+    // 否则"刚被标记为终态、尚未 flush"的会话会躲过这次清理条件。
+    @Modifying(flushAutomatically = true)
+    @Query("delete from EnrollmentSession s where s.state <> 'PENDING' and s.createdAt < :before")
+    fun purgeTerminalBefore(@Param("before") before: Long): Int
 }
 
 @Repository

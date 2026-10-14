@@ -15,6 +15,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
@@ -291,46 +292,31 @@ class LocalDataSource @Inject constructor(
 
     // ==================== DeviceRepository：设备接入（Mock） ====================
 
-    override suspend fun generateBindQrPayload(): Result<String> {
-        val token = (100000..999999).random().toString()
-        return Result.success("$BIND_PAYLOAD_SCHEME?token=$token&t=${System.currentTimeMillis()}")
+    /** Mock 的接入会话：二维码与接入码同源，与真实实现保持同一形状 */
+    private fun mockEnrollment(): Enrollment {
+        val code = (100000..999999).random().toString()
+        val now = System.currentTimeMillis()
+        return Enrollment(
+            sessionId = "mock-$code",
+            pairingCode = code,
+            qrPayload = "padguard://bind?code=$code",
+            state = EnrollmentState.PENDING,
+            deviceId = null,
+            expiresAt = now + 600_000,
+            serverNow = now,
+            receivedAtRealtime = android.os.SystemClock.elapsedRealtime()
+        )
     }
 
-    override suspend fun bindByQrPayload(payload: String, alias: String?): Result<Device> {
-        val hardwareId = parseBindPayload(payload)
-            ?: return Result.failure(IllegalArgumentException("二维码无效，请扫描被控平板展示的接入码"))
-        if (hardwareIdExists(hardwareId)) {
-            return Result.failure(IllegalStateException("设备 $hardwareId 已接入"))
-        }
-        return Result.success(newBoundDevice(hardwareId, alias, null, null))
-    }
+    override suspend fun openEnrollment(): Result<Enrollment> = Result.success(mockEnrollment())
 
-    /** 解析 padguard://bind?deviceId=...&token=... 载荷，返回硬件设备 ID */
-    private fun parseBindPayload(payload: String): String? {
-        if (!payload.startsWith(BIND_PAYLOAD_SCHEME)) return null
-        val query = payload.substringAfter("?", "")
-        val params = query.split("&").mapNotNull { pair ->
-            val kv = pair.split("=", limit = 2)
-            if (kv.size == 2) kv[0] to kv[1] else null
-        }.toMap()
-        return params["deviceId"]?.takeIf { it.isNotBlank() }
-            // 家长端自生成的待扫码载荷只有 token，此时用 Mock 硬件 ID 模拟被控端回报
-            ?: params["token"]?.let { "PAD_SCAN_$it" }
-    }
+    override suspend fun currentEnrollment(): Result<Enrollment?> = Result.success(null)
 
-    override suspend fun generatePairingCode(): Result<String> =
-        Result.success((100000..999999).random().toString())
+    override suspend fun refreshEnrollment(): Result<Enrollment> = Result.success(mockEnrollment())
 
-    override suspend fun bindByPairingCode(code: String, alias: String?): Result<Device> {
-        if (!code.matches(Regex("\\d{6}"))) {
-            return Result.failure(IllegalArgumentException("配对码为 6 位数字，请重新输入"))
-        }
-        val hardwareId = "PAD_PAIR_$code"
-        if (hardwareIdExists(hardwareId)) {
-            return Result.failure(IllegalStateException("该配对码对应设备已接入"))
-        }
-        return Result.success(newBoundDevice(hardwareId, alias, null, null))
-    }
+    override suspend fun cancelEnrollment(): Result<Unit> = Result.success(Unit)
+
+    override fun observeEnrollmentCompleted(): Flow<EnrollmentCompleted> = emptyFlow()
 
     override suspend fun discoverLanDevices(): Result<List<LanDevice>> =
         Result.success(mockLanDevices.filter { !hardwareIdExists(it.deviceId) })

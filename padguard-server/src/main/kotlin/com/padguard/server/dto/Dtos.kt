@@ -45,20 +45,25 @@ data class UserDto(
 data class LoginResponse(val user: UserDto, val token: String, val refreshToken: String)
 data class TokenResponse(val token: String, val refreshToken: String)
 
-data class BindCodeResponse(val bindCode: String, val expiresAt: Long)
-
 /**
- * 家长端轮询绑定码状态。
+ * 家长端一次请求拿到的**完整接入信息**。
  *
- * [state] 三态：`PENDING` 尚未完成、`BOUND` 已绑定、`EXPIRED` 已过期或无效。
- * 区分三态而不是只回"用没用过"，是为了让家长端能分辨"孩子还没扫"与"码已失效"——
- * 否则家长会对着一个已经过期的码反复重试，却只看到一句无差别的"等待超时"。
+ * 二维码与配对码在这里是同一个会话的两种呈现（[pairingCode] 与其封装出的 [qrPayload]），
+ * 而不是两次请求各自生成的东西 —— 家长端照此渲染，就不可能出现
+ * "二维码里的码和显示的配对码不是同一个"。
+ *
+ * [serverNow] 由服务端下发：家长端据此计算剩余有效期，不依赖本机时钟
+ * （终端时钟不准时，本地算出的倒计时会离谱地偏大或偏小）。
  */
-data class BindCodeStatusResponse(
+data class EnrollmentDto(
+    val sessionId: String,
+    val pairingCode: String,
+    val qrPayload: String,
     val state: String,
-    /** 绑定到的设备 ID；`state=BOUND` 时必有值 */
+    /** `state=BOUND` 时必有值 */
     val deviceId: String?,
-    val expiresAt: Long
+    val expiresAt: Long,
+    val serverNow: Long
 )
 
 // ---------------------------------------------------------------- 计费 / 订阅

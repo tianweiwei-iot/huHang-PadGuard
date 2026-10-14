@@ -32,7 +32,7 @@ import java.util.concurrent.ConcurrentHashMap
 class DeviceService(
     private val deviceRepository: DeviceRepository,
     private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
-    private val bindCodeService: BindCodeService,
+    private val enrollmentService: EnrollmentService,
     private val policyService: PolicyService,
     private val webSocketPush: WebSocketPushService,
     private val mqttGateway: MqttGateway,
@@ -78,15 +78,16 @@ class DeviceService(
      * - 码被消费但台账没建成 → 孩子端拿到凭据却无法上报，家长端停在"等待扫码"直到超时；
      * - 台账建成但没回写 deviceId → 家长端轮询状态永远是 PENDING，同样判定超时，
      *   而孩子端其实已经绑上并开始心跳（这正是"绑定未成功"的成因之一）。
-     * 回滚后码仍是未使用状态，家长重新生成即可，不会留下"废码"。
+     * 回滚后接入会话仍是 PENDING，家长端刷新即可继续，不会留下"废码"。
      */
     @Transactional
     fun bindChild(req: BindRequest): BindResult {
-        val userId = bindCodeService.consume(req.bindCode)
-        val result = bindChildWithUser(req, userId)
-        // 绑定结果回写到绑定码上：家长端靠轮询这个码判定成功。
+        // req.bindCode 就是接入会话的短码：抢占会话 -> 确定归属家长 -> 消费结果回写到会话
+        val claim = enrollmentService.consume(req.bindCode)
+        val result = bindChildWithUser(req, claim.userId)
+        // 绑定结果回写到**会话**上（而不是凭证上）：家长端靠这个会话的状态判定成功。
         // 重绑已存在设备时 deviceId 不变，只看设备列表是判不出来"这次绑上了"的。
-        bindCodeService.markBound(req.bindCode, result.deviceId)
+        enrollmentService.markBound(claim.sessionId, result.deviceId)
         return result
     }
 
@@ -303,11 +304,6 @@ class DeviceService(
 
     fun listDevices(userId: String): List<DeviceDto> =
         deviceRepository.findByUserId(userId).map { it.toDto() }
-
-    fun generateBindCode(userId: String) = bindCodeService.generate(userId)
-
-    /** 家长端轮询"这个绑定码被孩子端用掉了没、绑到了哪台设备" */
-    fun bindCodeStatus(code: String, userId: String) = bindCodeService.statusOf(code, userId)
 
     fun getDevice(userId: String, deviceId: String): DeviceDto {
         val dev = deviceRepository.findById(deviceId).orElse(null)

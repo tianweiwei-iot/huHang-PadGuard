@@ -1,5 +1,6 @@
 package com.padguard.server.service
 
+import com.padguard.server.common.SERVER_ZONE
 import com.padguard.server.repository.LocationTrackRepository
 import com.padguard.server.repository.MediaTaskRepository
 import com.padguard.server.repository.ScreenshotRepository
@@ -40,7 +41,9 @@ class RetentionCleanup(
     private val log = LoggerFactory.getLogger(RetentionCleanup::class.java)
 
     /** 定位轨迹保留天数。取 90 天：家长端轨迹回看按月计，90 天覆盖完整季度视角。 */
-    @Scheduled(cron = "0 30 4 * * *")
+    // zone 显式钉死北京时间：不带 zone 的 cron 跟随 JVM 默认时区（容器未设 TZ 时为 UTC），
+    // "凌晨 4:30 清理"会漂移到北京时间中午，IO 高峰执行清理且与 UsageLogCleanup 一并压到白天。
+    @Scheduled(cron = "0 30 4 * * *", zone = SERVER_ZONE)
     fun cleanup() {
         cleanupLocationTracks()
         cleanupScreenshots()
@@ -49,7 +52,7 @@ class RetentionCleanup(
     }
 
     /** 每 30 分钟检查一次磁盘水位；超阈值打 error（日志告警接入点）。 */
-    @Scheduled(cron = "0 */30 * * * *")
+    @Scheduled(cron = "0 */30 * * * *", zone = SERVER_ZONE)
     fun checkDiskUsage() {
         runCatching {
             val root = File("/")

@@ -166,33 +166,39 @@ fun genPassword(systemSettingRepository: SystemSettingRepository, om: ObjectMapp
 fun isDevProfile(env: Environment): Boolean =
     env.activeProfiles.any { it.equals("local", true) || it.equals("dev", true) }
 
+/**
+ * 北京时间下的 "yyyy-MM" 分桶键。
+ *
+ * 后台营收统计的"本月/近 N 月"必须按服务端统一时区切月，不能跟着 JVM 默认时区走：
+ * 容器未锁 TZ 时按月边界会整体偏移，月末最后一天与月初第一天的订单会被算进相邻月份，
+ * 表现为"后台月收入与订单明细对不上"，且这类差异只在月末出现，极难复现。
+ */
+private fun monthKey(ts: Long): String =
+    Instant.ofEpochMilli(ts).atZone(SERVER_ZONE_ID).toLocalDate().let { "%04d-%02d".format(it.year, it.monthValue) }
+
 fun monthPaidSum(paymentOrderRepository: PaymentOrderRepository): Int {
-    val cal = Calendar.getInstance()
-    val y = cal.get(Calendar.YEAR); val m = cal.get(Calendar.MONTH)
+    val thisMonth = monthKey(System.currentTimeMillis())
     return paymentOrderRepository.findAllByOrderByCreatedAtDesc()
-        .filter { it.status == OrderStatus.PAID.name && inMonth(it.createdAt, y, m) }
+        .filter { it.status == OrderStatus.PAID.name && monthKey(it.createdAt) == thisMonth }
         .sumOf { it.amountFen }
 }
 
 fun inMonth(ts: Long, y: Int, m: Int): Boolean {
-    val cal = Calendar.getInstance().apply { timeInMillis = ts }
-    return cal.get(Calendar.YEAR) == y && cal.get(Calendar.MONTH) == m
+    // m 是 Calendar.MONTH 语义（0 基），与传入方保持一致后统一换算。
+    return monthKey(ts) == "%04d-%02d".format(y, m + 1)
 }
 
 fun lastMonthsRevenue(paymentOrderRepository: PaymentOrderRepository, n: Int): List<RevenueMonth> {
     val orders = paymentOrderRepository.findAllByOrderByCreatedAtDesc().filter { it.status == OrderStatus.PAID.name }
     val buckets = TreeMap<String, RevenueMonthAccum>()
-    val now = Calendar.getInstance()
+    val now = Instant.ofEpochMilli(System.currentTimeMillis()).atZone(SERVER_ZONE_ID).toLocalDate()
     for (i in (n - 1) downTo 0) {
-        val c = now.clone() as Calendar
-        c.add(Calendar.MONTH, -i)
-        val key = "%04d-%02d".format(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1)
+        val d = now.minusMonths(i.toLong())
+        val key = "%04d-%02d".format(d.year, d.monthValue)
         buckets[key] = RevenueMonthAccum(key)
     }
     for (o in orders) {
-        val c = Calendar.getInstance().apply { timeInMillis = o.createdAt }
-        val key = "%04d-%02d".format(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1)
-        buckets[key]?.let { acc ->
+        buckets[monthKey(o.createdAt)]?.let { acc ->
             acc.amount += o.amountFen
             acc.newSubs += 1
         }

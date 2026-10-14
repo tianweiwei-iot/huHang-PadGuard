@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.padguard.child.util.DISPLAY_TIME_ZONE
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -137,5 +138,9 @@ fun MessageDetailScreen(
     }
 }
 
+// 显式钉死北京时间：孩子端设备时区被改到非北京时间时，
+// 若跟随设备时区格式化，同一条消息的显示时间会与服务端记录（Asia/Shanghai）错位。
 private fun formatTime(millis: Long): String =
-    SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(millis))
+    SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+        .apply { timeZone = DISPLAY_TIME_ZONE }
+        .format(Date(millis))

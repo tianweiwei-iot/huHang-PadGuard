@@ -92,6 +92,8 @@ padguard-server/mosquitto/passwd
 
 # ===================== 服务端运行副本（59MB jar，构建产物不入��） =====================
 padguard-server/deploy/
+# Tomcat 运行期 basedir（含访问日志，*.log 已全局忽略；整目录忽略防非日志文件泄露）
+padguard-server/tomcat-work/
 
 # ===================== 本地临时调试目录 / 第三方大文件 =====================
 .pgtmp/

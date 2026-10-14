@@ -9,6 +9,7 @@ import com.padguard.server.service.CommandKey
 import com.padguard.server.service.CommandService
 import com.padguard.server.service.CommandType
 import com.padguard.server.service.DeviceService
+import com.padguard.server.service.EnrollmentService
 import com.padguard.server.service.GroupService
 import com.padguard.server.service.PolicyExtensionService
 import com.padguard.server.service.PolicyService
@@ -51,17 +52,46 @@ class AuthController(private val authService: AuthService, private val rateLimit
 @RequestMapping("/v1/devices")
 class ParentDeviceController(
     private val deviceService: DeviceService,
-    private val groupService: GroupService
+    private val groupService: GroupService,
+    private val enrollmentService: EnrollmentService
 ) {
 
-    @PostMapping("/bind-code")
-    fun bindCode(@RequestAttribute("userId") userId: String) =
-        ApiResponse.ok(deviceService.generateBindCode(userId))
+    /**
+     * 打开（或复用）一次设备接入，一次性返回**完整连接信息**：
+     * 会话 ID、6 位接入码、二维码载荷、有效期。
+     *
+     * 二维码与接入码在这里同源（同一个会话的两种呈现），家长端无需、也不应该
+     * 为两个展示位置各发一次请求 —— 那正是"二维码里的码和显示的配对码不是同一个"的成因。
+     * 幂等：同一家长名下已有进行中的会话时直接复用，避免"退出去再进来"把孩子手里的码作废。
+     */
+    @PostMapping("/enrollments")
+    fun openEnrollment(@RequestAttribute("userId") userId: String) =
+        ApiResponse.ok(enrollmentService.open(userId))
+
+    /**
+     * 查询本次接入的当前状态。
+     *
+     * 这是 WS 推送之外的必然正确兜底：推送可能因断线丢失，但查询永远能拿到会话的真实状态。
+     * 返回 null 表示当前没有任何接入会话。
+     */
+    @GetMapping("/enrollments/current")
+    fun currentEnrollment(@RequestAttribute("userId") userId: String) =
+        ApiResponse.ok(enrollmentService.current(userId))
+
+    /** 换一个接入码（原码立即作废）：家长怀疑码已泄露、或孩子端一直绑不上时使用 */
+    @PostMapping("/enrollments/refresh")
+    fun refreshEnrollment(@RequestAttribute("userId") userId: String) =
+        ApiResponse.ok(enrollmentService.refresh(userId))
+
+    /** 作废本次接入（家长主动放弃） */
+    @DeleteMapping("/enrollments/current")
+    fun cancelEnrollment(@RequestAttribute("userId") userId: String) =
+        run { enrollmentService.cancel(userId); ApiResponse.ok<Any?>(null) }
 
     /**
      * 批量导入设备台账（Excel / CSV 解析后的行）。
      *
-     * 逐个 устройства 独立处理，失败行回传原因，家长能直接对着表格改。
+     * 逐行独立处理，失败行回传原因，家长能直接对着表格改。
      * 与绑定共用同一套"按 deviceSn 复用台账"的口径，导入进来的设备和扫码绑定来的没有区别。
      */
     @PostMapping("/import")
@@ -90,18 +120,6 @@ class ParentDeviceController(
         @RequestAttribute("userId") userId: String,
         @RequestBody req: com.padguard.server.dto.LanBindRequest
     ) = ApiResponse.ok(deviceService.bindLanDevice(userId, req))
-
-    /**
-     * 家长端轮询绑定码状态，判定孩子端是否已完成绑定。
-     *
-     * 不能直接让家长端"等设备列表里出现新 deviceId"：重绑同一台平板时
-     * 服务端按硬件指纹复用台账，deviceId 不变，那样判定必然超时。
-     */
-    @GetMapping("/bind-code/{code}/status")
-    fun bindCodeStatus(
-        @RequestAttribute("userId") userId: String,
-        @PathVariable code: String
-    ) = ApiResponse.ok(deviceService.bindCodeStatus(code, userId))
 
     @GetMapping
     fun list(@RequestAttribute("userId") userId: String, @RequestParam groupId: String? = null) =

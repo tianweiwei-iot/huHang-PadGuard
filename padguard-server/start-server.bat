@@ -112,4 +112,11 @@ REM --spring.mvc.async.request-timeout=600000
 REM      Fixes the live screen being cut every 30 seconds: the live stream is a
 REM      long-lived connection, and Spring MVC's default 30s async timeout kills
 REM      it even while frames are flowing normally.
-"%JAVA_EXE%" -Xmx512m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -Dlogging.register-bridge-handler=false -jar deploy/app.jar --spring.profiles.active=local --server.port=8090 --spring.datasource.url="jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE" --spring.mvc.async.request-timeout=600000 > server_restart.log 2>&1
+REM -Duser.timezone=Asia/Shanghai
+REM     家庭/本机部署时链路中的重要一环：不加的话 JVM 默认时区取 Windows 系统时区，
+REM     家长电脑时区一旦不是北京时间，后台时间显示、统计日切、cron 清理任务全部偏 8 小时。
+REM     显式钉死后，无论本机系统时区如何（哪怕装机默认 UTC），服务端恒按北京时间运行。
+REM --padguard.amap.web-key=%PADGUARD_AMAP_WEB_KEY%
+REM     高德 Web 服务 Key（逆地理编码）。从用户环境变量读取，不在脚本中写明文；
+REM     缺省为空时服务端不做地址反查，定位坐标照常上报。运维用 setx 注入一次即可持久生效。
+"%JAVA_EXE%" -Xmx512m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -Dlogging.register-bridge-handler=false -Duser.timezone=Asia/Shanghai -jar deploy/app.jar --spring.profiles.active=local --server.port=8090 --spring.datasource.url="jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE" --spring.mvc.async.request-timeout=600000 --padguard.amap.web-key=%PADGUARD_AMAP_WEB_KEY% > server_restart.log 2>&1

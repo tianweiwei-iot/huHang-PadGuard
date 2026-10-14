@@ -1,0 +1,16 @@
+-- 接入会话的乐观锁版本号。
+--
+-- 为什么加这一列（对应一个线上真实复现的缺陷）：
+-- 接入会话的状态迁移原先由一条 `@Modifying` 条件 UPDATE 完成
+-- （`update enrollment_sessions set state='BOUND' where pairing_code=? and state='PENDING'`），
+-- 而绑定结果（device_id / bound_at）由另一处实体 `save()` 回写。两条写路径指向同一行，
+-- 而 `@Modifying` 不经过持久化上下文 —— 缓存中的实体仍是 PENDING，
+-- 随后回写 device_id 的 save() 在提交时做脏检查，把整行（含 state）写回，
+-- 把刚被 SQL 改成 BOUND 的状态覆盖回 PENDING。
+-- 结果：设备确实绑上了、device_id 也回写了，家长端查询却永远显示"等待孩子扫码"。
+--
+-- 加列后状态迁移统一由实体承担，Hibernate 提交时发出
+-- `update ... set state='BOUND', revision=revision+1 where id=? and revision=?`，
+-- 并发下后提交者影响行数为 0 → 乐观锁冲突 → 整笔事务回滚。
+-- 排他与原先那条条件 UPDATE 等价，但写路径只剩一条，不可能再互相覆盖。
+ALTER TABLE enrollment_sessions ADD COLUMN revision BIGINT NOT NULL DEFAULT 0;

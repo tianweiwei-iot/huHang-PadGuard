@@ -1,5 +1,7 @@
 package com.padguard.parent.data.model
 
+import com.padguard.parent.domain.model.Enrollment
+import com.padguard.parent.domain.model.EnrollmentState
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 
@@ -109,26 +111,42 @@ data class DeviceDto(
     val guardPasswordSet: Boolean? = null
 )
 
-/** 家长端生成 6 位一次性绑定码响应 */
-@JsonClass(generateAdapter = true)
-data class BindCodeResponse(
-    val bindCode: String,
-    val expiresAt: Long
-)
-
 /**
- * 绑定码状态：家长端轮询用。
+ * 服务端一次返回的**完整接入信息**。
  *
- * [state] 三态：`PENDING` 孩子端尚未完成、`BOUND` 已绑定、`EXPIRED` 码已失效。
- * 区分三态才能给出准确提示 —— 否则"孩子还没扫"和"码已过期"都只能报一句"等待超时"，
- * 家长会对着一个已经失效的码反复重试。
+ * 二维码载荷与配对码在这里同源（同一会话的两种呈现），家长端照此渲染即可，
+ * 不再需要为两个展示位置各发一次请求 —— 那正是"二维码和配对码不是同一个码"的成因。
+ *
+ * [serverNow] 由服务端下发，用于计算剩余有效期：终端时钟不准时，
+ * 本地算出的倒计时会离谱地偏大或偏小。
  */
 @JsonClass(generateAdapter = true)
-data class BindCodeStatusResponse(
+data class EnrollmentDto(
+    val sessionId: String,
+    val pairingCode: String,
+    val qrPayload: String,
     val state: String,
     val deviceId: String?,
-    val expiresAt: Long
-)
+    val expiresAt: Long,
+    val serverNow: Long
+) {
+    /**
+     * 落域：记录收到快照的**单调时刻**，剩余时长据此计算。
+     *
+     * 用 elapsedRealtime 而不是 currentTimeMillis：后者会随用户改系统时间、NTP 校时跳变，
+     * 倒计时会突然多出几小时或直接归零。
+     */
+    fun toDomain(): Enrollment = Enrollment(
+        sessionId = sessionId,
+        pairingCode = pairingCode,
+        qrPayload = qrPayload,
+        state = EnrollmentState.of(state),
+        deviceId = deviceId,
+        expiresAt = expiresAt,
+        serverNow = serverNow,
+        receivedAtRealtime = android.os.SystemClock.elapsedRealtime()
+    )
+}
 
 @JsonClass(generateAdapter = true)
 data class BindDeviceRequest(
