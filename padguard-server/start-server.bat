@@ -119,4 +119,11 @@ REM     显式钉死后，无论本机系统时区如何（哪怕装机默认 UT
 REM --padguard.amap.web-key=%PADGUARD_AMAP_WEB_KEY%
 REM     高德 Web 服务 Key（逆地理编码）。从用户环境变量读取，不在脚本中写明文；
 REM     缺省为空时服务端不做地址反查，定位坐标照常上报。运维用 setx 注入一次即可持久生效。
+REM
+REM     兜底：若当前会话未继承到该环境变量（老终端 / IDE 集成终端不会在每次命令时
+REM     重新读取 HKCU 注册表），直接从注册表取出此前 setx 持久化的值，避免以空 Key 启动
+REM     导致逆地理编码静默失效。Key 仍不写死在脚本里，只在此处读取。
+if not defined PADGUARD_AMAP_WEB_KEY (
+    for /f "usebackq delims=" %%k in (`powershell -NoProfile -Command "(Get-ItemProperty -Path 'HKCU:\Environment' -Name PADGUARD_AMAP_WEB_KEY -ErrorAction SilentlyContinue).PADGUARD_AMAP_WEB_KEY"`) do set "PADGUARD_AMAP_WEB_KEY=%%k"
+)
 "%JAVA_EXE%" -Xmx512m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -Dlogging.register-bridge-handler=false -Duser.timezone=Asia/Shanghai -jar deploy/app.jar --spring.profiles.active=local --server.port=8090 --spring.datasource.url="jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE" --spring.mvc.async.request-timeout=600000 --padguard.amap.web-key=%PADGUARD_AMAP_WEB_KEY% > server_restart.log 2>&1
