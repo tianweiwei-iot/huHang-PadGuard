@@ -47,3 +47,56 @@ if (projectPath.all { it.code < 0x80 }) {
         layout.buildDirectory.set(File(buildRoot, moduleKey))
     }
 }
+
+// ---------------------------------------------------------------------------
+// 构建互斥：禁止同一项目被并发构建（2026-10-14 加，针对实际发生的构建故障）
+//
+// 与家长端同一处故障、同一套处理。Kotlin 增量编译缓存（caches-jvm 下
+// PersistentEnumerator 系列的 *.tab）**不是并发安全的**：同一模块被两次构建并发
+// 访问即写坏，报
+//   CorruptedException: PersistentEnumerator storage corrupted ...source-to-classes.tab
+// 回退全量编译时又因输出目录被另一进程占用而无法清空
+//   java.io.IOException: Could not delete ...\tmp\kotlin-classes\debug\com
+// 构建彻底中断且无法自愈。本端曾于 2026-10-09 实测命中该故障（core-data 模块）。
+//
+// 处理：OS 级文件锁把同一项目的构建串行化，后发构建排队等待；锁随进程退出自动
+// 释放，不会永久死锁；仅在执行构建任务时加锁，IDE 的 Gradle 同步不受影响。
+// 临时绕过（不推荐）：./gradlew <task> -Ppadguard.buildLock=off
+// ---------------------------------------------------------------------------
+run {
+    val lockRoot = rootDir
+    val lockLogger = logger
+    val lockEnabled = providers.gradleProperty("padguard.buildLock").orNull != "off"
+    val lockFile = File(lockRoot, ".gradle/padguard-build.lock")
+    gradle.taskGraph.whenReady {
+        if (!lockEnabled) return@whenReady
+        lockFile.parentFile?.mkdirs()
+        val raf = java.io.RandomAccessFile(lockFile, "rw")
+        val deadline = System.currentTimeMillis() + 15 * 60 * 1000L
+        var held: java.nio.channels.FileLock? = null
+        var notified = false
+        while (held == null) {
+            held = runCatching { raf.channel.tryLock() }.getOrNull()
+            if (held != null) break
+            if (!notified) {
+                lockLogger.lifecycle(
+                    "PadGuard: 同一项目已有构建在运行，本次构建排队等待，" +
+                        "避免 Kotlin 增量编译缓存被并发写入而损坏…"
+                )
+                notified = true
+            }
+            if (System.currentTimeMillis() > deadline) {
+                raf.close()
+                throw GradleException(
+                    "等待构建锁超时（15 分钟）：$lockFile。若确认没有其它构建在运行，" +
+                        "删除该文件后重试；也可用 -Ppadguard.buildLock=off 临时绕过。"
+                )
+            }
+            Thread.sleep(1000L)
+        }
+        gradle.buildFinished {
+            runCatching { held?.release() }
+            runCatching { raf.close() }
+        }
+    }
+}

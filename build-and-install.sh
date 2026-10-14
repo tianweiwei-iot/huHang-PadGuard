@@ -15,19 +15,23 @@
 # =============================================================================
 set -e
 
-# 当前项目根（与源码同盘符；纯 ASCII 构建输出盘见下方 APK 路径说明）
-CHILD_DIR="D:/Projects/PCS/V1.0.261013/护航成长"
-PARENT_DIR="D:/Projects/PCS/V1.0.261013/护航控制端"
+# 项目根：由脚本自身位置推导（本脚本与两个 Android 工程同级）。
+# 不写死盘符与绝对路径——历史上这里写死过 D:/Projects/PCS/...，项目迁到 E: 盘后
+# 整个脚本静默失效（引用路径全部不存在），排查成本很高。
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHILD_DIR="$ROOT/护航成长"
+PARENT_DIR="$ROOT/护航控制端"
+PROJECT_DRIVE="$(printf '%s' "$ROOT" | cut -c1)"
 
 # 孩子端根 build.gradle.kts 把「含中文路径」的构建产物重定向到 <盘符>:/builds/padguard，
-# :app 模块的 moduleKey 为 "app"，故产物固定在 D:/builds/padguard/app。
+# :app 模块的 moduleKey 为 "app"，故产物固定在 <盘符>:/builds/padguard/app。
 # 家长端未重定向，沿用默认 build/ 目录（跟随 PARENT_DIR）。
-CHILD_APK="D:/builds/padguard/app/outputs/apk/release/app-release.apk"
-PARENT_APK="D:/Projects/PCS/V1.0.261013/护航控制端/app/build/outputs/apk/release/app-release.apk"
+CHILD_APK="$PROJECT_DRIVE:/builds/padguard/app/outputs/apk/release/app-release.apk"
+PARENT_APK="$PARENT_DIR/app/build/outputs/apk/release/app-release.apk"
 
-DIST="D:/Projects/PCS/V1.0.261013/发布包/安装包-最新"
-STEP3="D:/Projects/PCS/V1.0.261013/发布包/第3步-孩子平板-护航成长.apk"
-STEP2="D:/Projects/PCS/V1.0.261013/发布包/第2步-家长手机-护航控制端.apk"
+DIST="$ROOT/发布包/安装包-最新"
+STEP3="$ROOT/发布包/第3步-孩子平板-护航成长.apk"
+STEP2="$ROOT/发布包/第2步-家长手机-护航控制端.apk"
 
 # 若环境变量 AMAP_KEY 已就绪，注入家长端 release 构建（避免定位页白屏/无底图）。
 AMAP_ARG=""

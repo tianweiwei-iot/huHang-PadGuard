@@ -28,6 +28,7 @@ import com.amap.api.maps.model.PolylineOptions
 import com.padguard.parent.domain.model.GeofenceConfig
 import com.padguard.parent.domain.model.LocationInfo
 import com.padguard.parent.domain.model.MapViewMode
+import kotlinx.coroutines.delay
 
 /**
  * 高德真实底图（定位页地图区域）。
@@ -47,12 +48,15 @@ internal fun AmapMapView(
     geofences: List<GeofenceConfig>,
     track: List<LocationInfo>,
     viewMode: MapViewMode,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 地图加载失败（密钥无效 / SHA1 绑定不符 / 网络受限）时的回调，供调用方回退占位底图。 */
+    onMapFailed: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val mapView = remember { MapView(context) }
     var destroyed by remember { mutableStateOf(false) }
+    var loaded by remember { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -67,6 +71,13 @@ internal fun AmapMapView(
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
+        // 关键修复：本 Composable 挂载时宿主（Activity）往往早已 RESUMED，
+        // LifecycleEventObserver 只回调"后续"事件，收不到 ON_RESUME，导致 onResume() 永不调用、
+        // MapView 只 onCreate 不 onResume → 高德底图永远灰屏、加载不出瓦片。
+        // 因此挂载时若当前状态已达 RESUMED，必须手动补齐 onResume。
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            mapView.onResume()
+        }
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             if (!destroyed) {
@@ -79,9 +90,20 @@ internal fun AmapMapView(
     AndroidView(
         modifier = modifier,
         factory = {
-            mapView.apply { onCreate(Bundle()) }
+            mapView.apply {
+                onCreate(Bundle())
+                // 底图真正就绪的回调：用于判定"加载成功"；看门狗据此区分成功与失败。
+                map.setOnMapLoadedListener { loaded = true }
+            }
         }
     )
+
+    // 看门狗：若 8 秒内底图始终未就绪（密钥无效 / SHA1 不符 / 网络受限等），
+    // 通知调用方回退到示意占位图并显示明确提示，避免"静默灰屏"让用户以为功能坏了。
+    LaunchedEffect(mapView) {
+        delay(8_000)
+        if (!loaded) onMapFailed()
+    }
 
     // 高德 MapView 通过 `map` 属性同步获取 AMap 实例（无 getMapAsync）；
     // 数据变化时重绘（先 clear 再叠加），保证设备标记 / 围栏 / 轨迹随最新状态刷新。

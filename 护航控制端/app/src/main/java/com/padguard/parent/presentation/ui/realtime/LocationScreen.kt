@@ -42,7 +42,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -194,19 +196,23 @@ private fun DeviceLocationCard(
         val context = LocalContext.current
         // 仅在「已配置高德 Key 且用户选中高德」时使用真实底图，否则回退等距投影占位图。
         val useRealMap = remember(provider) { readAmapKey(context).isNotBlank() && provider == MapProvider.AMAP }
+        // 真实底图加载失败时（密钥无效/SHA1 不符/网络受限）回退占位图；切换地图源时重置。
+        var amapFailed by remember(provider) { mutableStateOf(false) }
+        val showRealMap = useRealMap && !amapFailed
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(240.dp)
                 .clip(RoundedCornerShape(12.dp))
         ) {
-            if (useRealMap) {
+            if (showRealMap) {
                 AmapMapView(
                     location = location,
                     geofences = geofences,
                     track = emptyList(),
                     viewMode = viewMode,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    onMapFailed = { amapFailed = true }
                 )
             } else {
                 GeofenceMapCanvas(
@@ -234,13 +240,17 @@ private fun DeviceLocationCard(
             }
         }
         Text(
-            text = if (useRealMap) {
-                "地图由高德提供，坐标为 GCJ-02；设备 GPS（WGS-84）已做偏移转换后绘制；绿色圆圈为各安全区域。"
-            } else {
-                "未配置高德地图 Key，当前为示意占位图；配置 Key 后将显示真实底图。"
+            text = when {
+                useRealMap && amapFailed ->
+                    "真实底图加载失败（高德 Key 无效 / 包名或 SHA1 绑定不符 / 网络受限），已回退示意占位图。请检查高德控制台 Key 配置。"
+                useRealMap ->
+                    "地图由高德提供，坐标为 GCJ-02；设备 GPS（WGS-84）已做偏移转换后绘制；绿色圆圈为各安全区域。"
+                else ->
+                    "未配置高德地图 Key，当前为示意占位图；配置 Key 后将显示真实底图。"
             },
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            color = if (useRealMap && amapFailed) PadGuardColors.WarningRed.copy(alpha = 0.8f)
+            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
             modifier = Modifier.padding(top = 8.dp)
         )
 
@@ -269,6 +279,23 @@ private fun DeviceLocationCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
             )
+            // 新鲜度提示：坐标采集时间距现在过久，或本就是缓存降级点，明确告知家长"可能已过时/不准"。
+            val ageMinutes = ((System.currentTimeMillis() - location.timestamp) / 60_000).toInt()
+            val stale = ageMinutes > 2 || location.fresh == false
+            if (stale) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = buildString {
+                        if (ageMinutes > 2) append("位置可能已变化（${ageMinutes} 分钟前采集）")
+                        if (location.fresh == false) {
+                            if (ageMinutes > 2) append(" · ")
+                            append("缓存位置，可能不准确")
+                        }
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = PadGuardColors.WarningRed.copy(alpha = 0.85f)
+                )
+            }
         }
 
         // 设备电量（与位置并列，低电/关机能解释"为何位置有滞后"）
