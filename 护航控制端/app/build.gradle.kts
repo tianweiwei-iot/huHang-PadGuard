@@ -192,6 +192,24 @@ afterEvaluate {
                 )
             }
         }
+    } else {
+        // 头号灰屏诱因守卫：高德「Web 服务 Key」与「Android 平台 Key」是两套、不可互换。
+        // 把 Web Key 当 Android Key 注入，底图瓦片请求会被鉴权拒绝 → 灰屏且无法自愈。
+        // 此处把已知的服务端 Web Key 列为黑名单，从源头拦截这种误配（Web Key 随服务端配置变化时需同步更新此常量）。
+        val webServiceKey = "006f5b2e1fc174c9f37b8076730f88f0"
+        if (amapKey == webServiceKey) {
+            throw GradleException(
+                "检测到把「Web 服务 Key」当「Android 地图 Key」注入了（-PAMAP_KEY / amapKey）。" +
+                "高德地图底图必须使用「Android 平台」类型 Key，用 Web Key 会导致底图鉴权失败、灰屏。" +
+                "请到高德开放平台另行申请 Android 平台 Key，并绑定包名 com.padguard.parent 与签名 SHA1（debug/release 都加）。"
+            )
+        }
+        // 格式守卫：高德 Key 为 32 位十六进制字符串，复制残缺/夹带空格会直接白屏。
+        if (!amapKey.matches(Regex("^[0-9a-fA-F]{32}$"))) {
+            throw GradleException(
+                "AMAP_KEY 格式异常（应为 32 位十六进制字符串），请检查是否复制完整/正确：$amapKey"
+            )
+        }
     }
 }
 

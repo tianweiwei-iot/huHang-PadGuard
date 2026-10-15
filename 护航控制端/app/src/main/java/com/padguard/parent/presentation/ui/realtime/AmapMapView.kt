@@ -2,8 +2,11 @@ package com.padguard.parent.presentation.ui.realtime
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.graphics.Color as AColor
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -28,7 +31,12 @@ import com.amap.api.maps.model.PolylineOptions
 import com.padguard.parent.domain.model.GeofenceConfig
 import com.padguard.parent.domain.model.LocationInfo
 import com.padguard.parent.domain.model.MapViewMode
+import java.net.URL
+import java.security.MessageDigest
+import javax.net.ssl.HttpsURLConnection
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * 高德真实底图（定位页地图区域）。
@@ -49,8 +57,8 @@ internal fun AmapMapView(
     track: List<LocationInfo>,
     viewMode: MapViewMode,
     modifier: Modifier = Modifier,
-    /** 地图加载失败（密钥无效 / SHA1 绑定不符 / 网络受限）时的回调，供调用方回退占位底图。 */
-    onMapFailed: () -> Unit = {}
+    /** 地图加载失败时的回调，回传真实诊断数据（包名 / 签名 SHA1 / Key 是否注入 / 网络可达性），供调用方回退占位底图并给出可执行的排查提示。 */
+    onMapFailed: (AmapDiag) -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -98,11 +106,14 @@ internal fun AmapMapView(
         }
     )
 
-    // 看门狗：若 8 秒内底图始终未就绪（密钥无效 / SHA1 不符 / 网络受限等），
-    // 通知调用方回退到示意占位图并显示明确提示，避免"静默灰屏"让用户以为功能坏了。
+    // 看门狗：若 8 秒内底图始终未就绪，做一次真实诊断再回退占位图。
+    // 关键修正：旧实现只是超时，却在文案里断言"Key 无效 / SHA1 不符 / 网络受限"——
+    // 它根本无法区分这三者，属于误导性诊断，会让运维对着错误的方向排查。
+    // 改为超时后回传真实可观测数据（包名、签名 SHA1、Key 是否注入、网络是否可达），
+    // 由调用方据此给出有差异的、可执行的提示，并在 Logcat 打印，便于 `adb logcat` 快速核对控制台绑定。
     LaunchedEffect(mapView) {
         delay(8_000)
-        if (!loaded) onMapFailed()
+        if (!loaded) onMapFailed(diagnoseAmapFailure(context))
     }
 
     // 高德 MapView 通过 `map` 属性同步获取 AMap 实例（无 getMapAsync）；
@@ -200,6 +211,102 @@ internal fun readAmapKey(context: Context): String {
         ai.metaData?.getString("com.amap.api.v2.apikey")?.takeIf { it.isNotBlank() } ?: ""
     } catch (e: Exception) {
         ""
+    }
+}
+
+/**
+ * 底图加载失败时的真实诊断数据。
+ *
+ * 看门狗超时后回传这些**可观测**字段，让上层给出有差异的提示，而不是像旧实现那样
+ * 凭空断言"Key 无效 / SHA1 不符 / 网络受限"（它其实分辨不了）。
+ *
+ * @param keyPresent 高德 Key 是否已注入（非空）。false 时上层根本不该走真实底图，属构建/注入问题。
+ * @param packageName 当前 APK 的包名——高德控制台 Key 必须绑定**完全一致**的包名。
+ * @param sha1 当前 APK 签名证书的 SHA-1（冒号分隔）——高德控制台 Key 必须绑定此值；
+ *   装到设备上的包是什么签名，这里就显示什么，debug 与 release 自动区分，无需人工算。
+ * @param networkReachable 设备能否连上高德服务器（尽力探测）。false 强烈指向"网络受限/被拦截"；
+ *   true 但底图仍失败，则几乎可以确定是 Key 类型错误或包名/SHA1 绑定不符。
+ */
+internal data class AmapDiag(
+    val keyPresent: Boolean,
+    val packageName: String,
+    val sha1: String,
+    val networkReachable: Boolean
+)
+
+private const val TAG_DIAG = "PadGuard/AmapDiag"
+// 用于"能否连上高德服务器"的探测目标（Web API 网关，网络正常即可连通，不代表地图 Key 合法）。
+private const val AMAP_REACH_HOST = "https://restapi.amap.com"
+
+/**
+ * 底图超时后的真实诊断：收集包名、签名 SHA1、Key 注入状态，并尽力探测网络可达性，
+ * 全部打印到 Logcat（便于 `adb logcat -s PadGuard/AmapDiag`），再回传结构化结果。
+ *
+ * 注意：本函数**不猜测**失败原因，只提供事实；真正的"该改控制台还是该查网络"由上层据字段判定。
+ */
+internal suspend fun diagnoseAmapFailure(context: Context): AmapDiag {
+    val keyPresent = readAmapKey(context).isNotBlank()
+    val pkg = context.packageName
+    val sha1 = getSigningSha1(context)
+    val net = isAmapReachable()
+    Log.w(TAG_DIAG, "map not loaded within timeout | keyPresent=$keyPresent package=$pkg sha1=$sha1 networkReachable=$net")
+    return AmapDiag(keyPresent = keyPresent, packageName = pkg, sha1 = sha1, networkReachable = net)
+}
+
+/**
+ * 取当前 APK 签名证书的 SHA-1（冒号分隔大写十六进制）。
+ *
+ * 高德 Android Key 的绑定约束就是"包名 + 签名 SHA1"，此值必须与控制台一致。
+ * 用 [PackageManager] 直接读运行中的自身签名，debug / release 各自正确，家长无需手动 keytool。
+ * API 28+ 用 [PackageManager.GET_SIGNING_CERTIFICATES]，低版本回退到已废弃的 [PackageManager.GET_SIGNATURES]。
+ */
+internal fun getSigningSha1(context: Context): String {
+    return try {
+        val pm = context.packageManager
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            PackageManager.GET_SIGNING_CERTIFICATES
+        } else {
+            @Suppress("DEPRECATION") PackageManager.GET_SIGNATURES
+        }
+        val pi = pm.getPackageInfo(context.packageName, flags)
+        val sigs: Array<Signature> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pi.signingInfo?.apkContentsSigners ?: emptyArray()
+        } else {
+            @Suppress("DEPRECATION", "UNCHECKED_CAST")
+            pi.signatures as? Array<Signature> ?: emptyArray()
+        }
+        val sig = sigs.firstOrNull() ?: return ""
+        val md = MessageDigest.getInstance("SHA-1")
+        md.update(sig.toByteArray())
+        md.digest().joinToString(":") { "%02X".format(it) }
+    } catch (e: Exception) {
+        Log.e(TAG_DIAG, "failed to read signing SHA1", e)
+        ""
+    }
+}
+
+/**
+ * 尽力探测设备能否连上高德服务器（仅作"网络受限"的判定信号，不验证 Key 合法性）。
+ * 连不通（超时/异常/无响应）返回 false；拿到任意 HTTP 响应码（含 401/403）都视为"网络通"。
+ */
+private suspend fun isAmapReachable(): Boolean = withContext(Dispatchers.IO) {
+    var conn: HttpsURLConnection? = null
+    try {
+        val url = URL(AMAP_REACH_HOST)
+        conn = (url.openConnection() as HttpsURLConnection).apply {
+            connectTimeout = 2500
+            readTimeout = 2500
+            requestMethod = "HEAD"
+            instanceFollowRedirects = false
+        }
+        conn.connect()
+        conn.responseCode // 任意码（含 4xx）都说明网络可达
+        true
+    } catch (e: Exception) {
+        Log.w(TAG_DIAG, "amap host unreachable: ${e.message}")
+        false
+    } finally {
+        runCatching { conn?.disconnect() }
     }
 }
 

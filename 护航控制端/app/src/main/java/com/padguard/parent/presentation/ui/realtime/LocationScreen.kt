@@ -196,8 +196,10 @@ private fun DeviceLocationCard(
         val context = LocalContext.current
         // 仅在「已配置高德 Key 且用户选中高德」时使用真实底图，否则回退等距投影占位图。
         val useRealMap = remember(provider) { readAmapKey(context).isNotBlank() && provider == MapProvider.AMAP }
-        // 真实底图加载失败时（密钥无效/SHA1 不符/网络受限）回退占位图；切换地图源时重置。
+        // 真实底图加载失败时回退占位图；切换地图源时重置。
+        // amapDiag 保存看门狗回传的真实诊断（包名/签名 SHA1/Key 注入/网络可达），用于给出差异化提示。
         var amapFailed by remember(provider) { mutableStateOf(false) }
+        var amapDiag by remember(provider) { mutableStateOf<AmapDiag?>(null) }
         val showRealMap = useRealMap && !amapFailed
         Box(
             modifier = Modifier
@@ -212,7 +214,10 @@ private fun DeviceLocationCard(
                     track = emptyList(),
                     viewMode = viewMode,
                     modifier = Modifier.fillMaxSize(),
-                    onMapFailed = { amapFailed = true }
+                    onMapFailed = { diag ->
+                        amapFailed = true
+                        amapDiag = diag
+                    }
                 )
             } else {
                 GeofenceMapCanvas(
@@ -241,8 +246,7 @@ private fun DeviceLocationCard(
         }
         Text(
             text = when {
-                useRealMap && amapFailed ->
-                    "真实底图加载失败（高德 Key 无效 / 包名或 SHA1 绑定不符 / 网络受限），已回退示意占位图。请检查高德控制台 Key 配置。"
+                useRealMap && amapFailed -> amapFailText(amapDiag)
                 useRealMap ->
                     "地图由高德提供，坐标为 GCJ-02；设备 GPS（WGS-84）已做偏移转换后绘制；绿色圆圈为各安全区域。"
                 else ->
@@ -697,6 +701,29 @@ private data class GeofenceBannerStyle(
 )
 
 private fun formatCoordinate(value: Double): String = String.format(Locale.CHINA, "%.5f", value)
+
+/**
+ * 底图加载失败时的诚实、差异化提示。
+ *
+ * 旧实现直接断言"Key 无效 / 包名或 SHA1 绑定不符 / 网络受限"——但看门狗本身无法分辨这三者，
+ * 纯属误导。这里只基于看门狗回传的**真实观测数据**给结论：
+ *  - 连不上高德服务器 → 明确指向网络受限/被拦截；
+ *  - 网络通但底图仍失败 → 几乎可以确定是 Key 类型错误或包名/SHA1 绑定不符，并直接把本机签名
+ *    SHA1 与包名打印出来，家长/运维到高德控制台核对时无需再手动 keytool。
+ */
+private fun amapFailText(diag: AmapDiag?): String = when {
+    diag == null ->
+        "真实底图加载失败，已回退示意占位图。请检查高德控制台 Key 配置与设备网络。"
+    !diag.networkReachable ->
+        "真实底图加载失败：设备无法连接高德服务器（网络受限或被拦截），已回退示意占位图。" +
+            "请检查设备网络/WiFi 后重试；若在隔离网络环境，底图本就无法加载。"
+    else ->
+        "真实底图加载失败：高德 Key 类型错误或「包名 / 签名(SHA1)」绑定不符，已回退示意占位图。\n" +
+            "本机签名 SHA1：${diag.sha1.ifBlank { "（读取失败）" }}\n" +
+            "包名：${diag.packageName}\n" +
+            "请到高德开放平台 → 我的应用，确认该 Android Key 已绑定以上包名与 SHA1" +
+            "（debug 与 release 签名不同，建议两个 SHA1 都加进同一 Key）。"
+}
 
 /**
  * 按"东八区（Asia/Shanghai）自然日"分组轨迹点（键：yyyy-MM-dd，倒序用）。
