@@ -135,6 +135,8 @@ class LockScreenActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showOverLockScreen()
+        // 新一轮锁屏会话：复位抢占计数，给本次锁定一个完整的重试预算。
+        relaunchCount = 0
         admin.refreshControlMode()
         // 屏蔽下拉通知栏与快捷设置：否则孩子能从通知栏进设置去关管控 / 卸载我们。
         // 抢占复位会反复进 onCreate，这里做成幂等的"置一次"，不会反复调用系统 API。
@@ -267,7 +269,17 @@ class LockScreenActivity : ComponentActivity() {
         override fun run() {
             if (isFinishing || !stillLocked()) return
             if (resumed) return
-            Logger.w(TAG) { "lock screen pushed to background while locked, re-arming" }
+            // 到达上限即停：非硬锁设备后台启动 Activity 必被 ROM 拒绝，继续重试只是刷日志，
+            // 真正的兜底交给无障碍看门狗（可后台拉起）与悬浮窗地板（盖在桌面之上）。
+            if (relaunchCount >= MAX_RELAUNCH_ATTEMPTS) {
+                Logger.w(TAG) {
+                    "lock screen relaunch aborted after $relaunchCount attempts " +
+                        "(background start blocked by ROM; watchdog / overlay floor will keep it covered)"
+                }
+                return
+            }
+            relaunchCount++
+            Logger.w(TAG) { "lock screen pushed to background while locked, re-arming ($relaunchCount/$MAX_RELAUNCH_ATTEMPTS)" }
             show(this@LockScreenActivity, currentDetail)
             handler.postDelayed(this, RELAUNCH_RETRY_MS)
         }
@@ -312,6 +324,10 @@ class LockScreenActivity : ComponentActivity() {
 
     /** 是否真正处于前台（由 onResume/onPause/onStop 维护） */
     @Volatile private var resumed = false
+
+    /** 抢占复位已尝试次数：到达 [MAX_RELAUNCH_ATTEMPTS] 上限即停，避免非硬锁设备上
+     *  后台启动被 ROM 拒绝后无限刷「re-arming」日志（这正是此前日志风暴的诱因之一）。 */
+    private var relaunchCount = 0
 
     private fun stillLocked(): Boolean = lockController.state.value.locked
 
@@ -621,6 +637,13 @@ class LockScreenActivity : ComponentActivity() {
 
         /** 抢占未成功时的重试间隔：持续抢占直到真正回到前台 */
         private const val RELAUNCH_RETRY_MS = 500L
+
+        /**
+         * 抢占复位重试上限：约 8 秒（[RELAUNCH_RETRY_MS] × 本值）。
+         * 非硬锁设备的后台启动被 ROM 拒绝是常态，到上限后停止自我重试，
+         * 交由无障碍看门狗（可后台拉起 Activity）与悬浮窗地板兜底，避免无限刷日志。
+         */
+        private const val MAX_RELAUNCH_ATTEMPTS = 16
 
         /** 护眼休息倒计时刷新间隔：每秒一次，足够平滑又不浪费资源 */
         private const val COUNTDOWN_INTERVAL_MS = 1000L

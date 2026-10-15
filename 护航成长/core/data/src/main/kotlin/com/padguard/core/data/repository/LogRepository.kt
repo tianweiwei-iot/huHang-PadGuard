@@ -257,6 +257,7 @@ class LogRepository @Inject constructor(
         RiskType.ACCESSIBILITY_DISABLED -> "无障碍服务被关闭"
         RiskType.USAGE_ACCESS_LOST -> "使用情况权限被关闭"
         RiskType.GUARD_PASSWORD_NOT_SET -> "操作密码尚未设置"
+        RiskType.LOCK_SCREEN_UNPROTECTED -> "锁屏已失效：设备无系统锁且无悬浮窗权限"
         RiskType.INVALID_SIGNATURE -> "指令签名校验失败"
         RiskType.HEARTBEAT_TIMEOUT -> "与服务端通信超时"
     }

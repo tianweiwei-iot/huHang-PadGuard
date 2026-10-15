@@ -137,7 +137,8 @@
       应用访问门禁「关闭对话框即退出应用」的实现手段：孩子取消密码框时，
       由 AppAccessGateActivity 调用 ActivityManager.killBackgroundProcesses(pkg)
       强杀被管控应用进程（普通权限，随安装授予，无需运行时弹窗）。
-      仅杀后台进程，配合「门禁浮层盖在应用之上」的设计，取消即回到原桌面。
+      被管控应用已被无障碍服务的 GLOBAL_ACTION_HOME 压回后台，此处 kill 此刻可安全生效，
+      取消门禁即回到桌面（而非"盖在应用之上"时因时序竞态复活应用）。
     -->
     <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
 
@@ -168,9 +169,11 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!--
-      锁屏/拦截覆盖层不需要 SYSTEM_ALERT_WINDOW：
-      它们是普通 Activity（NEW_TASK 拉起），靠 setShowWhenLocked 在锁屏之上显示，
-      属于系统豁免范围，不强制申请悬浮窗权限。
+      锁屏覆盖层（LockScreenOverlay）依赖 SYSTEM_ALERT_WINDOW：它是 TYPE_APPLICATION_OVERLAY
+      悬浮窗，是「非 DO / 非设备管理员」设备上唯一的可靠锁定层（Activity 后台拉起会被 ROM 拒绝、
+      全屏通知在 targetSdk 34+ 失效、lockNow 需设备管理员）。因此悬浮窗权限是装机流程的必选项，
+      缺失时锁屏将彻底失效（见 LockScreenPresenter.reportUnprotected 上报家长告警）。
+      下方权限声明必须保留。
     -->
 
     <application

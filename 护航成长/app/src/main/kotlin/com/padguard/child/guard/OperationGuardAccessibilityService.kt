@@ -6,6 +6,7 @@ import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
 import com.padguard.child.di.ApplicationScope
 import com.padguard.child.ui.lock.LockScreenActivity
+import com.padguard.child.ui.lock.LockScreenPresenter
 import com.padguard.core.common.Logger
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
@@ -77,6 +78,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     @ApplicationScope
     lateinit var scope: CoroutineScope
 
+    /** 锁屏呈现入口：看门狗与窗口抢占统一委托它，避免重复实现锁定层逻辑（含非 DO 设备的悬浮窗地板）。 */
+    @Inject
+    lateinit var lockScreenPresenter: LockScreenPresenter
+
     /** 去抖：同一受保护窗口 1.5s 内只拦截一次，避免 performGlobalAction 导致事件风暴。 */
     private var lastTriggerAt = 0L
     private var lastTriggerPkg = ""
@@ -121,14 +126,22 @@ class OperationGuardAccessibilityService : AccessibilityService() {
                 if (!lockController.state.value.locked) continue
                 val fg = lastForegroundPkg
                 if (fg != null && fg.startsWith(OWN_PACKAGE_PREFIX)) continue
-                // 已逃逸到非本应用（桌面/其它 app）：先回桌面再顶锁屏，保证锁屏独占前台
-                runCatching { performGlobalAction(GLOBAL_ACTION_HOME) }
-                runCatching {
-                    LockScreenActivity.show(
-                        this@OperationGuardAccessibilityService,
-                        lockController.state.value.primaryDetail
-                    )
-                }.onFailure { Logger.w(TAG, it) { "lock watchdog re-show failed" } }
+                // 已逃逸到非本应用（桌面/其它 app）：
+                // 1) 无障碍服务可后台启动 Activity（豁免华为后台限制），把锁屏 Activity 顶回前台 ——
+                //    这是非 DO 设备后台锁屏唯一可靠的前台化手段；硬锁设备同样受益。
+                // 2) 委托 presenter.reenforce() 确保悬浮窗地板在位（非硬锁设备的真正锁定层）。
+                // 不再 performGlobalAction(HOME)：它反复把用户顶回桌面、且在非硬锁设备上无效，
+                // 只会和窗口切换事件叠加成日志风暴（这正是此前「锁屏崩 + 刷屏」的诱因之一）。
+                if (!LockScreenActivity.visible) {
+                    runCatching {
+                        LockScreenActivity.show(
+                            this@OperationGuardAccessibilityService,
+                            lockController.state.value.primaryDetail
+                        )
+                    }.onFailure { Logger.w(TAG, it) { "lock watchdog re-show activity failed" } }
+                }
+                runCatching { lockScreenPresenter.reenforce() }
+                    .onFailure { Logger.w(TAG, it) { "lock watchdog reenforce failed" } }
             }
         }
     }
@@ -172,11 +185,18 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             if (now - lastLockRelaunchAt > LOCK_RELAUNCH_DEBOUNCE_MS) {
                 lastLockRelaunchAt = now
                 Logger.i(TAG) { "lock active but foreground escaped to $pkg, re-arming lock screen" }
-                // 先回桌面，避免卡在最近任务等中间态；随后把锁屏顶回前台
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                runCatching {
-                    LockScreenActivity.show(this, lockController.state.value.primaryDetail)
-                }.onFailure { Logger.e(TAG, it) { "failed to re-show lock screen" } }
+                // 无障碍服务可后台启动 Activity（豁免华为后台限制），把锁屏重新顶回前台；
+                // 同时 reenforce 确保悬浮窗地板在位（非硬锁设备的真正锁定层）。
+                if (!LockScreenActivity.visible) {
+                    runCatching {
+                        LockScreenActivity.show(
+                            this@OperationGuardAccessibilityService,
+                            lockController.state.value.primaryDetail
+                        )
+                    }.onFailure { Logger.e(TAG, it) { "failed to re-show lock screen" } }
+                }
+                runCatching { lockScreenPresenter.reenforce() }
+                    .onFailure { Logger.e(TAG, it) { "failed to re-arm lock screen" } }
             }
             // 锁屏期间任何非本应用前台都视为"试图逃逸"，不再走下方密码闸逻辑
             return
@@ -219,6 +239,14 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 这里不做时间去抖：浮层是 singleTask，重复 show 只是更新、不会风暴；
         // 去抖反而会压制"关框后再次打开"的拦截，重新制造绕过窗口。
         if (reason == REASON_HIDDEN_APP) {
+            // 先把被管控应用压回桌面（无论是否锁定都必须执行），确保它不进入可用前台；
+            // 再在**桌面上**弹门禁浮层（盖在桌面而非盖在应用之上）。
+            // 绝不能"浮层透明盖在应用上"——那样应用仍在前台、可见且可交互，
+            // 孩子点屏幕任意处触发浮层取消后，被压回后台的应用会因时序竞态杀不掉而原地复活，
+            // 表现为"管控了还能继续打开"（c72f4cd 引入的回归）。
+            // 注意：此处不按包名去抖——去抖会压制"关框后再次点开"的拦截，
+            // 重新制造绕过窗口；每次前台事件都即时压回+弹框，反而更严格。
+            performGlobalAction(GLOBAL_ACTION_HOME)
             runCatching { AppAccessGateActivity.show(this, pkg) }
                 .onFailure { Logger.e(TAG, it) { "failed to launch app access gate (hidden app)" } }
             return
@@ -251,9 +279,11 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 1) 顶回当前操作：
         //    - 设置页用 BACK（部分 ROM 用 HOME 会卡在最近任务）；
         //    - 安装器/卸载用 HOME（BACK 后会经最近任务回跳）；
-        //    - 受管控应用**不再顶回桌面**：门禁浮层直接盖在应用之上，
-        //      否则回到桌面后孩子可再次点图标，配合去抖形成绕过。
-        if (reason != REASON_CONTROLLED_APP) {
+        //    - 受管控应用**必须先压回桌面**：门禁浮层盖在桌面上（而非盖在应用之上），
+        //      否则应用仍在前台可见可交互，孩子触发浮层取消后应用会因时序竞态复活，管控形同虚设。
+        if (reason == REASON_CONTROLLED_APP) {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        } else {
             performGlobalAction(
                 if (reason == REASON_SETTINGS) GLOBAL_ACTION_BACK else GLOBAL_ACTION_HOME
             )
@@ -262,7 +292,7 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         if (!lockedOut) {
             runCatching {
                 if (reason == REASON_CONTROLLED_APP) {
-                    // 打开受管控应用 → 盖在应用之上的门禁浮层（输对只放行这一个包）
+                    // 打开受管控应用 → 盖在桌面之上的门禁浮层（输对只放行这一个包）
                     AppAccessGateActivity.show(this, pkg)
                 } else {
                     // 改设置 / 安装卸载 → 家长设备操作解锁，输对开 10 分钟全局窗口

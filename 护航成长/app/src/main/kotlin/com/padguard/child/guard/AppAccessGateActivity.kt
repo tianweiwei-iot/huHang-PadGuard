@@ -133,22 +133,27 @@ class AppAccessGateActivity : ComponentActivity() {
     }
 
     /**
-     * 孩子取消 / 点框外 → 关闭对话框即退出被管控应用，回到桌面。
+     * 孩子取消 / 点框外 → 关闭门禁并回到桌面。
      *
-     * 两步必须配合，缺一不可：
-     * 1. 先 [android.content.Intent.ACTION_MAIN] + [android.content.Intent.CATEGORY_HOME]
-     *    把被管控应用送回后台、把桌面/启动器提到前台——这一步同时解决两件事：
-     *    - 让"退出应用"后的落点可预测：若 KidHome 已是默认启动器则返回 KidHome，
-     *      否则返回系统桌面，而不是残留在某个中间态；
-     *    - 确保目标应用不再是前台进程，给下一步强杀创造前提（Android 不允许杀前台进程）。
-     * 2. 再用 [ActivityManager.killBackgroundProcesses] 强杀该应用进程，实现真正的"退出"，
-     *    而非仅压到后台（仅压后台会被孩子从最近任务重新拉起，违背"退出应用"语义）。
+     * ## 关键：绝不在"被管控应用仍可能在前台"时强杀它
+     * 门禁浮层是由无障碍服务在**已把应用压回桌面之后**才拉起的，因此进入本方法时，
+     * 被管控应用早已不在前台（被 [GLOBAL_ACTION_HOME] 压回后台）。这里只需：
+     * 1. [android.content.Intent.ACTION_MAIN] + [android.content.Intent.CATEGORY_HOME]
+     *    确保落点是桌面（华为等非默认 KidHome 启动器的设备，HOME 仍能回到系统桌面）；
+     * 2. 应用已在后台，[ActivityManager.killBackgroundProcesses] 此刻可安全生效，作为
+     *    "关闭即退出"的兜底（防孩子从最近任务重新拉起）；
+     * 3. [finish] 收起浮层。
      *
-     * 最后 [finish] 收起浮层。不设任何"宽限时长"：用户明确要的是"关闭对话框就退出应用"。
+     * 早期实现是"先 HOME 再 kill 再 finish"的脆弱时序：HOME 是异步全局动作，kill 立即执行时
+     * 应用往往仍是前台进程、被系统拒绝强杀，浮层一收应用原地复活、直接可用 ——
+     * 这正是"管控了还是能继续打开"的回归根因。本方法把强杀前提（应用已后台）交给
+     * 调用前的不变量保证，不再依赖时序竞态。
+     * 即便 kill 因极端时序失败，孩子在桌面若再点开该应用，无障碍服务会立即重新拦截并弹门禁，
+     * 形成闭环，不会失控。
      */
     private fun exitAndFinish() {
         val pkg = targetPackage
-        // 1) 回桌面：把被管控应用压到后台，桌面/启动器提到前台
+        // 1) 回到桌面：确保落点可预测，且被管控应用保持后台
         runCatching {
             startActivity(
                 Intent(Intent.ACTION_MAIN)
@@ -156,7 +161,7 @@ class AppAccessGateActivity : ComponentActivity() {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         }.onFailure { Logger.w(TAG, it) { "failed to go home on gate dismiss" } }
-        // 2) 强杀被管控应用进程（此刻它已不在前台，可被杀）
+        // 2) 应用已在后台，强杀此刻可安全生效（非前台进程，系统不拒）
         if (pkg.isNotEmpty()) {
             runCatching { activityManager.killBackgroundProcesses(pkg) }
                 .onFailure { Logger.w(TAG, it) { "failed to kill $pkg on gate dismiss" } }

@@ -2,6 +2,10 @@ package com.padguard.child.ui.lock
 
 import android.content.Context
 import com.padguard.core.common.Logger
+import com.padguard.core.data.model.RiskLevel
+import com.padguard.core.data.model.RiskType
+import com.padguard.core.data.repository.AuthRepository
+import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.lock.LockController
@@ -45,6 +49,14 @@ import javax.inject.Singleton
  * 判断本身要读前台状态，而前台状态在指令到达的这一刻和真正执行的那一刻之间可能翻转；
  * 更关键的是，选路会让"某条路被 ROM 拦下"变成彻底无解。并行打 + 确认 + 重试，
  * 才能把"可能失败"收敛成"最坏也能锁住"。
+ *
+ * ## 非 DO / 非设备管理员设备（绝大多数 C 端平板）的分水岭
+ * 这类设备**没有系统级硬锁**：屏幕固定(Lock Task)只在 DO 白名单生效、`lockNow()` 需要
+ * 设备管理员，二者皆无。于是 Activity 只是普通页面、会被手势滑走，后台拉起还被 ROM 拒绝；
+ * 全屏通知在 targetSdk 34+ 又基本失效。此时应用内锁定**只能**靠悬浮窗这一层"软锁"——
+ * 它盖在桌面之上、吃掉触摸，孩子滑不出去。因此对这类设备，本引擎不再把希望寄托在会被
+ * ROM 拒绝的后台 Activity 上，而是**直接以悬浮窗为唯一锁定层**；只有当"既无硬锁、又无
+ * 悬浮窗权限"时锁屏才真正失效，这时如实上报家长 HIGH 告警，而不是空转制造"已锁"假象。
  */
 @Singleton
 class LockScreenPresenter @Inject constructor(
@@ -52,7 +64,9 @@ class LockScreenPresenter @Inject constructor(
     private val overlay: LockScreenOverlay,
     private val notifier: LockScreenNotifier,
     private val admin: DeviceAdminBridge,
-    private val lockController: LockController
+    private val lockController: LockController,
+    private val logRepository: LogRepository,
+    private val authRepository: AuthRepository
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -88,8 +102,37 @@ class LockScreenPresenter @Inject constructor(
     @Volatile
     private var systemLockPushed = false
 
+    /**
+     * 是否存在「系统级硬锁」能力：设备所有者(DO) 或设备管理员已激活。
+     *
+     * 有它，[LockScreenActivity] 才能通过屏幕固定(Lock Task)或 [DeviceAdminBridge.lockNow]
+     * 真正锁死屏幕（物理禁手势）。没有它（绝大多数 C 端平板，无法在不恢复出厂前提下成为 DO），
+     * Activity 只是普通页面、会被手势滑走，后台拉起还被 ROM 拒绝；此时应用内锁定**只能**
+     * 靠悬浮窗这一层"软锁"。这个判定是本次修复的分水岭：它决定了锁屏走哪条主干。
+     */
+    private fun hardLockAvailable(): Boolean = admin.can(Capability.LOCK_NOW)
+
     fun show(detail: String) {
         desiredDetail = detail
+        if (!hardLockAvailable()) {
+            // 非 DO / 非设备管理员设备：无系统级硬锁。
+            // 悬浮窗是唯一可靠的"软锁"地板（盖在桌面之上、吃掉触摸，且从后台也能铺设，
+            // 不受华为后台启动 Activity 限制）；锁屏 Activity 作为可见层兜底 —— 即便悬浮窗
+            // 被 ROM 在后台隐藏，前台时仍能弹出锁定页，避免"彻底锁不住"的回归。
+            // 二者互补：悬浮窗被隐藏时 Activity 顶上，Activity 被滑走时悬浮窗兜住。
+            if (overlay.canDrawOverlay()) {
+                overlay.show(detail)
+            } else {
+                // 连悬浮窗权限都没有：软锁完全失效，如实上报家长 HIGH 告警。
+                reportUnprotected(detail)
+            }
+            // 锁屏 Activity 兜底：前台时即刻可见；后台由无障碍看门狗借特权重新顶回前台
+            // （无障碍服务可后台启动 Activity，绕过华为后台限制）。不依赖它作为唯一手段
+            // （旧版"可滑走"的根源），但绝不能彻底不弹。
+            LockScreenActivity.show(context, detail)
+            return
+        }
+        // 有硬锁能力：沿用「Activity 真锁 + 悬浮窗地板 + lockNow 兜底」原链路。
         // 已经稳稳在前台了：只刷新原因，不重复走升级链（会闪一下）
         if (LockScreenActivity.visible) {
             LockScreenActivity.show(context, detail)
@@ -154,15 +197,33 @@ class LockScreenPresenter @Inject constructor(
     }
 
     /**
-     * 锁定态自愈（由守护服务的周期自检调用）。
+     * 锁定态自愈（由守护服务的周期自检、无障碍看门狗调用）。
      *
      * 升级链最多重试 [MAX_ROUNDS] 轮就收手，避免无限空转。但某些 ROM 只在特定时机
      * （例如屏幕刚点亮、刚回到桌面）才放行后台启动 —— 一轮没赶上不代表永远拉不起来。
-     * 因此这里给一个低成本的重新确认：**只有当前既没有锁定页在前台、也没有悬浮层覆盖时**
-     * 才重新打一轮，正常情况下是个空操作，不会重复发通知、也不会闪屏。
+     * 因此这里给一个低成本的重新确认。
+     *
+     * ## 非硬锁设备的分水岭
+     * 没有系统级硬锁时，**悬浮窗在位即等于锁定成立**（它盖在桌面之上、吃掉触摸，孩子滑不出去），
+     * 因此只要悬浮窗还在就立即返回，不重复去拉必被 ROM 拒绝的后台 Activity（那只会制造日志风暴）；
+     * 悬浮窗缺失则补铺，仍缺失才上报"锁屏失效"告警。
      */
     fun reenforce() {
         val detail = desiredDetail ?: return
+        if (!hardLockAvailable()) {
+            if (overlay.canDrawOverlay() && !overlay.isShowing()) {
+                Logger.i(TAG) { "lock screen (overlay-only) re-armed" }
+                overlay.show(detail)
+            } else if (!overlay.canDrawOverlay()) {
+                reportUnprotected(detail)
+            }
+            // 兜底：锁屏 Activity 不在前台（后台被 ROM 隐藏 / 被滑走）时重新顶上来。
+            // 无障碍上下文下可后台启动 Activity，是华为非 DO 设备把锁屏拉回前台的可靠手段。
+            if (!LockScreenActivity.visible) {
+                LockScreenActivity.show(context, detail)
+            }
+            return
+        }
         if (LockScreenActivity.visible || overlay.isShowing()) return
         Logger.i(TAG) { "lock screen lost coverage, re-arming escalation" }
         LockScreenActivity.show(context, detail)
@@ -210,6 +271,38 @@ class LockScreenPresenter @Inject constructor(
         Logger.i(TAG) { "system lockNow() pushed as last resort" }
     }
 
+    /**
+     * 上报「锁屏完全失效」告警（HIGH，家长端可见）。
+     *
+     * 触发条件：设备既无系统级硬锁（DO / 设备管理员），又无悬浮窗权限 —— 锁屏指令下达后
+     * 孩子可以滑回桌面照常使用，管控形同虚设。这种"以为锁了其实没锁"的洞比任何漏拦都危险，
+     * 必须让家长立刻知道，并引导其在装机流程中授予悬浮窗权限或激活设备管理员。
+     *
+     * 用 [UNPROTECTED_REPORT_INTERVAL_MS] 去抖：锁屏期间每 60s 至多报一次，避免反复刷同一条告警。
+     */
+    @Volatile
+    private var lastUnprotectedReportedAt = 0L
+
+    private fun reportUnprotected(lockDetail: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastUnprotectedReportedAt < UNPROTECTED_REPORT_INTERVAL_MS) return
+        lastUnprotectedReportedAt = now
+        scope.launch {
+            runCatching {
+                logRepository.raise(
+                    type = RiskType.LOCK_SCREEN_UNPROTECTED,
+                    level = RiskLevel.HIGH,
+                    detail = mapOf(
+                        "note" to "设备无系统锁（非 DO / 设备管理员未激活）且无悬浮窗权限，" +
+                            "锁屏指令无法生效，请引导孩子在装机流程中授予悬浮窗权限或激活设备管理员",
+                        "lockDetail" to lockDetail
+                    ),
+                    deviceId = authRepository.getDeviceId()
+                )
+            }.onFailure { Logger.w(TAG, it) { "failed to raise lock-screen-unprotected alert" } }
+        }
+    }
+
     private companion object {
         const val TAG = "LockScreenPresenter"
 
@@ -224,5 +317,8 @@ class LockScreenPresenter @Inject constructor(
 
         /** 每隔几轮补发一次全屏通知 */
         const val NOTIFY_EVERY_ROUNDS = 4
+
+        /** 「锁屏失效」告警最小间隔：60s，避免锁屏期间反复刷同一条 HIGH 告警 */
+        const val UNPROTECTED_REPORT_INTERVAL_MS = 60_000L
     }
 }
