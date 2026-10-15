@@ -14,6 +14,8 @@ import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -88,9 +90,47 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     /** 自检保护(防卸载)去抖：避免反复顶回造成事件风暴（同事侧） */
     private var lastSelfProtectAt = 0L
 
+    /** 最近一次前台包名（由无障碍窗口事件维护），供锁屏看门狗判断"是否已逃逸到非本应用"。 */
+    private var lastForegroundPkg: String? = null
+
+    /** 锁屏看门狗是否已启动（onServiceConnected 可能多次调用，防重复起协程）。 */
+    private var watchdogStarted = false
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         Logger.i(TAG) { "operation guard accessibility service connected" }
+        startLockWatchdog()
+    }
+
+    /**
+     * 锁屏看门狗：Android 10+ 会**静默丢弃后台启动的 Activity**，
+     * 因此 [LockScreenActivity] 自身的 onPause 抢占复位（Handler.postDelayed 里再 startActivity）
+     * 在多数 ROM 上根本不生效；而本无障碍服务启动的 Activity 不受此限制，这里用它做可靠兜底。
+     *
+     * 仅当处于锁定态、且最近一次前台包名不是本应用时，周期性把锁屏重新顶回前台。
+     * 这样即使孩子连续快速上滑回到桌面（手势导航 HOME），锁屏也会在至多
+     * [LOCK_WATCH_INTERVAL_MS] 内被拉回，无法"停"在桌面上——从根本上堵死
+     * "快速滑动退出锁屏"的绕过。
+     */
+    private fun startLockWatchdog() {
+        if (watchdogStarted) return
+        watchdogStarted = true
+        scope.launch {
+            while (isActive) {
+                delay(LOCK_WATCH_INTERVAL_MS)
+                if (!lockController.state.value.locked) continue
+                val fg = lastForegroundPkg
+                if (fg != null && fg.startsWith(OWN_PACKAGE_PREFIX)) continue
+                // 已逃逸到非本应用（桌面/其它 app）：先回桌面再顶锁屏，保证锁屏独占前台
+                runCatching { performGlobalAction(GLOBAL_ACTION_HOME) }
+                runCatching {
+                    LockScreenActivity.show(
+                        this@OperationGuardAccessibilityService,
+                        lockController.state.value.primaryDetail
+                    )
+                }.onFailure { Logger.w(TAG, it) { "lock watchdog re-show failed" } }
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -110,6 +150,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
 
         val pkg = event.packageName?.toString() ?: return
+        // 维护最近前台包名（供锁屏看门狗判断锁屏是否已被滑走）；自家界面也不例外，
+        // 否则锁屏页自身在前台时 lastForegroundPkg 仍是旧值，看门狗会误以为已逃逸而反复重拉。
+        lastForegroundPkg = pkg
         // 自家界面永远不拦（避免拦截解锁框/权限引导自身，造成死循环）
         if (pkg.startsWith(OWN_PACKAGE_PREFIX)) return
 
@@ -169,21 +212,13 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         }
 
         // 3a) 取消授权的应用：硬拦截（最严），与全局启动闸门、是否设了家长密码都无关。
-        // 设了家长密码 → 弹密码门禁（输对后自动打开目标应用）；
-        // 没设密码 → 同样顶回、并提示"需家长设置密码"，绝不漏放（严格做到授权管控）。
-        // 放在「未设密码降级拦截」分支之前：保证取消授权的应用在任何情况下都先被拦下。
+        // 不再把人顶回桌面再在桌面上弹框——那样孩子能在桌面上再次点同一图标，
+        // 而 1.5s 去抖会压制下一次拦截，等于"关掉框就能进应用"（绕过）。
+        // 改为：把密码框作为透明浮层**直接盖在被管控应用之上**（应用留在后台、可见），
+        // 输对只放行这一个包并把它带回前台；取消 / 点框外则 kill 该应用（退出应用）。
+        // 这里不做时间去抖：浮层是 singleTask，重复 show 只是更新、不会风暴；
+        // 去抖反而会压制"关框后再次打开"的拦截，重新制造绕过窗口。
         if (reason == REASON_HIDDEN_APP) {
-            val now = System.currentTimeMillis()
-            // 去抖按「包名」：顶回后用户可能立刻再点一次，那次同样要拦
-            if (pkg == lastTriggerPkg && now - lastTriggerAt < DEBOUNCE_MS) return
-            lastTriggerAt = now
-            lastTriggerPkg = pkg
-            // 受管控（取消授权）应用用「回桌面」而不是 BACK：部分应用被 BACK 后会立即重新抢焦点，
-            // 表现为"点开游戏闪一下又回来"，像坏了而不是像被管控。
-            performGlobalAction(GLOBAL_ACTION_HOME)
-            // 门禁浮层：密码框浮在**桌面**上，而不是把人带进管控系统页面。
-            // 未设操作密码时同一浮层改为显示"需家长先设置密码"提示 —— 硬拦截不变，
-            // 只是把"验不了"如实告知，绝不因为验不了就放行。
             runCatching { AppAccessGateActivity.show(this, pkg) }
                 .onFailure { Logger.e(TAG, it) { "failed to launch app access gate (hidden app)" } }
             return
@@ -197,7 +232,6 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         if (!manager.isEnabledNow()) {
             if (reason != REASON_SETTINGS) return
             val now = System.currentTimeMillis()
-            // 与主路径共用按包名去抖：顶回引发的事件风暴同样需要抑制
             if (pkg == lastTriggerPkg && now - lastTriggerAt < DEBOUNCE_MS) return
             lastTriggerAt = now
             lastTriggerPkg = pkg
@@ -213,26 +247,22 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 但不再拉起密码框——孩子此刻无论如何验不过，弹框只会被狂点。
         val lockedOut = manager.isLockedOutNow()
 
-        val now = System.currentTimeMillis()
-        // 去抖按「包名」而非全局：顶回后用户可能立刻点另一个应用，那次要拦
-        if (pkg == lastTriggerPkg && now - lastTriggerAt < DEBOUNCE_MS) return
-        lastTriggerAt = now
-        lastTriggerPkg = pkg
-
         Logger.i(TAG) { "guarded foreground: $pkg reason=$reason, intercepting (lockedOut=$lockedOut)" }
-        // 1) 顶回：阻止这次操作（无论是否锁定都必须执行，否则锁定期反而成了开闸窗口）
-        if (reason == REASON_CONTROLLED_APP) {
-            // 受管控应用用「回桌面」而不是 BACK：部分应用被 BACK 后会立即重新抢焦点，
-            // 表现为"点开游戏闪一下又回来"，像坏了而不是像被管控。
-            performGlobalAction(GLOBAL_ACTION_HOME)
-        } else {
-            performGlobalAction(GLOBAL_ACTION_BACK)
+        // 1) 顶回当前操作：
+        //    - 设置页用 BACK（部分 ROM 用 HOME 会卡在最近任务）；
+        //    - 安装器/卸载用 HOME（BACK 后会经最近任务回跳）；
+        //    - 受管控应用**不再顶回桌面**：门禁浮层直接盖在应用之上，
+        //      否则回到桌面后孩子可再次点图标，配合去抖形成绕过。
+        if (reason != REASON_CONTROLLED_APP) {
+            performGlobalAction(
+                if (reason == REASON_SETTINGS) GLOBAL_ACTION_BACK else GLOBAL_ACTION_HOME
+            )
         }
         // 2) 仅在未锁定时拉起验证界面，让家长可以放行（锁定态跳过，避免狂点弹框）
         if (!lockedOut) {
             runCatching {
                 if (reason == REASON_CONTROLLED_APP) {
-                    // 打开应用 → 桌面浮层门禁，输对只放行这一个包
+                    // 打开受管控应用 → 盖在应用之上的门禁浮层（输对只放行这一个包）
                     AppAccessGateActivity.show(this, pkg)
                 } else {
                     // 改设置 / 安装卸载 → 家长设备操作解锁，输对开 10 分钟全局窗口
@@ -332,6 +362,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         private const val TAG = "GuardA11y"
         private const val OWN_PACKAGE_PREFIX = "com.padguard.child"
         private const val DEBOUNCE_MS = 1500L
+
+        /** 锁屏看门狗轮询间隔：锁定态下每隔这么久核对一次前台，逃逸即拉回（快滑最多 500ms 内回锁屏）。 */
+        private const val LOCK_WATCH_INTERVAL_MS = 500L
 
         /** 锁屏抢占复位去抖间隔：窗口切换抖动期间避免反复重拉锁屏页 */
         private const val LOCK_RELAUNCH_DEBOUNCE_MS = 800L

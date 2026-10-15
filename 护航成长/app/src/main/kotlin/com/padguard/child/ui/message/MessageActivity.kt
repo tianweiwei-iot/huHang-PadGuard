@@ -480,56 +480,83 @@ private fun MessageContent(
                     .padding(top = 64.dp)
             )
 
-            // ---------- 屏幕正中央：消息框 ----------
-            // 正文（及素材）统一装进一块圆角卡片里，视觉上就是"一块消息板"，
-            // 而不是散落在屏幕中间的文字。
-            MessageCard(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    // 随内容自适应宽度：短文→窄卡片，长文→在 620dp 内自动换行，
-                    // 不再固定占屏幕 88%，避免平板上消息框被拉得过长。
-                    .wrapContentWidth(Alignment.CenterHorizontally)
-                    .widthIn(min = 200.dp, max = 620.dp)
-            ) {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+            // ---------- 屏幕正中央：消息内容 ----------
+            // 图片 / 视频类发布：直接铺满整个平板屏幕（1080P 照片按屏幕比例适配、不变形），
+            // 视觉上是一块"公告大屏"；文字 / 语音类发布仍走圆角卡片，保持"消息板"的克制观感。
+            val isFullBleedMedia = mediaUrl.isNotBlank() &&
+                (contentType == "IMAGE" || contentType == "VIDEO")
+
+            if (isFullBleedMedia) {
+                // 全屏媒体层：置于来源标识与脚注之下，居中铺满屏幕。
+                // 图片用 ContentScale.Fit（RemoteImage 内部固定）保持整图可见、按屏幕比例缩放；
+                // 视频交给 ResizableVideo 的 VideoView，同样保持原始比例居中铺满。
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .align(Alignment.Center),
+                    contentAlignment = Alignment.Center
                 ) {
-                    if (title.isNotBlank() && !isSourceLabel(title)) {
-                        Text(
-                            text = title,
-                            // 标题放大，便于孩子看清
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            textAlign = TextAlign.Center,
-                            color = MaterialTheme.colorScheme.onSurface
+                    when (contentType) {
+                        "IMAGE" -> RemoteImage(mediaUrl, Modifier.fillMaxSize())
+                        "VIDEO" -> ResizableVideo(
+                            url = mediaUrl,
+                            modifier = Modifier.fillMaxSize(),
+                            // 发布视频默认铺满屏幕播放；非霸屏时给控制条，霸屏期间不给（避免可点出口）
+                            defaultFullscreen = true,
+                            showControls = !blocking,
+                            onDuration = onMediaDuration
                         )
-                        Spacer(Modifier.height(16.dp))
                     }
-
-                    when {
-                        mediaUrl.isNotBlank() && contentType == "IMAGE" ->
-                            RemoteImage(mediaUrl, Modifier.fillMaxWidth())
-
-                        mediaUrl.isNotBlank() && contentType == "VIDEO" ->
-                            ResizableVideo(
-                                url = mediaUrl,
-                                modifier = Modifier.fillMaxWidth(),
-                                // 发布视频默认全屏播放；非霸屏时给控制条，霸屏期间不给（避免可点出口）
-                                defaultFullscreen = true,
-                                showControls = !blocking,
-                                onDuration = onMediaDuration
+                }
+                // 真实标题覆盖在媒体上方：半透明背板保证任意背景下的可读性
+                if (title.isNotBlank() && !isSourceLabel(title)) {
+                    Text(
+                        text = title,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        color = Color.White,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 120.dp, start = 24.dp, end = 24.dp)
+                            .background(
+                                color = Color.Black.copy(alpha = 0.4f),
+                                shape = RoundedCornerShape(12.dp)
                             )
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+            } else {
+                MessageCard(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .wrapContentWidth(Alignment.CenterHorizontally)
+                        .widthIn(min = 200.dp, max = 620.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        if (title.isNotBlank() && !isSourceLabel(title)) {
+                            Text(
+                                text = title,
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(Modifier.height(16.dp))
+                        }
 
-                        mediaUrl.isNotBlank() && contentType == "AUDIO" ->
-                            // 语音一律自动播放：家长发语音就是为了让孩子"听到"，
-                            // 要求孩子先点一下播放，等于把这条信息变成了一条需要打开的通知——
-                            // 孩子不看就等于没发。图片/视频本身是可见的，不存在这个问题。
-                            RemoteAudio(mediaUrl, mediaName, autoPlay = true, onDuration = onMediaDuration)
+                        when {
+                            mediaUrl.isNotBlank() && contentType == "AUDIO" ->
+                                // 语音一律自动播放：家长发语音就是为了让孩子"听到"，
+                                // 要求孩子先点一下播放，等于把这条信息变成需要打开的通知——
+                                // 孩子不看就等于没发。图片/视频本身是可见的，不存在这个问题。
+                                RemoteAudio(mediaUrl, mediaName, autoPlay = true, onDuration = onMediaDuration)
 
-                        else -> {
-                            if (body.isNotBlank()) {
+                            body.isNotBlank() ->
                                 Text(
                                     text = body,
                                     // 正文字号放大（原 bodyLarge=16sp），方便阅读
@@ -537,21 +564,27 @@ private fun MessageContent(
                                     textAlign = TextAlign.Center,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
-                            }
                         }
                     }
-
-                    // 有素材时，正文作为补充说明放在素材下方
-                    if (mediaUrl.isNotBlank() && body.isNotBlank()) {
-                        Spacer(Modifier.height(20.dp))
-                        Text(
-                            text = body,
-                            fontSize = 16.sp,
-                            textAlign = TextAlign.Center,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
-                        )
-                    }
                 }
+            }
+
+            // ---------- 全屏媒体的正文补充说明（贴底覆盖，半透明背板保证可读性） ----------
+            if (isFullBleedMedia && body.isNotBlank()) {
+                Text(
+                    text = body,
+                    fontSize = 16.sp,
+                    textAlign = TextAlign.Center,
+                    color = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(start = 24.dp, end = 24.dp, bottom = 104.dp)
+                        .background(
+                            color = Color.Black.copy(alpha = 0.45f),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                )
             }
 
             // ---------- 底部：非霸屏才给关闭入口 ----------

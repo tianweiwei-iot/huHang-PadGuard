@@ -12,9 +12,11 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
+import androidx.navigation.NavType
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.padguard.parent.presentation.ui.Screen
 import com.padguard.parent.presentation.ui.device.DeviceManageScreen
 import com.padguard.parent.presentation.ui.home.HomeScreen
@@ -111,12 +113,24 @@ fun MainScreen(
                     onNavigateToUsageSettings = { rootNavController.navigate(Screen.TabletUsageSettings.create(it)) },
                     onIgnoreUnlockTicket = homeVm::ignoreUnlockTicket,
                     onRefresh = homeVm::refreshData,
-                    onAddDevice = { navController.navigate("devices") }
+                    // 首页空状态「还没有绑定的孩子设备」：直接进入接入新设备流程，
+                    // 跳过设备管理主页面。openAccess=true 让 DeviceManageScreen 落地即拉起接入浮层。
+                    onAddDevice = { navController.navigate("devices?openAccess=true") { launchSingleTop = true } }
                 )
             }
-            composable("devices") {
+            composable(
+                route = "devices?openAccess={openAccess}",
+                arguments = listOf(
+                    navArgument("openAccess") {
+                        type = NavType.BoolType
+                        defaultValue = false
+                    }
+                )
+            ) { backStackEntry ->
+                val openAccess = backStackEntry.arguments?.getBoolean("openAccess") ?: false
                 DeviceManageScreen(
-                    onDeviceClick = { rootNavController.navigate(Screen.DeviceDetail.create(it)) }
+                    onDeviceClick = { rootNavController.navigate(Screen.DeviceDetail.create(it)) },
+                    autoOpenAccess = openAccess
                 )
             }
             composable("statistics") {

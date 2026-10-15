@@ -51,6 +51,8 @@ import kotlinx.coroutines.flow.collectLatest
 @Composable
 fun DeviceManageScreen(
     onDeviceClick: (String) -> Unit,
+    /** 首页空状态入口直达接入新设备：落地即拉起接入浮层，跳过设备管理主页面 */
+    autoOpenAccess: Boolean = false,
     viewModel: DeviceManageViewModel = hiltViewModel()
 ) {
     val devices by viewModel.devices.collectAsState()
@@ -64,6 +66,12 @@ fun DeviceManageScreen(
                 viewModel.clearToast()
             }
         }
+    }
+
+    // 直达接入：从首页「还没有绑定的孩子设备」进入时，立即拉起接入新设备浮层。
+    // 仅首次组合触发一次，避免重组重复拉起；设备管理 Tab 普通进入时 autoOpenAccess=false 不受影响。
+    LaunchedEffect(autoOpenAccess) {
+        if (autoOpenAccess) viewModel.openAccessSheet()
     }
 
     var searchQuery by remember { mutableStateOf("") }

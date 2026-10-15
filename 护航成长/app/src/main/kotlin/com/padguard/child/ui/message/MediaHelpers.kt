@@ -169,7 +169,9 @@ internal fun ResizableVideo(
 
         else -> {
             if (fullscreen) {
-                Box(modifier = modifier.fillMaxWidth()) {
+                // 不再强制 fillMaxWidth：由调用方决定铺满范围（信息发布弹窗传 fillMaxSize 铺满全屏，
+                // 消息详情页传 fillMaxWidth 保持宽度铺满、高度按视频比例自适应）。
+                Box(modifier = modifier) {
                     AndroidView(
                         factory = { ctx ->
                             VideoView(ctx).apply {
@@ -184,7 +186,7 @@ internal fun ResizableVideo(
                                 setOnErrorListener { _, _, _ -> true }
                             }
                         },
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxSize()
                     )
                     ResizeToggle(
                         fullscreen = true,
