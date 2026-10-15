@@ -10,6 +10,14 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+// local.properties（不入库）统一加载点：签名 RELEASE_* 与高德 amapKey 都支持从这里注入。
+// 注意 Gradle 的 findProperty 只认命令行 -P 与 gradle.properties，不读 local.properties——
+// 若没有这个加载点，把 amapKey 写进 local.properties 是不生效的（曾因此底图不加载排查半天）。
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
 android {
     namespace = "com.padguard.parent"
     compileSdk = project.findProperty("COMPILE_SDK")?.toString()?.toInt() ?: 35
@@ -31,11 +39,11 @@ android {
             useSupportLibrary = true
         }
 
-        // 高德地图 SDK Key（占位）。真实部署时由运维通过 -PAMAP_KEY=xxx 传入，
-        // 或在 gradle.properties 写入 amapKey=xxx；默认空字符串 = 不加载真实底图，定位页回退到等距投影占位图。
-        // 绝不把真实 Key 写进代码仓库。
+        // 高德地图 SDK Key（占位）。注入优先级：-PAMAP_KEY 命令行 > gradle.properties amapKey > local.properties amapKey。
+        // 默认空字符串 = 不加载真实底图，定位页回退到等距投影占位图。绝不把真实 Key 写进代码仓库。
         val amapKey = (findProperty("AMAP_KEY") as? String)?.takeIf { it.isNotBlank() }
             ?: (findProperty("amapKey") as? String)?.takeIf { it.isNotBlank() }
+            ?: localProps.getProperty("amapKey")?.takeIf { it.isNotBlank() }
             ?: ""
         manifestPlaceholders["AMAP_KEY"] = amapKey
 
@@ -57,10 +65,7 @@ android {
             //   RELEASE_STORE_PASSWORD=******
             //   RELEASE_KEY_ALIAS=padguard
             //   RELEASE_KEY_PASSWORD=******
-            val localProps = Properties().apply {
-                val f = rootProject.file("local.properties")
-                if (f.exists()) f.inputStream().use { load(it) }
-            }
+            // localProps 已在脚本顶层加载（与 amapKey 同一来源）。
             val ksFile = (findProperty("RELEASE_STORE_FILE") as? String) ?: localProps.getProperty("RELEASE_STORE_FILE")
             val ksPass = (findProperty("RELEASE_STORE_PASSWORD") as? String) ?: localProps.getProperty("RELEASE_STORE_PASSWORD")
             val ksAlias = (findProperty("RELEASE_KEY_ALIAS") as? String) ?: localProps.getProperty("RELEASE_KEY_ALIAS")
@@ -182,11 +187,12 @@ afterEvaluate {
     }
     val amapKey = (findProperty("AMAP_KEY") as? String)?.takeIf { it.isNotBlank() }
         ?: (findProperty("amapKey") as? String)?.takeIf { it.isNotBlank() }
+        ?: localProps.getProperty("amapKey")?.takeIf { it.isNotBlank() }
     if (amapKey.isNullOrBlank()) {
         tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
             doFirst {
                 throw GradleException(
-                    "release 缺少高德地图 Key：请用 -PAMAP_KEY=xxx 注入，或在 gradle.properties 写入 amapKey=xxx；" +
+                    "release 缺少高德地图 Key：请用 -PAMAP_KEY=xxx 注入，或在 gradle.properties / local.properties 写入 amapKey=xxx；" +
                     "并在高德开放平台控制台把「release keystore 的 SHA1」加入该 Key 的签名绑定，否则定位页白屏/无底图（上线事故）。" +
                     "debug 构建允许空 Key（回退示意占位图）。"
                 )
