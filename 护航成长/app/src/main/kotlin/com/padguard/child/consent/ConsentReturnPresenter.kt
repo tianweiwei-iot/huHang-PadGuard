@@ -2,39 +2,25 @@ package com.padguard.child.consent
 
 import android.content.Context
 import android.content.Intent
-import com.padguard.child.MainActivity
 import com.padguard.child.permission.SpecialPermission
 import com.padguard.core.common.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * 授权自动回前台引擎（"免手动返回"的核心）。
+ * 授权自动回前台协调器（「免手动返回」的统一入口）。
  *
- * ## 家长在系统设置页拨开关时本 App 处于后台，且开关变更**没有任何系统回调**
- * —— 既不能靠广播感知、也不能靠 onActivityResult 感知（设置页没有"完成"按钮）。
- * 因此这里用一条后台轮询守护：盯着"刚带家长去办的那一项"是否被授予，
- * 一旦检测到授予，立即通过 [ConsentReturnNotifier] 把授权页拉回前台；
- * 授权页 onResume 后自动复检并跳下一项。整条链"拨一个开关就自动前进一个"，
- * 家长不必再手动按返回。
+ * ## 职责收敛
+ * 只负责「启动 / 停止」[ConsentReturnService]，不再自己轮询、也不再发通知。
+ * 真正的轮询与后台 `startActivity` 交给前台服务——这是 Android 10+ 下
+ * 「后台把 App 重新顶回前台」唯一可靠的豁免路径（服务自前台态拉起后 startActivity 合法）。
  *
- * ## 为什么用轮询而不是监听
- * AppOps（使用情况/悬浮窗/未知来源）与无障碍服务**从设计上就不对外发回调**，
- * 任何第三方 App 都收不到"开关被拨动"的事件。只能靠"周期性复检状态"这一唯一可靠手段，
- * 与 [com.padguard.child.consent.OneTimeConsentViewModel] 在 onResume 时的复检同源同思路，
- * 区别只在于：onResume 被动等家长回来，这里主动把家长"接"回来。
- *
- * ## 不会无限空转
- * 轮询上限 [MAX_ROUNDS] 后自动停手：家长中途离开平板、或某项 ROM 根本不提供入口时，
- * 不占用 CPU、不耗电。超时后退回"手动按返回"的旧行为，流程不悬空。
+ * ## 为什么之前做不到真免返回（用户反馈「每个授权都要手动返回」的根因）
+ * 旧实现发的是一条 full-screen intent 通知：平板处于解锁使用态时，全屏 Intent 会降级为
+ * 需手动点按的悬浮通知，等于把「点继续」换成了「点通知」——家长仍要手动操作；
+ * 后台直接 `startActivity` 又被 Android 10+ 静默拦截，于是只能按系统返回键才生效。
+ * 这两点叠加，表现就是「授权完必须手动返回」。本类把职责转交前台服务后，从根上消除该问题。
  */
 @Singleton
 class ConsentReturnPresenter @Inject constructor(
@@ -42,75 +28,46 @@ class ConsentReturnPresenter @Inject constructor(
     private val notifier: ConsentReturnNotifier
 ) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-
-    @Volatile
-    private var watchJob: Job? = null
-
     /**
-     * 开始盯着一组目标权限。任一项被授予即触发一次回前台，随后自动停（不重复弹）。
-     * 重复调用会先 [stop] 清掉上一条，保证同一时刻只有一组在盯。
+     * 盯着一组 [SpecialPermission] 目标：启动前台服务轮询，任一项被授予即自动把授权页拉回前台。
      */
     fun watch(targets: Set<SpecialPermission>) {
         if (targets.isEmpty()) return
+        startService(targets.map { it.key })
+    }
+
+    /**
+     * 盯着一组自定义 key（如 [KEY_DEVICE_ADMIN]）：与 [watch] 同源，
+     * 覆盖「无系统回调、需轮询检测」的目标（典型是设备管理员激活）。
+     */
+    fun watch(keys: List<String>) {
+        if (keys.isEmpty()) return
+        startService(keys)
+    }
+
+    private fun startService(keys: List<String>) {
         stop()
-        watchJob = scope.launch {
-            var round = 0
-            while (isActive && round < MAX_ROUNDS) {
-                if (targets.any { it.isGranted(context) }) {
-                    Logger.i(TAG) { "consent target granted (${targets.map { it.key }}), returning to consent screen" }
-                    returnToConsent()
-                    break
+        runCatching {
+            context.startForegroundService(
+                Intent(context, ConsentReturnService::class.java).apply {
+                    putStringArrayListExtra(ConsentReturnService.EXTRA_KEYS, ArrayList(keys))
                 }
-                round++
-                delay(POLL_INTERVAL_MS)
-            }
-            if (round >= MAX_ROUNDS) {
-                Logger.w(TAG) { "consent return watcher timed out after $MAX_ROUNDS rounds (manual back may be needed)" }
-            }
-        }
+            )
+        }.onFailure { Logger.e(TAG) { "start consent return service failed: ${it.message}" } }
     }
 
     /** 停止盯守（授权页已回前台 / 流程结束 / 切到非设置步骤时调用）。 */
     fun stop() {
-        watchJob?.cancel()
-        watchJob = null
+        runCatching { context.stopService(Intent(context, ConsentReturnService::class.java)) }
+            .onFailure { Logger.w(TAG) { "stop consent return service failed: ${it.message}" } }
     }
 
     /** 撤掉回前台通知（授权页已可见时调用，避免通知栏留一条过期提醒）。 */
     fun cancelNotification() = notifier.cancel()
 
-    /**
-     * 把授权页宿主拉回前台。
-     *
-     * 优先走全屏 Intent（最稳，连"悬浮窗"这一项本身也能覆盖）；
-     * 不可用时退化为直接 `startActivity` —— 此时若 App 已持有 SYSTEM_ALERT_WINDOW
-     * （悬浮窗之后的各项），后台启动豁免同样生效，仍能自动返回；
-     * 两者都不行（极罕见：FSI 被撤销且悬浮窗尚未授予）则退回手动返回，不崩。
-     */
-    private fun returnToConsent() {
-        val posted = notifier.postReturnToConsent()
-        if (!posted) {
-            runCatching {
-                context.startActivity(
-                    Intent(context, MainActivity::class.java).apply {
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK or
-                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                                Intent.FLAG_ACTIVITY_SINGLE_TOP
-                        )
-                    }
-                )
-            }.onFailure { Logger.w(TAG) { "direct return-to-consent failed (background launch blocked)" } }
-        }
-    }
-
-    private companion object {
+    companion object {
         const val TAG = "ConsentReturnPresenter"
-        const val POLL_INTERVAL_MS = 600L
-
-        /** 约 60 秒上限：足够等家长拨完一个开关，又不至于长期空转 */
-        const val MAX_ROUNDS = 100
+        /** 设备管理员（DA）激活的盯守 key，与 [ConsentReturnService] 约定一致 */
+        const val KEY_DEVICE_ADMIN = "deviceAdmin"
     }
 }

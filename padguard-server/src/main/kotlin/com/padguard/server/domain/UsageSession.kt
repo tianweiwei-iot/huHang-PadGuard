@@ -52,6 +52,24 @@ class UsageSession(
     @Column(name = "last_delay_epoch")
     var lastDelayEpoch: Long? = null,
 
+    /**
+     * 当日累计护眼强制休息毫秒数。
+     *
+     * 休息期间设备被锁定、不属于"使用"，应从每日总时长中扣除：
+     * [UsageSessionService.usedMinutesIfActive] 与 [UsageSessionService.toDto] 的剩余均减去该值，
+     * 保证三端（孩子端倒计时 / 家长端看板 / 服务端锁机判定）一致地把休息排除在额度之外。
+     * 由孩子端在每次休息结束后经 [com.padguard.server.service.UsageSessionService.reportRest] 累加。
+     */
+    @Column(name = "rest_accumulated_ms")
+    var restAccumulatedMs: Long = 0L,
+
+    /**
+     * 已上报并计入的休息事件 id 集合（逗号分隔，保留最近若干条）。
+     * 用于服务端幂等去重，避免网络重试 / 乱序导致同一次休息被重复扣减。
+     */
+    @Column(name = "rest_ids")
+    var restIds: String = "",
+
     @Column(name = "created_at")
     var createdAt: Long = 0L,
 

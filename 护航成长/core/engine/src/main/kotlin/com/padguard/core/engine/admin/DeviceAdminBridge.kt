@@ -291,6 +291,50 @@ class DeviceAdminBridge @Inject constructor(
         }
 
     /**
+     * 经 DO/PO 特权把某包的某个运行时权限**强制拒绝**（真回收）。
+     *
+     * 与 [setRuntimePermission]（置为已授予 / 回归默认）不同，这里置为
+     * [DevicePolicyManager.PERMISSION_GRANT_STATE_DENIED]：不仅撤销已授予的权限，
+     * 还禁止用户/应用再次授予——即使应用声明并请求该权限，系统也直接拒绝。
+     * 这是"时间到立即回收应用权限"在 DO 路径下的治本手段：非 DO 设备只能靠无障碍事后顶回，
+     * 关掉无障碍即可绕过；DO 下权限被系统级拒绝，无法绕过。
+     *
+     * 普通设备管理员（无 DO/PO）返回 [OpResult.Unsupported]——预期降级，上层据此回执。
+     */
+    fun revokeRuntimePermission(packageName: String, permission: String): OpResult =
+        guarded("denyPermission:$packageName:$permission") {
+            require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) { "requires API 23+" }
+            require(hasOwnerPrivileges()) { "revokeRuntimePermission requires Device/Profile Owner" }
+            val admin = requireAdmin()
+            val target = packageName.takeIf { it.isNotBlank() } ?: context.packageName
+            val ok = dpm.setPermissionGrantState(
+                admin, target, permission,
+                DevicePolicyManager.PERMISSION_GRANT_STATE_DENIED
+            )
+            require(ok) { "setPermissionGrantState(DENIED) returned false for $permission on $target" }
+        }
+
+    /**
+     * 归还某包某运行时权限到**系统默认**状态（解除 [revokeRuntimePermission] 设的强制拒绝）。
+     *
+     * 注意是 DEFAULT 而非 GRANTED：只解除"我们强加的拒绝"，让应用回到"可正常向用户请求授权"的默认态，
+     * 不擅自替用户把权限重新授予，避免解除管控后应用行为被改变。
+     * 设备已无 DO（权限被摘除）时返回 [OpResult.Unsupported]，调用方忽略即可。
+     */
+    fun restoreRuntimePermission(packageName: String, permission: String): OpResult =
+        guarded("restorePermission:$packageName:$permission") {
+            require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) { "requires API 23+" }
+            require(hasOwnerPrivileges()) { "restoreRuntimePermission requires Device/Profile Owner" }
+            val admin = requireAdmin()
+            val target = packageName.takeIf { it.isNotBlank() } ?: context.packageName
+            val ok = dpm.setPermissionGrantState(
+                admin, target, permission,
+                DevicePolicyManager.PERMISSION_GRANT_STATE_DEFAULT
+            )
+            require(ok) { "setPermissionGrantState(DEFAULT) returned false for $permission on $target" }
+        }
+
+    /**
      * 协议同意后应用的「常开加固基线」（说明书 §11 防绕过）。
      *
      * 这些限制一旦开启未成年人模式就不应被解除，仅 Device Owner 可设。

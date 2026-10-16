@@ -62,13 +62,24 @@ class ChildDeviceController(
     ) = DeviceApiResponse.ok(usageSessionService.start(deviceId))
 
     /**
-     * 孩子端申请延时：minutes 必须落在 15/30/45/60 档位内，单日累计不超上限。
+     * 孩子端申请延时：仅发起审批工单（PENDING），不立即延长。
+     * 必须经家长端审批通过后额度才真正增加。返回刷新后的会话（含 pendingDelayMinutes）。
      */
-    @PostMapping("/usage/session/extend")
-    fun extendUsageSession(
+    @PostMapping("/usage/session/delay/request")
+    fun requestDelayUsageSession(
         @RequestAttribute("deviceId") deviceId: String,
         @RequestBody req: com.padguard.server.dto.UsageDelayRequest
-    ) = DeviceApiResponse.ok(usageSessionService.extend(deviceId, req.minutes))
+    ) = DeviceApiResponse.ok(usageSessionService.requestDelay(deviceId, req.minutes))
+
+    /**
+     * 孩子端上报护眼强制休息的实际时长（毫秒），服务端从每日总时长中扣除，
+     * 保证「休息不计入每日总时长」在三端（孩子端倒计时 / 家长端看板 / 服务端锁机判定）一致生效。
+     */
+    @PostMapping("/usage/session/rest")
+    fun reportEyeCareRest(
+        @RequestAttribute("deviceId") deviceId: String,
+        @RequestBody req: com.padguard.server.dto.UsageRestReportRequest
+    ) = DeviceApiResponse.ok(usageSessionService.reportRest(deviceId, req.restId, req.restMs))
 
     @GetMapping("/policy")
     fun policy(

@@ -262,7 +262,12 @@ class PolicyEngine @Inject constructor(
         }
 
         // ---------- 2. 使用限额 ----------
-        val limit = appLimitEnforcer.track(policy.appLimit, foregroundPackage, screenOn)
+        // 护眼强制休息锁屏期间屏幕点亮但设备被锁定，这段时间不应计入使用时长：
+        // 本地累计跳过（避免上报口径失真），服务端权威会话也会统一扣减。
+        // 取上一轮 tick 已 settle 的锁定态：本轮 syncAutoReasons 在末尾才更新，
+        // 因此这里看到的是"上一轮结束时的 EYE_CARE 是否生效"，与休息实际进行态一致（最多一个采样周期延迟）。
+        val eyeCareResting = lockController.state.value.reasons.contains(LockReason.EYE_CARE)
+        val limit = appLimitEnforcer.track(policy.appLimit, foregroundPackage, screenOn, eyeCareResting)
         var blockedPackage: String? = null
         var blockedReason = ""
         if (limit is LimitVerdict.Blocked) {
@@ -331,9 +336,12 @@ class PolicyEngine @Inject constructor(
         // ---------- 3. 护眼休息 ----------
         val eyeCare = eyeCareEnforcer.track(policy.eyeCare, screenOn)
         if (eyeCare is EyeCareVerdict.Resting && eyeCare.forceLock) {
-            val minutes = (eyeCare.remainingSeconds + 59) / 60
+            // 锁屏顶部展示「本次休息总时长」（固定值，来自家长设定的 restMinutes），
+            // 与底部 MM:SS 精确倒计时分工明确：上=总时长，下=倒计时。
+            // 历史实现错把「递减的剩余分钟」放到顶部，导致"约 X 分钟"既不像总时长也不像倒计时。
+            val totalRestMinutes = policy.eyeCare.restMinutes
             autoReasons[LockReason.EYE_CARE] = LockDetail(
-                text = "护眼休息中，剩余约 $minutes 分钟",
+                text = "本次护眼休息共 $totalRestMinutes 分钟",
                 untilMillis = eyeCare.untilMillis
             )
         }
@@ -361,6 +369,9 @@ class PolicyEngine @Inject constructor(
         // 逐个调用会在"时段刚结束、限额刚触发"的瞬间出现锁定态短暂为空，导致锁屏页闪一下
         lockController.syncAutoReasons(autoReasons)
 
+        // 取出 EyeCareEnforcer 在本轮产生的待上报休息事件（restId, 实际休息毫秒），上抛给 GuardService
+        val pendingRestReport = eyeCareEnforcer.consumePendingRestReport()
+
         return EngineTick(
             lockState = lockController.state.value,
             schedule = schedule,
@@ -368,7 +379,8 @@ class PolicyEngine @Inject constructor(
             eyeCare = eyeCare,
             minorMode = minorMode,
             blockedPackage = blockedPackage,
-            blockedReason = blockedReason
+            blockedReason = blockedReason,
+            pendingRestReport = pendingRestReport
         )
     }
 
@@ -516,7 +528,13 @@ data class EngineTick(
     /** 非空表示该应用已超额，应被拦截（但不锁整机） */
     val blockedPackage: String?,
     /** 拦截原因文案（限额超额/黑名单命中），供拦截页展示 */
-    val blockedReason: String = ""
+    val blockedReason: String = "",
+    /**
+     * 护眼强制休息结束后待上报服务端的事件（restId, 实际休息毫秒）。
+     * 非空时由 [com.padguard.child.service.GuardService] 异步上报，
+     * 服务端据此从每日总时长中扣减，保证三端一致。取走即由 EyeCareEnforcer 清空。
+     */
+    val pendingRestReport: Pair<String, Long>? = null
 ) {
     val shouldShowLockScreen: Boolean get() = lockState.locked
     val shouldBlockApp: Boolean get() = blockedPackage != null

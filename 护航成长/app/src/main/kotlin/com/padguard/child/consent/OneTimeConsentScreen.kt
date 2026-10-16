@@ -55,9 +55,16 @@ import com.padguard.child.capture.CapturePermissionActivity
  * ## 为什么清单是全量而不是只列关键项
  * 只列一部分，剩下"用到时再申请"正是过去的做法，结果是家长配置水印、
  * 远程拍照、实时看屏时被二次叫去系统设置。列全量才能兑现"一次到位"。
+ *
+ * ## [autoStart]：补授权场景
+ * 默认为 false（首次装机，需家长主动点「同意并授权」）。
+ * 当入口分流因「设备管理员未激活」把已装机用户带回本页时（[com.padguard.child.MainActivity]），
+ * 置 true：家长此前已同意过协议，无需再点按钮，自动进入流水线并直接拉起 DA 激活页，
+ * 落地「自动获取管理员权限」。
  */
 @Composable
 fun OneTimeConsentScreen(
+    autoStart: Boolean = false,
     viewModel: OneTimeConsentViewModel = hiltViewModel()
 ) {
     val phase by viewModel.phase.collectAsStateWithLifecycle()
@@ -93,6 +100,14 @@ fun OneTimeConsentScreen(
                     captureLauncher.launch(CapturePermissionActivity.intent(context))
             }
         }
+    }
+
+    // 补授权场景（autoStart=true）：家长此前已同意过协议、仅设备管理员缺失，
+    // 自动进入流水线（跳过「同意并授权」按钮）并直接拉起 DA 激活页，落地「自动获取管理员权限」；
+    // 前台服务把授权页顶回前台（实例重建）时也借此续跑。
+    // 仅在 autoStart 变化时执行一次；且「授权链已启动」时不再重复触发，避免与系统返回回调重复推进。
+    LaunchedEffect(autoStart) {
+        if (autoStart && !viewModel.hasStarted) viewModel.retryCurrent()
     }
 
     // 兜底：个别 ROM 的系统设置页不会回传 result，只靠 ActivityResult 会永远停在等待态。

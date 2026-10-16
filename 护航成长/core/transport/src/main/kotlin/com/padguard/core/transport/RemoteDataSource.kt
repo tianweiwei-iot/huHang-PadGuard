@@ -85,8 +85,16 @@ interface RemoteDataSource {
     /** 孩子端确认"计时开始"：服务端锁定今日计时起点与额度（幂等） */
     suspend fun startUsageSession(): ApiResult<UsageSessionDto>
 
-    /** 孩子端申请延时：minutes 必须落在档位内，单日累计不超上限 */
-    suspend fun extendUsageSession(minutes: Int): ApiResult<UsageSessionDto>
+    /** 孩子端申请延时：仅发起审批工单（须经家长审批才生效），返回刷新后的会话 */
+    suspend fun requestDelayUsageSession(minutes: Int): ApiResult<UsageSessionDto>
+
+    /**
+     * 上报护眼强制休息时长（毫秒），服务端据此从每日总时长中扣除。
+     *
+     * @param restId 本次休息唯一标识（= 休息开始墙钟），服务端幂等去重
+     * @param restMs 实际休息毫秒（已钳制到 [0, restMinutes*60000]）
+     */
+    suspend fun reportEyeCareRest(restId: String, restMs: Long): ApiResult<Unit>
 
     // ---------- 上行 ----------
 

@@ -114,6 +114,14 @@ object AuditAction {
     const val UNLOCK_APPROVE = "UNLOCK_APPROVE"
     const val UNLOCK_REJECT = "UNLOCK_REJECT"
     const val UNLOCK_DISMISS = "UNLOCK_DISMISS"
+    /** 延时申请提交（孩子端发起，待家长审批） */
+    const val USAGE_DELAY_REQUEST = "USAGE_DELAY_REQUEST"
+    /** 延时申请通过（家长批准，额度真正延长） */
+    const val USAGE_DELAY_APPROVE = "USAGE_DELAY_APPROVE"
+    /** 延时申请拒绝（家长驳回，下发拒因给孩子） */
+    const val USAGE_DELAY_REJECT = "USAGE_DELAY_REJECT"
+    /** 延时申请忽略（家长归档，非终态、仍可被批准） */
+    const val USAGE_DELAY_DISMISS = "USAGE_DELAY_DISMISS"
     const val COMMAND_ISSUE = "COMMAND_ISSUE"
     const val CONTENT_SAFE_SEARCH_UPDATE = "CONTENT_SAFE_SEARCH_UPDATE"
     const val CONTENT_CATEGORY_BLOCK_UPDATE = "CONTENT_CATEGORY_BLOCK_UPDATE"

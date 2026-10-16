@@ -792,6 +792,20 @@ class LocalDataSource @Inject constructor(
     override suspend fun dismissUnlockTicket(deviceId: String, ticketId: String): Result<Unit> =
         Result.success(Unit)
 
+    // ---- 延时审批工单 (Mock) ----
+    override suspend fun getUsageDelayTickets(deviceId: String): Result<List<UsageDelayTicket>> =
+        Result.success(emptyList())
+
+    override suspend fun approveUsageDelayTicket(deviceId: String, ticketId: String): Result<Unit> =
+        Result.success(Unit)
+
+    override suspend fun rejectUsageDelayTicket(
+        deviceId: String, ticketId: String, reason: String?
+    ): Result<Unit> = Result.success(Unit)
+
+    override suspend fun dismissUsageDelayTicket(deviceId: String, ticketId: String): Result<Unit> =
+        Result.success(Unit)
+
     override suspend fun setControlMode(deviceId: String, mode: ControlMode): Result<Unit> =
         Result.success(Unit)
 
@@ -874,7 +888,8 @@ class LocalDataSource @Inject constructor(
                 remainingMs = 90 * 60_000L,
                 countdownThresholdMs = 10 * 60_000L,
                 delayOptions = listOf(15, 30, 45, 60),
-                maxDailyExtendMinutes = 120
+                maxDailyExtendMinutes = 120,
+                pendingDelayMinutes = 0
             )
         )
     }

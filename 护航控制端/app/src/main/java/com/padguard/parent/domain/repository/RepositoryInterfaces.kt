@@ -508,6 +508,19 @@ interface PolicyRepository {
      */
     suspend fun dismissUnlockTicket(deviceId: String, ticketId: String): Result<Unit>
 
+    // === 延时审批工单（孩子申请延长使用时长，须经家长审批） ===
+    /** 读取某设备的全部延时工单（含已处理），供消息中心翻看历史与待处理弹窗 */
+    suspend fun getUsageDelayTickets(deviceId: String): Result<List<UsageDelayTicket>>
+
+    /** 同意：服务端按工单申请分钟数累加额度（无需再传时长） */
+    suspend fun approveUsageDelayTicket(deviceId: String, ticketId: String): Result<Unit>
+
+    /** 拒绝：关闭工单并给孩子下发「申请未通过」 */
+    suspend fun rejectUsageDelayTicket(deviceId: String, ticketId: String, reason: String? = null): Result<Unit>
+
+    /** 忽略（归档）：关闭弹窗、留在消息中心，不下发消息给孩子，工单仍可被批准 */
+    suspend fun dismissUsageDelayTicket(deviceId: String, ticketId: String): Result<Unit>
+
     // === 模式切换 ===
     /** 切换管控模式 */
     suspend fun setControlMode(deviceId: String, mode: ControlMode): Result<Unit>
@@ -726,6 +739,34 @@ data class UnlockTicket(
 
     /** 展示标题：单应用申请显示应用名，整机申请显示「整台设备」 */
     val targetLabel: String get() = appLabel?.takeIf { it.isNotBlank() } ?: "整台设备"
+}
+
+/**
+ * 孩子端提交的延时申请工单（服务端工单）。
+ *
+ * 闭环：孩子在计时倒计时页点「延时申请」→ 服务端建 PENDING 工单（**不直接延长时长**）→
+ * 家长端消息中心 / 时间管控页展示 → 家长「同意」后服务端才累加额度，「拒绝/忽略」则归档。
+ *
+ * 这是本次修复的核心：旧实现里孩子端「申请延时」直接生效，既绕过了家长审核，
+ * 家长端也同步不到延时后的时长。新流程把"申请"与"生效"彻底解耦，必须家长审批。
+ */
+data class UsageDelayTicket(
+    val id: String,
+    val deviceId: String,
+    val minutes: Int = 0,
+    val reason: String? = null,
+    val status: String = "PENDING",
+    val createdAt: Long = 0L,
+    val resolvedAt: Long? = null
+) {
+    val isPending: Boolean get() = status == "PENDING"
+
+    /**
+     * 是否仍可被家长处理。
+     * 与 [UnlockTicket.isActionable] 同语义：`IGNORED` 也算可处理——
+     * 忽略只是"暂时不打扰"，不是终态，家长稍后改变主意仍应能在消息中心批准。
+     */
+    val isActionable: Boolean get() = status == "PENDING" || status == "IGNORED"
 }
 
 /**

@@ -277,6 +277,43 @@ interface PolicyApi {
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<UsageSessionDto>>
 
+    // === 延时审批工单（孩子申请延长使用时长，须经家长审批） ===
+    @GET("devices/{deviceId}/usage-delay/tickets")
+    suspend fun getUsageDelayTickets(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<List<UsageDelayTicketDto>>>
+
+    /**
+     * 同意延时：审批通过后服务端按工单分钟数累加额度。
+     * 响应体为空对象，走 execRaw（与 unlock/approve 同一套"只看 HTTP 成功"写法），
+     * 避免 ApiResponse<Unit> 解析失败导致"发送失败"的假失败。
+     */
+    @POST("devices/{deviceId}/usage-delay/tickets/{ticketId}/approve")
+    suspend fun approveUsageDelayTicket(
+        @Path("deviceId") deviceId: String,
+        @Path("ticketId") ticketId: String,
+        @Body request: UsageDelayApproveRequest
+    ): Response<okhttp3.ResponseBody>
+
+    /**
+     * 拒绝延时：关闭工单并给孩子下发"申请未通过"（[UsageDelayRejectRequest.reason] 为拒因）。
+     */
+    @POST("devices/{deviceId}/usage-delay/tickets/{ticketId}/reject")
+    suspend fun rejectUsageDelayTicket(
+        @Path("deviceId") deviceId: String,
+        @Path("ticketId") ticketId: String,
+        @Body request: UsageDelayRejectRequest
+    ): Response<okhttp3.ResponseBody>
+
+    /**
+     * 忽略（归档）延时申请：关闭弹窗并留在消息中心，不下发消息给孩子、工单仍可批准。
+     */
+    @POST("devices/{deviceId}/usage-delay/tickets/{ticketId}/dismiss")
+    suspend fun dismissUsageDelayTicket(
+        @Path("deviceId") deviceId: String,
+        @Path("ticketId") ticketId: String
+    ): Response<okhttp3.ResponseBody>
+
     // === 未成年人模式（合规底座） ===
     @GET("policies/{deviceId}/minor-mode")
     suspend fun getMinorMode(

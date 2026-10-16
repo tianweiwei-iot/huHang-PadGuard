@@ -449,3 +449,39 @@ class ParentUnlockController(private val unlockService: UnlockService) {
     fun dismiss(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @PathVariable ticketId: String) =
         ApiResponse.ok<Any?>(run { unlockService.dismiss(userId, deviceId, ticketId); null })
 }
+
+/**
+ * 延时审批（根因修复）：孩子端发起的"延长使用时间"申请，必须经家长审批才生效。
+ *
+ * 旧实现里"申请即生效"导致家长端无法同步、也无人审批；本控制器把审批流暴露给家长端，
+ * 与 [ParentUnlockController] 同构——消息中心小铃铛与时间管控页两处入口都调用这些端点。
+ */
+@RestController
+@RequestMapping("/v1/devices")
+class ParentUsageDelayController(private val usageDelayService: UsageDelayService) {
+
+    @GetMapping("/{deviceId}/usage-delay/tickets")
+    fun tickets(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
+        ApiResponse.ok(usageDelayService.listTickets(userId, deviceId))
+
+    @PostMapping("/{deviceId}/usage-delay/tickets/{ticketId}/approve")
+    fun approve(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String,
+        @PathVariable ticketId: String, @RequestBody(required = false) req: UsageDelayApproveRequest?
+    ) = ApiResponse.ok<Any?>(run { usageDelayService.approve(userId, deviceId, ticketId, req ?: UsageDelayApproveRequest()); null })
+
+    @PostMapping("/{deviceId}/usage-delay/tickets/{ticketId}/reject")
+    fun reject(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String,
+        @PathVariable ticketId: String, @RequestBody(required = false) req: UsageDelayRejectRequest?
+    ) = ApiResponse.ok<Any?>(run { usageDelayService.reject(userId, deviceId, ticketId, req ?: UsageDelayRejectRequest()); null })
+
+    /**
+     * 忽略：关掉弹窗、归档进消息中心，不下发消息给孩子，工单保留为可批准状态。
+     * 与 reject 的区别见 [com.padguard.server.service.UsageDelayService.dismiss]。
+     */
+    @PostMapping("/{deviceId}/usage-delay/tickets/{ticketId}/dismiss")
+    fun dismiss(
+        @RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @PathVariable ticketId: String
+    ) = ApiResponse.ok<Any?>(run { usageDelayService.dismiss(userId, deviceId, ticketId); null })
+}

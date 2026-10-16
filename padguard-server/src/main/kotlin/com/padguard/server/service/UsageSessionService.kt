@@ -6,10 +6,9 @@ import com.padguard.server.common.SERVER_ZONE_ID
 import com.padguard.server.domain.DeviceSetting
 import com.padguard.server.domain.UsageSession
 import com.padguard.server.dto.UsageSessionDto
-import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.DeviceSettingRepository
 import com.padguard.server.repository.UsageSessionRepository
-import com.padguard.server.ws.WebSocketPushService
+import com.padguard.server.service.UsageDelayService
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -23,6 +22,8 @@ import java.time.ZoneId
  * 计时由服务端统一锚定：孩子端确认"计时开始"时记录 `startEpoch`，三端据此派生剩余时长，
  * 因此家长端 / 孩子端 / 服务端显示同一份数字，不再各自按本地时钟计算。
  *
+ * **延时不再在本服务内直接生效**：孩子端的"申请延时"只是发起 [UsageDelayService] 工单，
+ * 必须经家长审批（[UsageDelayService.approve]）后才会累加额度。本服务只负责"计时与剩余"，
  * 详见 [com.padguard.server.domain.UsageSession] 的字段说明与一致性设计。
  */
 @Service
@@ -30,8 +31,7 @@ class UsageSessionService(
     private val usageSessionRepository: UsageSessionRepository,
     private val deviceSettingRepository: DeviceSettingRepository,
     private val deviceService: DeviceService,
-    private val webSocketPush: WebSocketPushService,
-    private val mqttGateway: MqttGateway
+    private val usageDelayService: UsageDelayService
 ) {
     private val log = LoggerFactory.getLogger(UsageSessionService::class.java)
     private val zoneId = SERVER_ZONE_ID
@@ -65,6 +65,9 @@ class UsageSessionService(
             this.quotaMinutes = quota
             this.extendedMinutes = 0
             this.lastDelayEpoch = null
+            // 新的一天重置护眼休息累计与去重集合（休息累计按日清零，避免跨日延续）
+            this.restAccumulatedMs = 0L
+            this.restIds = ""
             if (this.createdAt == 0L) this.createdAt = now
             this.updatedAt = now
         }
@@ -107,68 +110,63 @@ class UsageSessionService(
         val startEpoch = entity.startEpoch ?: return null
         if (entity.dayKey != dayKey(now)) return null
         val totalMinutes = resolveQuota(deviceId, now) + entity.extendedMinutes
-        val elapsedMin = ((now - startEpoch) / 60_000L).coerceAtLeast(0L).toInt()
+        // 已用 = 墙钟流逝 - 护眼强制休息时长（休息期间设备被锁定，不属于使用，须从每日总时长扣除）
+        val elapsedMin = ((now - startEpoch - entity.restAccumulatedMs) / 60_000L).coerceAtLeast(0L).toInt()
         return minOf(elapsedMin, totalMinutes)
     }
 
     /**
-     * 孩子端申请延时。
+     * 上报一次护眼强制休息的实际时长（毫秒），从当日总时长中扣除。
      *
-     * 校验：档位必须落在 [UsageSession.DELAY_OPTIONS]；单日累计延时不超过
-     * [UsageSession.MAX_DAILY_EXTEND_MINUTES]（防刷）；今日必须先确认开始计时。
-     * 成功后通知家长端（WebSocket），让"孩子申请了延时"实时可见。
+     * 三端一致性的关键落地：休息由孩子端本地 [com.padguard.core.engine.enforcer.EyeCareEnforcer] 触发，
+     * 服务端原本只按 `now - startEpoch` 纯墙钟计时，必然把休息算进额度。这里由孩子端在休息结束后
+     * 上报实际休息毫秒，服务端累加进 [com.padguard.server.domain.UsageSession.restAccumulatedMs]，
+     * 并在 [usedMinutesIfActive] 与 [toDto] 中统一扣减 —— 孩子端倒计时（基线来自 [toDto.remainingMs]）、
+     * 家长端看板（[usedMinutesIfActive]）、服务端锁机判定（[toDto] 剩余派生）三端同源排除，
+     * 杜绝"休息被计入每日总时长额度"。
+     *
+     * 幂等：同一 restId 只计一次（[com.padguard.server.domain.UsageSession.restIds] 保留最近若干条去重），
+     * 防止网络重试 / 乱序导致的重复扣减；单次休息毫秒钳制到 [0, 当日总额度] 防异常值。
      */
     @Transactional
-    fun extend(deviceId: String, minutes: Int): UsageSessionDto {
+    fun reportRest(deviceId: String, restId: String, restMs: Long) {
+        if (deviceId.isBlank() || restId.isBlank() || restMs <= 0L) {
+            log.warn("usage rest report ignored: invalid args device={} restId={} restMs={}", deviceId, restId, restMs)
+            return
+        }
         val now = System.currentTimeMillis()
-        val today = dayKey(now)
-        val entity = usageSessionRepository.findByDeviceId(deviceId)
-        if (entity == null || entity.dayKey != today || entity.startEpoch == null) {
-            throw BizException(ParentErr.PARAM_ERROR, "今日计时尚未开始，无法延时")
-        }
-        if (minutes !in UsageSession.DELAY_OPTIONS) {
-            throw BizException(ParentErr.PARAM_ERROR, "非法的延时档位：$minutes 分钟")
-        }
-        if (entity.extendedMinutes + minutes > UsageSession.MAX_DAILY_EXTEND_MINUTES) {
-            throw BizException(
-                ParentErr.PARAM_ERROR,
-                "今日延时已达上限 ${UsageSession.MAX_DAILY_EXTEND_MINUTES} 分钟"
-            )
-        }
-        entity.extendedMinutes += minutes
-        entity.lastDelayEpoch = now
+        val entity = usageSessionRepository.findByDeviceId(deviceId) ?: return
+        // 非今日会话：该次休息属于已过期会话，不再计入当前额度
+        if (entity.dayKey != dayKey(now)) return
+        // 幂等去重：restId 已记录则跳过（应对重试 / 乱序）。
+        // 用有序 List 而非 Set：takeLast(16) 依赖写入顺序（末尾即最近），且保证"最近16条"语义正确。
+        val recorded = entity.restIds.split(',').map { it.trim() }.filter { it.isNotBlank() }
+        if (restId in recorded) return
+
+        val totalMs = (resolveQuota(deviceId, now) + entity.extendedMinutes) * 60_000L
+        val capped = restMs.coerceIn(0L, totalMs)
+        entity.restAccumulatedMs = (entity.restAccumulatedMs + capped).coerceAtLeast(0L)
+        // 维护去重集合（保留最近 16 条，防止字段无限增长）
+        entity.restIds = (recorded + restId).takeLast(16).joinToString(",")
         entity.updatedAt = now
         usageSessionRepository.save(entity)
-        log.info("usage session extended device={} +{}min total={}", deviceId, minutes, entity.extendedMinutes)
+        log.info("usage rest reported device={} restId={} restMs={} totalRestMs={}", deviceId, restId, capped, entity.restAccumulatedMs)
+    }
 
-        deviceService.getUserId(deviceId)?.let { userId ->
-            //  延时生效事件须"按端点 audience 分流"，补 audience 字段，避免"抛 PARENT 给 CHILD 端点"的 audience 错配。
-            // - 家长端（PARENT）：经 WebSocket 实时通知，让家长端看板/通知知悉孩子申请了延时；
-            // - 被控端孩子（CHILD）：经 MQTT 下行通道推到设备，孩子端即时刷新自身倒计时。
-            webSocketPush.pushToUser(
-                userId,
-                mapOf(
-                    "type" to "usage.delay",
-                    "audience" to "PARENT",
-                    "deviceId" to deviceId,
-                    "minutes" to minutes,
-                    "extendedMinutes" to entity.extendedMinutes,
-                    "at" to now
-                )
-            )
-            mqttGateway.publishConfig(
-                deviceId,
-                mapOf(
-                    "type" to "usage.delay",
-                    "audience" to "CHILD",
-                    "deviceId" to deviceId,
-                    "minutes" to minutes.toString(),
-                    "extendedMinutes" to entity.extendedMinutes.toString(),
-                    "at" to now.toString()
-                )
-            )
-        }
-        return toDto(entity, now, deviceId)
+    /**
+     * 孩子端申请延时（仅发起审批工单，不立即延长）。
+     *
+     * 这是 [UsageDelayService.request] 的会话侧入口：只负责把"申请"转交审批流，
+     * 真正的额度延长发生在家长 `approve` 之后。返回刷新后的会话 DTO（含 [pendingDelayMinutes]），
+     * 孩子端据此展示"已提交，等待家长审核"。
+     *
+     * 之所以不直接在此累加额度：旧实现正是在这一步直接生效，导致"孩子自己批准自己"、
+     * 家长端无法同步——这是本次修复的核心缺陷。
+     */
+    @Transactional
+    fun requestDelay(deviceId: String, minutes: Int): UsageSessionDto {
+        usageDelayService.request(deviceId, minutes)
+        return get(deviceId)
     }
 
     /**
@@ -196,7 +194,8 @@ class UsageSessionService(
         // 避免出现"明明改了额度、孩子端当天却照旧"的"设置不生效"问题。
         val liveQuota = if (started) resolveQuota(deviceId, now) else s.quotaMinutes
         val totalMinutes = liveQuota + s.extendedMinutes
-        val remainingMs = if (started) maxOf(0L, totalMinutes * 60_000L - (now - start)) else 0L
+        // 剩余 = 总额度 - 墙钟流逝 - 护眼强制休息时长（休息不计入每日总时长）
+        val remainingMs = if (started) maxOf(0L, totalMinutes * 60_000L - (now - start) - s.restAccumulatedMs) else 0L
         return UsageSessionDto(
             deviceId = s.deviceId,
             serverNow = now,
@@ -210,7 +209,8 @@ class UsageSessionService(
             countdownThresholdMs = UsageSession.COUNTDOWN_THRESHOLD_MS,
             delayOptions = UsageSession.DELAY_OPTIONS,
             maxDailyExtendMinutes = UsageSession.MAX_DAILY_EXTEND_MINUTES,
-            lastDelayEpoch = s.lastDelayEpoch
+            lastDelayEpoch = s.lastDelayEpoch,
+            pendingDelayMinutes = usageDelayService.pendingDelayMinutes(s.deviceId)
         )
     }
 }

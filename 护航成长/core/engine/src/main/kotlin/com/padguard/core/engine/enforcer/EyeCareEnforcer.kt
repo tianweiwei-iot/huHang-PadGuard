@@ -38,6 +38,23 @@ class EyeCareEnforcer @Inject constructor(
     /** 强制休息结束的单调时钟点；0 表示不在休息中 */
     private var restUntilElapsed: Long = 0L
 
+    /** 休息开始时的墙钟毫秒（服务端校准）；0 表示未在休息中。用于核算实际休息时长 */
+    private var restStartedWallEpoch: Long = 0L
+
+    /** 本次休息的唯一标识（= 休息开始墙钟），随上报送达服务端做幂等去重 */
+    private var restId: String? = null
+
+    /** 本次休息的时长上限（毫秒）= restMinutes * 60000，核算实际休息时长时做上钳制 */
+    private var restCapMs: Long = 0L
+
+    /**
+     * 休息结束后待上报的 (restId, 实际休息毫秒)。
+     * 由 [PolicyEngine.tick] 取出经 [EngineTick] 上抛，[GuardService] 负责异步上报服务端，
+     * 服务端据此从每日总时长中扣减——这是"休息不计入每日总时长"在权威口径上的落地。
+     * 取走即清空，避免重复上报。
+     */
+    private var pendingRestReport: Pair<String, Long>? = null
+
     private var lastSampleElapsed: Long = -1L
 
     /**
@@ -56,10 +73,9 @@ class EyeCareEnforcer @Inject constructor(
         // 正在强制休息中
         if (restUntilElapsed > 0) {
             if (nowElapsed >= restUntilElapsed) {
+                // 自然结束：核算实际休息时长并暂存为待上报事件（供服务端从每日总额度扣减）
+                finalizeRestIfActive()
                 Logger.i(TAG) { "rest finished, counters cleared" }
-                restUntilElapsed = 0L
-                continuousUsedMs = 0L
-                screenOffAccumulatedMs = 0L
                 return EyeCareVerdict.Idle
             }
             val remainingSec = ((restUntilElapsed - nowElapsed) / 1000L).toInt()
@@ -90,6 +106,11 @@ class EyeCareEnforcer @Inject constructor(
         val thresholdMs = policy.continuousMinutes * 60_000L
         if (continuousUsedMs >= thresholdMs) {
             restUntilElapsed = nowElapsed + policy.restMinutes * 60_000L
+            // 记录休息开始墙钟、唯一标识与时长上限，供结束时核算实际休息并上报服务端。
+            // restId 用墙钟时间戳，天然唯一且可幂等去重；restCapMs 用于上钳制防异常值。
+            restStartedWallEpoch = timeProvider.now()
+            restId = restStartedWallEpoch.toString()
+            restCapMs = policy.restMinutes * 60_000L
             Logger.i(TAG) {
                 "eye care triggered after ${continuousUsedMs / 60000}min, rest ${policy.restMinutes}min"
             }
@@ -112,17 +133,52 @@ class EyeCareEnforcer @Inject constructor(
 
     /** 家长确认"已休息"或远程指令提前结束休息时调用 */
     fun skipRest() {
-        restUntilElapsed = 0L
-        continuousUsedMs = 0L
-        screenOffAccumulatedMs = 0L
+        // 提前结束也算一次真实休息，核算实际休息时长并暂存上报事件，再清零
+        finalizeRestIfActive()
         Logger.i(TAG) { "rest skipped by authorization" }
     }
 
     fun reset() {
+        // 策略被关闭/重载导致的清零：此时本就无日总时长管控，静默清零即可（不上报，避免噪音）
         continuousUsedMs = 0L
         screenOffAccumulatedMs = 0L
         restUntilElapsed = 0L
+        restStartedWallEpoch = 0L
+        restId = null
+        restCapMs = 0L
+        pendingRestReport = null
         lastSampleElapsed = -1L
+    }
+
+    /**
+     * 休息结束收尾：若正处于强制休息，核算「实际休息毫秒」（墙钟差值，钳制到 [0, restCapMs]），
+     * 暂存为待上报事件；随后清零所有休息相关状态。
+     *
+     * 实际休息时长以墙钟差值核算（而非单调时钟），因为休息窗口要映射到服务端权威会话的
+     * 墙钟计时轴上才能被正确扣减；单调时钟受重启归零影响，不能直接换算成"已被计入总额度的墙钟时长"。
+     */
+    private fun finalizeRestIfActive() {
+        if (restUntilElapsed > 0L && restId != null) {
+            val actualMs = (timeProvider.now() - restStartedWallEpoch)
+                .coerceAtLeast(0L)
+                .coerceAtMost(restCapMs)
+            if (actualMs > 0L) {
+                pendingRestReport = (restId!! to actualMs)
+            }
+        }
+        restUntilElapsed = 0L
+        continuousUsedMs = 0L
+        screenOffAccumulatedMs = 0L
+        restStartedWallEpoch = 0L
+        restId = null
+        restCapMs = 0L
+    }
+
+    /** 取出并清空待上报的休息事件（restId, 实际休息毫秒）；无则返回 null */
+    fun consumePendingRestReport(): Pair<String, Long>? {
+        val r = pendingRestReport
+        pendingRestReport = null
+        return r
     }
 
     /** 与 [AppLimitEnforcer.computeDelta] 同规则：首采样、重启、超长间隔都要挡住 */

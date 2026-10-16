@@ -57,13 +57,30 @@ data class UsageSessionDto(
     @SerialName("countdownThresholdMs") val countdownThresholdMs: Long = 10 * 60_000L,
     @SerialName("delayOptions") val delayOptions: List<Int> = listOf(15, 30, 45, 60),
     @SerialName("maxDailyExtendMinutes") val maxDailyExtendMinutes: Int = 120,
-    @SerialName("lastDelayEpoch") val lastDelayEpoch: Long? = null
+    @SerialName("lastDelayEpoch") val lastDelayEpoch: Long? = null,
+    /** 当前正在等待家长审批的延时分钟数（PENDING 工单之和）；>0 表示"已提交，等待审核" */
+    @SerialName("pendingDelayMinutes") val pendingDelayMinutes: Int = 0
 )
 
 /** 延时申请请求：minutes 必须落在 delayOptions 内 */
 @Serializable
 data class UsageDelayRequest(
     @SerialName("minutes") val minutes: Int = 0
+)
+
+/**
+ * 护眼强制休息时长上报请求（契约 §5.x）。
+ *
+ * 孩子端在每次护眼休息结束后上报实际休息毫秒，服务端据此从每日总时长中扣除，
+ * 保证「休息不计入每日总时长」在三端（孩子端倒计时 / 家长端看板 / 服务端锁机判定）一致生效。
+ *
+ * @param restId 本次休息唯一标识（= 休息开始墙钟），服务端做幂等去重，避免重试导致重复扣减
+ * @param restMs 实际休息毫秒（已钳制到 [0, restMinutes*60000]）
+ */
+@Serializable
+data class UsageRestReportRequest(
+    @SerialName("restId") val restId: String,
+    @SerialName("restMs") val restMs: Long
 )
 
 // ==================== 策略 ====================

@@ -281,6 +281,19 @@
             android:excludeFromRecents="true"
             android:theme="@style/Theme.PadGuard.Lock" />
 
+        <!--
+          家长验证入口（悬浮状态卡的唯一触点，隐藏形态下孩子端仅此外露）。
+          透明浮层主题复用 Gate（半透明 + 压暗桌面）；由悬浮卡点按经系统唤起，
+          输对家长操作密码后才放行「进入管理控制台 / 退出并卸载」。仅本应用内部拉起，不对外暴露。
+        -->
+        <activity
+            android:name=".hidden.FloatingActionActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.PadGuard.Gate" />
+
         <!-- 常驻守护服务（GuardService） -->
         <service
             android:name=".service.GuardService"
@@ -291,6 +304,18 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="device management / parental-control guard service" />
         </service>
+
+        <!--
+          授权自动回前台服务（"免手动返回"执行体）。
+          家长在系统设置页拨开关时本 App 处于后台，Android 10+ 禁止后台启动 Activity、
+          全屏通知在解锁态又会降级成需手动点按的悬浮通知；本服务自前台态（授权页仍可见时）
+          拉起，常驻轮询目标权限，检测到授予后直接把授权页顶回前台，实现"拨一个开关自动前进一个"。
+          dataSync 类型已声明对应权限（FOREGROUND_SERVICE_DATA_SYNC）。
+        -->
+        <service
+            android:name=".consent.ConsentReturnService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!--
           守护服务看门狗：由系统进程周期回调（应用进程被杀也照样回调），

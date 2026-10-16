@@ -66,6 +66,7 @@ class ParentPushClient @Inject constructor(
 
     private val usageStatsAdapter = moshi.adapter(UsageStatsDto::class.java)
     private val enrollmentAdapter = moshi.adapter(EnrollmentEventDto::class.java)
+    private val usageDelayAdapter = moshi.adapter(UsageDelayEventDto::class.java)
     private val envelopeAdapter = moshi.adapter(PushEnvelope::class.java)
 
     /** 应用启动后调用一次：按登录态与服务器地址自动管理连接（幂等，多次调用安全） */
@@ -152,6 +153,27 @@ class ParentPushClient @Inject constructor(
                     if (sessionId.isNullOrBlank() || deviceId.isNullOrBlank()) return
                     _messages.tryEmit(ParentPushMessage.DeviceEnrolled(sessionId, deviceId))
                 }
+                // 孩子提交了延时申请：家长端据此即时弹出审批入口（仍由轮询兜底，防推送丢失）
+                "usage.delay.requested" -> {
+                    val dto = usageDelayAdapter.fromJson(text) ?: return
+                    val deviceId = dto.deviceId ?: return
+                    val ticketId = dto.ticketId ?: return
+                    val minutes = dto.minutes ?: return
+                    val createdAt = dto.createdAt ?: return
+                    _messages.tryEmit(
+                        ParentPushMessage.UsageDelayRequested(deviceId, ticketId, minutes, createdAt)
+                    )
+                }
+                // 某条延时工单被处理（同意/拒绝/忽略）：家长端据此即时刷新审批列表
+                "usage.delay.updated" -> {
+                    val dto = usageDelayAdapter.fromJson(text) ?: return
+                    val deviceId = dto.deviceId ?: return
+                    val ticketId = dto.ticketId ?: return
+                    val status = dto.status ?: return
+                    _messages.tryEmit(
+                        ParentPushMessage.UsageDelayUpdated(deviceId, ticketId, status)
+                    )
+                }
             }
         }.onFailure { /* 单条报文解析失败忽略，不影响后续 */ }
     }
@@ -188,6 +210,19 @@ private data class PushEnvelope(val type: String?)
 @JsonClass(generateAdapter = true)
 private data class EnrollmentEventDto(val sessionId: String?, val deviceId: String?)
 
+/**
+ * 延时审批工单事件体（`usage.delay.requested` / `usage.delay.updated` 共用，
+ * 各自只带自己关心的字段，其余为 null）。
+ */
+@JsonClass(generateAdapter = true)
+private data class UsageDelayEventDto(
+    val deviceId: String? = null,
+    val ticketId: String? = null,
+    val minutes: Int? = null,
+    val createdAt: Long? = null,
+    val status: String? = null
+)
+
 /** 家长端实时推送消息 */
 sealed interface ParentPushMessage {
     /** 今日用量快照刷新（deviceId + 领域模型，图标已补成绝对地址） */
@@ -195,4 +230,19 @@ sealed interface ParentPushMessage {
 
     /** 一台设备完成了接入（孩子端扫码 / 输入接入码后由服务端推送） */
     data class DeviceEnrolled(val sessionId: String, val deviceId: String) : ParentPushMessage
+
+    /** 孩子提交了延时申请（待家长审批），仅服务端 → 家长端下行 */
+    data class UsageDelayRequested(
+        val deviceId: String,
+        val ticketId: String,
+        val minutes: Int,
+        val createdAt: Long
+    ) : ParentPushMessage
+
+    /** 某条延时工单被家长处理（同意 / 拒绝 / 忽略），用于即时刷新审批列表 */
+    data class UsageDelayUpdated(
+        val deviceId: String,
+        val ticketId: String,
+        val status: String
+    ) : ParentPushMessage
 }

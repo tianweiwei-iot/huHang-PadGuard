@@ -7,11 +7,14 @@ import android.view.accessibility.AccessibilityEvent
 import com.padguard.child.di.ApplicationScope
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.ui.lock.LockScreenPresenter
+import com.padguard.child.ui.lock.NoPermissionOverlay
 import com.padguard.core.common.Logger
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.repository.LogRepository
+import com.padguard.core.engine.admin.Capability
+import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -82,12 +85,20 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     @Inject
     lateinit var lockScreenPresenter: LockScreenPresenter
 
+    /** 设备管理能力桥接：锁屏被划走时借设备管理员 lockNow() 重新唤起系统锁屏（keyguard）作为兜底。 */
+    @Inject
+    lateinit var admin: DeviceAdminBridge
+
+    /** "您当前无权限操作"瞬时提示覆盖层：受控态连点达阈值时弹出。 */
+    @Inject
+    lateinit var noPermissionOverlay: NoPermissionOverlay
+
     /** 去抖：同一受保护窗口 1.5s 内只拦截一次，避免 performGlobalAction 导致事件风暴。 */
     private var lastTriggerAt = 0L
     private var lastTriggerPkg = ""
 
-    /** 锁屏抢占复位去抖：避免每次窗口切换都重拉锁屏造成事件风暴 / 反复重启锁屏页 */
-    private var lastLockRelaunchAt = 0L
+    /** 受控态（锁定/时间到）期间的连点计数器：达阈值后由 NoPermissionOverlay 给出明确提示。 */
+    private val blockCounter = BlockCounter()
 
     /** S11：密码未设置告警的 24h 一次闸 */
     private var lastPasswordNotSetReportedAt = 0L
@@ -129,7 +140,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
                 // 已逃逸到非本应用（桌面/其它 app）：
                 // 1) 无障碍服务可后台启动 Activity（豁免华为后台限制），把锁屏 Activity 顶回前台 ——
                 //    这是非 DO 设备后台锁屏唯一可靠的前台化手段；硬锁设备同样受益。
-                // 2) 委托 presenter.reenforce() 确保悬浮窗地板在位（非硬锁设备的真正锁定层）。
+                // 2) 设备管理员已激活时，借系统级 lockNow() 重新唤起系统锁屏（keyguard），
+                //    物理封死手势导航/最近任务，是「非 DO 设备」上锁屏被划走后最可靠的兜底。
+                //    仅当设备管理员可用时调用；LEGACY 设备无此能力，交由悬浮窗地板兜底。
+                // 3) 委托 presenter.reenforce() 确保悬浮窗地板在位（非硬锁设备的真正锁定层）。
                 // 不再 performGlobalAction(HOME)：它反复把用户顶回桌面、且在非硬锁设备上无效，
                 // 只会和窗口切换事件叠加成日志风暴（这正是此前「锁屏崩 + 刷屏」的诱因之一）。
                 if (!LockScreenActivity.visible) {
@@ -139,6 +153,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
                             lockController.state.value.primaryDetail
                         )
                     }.onFailure { Logger.w(TAG, it) { "lock watchdog re-show activity failed" } }
+                }
+                if (admin.can(Capability.LOCK_NOW)) {
+                    runCatching { admin.lockNow() }
+                        .onFailure { Logger.w(TAG, it) { "lock watchdog lockNow failed" } }
                 }
                 runCatching { lockScreenPresenter.reenforce() }
                     .onFailure { Logger.w(TAG, it) { "lock watchdog reenforce failed" } }
@@ -174,31 +192,21 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 回到桌面后再点同一个应用就能免密进去，门禁形同虚设。
         manager.revokeAppAccessIfNot(pkg)
 
-        // ---- 锁屏抢占复位（不依赖 DO / 设备管理员）----
-        // 没有 Device Owner 时 Lock Task 不生效，锁屏只是普通 Activity；
-        // 孩子上滑回桌面后，锁屏 Activity 在后台用 startActivity 拉不回来
-        // （Android 10+ 限制后台启动 Activity）。无障碍服务不受此限制，
-        // 因此由本服务在"锁定时前台变成非本应用"的瞬间把锁屏重新顶回前台。
-        // 注意：这一段独立于下方密码闸门，即使密码闸门未启用也必须生效。
+        // ---- 受控态（锁定 / 时间到）拦截：双击即闪退，连点弹提示 ----
+        // 双层防御的第二层：即便孩子绕开锁屏落到自家桌面（KidHome），只要点开任意第三方应用
+        // 就立即顶回桌面（"闪退"），从源头实现"退出锁屏仍无权使用应用"。
+        // 不再在窗口回调里反复重拉锁屏 Activity —— 那会把孩子从受控桌面又拽回锁屏页，
+        // 与"受控桌面"的设计相悖；真正的解锁由家长在控制端操作，而非本地重拉锁屏。
+        // 锁屏被划走后的系统级兜底（lockNow / 悬浮窗地板）由 [startLockWatchdog] 周期负责。
         if (lockController.state.value.locked) {
-            val now = System.currentTimeMillis()
-            if (now - lastLockRelaunchAt > LOCK_RELAUNCH_DEBOUNCE_MS) {
-                lastLockRelaunchAt = now
-                Logger.i(TAG) { "lock active but foreground escaped to $pkg, re-arming lock screen" }
-                // 无障碍服务可后台启动 Activity（豁免华为后台限制），把锁屏重新顶回前台；
-                // 同时 reenforce 确保悬浮窗地板在位（非硬锁设备的真正锁定层）。
-                if (!LockScreenActivity.visible) {
-                    runCatching {
-                        LockScreenActivity.show(
-                            this@OperationGuardAccessibilityService,
-                            lockController.state.value.primaryDetail
-                        )
-                    }.onFailure { Logger.e(TAG, it) { "failed to re-show lock screen" } }
-                }
-                runCatching { lockScreenPresenter.reenforce() }
-                    .onFailure { Logger.e(TAG, it) { "failed to re-arm lock screen" } }
-            }
-            // 锁屏期间任何非本应用前台都视为"试图逃逸"，不再走下方密码闸逻辑
+            // 自家界面（锁屏页 / 桌面 / 管理页）永远安全：不拦不顶，否则会拦截自身造成死循环。
+            if (pkg.startsWith(OWN_PACKAGE_PREFIX)) return
+            // 系统关键包（输入法 / 拨号 / SystemUI / 默认 Launcher 等）永不顶回，防砖。
+            if (appGuard.isSystemCritical(pkg)) return
+            // 临时解锁窗口内的目标应用放行（孩子端申请、家长已批准的那个应用）。
+            if (lockController.isTempUnlockActive(pkg)) return
+            // 其余任何第三方应用被拉到前台 = 试图在受控态下使用应用 → 顶回（闪退）+ 连点提示。
+            handleControlledModeBounce(pkg)
             return
         }
 
@@ -253,18 +261,21 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         }
 
         // S11 拆层：密码未设置时的降级拦截。
-        // 设置页必须拦：它正是关闭本无障碍服务的入口，放行等于允许"先关无障碍、
-        // 再解除一切管控"。但密码未设时拉不出验证框（没有可比对的凭据），
-        // 所以只顶回 + 提醒家长尽快补设密码（24h 至多一次）。
-        // 安装器/受管控应用的拦截依赖密码闸验证身份，未设密码时维持放行。
+        // 判定已在 decide() 里完成（这个界面是否需要保护），此处只决定"没凭据时怎么拦"。
+        // 没有可比对的家长密码，无法拉起验证框，但**绝不能静默放行**——
+        // 那等于"家长没设密码，孩子就能随便开受管控应用 / 装卸载"，正是"管控形同虚设"的成因。
+        // 一律顶回（设置页用 BACK、其余用 HOME），并提醒家长尽快补设密码（24h 至多一次）。
+        // 取消授权的应用（REASON_HIDDEN_APP）在此之前的专属分支已先行处理，不会走到这里。
         if (!manager.isEnabledNow()) {
-            if (reason != REASON_SETTINGS) return
             val now = System.currentTimeMillis()
             if (pkg == lastTriggerPkg && now - lastTriggerAt < DEBOUNCE_MS) return
             lastTriggerAt = now
             lastTriggerPkg = pkg
             Logger.i(TAG) { "guarded foreground: $pkg reason=$reason, guard password not set, bouncing back" }
-            performGlobalAction(GLOBAL_ACTION_BACK)
+            // 设置页用 BACK（部分 ROM 用 HOME 会卡在最近任务）；受管控应用 / 安装器用 HOME。
+            performGlobalAction(
+                if (reason == REASON_SETTINGS) GLOBAL_ACTION_BACK else GLOBAL_ACTION_HOME
+            )
             reportPasswordNotSet()
             return
         }
@@ -388,6 +399,30 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         null
     }.getOrNull()
 
+    /**
+     * 受控态期间的"应用使用拦截"统一处理：闪退（顶回桌面）+ 连点升级提示。
+     *
+     * 判定入口见上方锁定时分支：凡是"锁定态下的第三方应用前台"都走到这里，不再区分名单/黑白，
+     * 因为受控态（时间到 / 家长锁）语义就是"整机不可用"，连白名单应用也不该被打开
+     * （即需求里的"退出锁屏仍无权使用应用"）。
+     *
+     * - 未达连点阈值：直接 [performGlobalAction]`GLOBAL_ACTION_HOME` 顶回桌面（"闪退"），
+     *   不依赖去抖——去抖会压制"关掉提示框后再点"的拦截，重新制造绕过窗口；
+     * - 达到阈值：弹"您当前无权限操作"覆盖层（明确反馈、避免盲目闪烁），同时仍把应用顶回桌面，
+     *   确保应用不会停留在前台被使用，随后复位计数，避免弹窗期间反复触发。
+     */
+    private fun handleControlledModeBounce(pkg: String) {
+        val hitThreshold = runCatching { blockCounter.record(pkg) }.getOrDefault(false)
+        if (hitThreshold) {
+            blockCounter.reset(pkg)
+            runCatching { noPermissionOverlay.show() }
+                .onFailure { Logger.w(TAG, it) { "no-permission overlay show failed" } }
+            Logger.i(TAG) { "controlled-mode: $pkg hit bounce threshold, showing no-permission overlay" }
+        }
+        // 无论是否弹窗，都把应用顶回桌面，保证"无权使用"落到实处。
+        performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
     companion object {
         private const val TAG = "GuardA11y"
         private const val OWN_PACKAGE_PREFIX = "com.padguard.child"
@@ -395,9 +430,6 @@ class OperationGuardAccessibilityService : AccessibilityService() {
 
         /** 锁屏看门狗轮询间隔：锁定态下每隔这么久核对一次前台，逃逸即拉回（快滑最多 500ms 内回锁屏）。 */
         private const val LOCK_WATCH_INTERVAL_MS = 500L
-
-        /** 锁屏抢占复位去抖间隔：窗口切换抖动期间避免反复重拉锁屏页 */
-        private const val LOCK_RELAUNCH_DEBOUNCE_MS = 800L
 
         /** 自检保护(防卸载)去抖间隔 */
         private const val SELF_PROTECT_DEBOUNCE_MS = 1200L

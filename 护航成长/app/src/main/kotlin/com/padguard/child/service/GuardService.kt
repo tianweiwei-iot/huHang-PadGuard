@@ -30,6 +30,8 @@ import com.padguard.child.guard.AppGuardPolicyStore
 import com.padguard.child.guard.EyeProtectionOverlay
 import com.padguard.child.guard.GuardA11y
 import com.padguard.child.guard.GuardPasswordManager
+import com.padguard.child.hidden.AppHider
+import com.padguard.child.hidden.FloatingStatusController
 import com.padguard.child.maintain.AppInstaller
 import com.padguard.child.monitor.AppInventoryCollector
 import com.padguard.child.monitor.DeviceSnapshotCollector
@@ -43,6 +45,7 @@ import com.padguard.child.ui.block.AppBlockActivity
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.usagesession.UsageSessionManager
 import com.padguard.child.ui.lock.LockScreenPresenter
+import com.padguard.child.guard.DeviceOwnerEnforcer
 import com.padguard.child.ui.message.MessageActivity
 import com.padguard.child.ui.overlay.WatermarkOverlay
 import com.padguard.core.common.Logger
@@ -85,6 +88,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 
@@ -145,6 +149,11 @@ class GuardService : Service() {
     @Inject lateinit var appGuardStore: AppGuardPolicyStore
     /** 锁屏呈现统一入口：前台走 Activity、后台走悬浮层（后台启动 Activity 会被系统拦截） */
     @Inject lateinit var lockScreenPresenter: LockScreenPresenter
+    /**
+     * P2（DO 治本路径）独立载体：仅当本机持有 Device Owner 时，于受控态真回收应用权限 + 置 Kiosk 标志。
+     * 非 DO 设备整体 no-op，不影响 P0/P1 三件套。注入此处以确保 @Singleton 被实例化并开始订阅锁定态。
+     */
+    @Inject lateinit var deviceOwnerEnforcer: DeviceOwnerEnforcer
     /** 护眼滤镜；与水印同为悬浮层，但互不相关（一个护眼、一个署名），分开管理 */
     @Inject lateinit var eyeProtectionOverlay: EyeProtectionOverlay
 
@@ -159,6 +168,10 @@ class GuardService : Service() {
     @Inject lateinit var guardPassword: GuardPasswordManager
     /** 媒体上传重试队列；解绑时随采集缓存一并清空 */
     @Inject lateinit var mediaRetry: MediaUploadRetry
+    /** 绑定后隐藏管理控制台（图标消失），仅留悬浮状态卡给孩子 */
+    @Inject lateinit var appHider: AppHider
+    /** 悬浮状态卡控制器（绑定后常驻展示使用时长，是隐藏形态下唯一的家长触点） */
+    @Inject lateinit var floatingStatus: FloatingStatusController
 
     /**
      * 当前是否"已绑定"（由 [observeBinding] 维护）。
@@ -325,6 +338,8 @@ class GuardService : Service() {
         // 滤镜必须跟着服务一起撤：服务销毁意味着退出管控，
         // 留一层黄蒙蒙的遮罩在孩子屏幕上，家长会以为平板坏了。
         eyeProtectionOverlay.remove()
+        // 悬浮状态卡同样随守护服务撤收：服务销毁即退出管控，不应再留悬浮入口。
+        floatingStatus.dispose()
         scope.cancel()
         super.onDestroy()
     }
@@ -410,12 +425,20 @@ class GuardService : Service() {
                         .onSuccess { Logger.i(TAG) { "control released on unbound observe (${it.size} ops)" } }
                         .onFailure { t -> Logger.e(TAG, t) { "releaseControl failed on unbound observe" } }
                     Logger.w(TAG) { "device not bound: all app locks + DPM control released" }
+                    // 解绑后恢复管理控制台可见性，并将悬浮卡收起：设备回到普通可用状态，
+                    // 便于家长重新绑定或在设置里正常卸载。
+                    runSafely("revealOnUnbind") { appHider.revealManagementUi() }
+                    runSafely("hideFloatingOnUnbind") { floatingStatus.hide() }
                     return@collect
                 }
                 boundNow.set(true)
                 startTransport()
                 // 绑定成功即拉取会话：让「计时开始」确认弹窗尽快出现（若今日尚未确认）
                 runSafely("sessionSyncOnBind") { usageSessionManager.refresh() }
+                // 绑定完成：隐藏管理控制台图标（孩子端隐形），仅以悬浮状态卡展示基本信息。
+                // 隐藏态持久写入系统 PMS，重启/覆盖安装后仍生效；开机自启会再次确认。
+                runSafely("hideOnBind") { appHider.hideManagementUi() }
+                runSafely("showFloatingOnBind") { floatingStatus.show() }
             }
         }
     }
@@ -631,6 +654,44 @@ class GuardService : Service() {
     }
 
     /**
+     * 护眼强制休息时长上报队列：休息结束后产生的 (restId, 实际休息毫秒) 入队，
+     * 由 [flushEyeCareRestReports] 异步送达服务端，从每日总时长扣减（保证三端一致）。
+     *
+     * 之所以要队列而非"失败即丢弃"：休息结束那一刻设备可能刚好离线（息屏后网络回收），
+     * 直接丢弃会让该次休息被误计入额度。队列在后续每次 doTick 重试，离线恢复后即补齐。
+     * 上限保护防止异常情况下无限堆积。
+     */
+    private val eyeCareRestQueue = ConcurrentLinkedQueue<Pair<String, Long>>()
+
+    /**
+     * 把待上报的护眼休息事件送达服务端。
+     *
+     * 成功即出队；业务校验失败（restId 重复/非法）直接丢弃避免死循环；
+     * 网络/解析失败保留待下次重试。入参均来自引擎侧已校验过的值，这里只做传输。
+     */
+    private suspend fun flushEyeCareRestReports() {
+        if (!credentials.isBound) return
+        if (authRepository.getDeviceId().isBlank()) return
+        while (eyeCareRestQueue.size > MAX_EYE_CARE_REST_REPORTS) eyeCareRestQueue.poll()
+        val iterator = eyeCareRestQueue.iterator()
+        while (iterator.hasNext()) {
+            val (restId, restMs) = iterator.next()
+            when (val r = remote.reportEyeCareRest(restId, restMs)) {
+                is ApiResult.Success -> iterator.remove()
+                is ApiResult.BizError -> {
+                    // 服务端判定为非法/重复：无需重试，丢弃避免死循环
+                    Logger.w(TAG) { "eye-care rest report rejected (drop): ${r.code} ${r.message}" }
+                    iterator.remove()
+                }
+                is ApiResult.Failure -> {
+                    // 网络/解析失败：保留，下次 tick 重试
+                    Logger.w(TAG) { "eye-care rest report failed (retry later): ${r.message}" }
+                }
+            }
+        }
+    }
+
+    /**
      * 上报已安装应用台账。
      *
      * 频率刻意压到 30 分钟：清单上百条、单次请求几十 KB，
@@ -674,6 +735,11 @@ class GuardService : Service() {
             screenOn = screenOn,
             dailyLimitExpired = sessionExpired
         )
+
+        // 护眼休息结束后，把实际休息时长上报服务端，从每日总时长扣减（保证三端一致）。
+        // 即使本次上报时离线，也会进入本地队列在后续 tick 重试，避免该次休息被误计入额度。
+        tick.pendingRestReport?.let { eyeCareRestQueue.add(it) }
+        flushEyeCareRestReports()
 
         // 息屏时不弹任何界面：此刻拉起 Activity 只会点亮屏幕、白耗电，
         // 而且部分 ROM 会把它记成"后台弹窗"从而限制我们后续的启动权限。
@@ -1588,6 +1654,12 @@ class GuardService : Service() {
 
         /** 临时解锁申请本地保留天数，到期随上报周期安全销毁 */
         private const val UNLOCK_REQUEST_RETENTION_DAYS = 30
+
+        /**
+         * 护眼休息上报队列上限：超出丢弃最旧的，防止异常情况下无限堆积。
+         * 对应 [eyeCareRestQueue] 的容量保护，原声明于被合并删除的私有 companion（Kotlin 不允许重复 companion）。
+         */
+        private const val MAX_EYE_CARE_REST_REPORTS = 32
 
         private const val CHANNEL_ID = "padguard_guard"
         private const val NOTIFICATION_ID = 1001

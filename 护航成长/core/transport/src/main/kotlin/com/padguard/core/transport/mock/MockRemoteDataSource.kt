@@ -112,6 +112,8 @@ class MockRemoteDataSource @Inject constructor(
     private var sessionStartEpoch: Long? = null
     private var sessionQuotaMinutes = 120
     private var sessionExtendedMinutes = 0
+    /** 当前待审批（PENDING）的延时分钟数：模拟"孩子申请 → 家长审批"的异步间隙 */
+    private var sessionPendingDelayMinutes = 0
 
     private val heartbeatCounter = AtomicInteger()
 
@@ -243,7 +245,8 @@ class MockRemoteDataSource @Inject constructor(
             countdownThresholdMs = 10 * 60_000L,
             delayOptions = listOf(15, 30, 45, 60),
             maxDailyExtendMinutes = 120,
-            lastDelayEpoch = null
+            lastDelayEpoch = null,
+            pendingDelayMinutes = sessionPendingDelayMinutes
         )
         Logger.d(TAG) { "usage-session get: active=$sessionActive remainingMs=$remainingMs" }
         return ApiResult.Success(dto, now)
@@ -258,24 +261,49 @@ class MockRemoteDataSource @Inject constructor(
                 sessionActive = true
                 sessionStartEpoch = now
                 sessionExtendedMinutes = 0
+                sessionPendingDelayMinutes = 0
             }
         }
         Logger.i(TAG) { "usage-session start: startEpoch=$sessionStartEpoch quota=$sessionQuotaMinutes" }
         return getUsageSession()
     }
 
-    override suspend fun extendUsageSession(minutes: Int): ApiResult<UsageSessionDto> {
+    override suspend fun requestDelayUsageSession(minutes: Int): ApiResult<UsageSessionDto> {
         simulateNetwork<UsageSessionDto>()?.let { return it }
         val valid = listOf(15, 30, 45, 60).contains(minutes)
         if (!valid) {
             return ApiResult.BizError(ApiCode.BAD_REQUEST, "延时档位非法：$minutes，可选 ${listOf(15, 30, 45, 60)}")
         }
-        if (sessionExtendedMinutes + minutes > 120) {
+        if (sessionPendingDelayMinutes > 0) {
+            return ApiResult.BizError(ApiCode.BAD_REQUEST, "已有待审核的延时申请，请等待家长处理")
+        }
+        if (sessionExtendedMinutes + sessionPendingDelayMinutes + minutes > 120) {
             return ApiResult.BizError(ApiCode.BAD_REQUEST, "单日累计延时不得超过 120 分钟")
         }
-        stateMutex.withLock { sessionExtendedMinutes += minutes }
-        Logger.i(TAG) { "usage-session extend: +$minutes -> extended=$sessionExtendedMinutes" }
+        stateMutex.withLock { sessionPendingDelayMinutes += minutes }
+        Logger.i(TAG) { "usage-session delay request: +$minutes pending -> pending=$sessionPendingDelayMinutes" }
         return getUsageSession()
+    }
+
+    /**
+     * 测试辅助：模拟家长端审批通过，把待审批分钟数转为已批准额度。
+     * 真实环境由服务端审批后下发，Mock 端用此方法在单测 / 演示中推进状态。
+     */
+    suspend fun approvePendingDelayForTest() {
+        stateMutex.withLock {
+            sessionExtendedMinutes += sessionPendingDelayMinutes
+            sessionPendingDelayMinutes = 0
+        }
+    }
+
+    override suspend fun reportEyeCareRest(restId: String, restMs: Long): ApiResult<Unit> {
+        simulateNetwork<Unit>()?.let { return it }
+        // Mock 端无需持久化；仅做入参合法性校验，保证与真实接口行为一致
+        if (restId.isBlank() || restMs <= 0) {
+            return ApiResult.BizError(ApiCode.BAD_REQUEST, "restId 为空或 restMs 非法：$restId/$restMs")
+        }
+        Logger.i(TAG) { "usage-session rest reported: restId=$restId restMs=$restMs" }
+        return ApiResult.Success(Unit, System.currentTimeMillis())
     }
 
     // ==================== 上行 ====================

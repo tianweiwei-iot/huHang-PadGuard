@@ -35,6 +35,13 @@ class NotificationHelper @Inject constructor(
         private const val NOTIFICATION_ID_UNLOCK = 1001
 
         /**
+         * 延时申请本地通知。
+         * 与解锁工单（[NOTIFICATION_ID_UNLOCK]）分开 ID 与 tag：两类审批语义不同、
+         * 生命周期也不同（处理即取消），共用一个 ID 会互相取消。
+         */
+        private const val NOTIFICATION_ID_DELAY = 1003
+
+        /**
          * 高危告警（CRITICAL）本地通知。
          * 与解锁工单（[NOTIFICATION_ID_UNLOCK]）分开 ID 与 tag：两类通知语义不同、
          * 生命周期也不同（告警要留到家长确认，工单在处理即取消），共用一个 ID 会互相取消。
@@ -112,6 +119,39 @@ class NotificationHelper @Inject constructor(
      */
     fun cancelUnlockRequest(ticketId: String) {
         runCatching { manager.cancel("unlock_$ticketId", NOTIFICATION_ID_UNLOCK) }
+    }
+
+    /**
+     * 孩子提交延时申请时本地通知家长。
+     * 与 [notifyUnlockRequest] 同语义：用 ticketId 作 tag 防重复堆叠，点击直达消息中心。
+     * 审批是有时效的交互——家长晚几分钟看到，孩子就得多等几分钟。
+     */
+    fun notifyUsageDelayRequest(deviceName: String, ticketId: String) {
+        if (!canPost()) return
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(EXTRA_OPEN_ALERTS, true)
+        }
+        val pi = PendingIntent.getActivity(
+            context,
+            NOTIFICATION_ID_DELAY,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(context.applicationInfo.icon)
+            .setContentTitle("孩子申请延长使用时长")
+            .setContentText("${deviceName} 的孩子申请延长使用时长，请及时处理")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .build()
+        manager.notify("delay_$ticketId", NOTIFICATION_ID_DELAY, notification)
+    }
+
+    /** 延时工单已被处理（同意/拒绝/忽略）时取消对应通知，避免通知栏与事实不符。 */
+    fun cancelUsageDelayRequest(ticketId: String) {
+        runCatching { manager.cancel("delay_$ticketId", NOTIFICATION_ID_DELAY) }
     }
 
     /**

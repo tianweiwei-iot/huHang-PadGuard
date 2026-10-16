@@ -12,7 +12,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.child.guard.AppGuardPolicyStore
 import com.padguard.child.guard.GuardPasswordManager
-import com.padguard.core.data.model.policy.AppListMode
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -94,22 +93,19 @@ class KidHomeViewModel @Inject constructor(
         }
     }
 
-    /** 按策略过滤后的桌面应用列表 */
+    /** 按策略过滤后的桌面应用列表（权威入口：取消授权/名单外应用直接在桌面不出现） */
     private fun buildAllowedApps(): List<LauncherAppItem> {
         val pm = context.packageManager
         val launchIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val ris = pm.queryIntentActivities(launchIntent, 0)
-        val snap = appGuard.snapshot()
         val result = ArrayList<LauncherAppItem>()
         for (ri in ris) {
             val pkg = ri.activityInfo.packageName
             if (pkg == context.packageName) continue // 不在桌面显示自家管理 App
-            val visible = when {
-                snap == null -> true // 未下发策略：全部可见，设备保持可用
-                snap.mode == AppListMode.WHITELIST -> pkg in snap.whitelist
-                else -> pkg !in snap.blacklist // BLACKLIST：隐藏黑名单
-            }
-            if (!visible) continue
+            // 权威入口判定：由 AppGuardDecisions.isLaunchableByChild 统一口径，
+            // 取消授权 / 名单外的应用直接在桌面不出现，从源头减少触达与被最近任务绕过的机会。
+            // 未下发策略时 isLaunchableByChild 返回 true（fail-open），保证桌面不空白、设备可用。
+            if (!appGuard.isLaunchableByChild(pkg)) continue
             val label = runCatching { ri.loadLabel(pm).toString() }.getOrDefault(pkg)
             val icon = runCatching { ri.loadIcon(pm).toImageBitmap() }.getOrNull() ?: continue
             result.add(LauncherAppItem(pkg, label, icon))
@@ -146,36 +142,18 @@ class KidHomeViewModel @Inject constructor(
     /**
      * 打开该应用前是否需要门禁（孩子桌面点开应用的闸门）。
      *
-     * 口径与 [com.padguard.child.guard.OperationGuardAccessibilityService.decide] 完全一致，
-     * 确保「桌面点开」与「最近任务/通知点开」（无障碍兜底）行为统一，不会一边免密一边要密：
-     * - 系统关键包（防砖名单）→ 不拦；
-     * - 处于解锁窗口内（家长刚输过密码）→ 放行，含取消授权的应用；
-     * - 家长刚针对这个包验证通过（[GuardPasswordManager.isAppAccessGrantedNow]）→ 放行，
-     *   只放行这一个包，不波及安装/卸载/改设置；
-     * - 家长"取消授权"（hidden）→ 未解锁时一律经过门禁（最严，且不因未设家长密码而漏放）：
-     *   已设密码 → 桌面上就地弹密码框，输对后自动打开；
-     *   未设密码 → 同一弹框改为提示"需家长设置密码"，不直接放行。
-     *   这是"授权已取消"的底线语义，不依赖「打开应用也要密码」开关（见 [AppGuardPolicyStore.isHiddenControlled]）；
-     * - 其余受管控应用：依赖「打开应用也要密码」开关 + 家长密码，二者缺一不可，否则不拦；
-     * - 系统关键包（防砖名单）→ 不拦。
-     *
-     * 这是桌面这层"可视网关"的必要补强：早期 [launchApp] 直接启动，会绕过本应由
-     * 无障碍服务实施的启动门禁（且一旦无障碍未开就彻底免密）。
+     * 判定口径完全收敛到 [AppGuardDecisions.needsLaunchGuard]，
+     * 与无障碍软拦截（[com.padguard.child.guard.OperationGuardAccessibilityService]）共用
+     * **同一份纯函数**，确保「桌面点开」与「最近任务 / 通知点开」行为一致，
+     * 不会一边免密一边要密，也不会因为「未设家长密码」而静默放行
+     * （取消授权的应用在任何情况下都走门禁；此前的"未设密码即放行"正是管控失效的成因之一）。
      */
-    fun needsLaunchGuard(pkg: String): Boolean {
-        if (appGuard.isSystemCritical(pkg)) return false
-        // 家长刚在门禁里针对**这个包**验证通过 → 放行（只针对这一个应用，不是全局开闸）
-        if (guard.isAppAccessGrantedNow(pkg)) return false
-        // 处于解锁窗口内（家长刚输过密码）→ 放行，含取消授权的应用
-        if (guard.isUnlockedNow()) return false
-        // 取消授权的应用：未解锁时一律经过门禁（最严，且不因未设家长密码而漏放）。
-        // 这是"授权已取消"的底线语义，不能依赖 launchBlockEnabled（默认关闭会完全失效）。
-        if (appGuard.isHiddenControlled(pkg)) return true
-        // 其余受管控应用依赖「打开应用也要密码」开关 + 家长密码，二者缺一不可
-        if (!guard.isEnabledNow()) return false
-        if (!appGuard.launchBlockEnabled()) return false
-        return appGuard.isControlled(pkg)
-    }
+    fun needsLaunchGuard(pkg: String): Boolean =
+        appGuard.decisions()?.needsLaunchGuard(
+            pkg = pkg,
+            appAccessGranted = guard.isAppAccessGrantedNow(pkg),
+            unlocked = guard.isUnlockedNow()
+        ) ?: false
 }
 
 private fun Drawable.toImageBitmap(): ImageBitmap {

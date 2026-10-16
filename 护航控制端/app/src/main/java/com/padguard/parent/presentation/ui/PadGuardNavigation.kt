@@ -34,6 +34,7 @@ import com.padguard.parent.presentation.ui.alert.AlertCenterScreen
 import com.padguard.parent.presentation.ui.auth.LoginScreen
 import com.padguard.parent.presentation.ui.components.AppSoftBackground
 import com.padguard.parent.presentation.ui.components.UnlockRequestDialog
+import com.padguard.parent.presentation.ui.components.UsageDelayRequestDialog
 import com.padguard.parent.presentation.ui.control.ControlPolicyScreen
 import com.padguard.parent.presentation.ui.device.DeviceDetailScreen
 import com.padguard.parent.presentation.ui.main.MainScreen
@@ -41,6 +42,7 @@ import com.padguard.parent.presentation.ui.realtime.LocationScreen
 import com.padguard.parent.presentation.ui.realtime.MessagePublishScreen
 import com.padguard.parent.presentation.ui.realtime.ScreenMonitorScreen
 import com.padguard.parent.presentation.viewmodel.UnlockRequestCenterViewModel
+import com.padguard.parent.presentation.viewmodel.UsageDelayCenterViewModel
 import com.padguard.parent.presentation.viewmodel.RiskAlertCenterViewModel
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -137,6 +139,10 @@ fun PadGuardNavHost(
     // 家长翻到哪个页面都能收到申请，不会被某个页面的销毁打断。
     val unlockVm: UnlockRequestCenterViewModel = hiltViewModel()
     val unlockState by unlockVm.uiState.collectAsState()
+    // 延时申请全局轮询（与解锁工单同层级：Activity 作用域，翻到哪个页面都在拉，
+    // 孩子提交/家长处理都即时刷新；后台时新申请转本地通知触达家长）
+    val delayVm: UsageDelayCenterViewModel = hiltViewModel()
+    val delayState by delayVm.uiState.collectAsState()
     // 风险告警全局轮询（与解锁工单同层级：Activity 作用域，翻到哪个页面都在拉，
     // 后台时新 CRITICAL 告警转本地通知触达家长）
     val riskVm: RiskAlertCenterViewModel = hiltViewModel()
@@ -157,6 +163,7 @@ fun PadGuardNavHost(
             when (event) {
                 Lifecycle.Event.ON_START -> {
                     unlockVm.setAppForeground(true)
+                    delayVm.setAppForeground(true)
                     // 风险告警共用同一套前台门控 —— 前台不打扰，退到后台才发通知
                     riskVm.setAppForeground(true)
                     // 通知点击直达消息中心。冷启动（onCreate intent 带 extra）与
@@ -171,6 +178,7 @@ fun PadGuardNavHost(
                 // 退到后台才允许本地通知触达（前台已有弹窗，双响是噪音）
                 Lifecycle.Event.ON_STOP -> {
                     unlockVm.setAppForeground(false)
+                    delayVm.setAppForeground(false)
                     riskVm.setAppForeground(false)
                 }
                 else -> Unit
@@ -192,6 +200,13 @@ fun PadGuardNavHost(
         val msg = riskState.actionMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
         riskVm.clearActionMessage()
+    }
+
+    // 延时申请的反馈，与解锁工单共用 snackbar 通道
+    LaunchedEffect(delayState.actionMessage) {
+        val msg = delayState.actionMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(msg)
+        delayVm.clearActionMessage()
     }
 
     // 全局浅灰背景铺在导航根部：登录页、主框架与全部二级页共享同一底色，
@@ -228,8 +243,8 @@ fun PadGuardNavHost(
         composable(Screen.Main.route) {
             MainScreen(
                 rootNavController = navController,
-                // 铃铛红点合并解锁工单与风险告警两类未读
-                unreadAlertCount = unlockState.unreadCount + riskState.unreadCount,
+                // 铃铛红点合并解锁工单、延时申请与风险告警三类未读
+                unreadAlertCount = unlockState.unreadCount + delayState.unreadCount + riskState.unreadCount,
                 onNavigateToAlerts = { navController.navigate(Screen.AlertList.route) }
             )
         }
@@ -247,7 +262,12 @@ fun PadGuardNavHost(
                 riskAlerts = riskState.alerts,
                 riskUnreadCount = riskState.unreadCount,
                 riskProcessing = riskState.processing,
-                onAcknowledgeRisk = { alert -> riskVm.acknowledge(alert) }
+                onAcknowledgeRisk = { alert -> riskVm.acknowledge(alert) },
+                // 延时申请分区（同一页面承载，根层 VM 已在此处之上取出）
+                delayState = delayState,
+                onApproveDelay = { delayVm.approve(it.ticket) },
+                onRejectDelay = { delayVm.reject(it.ticket) },
+                onDismissDelay = { delayVm.dismiss(it.ticket) }
             )
         }
         // 关于页落地为真实路由
@@ -331,6 +351,20 @@ fun PadGuardNavHost(
                 onIgnore = { unlockVm.dismiss(entry.ticket) },
                 // 去处理：直接按申请时长同意放行（孩子此刻正等着，多一步跳转就多一分钟干等）
                 onHandle = { unlockVm.approve(entry.ticket, entry.ticket.durationMinutes) }
+            )
+        }
+
+        // ---- 延时申请全局弹层（与解锁弹窗并列，覆盖所有页面） ----
+        delayState.popup?.let { entry ->
+            UsageDelayRequestDialog(
+                entry = entry,
+                processing = delayState.processing,
+                // 忽略：归档进消息中心，不下发消息给孩子，工单仍可被批准
+                onIgnore = { delayVm.dismiss(entry.ticket) },
+                // 同意延长：服务端按工单分钟数累加额度，孩子端下一次会话刷新即生效
+                onApprove = { delayVm.approve(entry.ticket) },
+                // 拒绝：关闭工单并给孩子下发"申请未通过"
+                onReject = { delayVm.reject(entry.ticket) }
             )
         }
 

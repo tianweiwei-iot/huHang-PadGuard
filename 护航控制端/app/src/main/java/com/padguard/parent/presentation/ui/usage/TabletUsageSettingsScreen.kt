@@ -37,6 +37,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.padguard.parent.domain.model.TabletUsageSettings
 import com.padguard.parent.domain.model.TimeRange
 import com.padguard.parent.domain.model.UsageSession
+import com.padguard.parent.domain.repository.UsageDelayTicket
 import com.padguard.parent.presentation.util.TimeFormat
 import com.padguard.parent.presentation.viewmodel.TabletUsageSettingsUiState
 import com.padguard.parent.presentation.viewmodel.TabletUsageSettingsViewModel
@@ -88,12 +89,13 @@ fun TabletUsageSettingsScreen(
         }
     }
 
-    // 每 15 秒刷新一次剩余时长，与服务端/孩子端保持同源一致（服务端锚定 startEpoch + serverNow）
+    // 每 15 秒刷新一次剩余时长与延时工单，与服务端/孩子端保持同源一致
     LaunchedEffect(deviceId) {
         if (deviceId.isEmpty()) return@LaunchedEffect
         while (true) {
             delay(15_000)
             viewModel.loadSession(deviceId)
+            viewModel.loadDelayTickets(deviceId)
         }
     }
 
@@ -193,6 +195,15 @@ fun TabletUsageSettingsScreen(
                 item { RestSection(settings = uiState.settings, viewModel = viewModel, enabled = enabled) }
                 item {
                     UsageSessionCard(session = uiState.usageSession)
+                }
+                item {
+                    DelayApprovalCard(
+                        tickets = uiState.delayTickets,
+                        processing = uiState.delayProcessing,
+                        onApprove = viewModel::approveDelay,
+                        onReject = viewModel::rejectDelay,
+                        onDismiss = viewModel::dismissDelay
+                    )
                 }
             }
         }
@@ -808,5 +819,162 @@ private fun UsageSessionCard(session: UsageSession?) {
             else "当日额度 $total 分钟",
             style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
         )
+    }
+}
+
+/**
+ * 延时申请审批卡（时间管控页内联入口）。
+ *
+ * ## 为什么时间管控页也要有审批入口
+ * 用户明确要"两者都展示"——除了右上角消息中心（根层全局弹窗 + 列表），
+ * 时间管控页作为孩子计时的"主场"也必须能直接处理延时申请，家长无需跳转到铃铛。
+ *
+ * ## 与根层弹窗的分工
+ * 本卡只读该设备的工单（页面自带 deviceId，无需全局轮询），随页面 15 秒刷新；
+ * 根层 [com.padguard.parent.presentation.viewmodel.UsageDelayCenterViewModel] 负责跨设备、
+ * 跨页面的打扰式弹窗与铃铛红点。两条通路共享服务端同一份工单，互不冲突。
+ */
+@Composable
+private fun DelayApprovalCard(
+    tickets: List<UsageDelayTicket>,
+    processing: Boolean,
+    onApprove: (UsageDelayTicket) -> Unit,
+    onReject: (UsageDelayTicket) -> Unit,
+    onDismiss: (UsageDelayTicket) -> Unit
+) {
+    GlassCard {
+        GlassSectionHeader(icon = Icons.Default.Schedule, title = "延时申请审批")
+        Spacer(modifier = Modifier.height(6.dp))
+        if (tickets.isEmpty()) {
+            Text(
+                "暂无延时申请",
+                style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
+            )
+            return@GlassCard
+        }
+        // 待处理优先、其余按时间倒序，便于家长第一时间看到要处理的
+        val sorted = tickets.sortedWith(compareBy({ it.status != "PENDING" }, { -it.createdAt }))
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            sorted.forEach { ticket ->
+                DelayTicketRow(
+                    ticket = ticket,
+                    processing = processing,
+                    onApprove = onApprove,
+                    onReject = onReject,
+                    onDismiss = onDismiss
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DelayTicketRow(
+    ticket: UsageDelayTicket,
+    processing: Boolean,
+    onApprove: (UsageDelayTicket) -> Unit,
+    onReject: (UsageDelayTicket) -> Unit,
+    onDismiss: (UsageDelayTicket) -> Unit
+) {
+    val actionable = ticket.status == "PENDING" || ticket.status == "IGNORED"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
+            .padding(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "申请延长 ${ticket.minutes} 分钟",
+                style = TextStyle(color = GlassText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            DelayStatusChip(status = ticket.status)
+        }
+        if (!ticket.reason.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "理由：${ticket.reason}",
+                style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
+            )
+        }
+        if (actionable) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GlassActionButton(
+                    text = "拒绝",
+                    enabled = !processing,
+                    modifier = Modifier.weight(1f),
+                    onClick = { onReject(ticket) }
+                )
+                GlassActionButton(
+                    text = "忽略",
+                    enabled = !processing,
+                    modifier = Modifier.weight(1f),
+                    onClick = { onDismiss(ticket) }
+                )
+                GlassActionButton(
+                    text = "同意延长",
+                    enabled = !processing,
+                    primary = true,
+                    modifier = Modifier.weight(1f),
+                    onClick = { onApprove(ticket) }
+                )
+            }
+        } else {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "该申请已处理完毕",
+                style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun DelayStatusChip(status: String) {
+    val (text, color) = when (status) {
+        "PENDING" -> "待处理" to AccentCyan
+        "IGNORED" -> "已忽略" to GlassTextDim
+        "APPROVED" -> "已同意" to AccentViolet
+        "REJECTED" -> "已拒绝" to Color(0xFFE65100)
+        else -> status to GlassTextDim
+    }
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = color.copy(alpha = 0.12f)
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            fontSize = 12.sp,
+            color = color,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun GlassActionButton(
+    text: String,
+    enabled: Boolean,
+    primary: Boolean = false,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.height(38.dp),
+        shape = RoundedCornerShape(10.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (primary) AccentCyan else GlassSurfaceAlt,
+            contentColor = if (primary) Color.White else AccentCyan,
+            disabledContainerColor = GlassSurfaceAlt,
+            disabledContentColor = GlassTextDim.copy(alpha = 0.5f)
+        ),
+        elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
+    ) {
+        Text(text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }
 }

@@ -480,6 +480,29 @@ data class UnlockRejectRequest(
     val reason: String? = null
 )
 
+/**
+ * 延时审批工单（家长端审批列表 / 消息中心展示用）。
+ * 字段与服务端 [com.padguard.server.dto.UsageDelayTicketDto] 一一对应。
+ */
+@JsonClass(generateAdapter = true)
+data class UsageDelayTicketDto(
+    val id: String,
+    val deviceId: String,
+    val minutes: Int = 0,
+    val reason: String? = null,
+    val status: String = "PENDING",
+    val createdAt: Long = 0L,
+    val resolvedAt: Long? = null
+)
+
+/** 家长同意延时申请（按申请分钟数延长额度，无需再传时长） */
+@JsonClass(generateAdapter = true)
+data class UsageDelayApproveRequest(val reason: String? = null)
+
+/** 家长拒绝延时申请（下发给孩子的拒因） */
+@JsonClass(generateAdapter = true)
+data class UsageDelayRejectRequest(val reason: String? = null)
+
 @JsonClass(generateAdapter = true)
 data class PolicyTemplateDto(
     val id: String,
@@ -532,7 +555,9 @@ data class UsageSessionDto(
     val countdownThresholdMs: Long = 10 * 60_000L,
     val delayOptions: List<Int> = listOf(15, 30, 45, 60),
     val maxDailyExtendMinutes: Int = 120,
-    val lastDelayEpoch: Long? = null
+    val lastDelayEpoch: Long? = null,
+    /** 当前等待家长审批的延时分钟数（>0 表示孩子已提交、家长尚未处理） */
+    val pendingDelayMinutes: Int = 0
 )
 
 // ==================== 指令回执（可观测性） ====================

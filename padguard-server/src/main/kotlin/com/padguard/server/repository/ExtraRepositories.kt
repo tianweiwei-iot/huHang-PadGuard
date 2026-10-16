@@ -147,6 +147,30 @@ interface UnlockTicketRepository : JpaRepository<UnlockTicket, String> {
 }
 
 @Repository
+interface UsageDelayRepository : JpaRepository<UsageDelayTicket, String> {
+    fun findByIdAndDeviceId(id: String, deviceId: String): UsageDelayTicket?
+    fun findByDeviceIdAndStatus(deviceId: String, status: String): List<UsageDelayTicket>
+
+    /**
+     * 单日已批准 + 待审批的延长分钟汇总：用于"申请即生效"改"审批后才生效"后的
+     * 单日累计上限校验（[com.padguard.server.domain.UsageSession.MAX_DAILY_EXTEND_MINUTES]），
+     * 防止孩子反复提交绕过上限。
+     */
+    @Query(
+        """
+        select coalesce(sum(t.minutes), 0) from UsageDelayTicket t
+        where t.deviceId = :deviceId and t.status in ('PENDING', 'APPROVED')
+        """
+    )
+    fun sumEffectiveMinutes(@Param("deviceId") deviceId: String): Int
+
+    /** 易主 / 解绑时连同设备一起作废未结工单。 */
+    @Modifying
+    @Query("delete from UsageDelayTicket t where t.deviceId = :deviceId")
+    fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+}
+
+@Repository
 interface AppPolicyRepository : JpaRepository<AppPolicy, String> {
     fun findByDeviceId(deviceId: String): List<AppPolicy>
     fun findByDeviceIdAndPackageName(deviceId: String, packageName: String): AppPolicy?

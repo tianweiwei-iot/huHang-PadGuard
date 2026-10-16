@@ -101,6 +101,9 @@ class OneTimeConsentViewModel @Inject constructor(
     /** 家长是否已点过「同意并授权」 */
     private var started = false
 
+    /** 对外暴露：授权链是否已启动（入口续跑、自动授权场景据此判断是否仍需自动触发） */
+    val hasStarted: Boolean get() = started
+
     /** 每一类系统交互只自动发起一次：家长明确拒绝后不再纠缠 */
     private val requestedOnce = mutableSetOf<String>()
 
@@ -201,7 +204,11 @@ class OneTimeConsentViewModel @Inject constructor(
         Logger.i(TAG) { "retry current step: $key" }
         _phase.value = Phase.WAITING_PARENT
         when (key) {
-            KEY_DEVICE_ADMIN -> tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
+            KEY_DEVICE_ADMIN -> {
+                tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
+                // 重试激活 DA 同样需要盯守：家长点「激活」后自动拉回授权页并跳下一项
+                consentReturn.watch(listOf(KEY_DEVICE_ADMIN))
+            }
             KEY_RUNTIME -> tryEmit(ConsentLaunch.Runtime(permissionGranter.missingRuntimePermissions()))
             KEY_CAPTURE -> tryEmit(ConsentLaunch.MediaProjection)
             else -> SpecialPermission.fromKey(key)?.let { openAgain(it.key) }
@@ -215,6 +222,15 @@ class OneTimeConsentViewModel @Inject constructor(
      * 没有它家长会被永久卡在装机页、平板完全用不了。
      */
     fun finishAnyway() {
+        // 家长在授权流程里跳过了设备管理员（管控基石）：记录已确认，
+        // 避免下次冷启动又因「DA 未激活」强制弹回授权流程形成无限循环。
+        // 已激活 DA 的出口（正常完成 DA 后跳过其余项）不受影响。
+        if (!admin.isAdminActive()) {
+            viewModelScope.launch {
+                runCatching { authRepository.setDeviceAdminPromptAck() }
+                    .onFailure { Logger.w(TAG) { "mark DA prompt ack failed" } }
+            }
+        }
         skippedKeys.addAll(missingManualKeys())
         advance("parent-opt-out")
     }
@@ -243,6 +259,9 @@ class OneTimeConsentViewModel @Inject constructor(
             _currentKey.value = KEY_DEVICE_ADMIN
             _phase.value = Phase.WAITING_PARENT
             tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
+            // 设备管理员激活页没有「完成」回调：挂盯守，家长点「激活」后由前台服务自动把授权页
+            // 拉回前台并跳下一项（与悬浮窗/使用情况访问等 MANUAL_SETTING 步骤一致，免手动返回）。
+            consentReturn.watch(listOf(KEY_DEVICE_ADMIN))
             return
         }
 

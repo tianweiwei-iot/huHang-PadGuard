@@ -58,9 +58,16 @@ interface PadGuardApi {
     @POST("device/usage/session/start")
     suspend fun startUsageSession(): Response<ApiEnvelope<UsageSessionDto>>
 
-    /** 使用计时会话：孩子端申请延时（minutes 落档位） */
-    @POST("device/usage/session/extend")
-    suspend fun extendUsageSession(@Body body: UsageDelayRequest): Response<ApiEnvelope<UsageSessionDto>>
+    /** 使用计时会话：孩子端申请延时（仅发起审批工单，须经家长审批才生效） */
+    @POST("device/usage/session/delay/request")
+    suspend fun requestDelayUsageSession(@Body body: UsageDelayRequest): Response<ApiEnvelope<UsageSessionDto>>
+
+    /**
+     * 使用计时会话：上报护眼强制休息时长（毫秒），服务端从每日总时长中扣除。
+     * data 可空（仅关心成功与否），统一走 [ApiCaller.callIgnoringData]。
+     */
+    @POST("device/usage/session/rest")
+    suspend fun reportEyeCareRest(@Body body: UsageRestReportRequest): Response<ApiEnvelope<JsonElement>>
 
     /**
      * §5.3 拉取策略包。

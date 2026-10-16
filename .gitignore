@@ -107,3 +107,12 @@ myapk/
 
 # ===================== 构建产物（APK 输出目录：防 baselineProfiles / output-metadata 漏入） =====================
 **/app/release/
+
+# ===================== WorkBuddy / 临时构建缓存（非仓库内容，严禁入库） =====================
+.gradle-daemon/
+gradle-home/
+proj-gradle/
+wb-gradle-home/
+wb-init.gradle
+wb-init-ran.txt
+wb-pcache/

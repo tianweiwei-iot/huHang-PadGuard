@@ -60,8 +60,9 @@ fun UsageSessionHost(viewModel: UsageSessionViewModel = hiltViewModel()) {
             delayOptions = state.delayOptions,
             extendedMinutes = state.extendedMinutes,
             maxDailyExtendMinutes = state.maxDailyExtendMinutes,
+            pendingDelayMinutes = state.pendingDelayMinutes,
             loading = state.loading,
-            onExtend = viewModel::requestExtend
+            onExtend = viewModel::requestDelay
         )
     }
 }
@@ -103,8 +104,12 @@ private fun UsageStartDialog(
  * 屏幕正上方倒计时浮层。
  *
  * - 实时显示 MM:SS 倒计时（每秒刷新，基于服务端基线与本地校准墙钟平滑插值）；
- * - 旁边"延时申请"按钮展开 4 档（15/30/45/60 分钟），点选即向服务端申请；
+ * - 旁边"延时申请"按钮展开 4 档（15/30/45/60 分钟），点选即向服务端**发起审批工单**（不再立即生效）；
+ * - 已存在待审核延时（[pendingDelayMinutes] > 0）时进入只读"待审核"态：隐藏申请入口，杜绝重复提交；
  * - 单日累计已达上限（默认 120 分钟）时隐藏档位，仅保留倒计时。
+ *
+ * 设计要点：申请是"提交工单"而非"立即延长"，因此 pending 期间不允许再发起，
+ * 待家长审批通过后下一次 15s 会话轮询会带回新的 [extendedMinutes]，浮层自动恢复正常。
  */
 @Composable
 private fun CountdownBanner(
@@ -112,9 +117,12 @@ private fun CountdownBanner(
     delayOptions: List<Int>,
     extendedMinutes: Int,
     maxDailyExtendMinutes: Int,
+    pendingDelayMinutes: Int,
     loading: Boolean,
     onExtend: (Int) -> Unit
 ) {
+    val pending = pendingDelayMinutes > 0
+
     // 1 秒一次的本地心跳，驱动倒计时数字平滑刷新（不依赖 15s 的会话刷新节奏）
     var tick by remember { mutableStateOf(0L) }
     LaunchedEffect(Unit) {
@@ -167,15 +175,24 @@ private fun CountdownBanner(
 
                 Spacer(Modifier.weight(1f))
 
-                TextButton(
-                    onClick = { showOptions = !showOptions },
-                    enabled = !loading
-                ) {
-                    Text("延时申请")
+                if (pending) {
+                    // 已提交审批：展示待审状态并彻底禁用申请入口，避免绕过审核重复提交
+                    Text(
+                        text = "已申请 +${pendingDelayMinutes}分 · 待审核",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                } else {
+                    TextButton(
+                        onClick = { showOptions = !showOptions },
+                        enabled = !loading
+                    ) {
+                        Text("延时申请")
+                    }
                 }
             }
 
-            AnimatedVisibility(visible = showOptions) {
+            AnimatedVisibility(visible = showOptions && !pending) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

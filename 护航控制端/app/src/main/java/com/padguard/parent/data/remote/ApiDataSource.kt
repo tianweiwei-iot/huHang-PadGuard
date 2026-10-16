@@ -1021,6 +1021,41 @@ class ApiDataSource @Inject constructor(
     override suspend fun dismissUnlockTicket(deviceId: String, ticketId: String): Result<Unit> =
         execRaw { policyApi.dismissUnlockTicket(deviceId, ticketId) }
 
+    // ---- 延时审批工单 ----
+    override suspend fun getUsageDelayTickets(deviceId: String): Result<List<com.padguard.parent.domain.repository.UsageDelayTicket>> =
+        exec { policyApi.getUsageDelayTickets(deviceId) }.map { list ->
+            list.data.orEmpty().map { dto ->
+                com.padguard.parent.domain.repository.UsageDelayTicket(
+                    id = dto.id,
+                    deviceId = dto.deviceId,
+                    minutes = dto.minutes,
+                    reason = dto.reason,
+                    status = dto.status,
+                    createdAt = dto.createdAt,
+                    resolvedAt = dto.resolvedAt
+                )
+            }
+        }
+
+    override suspend fun approveUsageDelayTicket(deviceId: String, ticketId: String): Result<Unit> =
+        execRaw {
+            policyApi.approveUsageDelayTicket(
+                deviceId, ticketId, com.padguard.parent.data.model.UsageDelayApproveRequest()
+            )
+        }
+
+    override suspend fun rejectUsageDelayTicket(
+        deviceId: String, ticketId: String, reason: String?
+    ): Result<Unit> =
+        execRaw {
+            policyApi.rejectUsageDelayTicket(
+                deviceId, ticketId, com.padguard.parent.data.model.UsageDelayRejectRequest(reason = reason)
+            )
+        }
+
+    override suspend fun dismissUsageDelayTicket(deviceId: String, ticketId: String): Result<Unit> =
+        execRaw { policyApi.dismissUsageDelayTicket(deviceId, ticketId) }
+
     override suspend fun setControlMode(deviceId: String, mode: ControlMode): Result<Unit> =
         execRaw { policyApi.setControlMode(deviceId, com.padguard.parent.data.model.ModeChangeRequest(mode.name)) }
 
@@ -1385,7 +1420,8 @@ private fun UsageSessionDto.toDomain(): UsageSession = UsageSession(
     countdownThresholdMs = countdownThresholdMs,
     delayOptions = delayOptions,
     maxDailyExtendMinutes = maxDailyExtendMinutes,
-    lastDelayEpoch = lastDelayEpoch
+    lastDelayEpoch = lastDelayEpoch,
+    pendingDelayMinutes = pendingDelayMinutes
 )
 
 private fun InstalledAppDto.toDomain(): InstalledApp = InstalledApp(

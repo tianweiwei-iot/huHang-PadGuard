@@ -160,6 +160,33 @@ class UnlockTicket(
     @Column(name = "resolved_at") var resolvedAt: Long? = null
 )
 
+/**
+ * 延时审批工单（孩子端申请延长使用时间 → 家长端审批）。
+ *
+ * ## 为什么需要独立工单，而不是直接延长（根因修复）
+ * 旧实现 [com.padguard.server.service.UsageSessionService.extend] 在"孩子端申请"这一步
+ * 就直接累加 `extendedMinutes` 并立刻生效——等于"孩子自己批准了自己"，家长端既无审批入口、
+ * 也无法同步这条延长。本工单模型把"申请"与"生效"彻底解耦：
+ * - `request` 只落 PENDING 工单，**不**触碰 `extendedMinutes`；
+ * - 家长 `approve` 才真正累加额度并下发给设备。
+ *
+ * 状态机与 [UnlockTicket] 一致：PENDING → APPROVED / REJECTED，外加 IGNORED（忽略=暂不打扰、
+ * 非终态、仍可被批准）。这样家长端的"小铃铛"消息中心可以像处理解锁申请一样处理延时申请。
+ */
+@Entity
+@Table(name = "usage_delay_tickets")
+class UsageDelayTicket(
+    @Id var id: String = "",
+    @Column(name = "device_id") var deviceId: String = "",
+    @Column(name = "user_id") var userId: String? = null,
+    /** 申请的延长分钟数（必须落在 UsageSession.DELAY_OPTIONS 档位内） */
+    @Column(name = "minutes") var minutes: Int = 0,
+    @Column(name = "reason", columnDefinition = "text") var reason: String? = null,
+    var status: String = "PENDING",
+    @Column(name = "created_at") var createdAt: Long = 0,
+    @Column(name = "resolved_at") var resolvedAt: Long? = null
+)
+
 @Entity
 @Table(name = "app_policies")
 class AppPolicy(

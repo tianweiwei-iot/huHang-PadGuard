@@ -396,7 +396,9 @@ data class UsageSession(
     /** 单日累计延时上限（分钟） */
     val maxDailyExtendMinutes: Int = 120,
     /** 最近一次延时申请的服务端墙钟 */
-    val lastDelayEpoch: Long? = null
+    val lastDelayEpoch: Long? = null,
+    /** 当前等待家长审批的延时分钟数（>0 表示孩子已提交、家长尚未处理） */
+    val pendingDelayMinutes: Int = 0
 ) {
     /** 以本地墙钟 [now] 平滑插值，得到与家长端/孩子端一致的实时剩余毫秒（永不为负） */
     fun liveRemainingMs(now: Long): Long {
@@ -531,7 +533,6 @@ data class PublishedMessage(
  * 地图服务提供方
  */
 enum class MapProvider(val label: String) {
-    BAIDU("百度地图"),
     AMAP("高德地图")
 }
 

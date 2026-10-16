@@ -34,6 +34,7 @@ import com.padguard.core.transport.http.PolicyFetchResult
 import com.padguard.core.transport.http.ScreenshotAck
 import com.padguard.core.transport.http.UsageSessionDto
 import com.padguard.core.transport.http.UsageDelayRequest
+import com.padguard.core.transport.http.UsageRestReportRequest
 import com.padguard.core.transport.mqtt.MqttInbound
 import com.padguard.core.transport.mqtt.MqttTopics
 import com.padguard.core.transport.mqtt.MqttTransport
@@ -221,11 +222,16 @@ class RealRemoteDataSource @Inject constructor(
             is ApiResult.Failure -> r
         }
 
-    override suspend fun extendUsageSession(minutes: Int): ApiResult<UsageSessionDto> =
-        when (val r = caller.callEnvelope("usage-session-extend") { api.extendUsageSession(UsageDelayRequest(minutes)) }) {
+    override suspend fun requestDelayUsageSession(minutes: Int): ApiResult<UsageSessionDto> =
+        when (val r = caller.callEnvelope("usage-session-delay-request") { api.requestDelayUsageSession(UsageDelayRequest(minutes)) }) {
             is ApiResult.Success -> ApiResult.Success(r.value.data ?: UsageSessionDto(), r.serverTime)
             is ApiResult.BizError -> r
             is ApiResult.Failure -> r
+        }
+
+    override suspend fun reportEyeCareRest(restId: String, restMs: Long): ApiResult<Unit> =
+        caller.callIgnoringData("usage-session-rest") {
+            api.reportEyeCareRest(UsageRestReportRequest(restId, restMs))
         }
 
     // ==================== 上行 ====================

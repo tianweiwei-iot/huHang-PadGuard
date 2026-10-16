@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.NotificationsNone
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -53,6 +54,8 @@ import com.padguard.parent.presentation.ui.theme.TextSecondary
 import com.padguard.parent.presentation.ui.theme.TintBlue
 import com.padguard.parent.presentation.viewmodel.UnlockCenterUiState
 import com.padguard.parent.presentation.viewmodel.UnlockTicketEntry
+import com.padguard.parent.presentation.viewmodel.UsageDelayCenterUiState
+import com.padguard.parent.presentation.viewmodel.UsageDelayTicketEntry
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -91,7 +94,12 @@ fun AlertCenterScreen(
     riskAlerts: List<Alert> = emptyList(),
     riskUnreadCount: Int = 0,
     riskProcessing: Boolean = false,
-    onAcknowledgeRisk: (Alert) -> Unit = {}
+    onAcknowledgeRisk: (Alert) -> Unit = {},
+    // 延时申请分区（根层 UsageDelayCenterViewModel 驱动，与解锁工单同层级）
+    delayState: UsageDelayCenterUiState = UsageDelayCenterUiState(),
+    onApproveDelay: (UsageDelayTicketEntry) -> Unit = {},
+    onRejectDelay: (UsageDelayTicketEntry) -> Unit = {},
+    onDismissDelay: (UsageDelayTicketEntry) -> Unit = {}
 ) {
     AppSoftBackground(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -114,16 +122,16 @@ fun AlertCenterScreen(
                         color = PadGuardColors.TextPrimary
                     )
                     Spacer(Modifier.weight(1f))
-                    // 红点合并两类未读（解锁工单 + 需关注的告警）——
+                    // 红点合并三类未读（解锁工单 + 延时申请 + 需关注的告警）——
                     // 家长认的是"铃铛上有东西要处理"，不关心来源。
-                    val totalUnread = state.unreadCount + riskUnreadCount
+                    val totalUnread = state.unreadCount + delayState.unreadCount + riskUnreadCount
                     if (totalUnread > 0) {
                         UnreadBadge(totalUnread)
                     }
                 }
             }
         ) { padding ->
-            if (state.records.isEmpty() && riskAlerts.isEmpty()) {
+            if (state.records.isEmpty() && riskAlerts.isEmpty() && delayState.records.isEmpty()) {
                 EmptyState(modifier = Modifier.padding(padding).fillMaxSize())
                 return@Scaffold
             }
@@ -155,6 +163,20 @@ fun AlertCenterScreen(
                             processing = state.processing,
                             onApprove = onApprove,
                             onReject = onReject
+                        )
+                    }
+                }
+                if (delayState.records.isNotEmpty()) {
+                    item(key = "delay_header") {
+                        SectionHeader(title = "延时申请", count = delayState.records.size)
+                    }
+                    items(delayState.records, key = { "delay_${it.ticket.id}" }) { entry ->
+                        DelayTicketCard(
+                            entry = entry,
+                            processing = delayState.processing,
+                            onApprove = onApproveDelay,
+                            onReject = onRejectDelay,
+                            onDismiss = onDismissDelay
                         )
                     }
                 }
@@ -396,6 +418,85 @@ private fun TicketCard(
         }
     }
 }
+
+@Composable
+private fun DelayTicketCard(
+    entry: UsageDelayTicketEntry,
+    processing: Boolean,
+    onApprove: (UsageDelayTicketEntry) -> Unit,
+    onReject: (UsageDelayTicketEntry) -> Unit,
+    onDismiss: (UsageDelayTicketEntry) -> Unit
+) {
+    val ticket = entry.ticket
+    var selected: DelayChoice? by remember(ticket.id) { mutableStateOf(null) }
+
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(TintBlue, RoundedCornerShape(10.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Schedule, contentDescription = null, tint = PrimaryBlue, modifier = Modifier.size(18.dp))
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("延时申请", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = PadGuardColors.TextPrimary)
+                    Text(
+                        "${entry.deviceName.ifBlank { "孩子的平板" }} · ${formatTime(ticket.createdAt)}",
+                        fontSize = 12.sp, color = TextSecondary
+                    )
+                }
+                StatusChip(ticket.status)
+            }
+
+            Spacer(Modifier.height(10.dp))
+            Text("申请延长：${ticket.minutes} 分钟", fontSize = 14.sp, color = PadGuardColors.TextPrimary)
+            if (!ticket.reason.isNullOrBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text("理由：${ticket.reason}", fontSize = 14.sp, color = TextSecondary)
+            }
+
+            if (ticket.isActionable) {
+                Spacer(Modifier.height(14.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ChoiceButton(
+                        text = "拒绝",
+                        selected = selected == DelayChoice.Reject,
+                        enabled = selected == null && !processing,
+                        modifier = Modifier.weight(1f),
+                        onClick = { selected = DelayChoice.Reject; onReject(entry) }
+                    )
+                    ChoiceButton(
+                        text = "忽略",
+                        selected = selected == DelayChoice.Ignore,
+                        enabled = selected == null && !processing,
+                        modifier = Modifier.weight(1f),
+                        onClick = { selected = DelayChoice.Ignore; onDismiss(entry) }
+                    )
+                    ChoiceButton(
+                        text = "同意延长",
+                        selected = selected == DelayChoice.Approve,
+                        enabled = selected == null && !processing,
+                        modifier = Modifier.weight(1f),
+                        onClick = { selected = DelayChoice.Approve; onApprove(entry) }
+                    )
+                }
+            } else {
+                Spacer(Modifier.height(10.dp))
+                Text("该申请已处理完毕", fontSize = 12.sp, color = TextSecondary)
+            }
+        }
+    }
+}
+
+private enum class DelayChoice { Approve, Reject, Ignore }
 
 private enum class Choice { Approve, Reject }
 

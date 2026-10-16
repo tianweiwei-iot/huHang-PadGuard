@@ -92,21 +92,7 @@ class AppGuardPolicyStore @Inject constructor(
 
     /** 同步缓存：无障碍回调在主线程，不能每次挂起读盘 */
     @Volatile
-    private var cache: Snapshot? = null
-
-    data class Snapshot(
-        val mode: AppListMode,
-        val whitelist: Set<String>,
-        val blacklist: Set<String>,
-        /** 系统应用精细规则：包名 -> ALLOW / BLOCK（优先于名单） */
-        val systemAppRules: Map<String, String>,
-        /** 打开受管控应用是否要密码（家长端开关，默认关 = 只拦安装/卸载） */
-        val requirePasswordOnLaunch: Boolean,
-        /** 无 DO 降级：安装确认页是否要密码（家长端开关，默认 true = 要） */
-        val requirePasswordOnInstall: Boolean,
-        /** 无 DO 降级：卸载确认页是否要密码（家长端开关，默认 true = 要） */
-        val requirePasswordOnUninstall: Boolean
-    )
+    private var cache: AppGuardDecisions.Snapshot? = null
 
     /**
      * 把服务端下发的策略镜像到本地。
@@ -154,16 +140,26 @@ class AppGuardPolicyStore @Inject constructor(
      * 改为：后台 [policyScope] 常驻订阅 DataStore，最新快照始终在 [cache] 里；
      * 本方法只做无锁的易变字段读取，主线程零阻塞。
      */
-    fun snapshot(): Snapshot? = cache
+    fun snapshot(): AppGuardDecisions.Snapshot? = cache
+
+    /**
+     * 基于当前策略快照构建纯函数决策器。
+     *
+     * 把"防砖判定"（[isSystemCritical]）与"取消授权账本"（[DeviceAdminBridge.isHidden]）
+     * 作为外部事实注入，使 [AppGuardDecisions] 保持无 Android 依赖、可单测，
+     * 同时与本地唯一真相保持一致。
+     */
+    fun decisions(): AppGuardDecisions? =
+        cache?.let { AppGuardDecisions(it, ::isSystemCritical, admin::isHidden) }
 
     /** 由后台收集器调用的纯函数：把一次 DataStore 快照换算成内存策略副本 */
-    private fun computeSnapshot(prefs: Preferences): Snapshot? {
+    private fun computeSnapshot(prefs: Preferences): AppGuardDecisions.Snapshot? {
         if (!(prefs[KEY_HAS_POLICY] ?: false)) return null
         val rules = runCatching {
             val obj = JSONObject(prefs[KEY_SYSTEM_RULES] ?: "{}")
             obj.keys().asSequence().associateWith { obj.getString(it).uppercase() }
         }.getOrDefault(emptyMap())
-        return Snapshot(
+        return AppGuardDecisions.Snapshot(
             mode = runCatching { AppListMode.valueOf(prefs[KEY_MODE] ?: "BLACKLIST") }
                 .getOrDefault(AppListMode.BLACKLIST),
             whitelist = decodeList(prefs[KEY_WHITELIST]),
@@ -189,22 +185,18 @@ class AppGuardPolicyStore @Inject constructor(
      *
      * 调用方需先排除 [isSystemCritical] 与自家界面。
      */
-    fun isControlled(pkg: String): Boolean {
-        val s = snapshot() ?: return false
-        // 已授权应用一律放行：这是「授权的可以正常使用」的底线。
-        // 任何全局闸门（含「打开应用也要密码」）都不得误伤已授权应用，
-        // 否则会退化成「无论授权与否打开都被弹回/闪退」的现场故障。
-        if (isAuthorized(s, pkg)) return false
-        // 全局启动闸门：仅对已授权之外的应用（即未授权应用）生效，
-        // 让「打开应用也要密码」变成「未授权应用打开要密码」，而非「所有应用都要密码」。
-        if (s.requirePasswordOnLaunch && !isSystemCritical(pkg)) return true
-        // 精细规则优先：家长显式标了 ALLOW/BLOCK 时，名单口径让位于精细规则
-        s.systemAppRules[pkg]?.let { return it == "BLOCK" }
-        return when (s.mode) {
-            AppListMode.WHITELIST -> pkg !in s.whitelist
-            AppListMode.BLACKLIST -> pkg in s.blacklist
-        }
-    }
+    /**
+     * 该包是否受管控（需要密码门禁），判定口径经 [decisions] 收敛为单一真相。
+     *
+     * 注意：本方法只回答"名单/取消授权层面是否受控"，**不含「打开应用也要密码」全局闸门**——
+     * 那一层由 [AppGuardDecisions.needsLaunchGuard] 在调用方统一施加，避免三处口径分叉。
+     * 取消授权（hidden）在此即视为受控（最严），与桌面可见性（[isLaunchableByChild]）、
+     * 软拦截（[OperationGuardAccessibilityService]）共用同一判定。
+     *
+     * 调用方（无障碍软拦截、桌面点开门禁）在此之前都已单独排除系统关键包与自身界面，
+     * 因此这里不再重复排除。
+     */
+    fun isControlled(pkg: String): Boolean = decisions()?.isControlled(pkg) ?: false
 
     /**
      * 家长是否"关闭了该应用的使用权限"（hidden）。
@@ -224,21 +216,19 @@ class AppGuardPolicyStore @Inject constructor(
     }
 
     /**
-     * 应用是否已授权（可正常使用）。
+     * 孩子端桌面是否应展示并允许启动该应用（**应用管控的权威入口判定**）。
      *
-     * - 白名单模式：在白名单内即授权；
-     * - 黑名单模式：不在黑名单内即授权。
+     * 收敛自 [AppGuardDecisions.isLaunchableByChild]：被取消授权 / 名单外的应用**在桌面直接不出现**，
+     * 从源头减少触达机会，而不是"点了再弹框顶回"——
+     * 后者在非 DO 设备上是可被最近任务 / 系统桌面绕过的（这正是"应用管控照样能打开"的成因之一）。
      *
-     * 与 [isControlled] 共用，确保「授权放行 / 未授权拦截」口径在
-     * 桌面可视网关（[com.padguard.child.KidHomeViewModel.needsLaunchGuard]）、
-     * 无障碍软拦截（[OperationGuardAccessibilityService.decide]）、
-     * DO 隐藏/挂起（[com.padguard.core.engine.enforcer.AppPolicyEnforcer]）三处完全一致，
-     * 不会出现"App 里显示已授权、设备上却仍被拦"。
+     * - 系统关键包（防砖名单）→ 永远可启动，绝不隐藏；
+     * - 取消授权（hidden）→ 不可启动（必须隐藏，否则孩子能看到图标）；
+     * - 白 / 黑名单口径 → 名单外 / 黑名单内不可启动。
+     *
+     * 未下发策略（[decisions] 为 null）时返回 true（fail-open），保证桌面不会凭空空白、设备始终可用。
      */
-    private fun isAuthorized(s: Snapshot, pkg: String): Boolean = when (s.mode) {
-        AppListMode.WHITELIST -> pkg in s.whitelist
-        AppListMode.BLACKLIST -> pkg !in s.blacklist
-    }
+    fun isLaunchableByChild(pkg: String): Boolean = decisions()?.isLaunchableByChild(pkg) ?: true
 
     /**
      * 安装 / 卸载确认页是否要求管理密码（无障碍软拦截闸门）。

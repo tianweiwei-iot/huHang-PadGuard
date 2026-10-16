@@ -67,11 +67,15 @@ class AppLimitEnforcer @Inject constructor(
      * @param policy 限额策略
      * @param foregroundPackage 当前前台应用包名；null 表示未知（此时只累计全局时长）
      * @param screenOn 屏幕是否点亮 —— 息屏不计时，否则平板放着不动也会耗尽额度
+     * @param eyeCareResting 是否正处于护眼强制休息锁屏。
+     *        true 时屏幕虽点亮但设备被锁定，这段时间**不计入**任何使用时长
+     *        （休息时长由服务端权威会话统一从每日总额度扣减，本地也不累计以免上报口径失真）。
      */
     suspend fun track(
         policy: AppLimitPolicy,
         foregroundPackage: String?,
-        screenOn: Boolean
+        screenOn: Boolean,
+        eyeCareResting: Boolean = false
     ): LimitVerdict {
         val nowElapsed = timeProvider.elapsedRealtime()
         val nowWall = timeProvider.now()
@@ -88,6 +92,14 @@ class AppLimitEnforcer @Inject constructor(
             // 息屏：结束当前会话计时，但保留当日累计值
             lastForegroundPackage = null
             sessionStartElapsed = 0L
+            return LimitVerdict.Allowed
+        }
+
+        if (eyeCareResting) {
+            // 护眼强制休息锁屏：屏幕亮但孩子无法操作，这段时间不属于"使用"。
+            // 仍更新前台包名采样基线（避免休息结束后把整段休息当成一次 60s 增量计入），
+            // 但不调用 addTotalUsage / addAppUsage，本地累计与服务端权威口径保持一致。
+            lastForegroundPackage = foregroundPackage
             return LimitVerdict.Allowed
         }
 

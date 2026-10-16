@@ -42,12 +42,17 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.padguard.child.ui.theme.PadGuardTheme
 import com.padguard.child.guard.AppAccessGateDialog
 import com.padguard.child.guard.AppAccessNoPasswordDialog
 import com.padguard.child.guard.AppAccessReason
+import com.padguard.child.guard.DeviceOwnerEnforcer
+import com.padguard.child.ui.lock.LockTaskSupport
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
+import javax.inject.Inject
 
 /**
  * 孩子桌面（自定义 Launcher）。
@@ -72,9 +77,26 @@ import kotlinx.coroutines.launch
  */
 @AndroidEntryPoint
 class KidHomeActivity : ComponentActivity() {
+    /** P2（DO 治本路径）：受控态下由本类把桌面钉成 Kiosk，真正锁死 HOME。非 DO 时恒为 false，不触发。 */
+    @Inject
+    lateinit var deviceOwnerEnforcer: DeviceOwnerEnforcer
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // DO 受控态 Kiosk：仅当 [DeviceOwnerEnforcer.kioskActive] 为真（DO 且锁定）时，
+        // 把本桌面用 LockTask 真锁死 —— 系统禁用手势/返回/最近任务，连"退出锁屏"都做不到。
+        // 与 P0/P1 的无障碍软拦截互不冲突：非 DO 设备此流恒 false，桌面行为完全不变。
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                deviceOwnerEnforcer.kioskActive.collect { active ->
+                    if (active) LockTaskSupport.start(this@KidHomeActivity)
+                    else LockTaskSupport.stop(this@KidHomeActivity)
+                }
+            }
+        }
+
         setContent {
             PadGuardTheme {
                 KidLauncherScreen(

@@ -70,6 +70,8 @@ class UsageSessionManager @Inject constructor(
         val maxDailyExtendMinutes: Int = 120,
         /** 已累计延时（分钟） */
         val extendedMinutes: Int = 0,
+        /** 当前正在等待家长审批的延时分钟数（>0 表示"已提交，等待审核"） */
+        val pendingDelayMinutes: Int = 0,
         /** 今日额度（分钟，含延时） */
         val quotaMinutes: Int = 0,
         /** 计时起点（服务端墙钟，毫秒），未激活为 null */
@@ -142,28 +144,32 @@ class UsageSessionManager @Inject constructor(
     }
 
     /**
-     * 申请延时（分钟必须落在 [UiState.delayOptions] 内）。成功则刷新基线。
+     * 申请延时（分钟必须落在 [UiState.delayOptions] 内）。
+     *
+     * 注意：**只发起审批工单，不立即延长**。成功仅把服务端返回的 `pendingDelayMinutes` 落到本地状态，
+     * 真正延长要等家长端审批通过、下一次会话刷新（15s 轮询）拿到新的 `extendedMinutes` 才生效。
+     * 这与"申请即生效"的旧实现彻底解耦，是本次修复的核心。
      */
-    suspend fun requestExtend(minutes: Int): Boolean {
+    suspend fun requestDelay(minutes: Int): Boolean {
         if (!credentials.isBound) return false
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return false
 
         _state.update { it.copy(loading = true, error = null) }
         val result = refreshMutex.withLock {
-            when (val r = remote.extendUsageSession(minutes)) {
+            when (val r = remote.requestDelayUsageSession(minutes)) {
                 is ApiResult.Success -> {
                     applyDto(r.value)
                     true
                 }
                 is ApiResult.BizError -> {
                     _state.update { it.copy(error = "${r.code}: ${r.message}") }
-                    Logger.w(TAG) { "usage-session extend($minutes) rejected: ${r.code} ${r.message}" }
+                    Logger.w(TAG) { "usage-session delay request($minutes) rejected: ${r.code} ${r.message}" }
                     false
                 }
                 is ApiResult.Failure -> {
                     _state.update { it.copy(error = r.message) }
-                    Logger.w(TAG) { "usage-session extend($minutes) failed: ${r.message}" }
+                    Logger.w(TAG) { "usage-session delay request($minutes) failed: ${r.message}" }
                     false
                 }
             }
@@ -208,6 +214,7 @@ class UsageSessionManager @Inject constructor(
                 delayOptions = dto.delayOptions,
                 maxDailyExtendMinutes = dto.maxDailyExtendMinutes,
                 extendedMinutes = dto.extendedMinutes,
+                pendingDelayMinutes = dto.pendingDelayMinutes,
                 quotaMinutes = dto.quotaMinutes + dto.extendedMinutes,
                 startEpoch = dto.startEpoch,
                 error = null

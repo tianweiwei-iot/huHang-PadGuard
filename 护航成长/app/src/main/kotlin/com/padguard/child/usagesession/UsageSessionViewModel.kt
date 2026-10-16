@@ -28,9 +28,9 @@ class UsageSessionViewModel @Inject constructor(
         viewModelScope.launch { manager.confirmStart() }
     }
 
-    /** 申请延时（档位分钟数） */
-    fun requestExtend(minutes: Int) {
-        viewModelScope.launch { manager.requestExtend(minutes) }
+    /** 申请延时（档位分钟数）：仅发起审批工单，真正的延长由家长审批后生效 */
+    fun requestDelay(minutes: Int) {
+        viewModelScope.launch { manager.requestDelay(minutes) }
     }
 
     /** 本地平滑倒计时：在"当前校准墙钟"时刻的实时剩余毫秒，供浮层每秒刷新 */

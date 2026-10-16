@@ -2,6 +2,8 @@ package com.padguard.parent.presentation.ui.realtime
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +12,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -45,10 +49,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -85,7 +93,7 @@ private const val DEFAULT_VIEW_RADIUS_METERS = 800.0
 /**
  * 实时管控 · 定位
  *
- * 实时获取被管控平板位置并在地图上展示，支持百度 / 高德地图与 2D / 3D 视图；
+ * 实时获取被管控平板位置并在地图上展示，支持高德地图与 2D / 3D 视图；
  * 支持多电子围栏（一对多）；设备越界 / 进入安全区均记录轨迹。
  * deviceId 由导航路由参数经 SavedStateHandle 注入 ViewModel。
  */
@@ -105,6 +113,16 @@ fun LocationScreen(
         }
     }
 
+    val context = LocalContext.current
+    // 仅在「已配置高德 Key 且用户选中高德」时使用真实底图，否则回退等距投影占位图。
+    val useRealMap = remember(uiState.provider) {
+        readAmapKey(context).isNotBlank() && uiState.provider == MapProvider.AMAP
+    }
+    // 真实底图加载失败时回退占位图；切换地图源时重置。
+    var amapFailed by remember(uiState.provider) { mutableStateOf(false) }
+    var amapDiag by remember(uiState.provider) { mutableStateOf<AmapDiag?>(null) }
+    val showRealMap = useRealMap && !amapFailed
+
     Scaffold(
         containerColor = Color.Transparent,
         topBar = { RealtimeTopBar(title = "定位", onBack = onBack) },
@@ -114,56 +132,122 @@ fun LocationScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            DeviceLocationCard(
-                location = uiState.location,
-                geofences = uiState.geofences,
-                provider = uiState.provider,
-                viewMode = uiState.viewMode,
-                batteryLevel = uiState.batteryLevel,
-                onProviderChange = viewModel::selectProvider,
-                onViewModeChange = viewModel::selectViewMode,
-                onRefresh = viewModel::refreshLocation,
-                onLocate = viewModel::locateNow,
-                isLocating = uiState.isLocating
-            )
+            // 全屏地图主区域：占满状态栏以下剩余空间（权重更高）。「立即定位」已移至地图下方固定区域，不再遮挡画面。
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1.4f)
+                    .heightIn(min = 220.dp)
+            ) {
+                if (showRealMap) {
+                    AmapMapView(
+                        location = uiState.location,
+                        geofences = uiState.geofences,
+                        track = emptyList(),
+                        viewMode = uiState.viewMode,
+                        modifier = Modifier.fillMaxSize(),
+                        onMapFailed = { diag ->
+                            amapFailed = true
+                            amapDiag = diag
+                        }
+                    )
+                } else {
+                    GeofenceMapCanvas(
+                        location = uiState.location,
+                        geofences = uiState.geofences,
+                        track = emptyList(),
+                        provider = uiState.provider,
+                        viewMode = uiState.viewMode,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                // 左上角仅保留当前视图模式标识（不再展示地图服务商名称）。
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(8.dp),
+                    color = Color.White.copy(alpha = 0.92f),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = uiState.viewMode.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF333333),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                }
+            }
 
-            GeofenceStatusBanner(
-                inside = uiState.insideGeofence,
-                hasEnabled = uiState.geofences.any { it.enabled },
-                distanceMeters = uiState.distanceMeters,
-                nearestRadiusMeters = uiState.nearestRadiusMeters
-            )
+            // 「立即定位」固定区域：位于地图正下方，独立于地图画面，不遮挡。
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                SoftCandyButton(
+                    text = if (uiState.isLocating) "定位中…" else "立即定位",
+                    icon = Icons.Default.MyLocation,
+                    enabled = !uiState.isLocating,
+                    onClick = viewModel::locateNow,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
 
-            GeofenceListCard(
-                geofences = uiState.geofences,
-                onAdd = viewModel::addGeofence,
-                onUpdateDraft = viewModel::updateZoneDraft,
-                onSetCenter = viewModel::setZoneCenterToDevice,
-                onSave = viewModel::saveZone,
-                onDelete = viewModel::deleteZone
-            )
+            // 下方内容区：地址/电量、地图与视图切换、围栏管理、轨迹时间线等其余功能保持不变。
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                DeviceLocationInfoCard(
+                    location = uiState.location,
+                    geofences = uiState.geofences,
+                    viewMode = uiState.viewMode,
+                    batteryLevel = uiState.batteryLevel,
+                    useRealMap = useRealMap,
+                    amapFailed = amapFailed,
+                    amapDiag = amapDiag,
+                    onViewModeChange = viewModel::selectViewMode,
+                    onRefresh = viewModel::refreshLocation
+                )
 
-            TrackHistoryCard(track = uiState.track, geofences = uiState.geofences)
+                GeofenceStatusBanner(
+                    inside = uiState.insideGeofence,
+                    hasEnabled = uiState.geofences.any { it.enabled },
+                    distanceMeters = uiState.distanceMeters,
+                    nearestRadiusMeters = uiState.nearestRadiusMeters
+                )
+
+                GeofenceListCard(
+                    geofences = uiState.geofences,
+                    onAdd = viewModel::addGeofence,
+                    onUpdateDraft = viewModel::updateZoneDraft,
+                    onSetCenter = viewModel::setZoneCenterToDevice,
+                    onSave = viewModel::saveZone,
+                    onDelete = viewModel::deleteZone
+                )
+
+                TrackHistoryCard(track = uiState.track, geofences = uiState.geofences)
+            }
         }
     }
 }
 
 @Composable
-private fun DeviceLocationCard(
+private fun DeviceLocationInfoCard(
     location: LocationInfo?,
     geofences: List<GeofenceConfig>,
-    provider: MapProvider,
     viewMode: MapViewMode,
     batteryLevel: Int?,
-    onProviderChange: (MapProvider) -> Unit,
+    useRealMap: Boolean,
+    amapFailed: Boolean,
+    amapDiag: AmapDiag?,
     onViewModeChange: (MapViewMode) -> Unit,
-    onRefresh: () -> Unit,
-    onLocate: () -> Unit,
-    isLocating: Boolean
+    onRefresh: () -> Unit
 ) {
     RealtimeCard(
         title = "设备位置",
@@ -173,84 +257,26 @@ private fun DeviceLocationCard(
             }
         }
     ) {
-        Text("地图服务", style = MaterialTheme.typography.bodyLarge)
-        Spacer(modifier = Modifier.height(4.dp))
-        SingleChoiceChips(
-            options = MapProvider.values().toList(),
-            selected = provider,
-            labelOf = { it.label },
-            onSelect = onProviderChange
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-        Text("视图模式", style = MaterialTheme.typography.bodyLarge)
-        Spacer(modifier = Modifier.height(4.dp))
-        SingleChoiceChips(
-            options = MapViewMode.values().toList(),
-            selected = viewMode,
-            labelOf = { it.label },
-            onSelect = onViewModeChange
-        )
+        // 视图模式：标签与 2D / 3D 选项同一行显示（已移除「地图服务」服务商选择）。
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("视图模式", style = MaterialTheme.typography.bodyLarge)
+            Spacer(modifier = Modifier.width(12.dp))
+            SingleChoiceChips(
+                options = MapViewMode.values().toList(),
+                selected = viewMode,
+                labelOf = { it.label },
+                onSelect = onViewModeChange
+            )
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
-        val context = LocalContext.current
-        // 仅在「已配置高德 Key 且用户选中高德」时使用真实底图，否则回退等距投影占位图。
-        val useRealMap = remember(provider) { readAmapKey(context).isNotBlank() && provider == MapProvider.AMAP }
-        // 真实底图加载失败时回退占位图；切换地图源时重置。
-        // amapDiag 保存看门狗回传的真实诊断（包名/签名 SHA1/Key 注入/网络可达），用于给出差异化提示。
-        var amapFailed by remember(provider) { mutableStateOf(false) }
-        var amapDiag by remember(provider) { mutableStateOf<AmapDiag?>(null) }
-        val showRealMap = useRealMap && !amapFailed
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(240.dp)
-                .clip(RoundedCornerShape(12.dp))
-        ) {
-            if (showRealMap) {
-                AmapMapView(
-                    location = location,
-                    geofences = geofences,
-                    track = emptyList(),
-                    viewMode = viewMode,
-                    modifier = Modifier.fillMaxSize(),
-                    onMapFailed = { diag ->
-                        amapFailed = true
-                        amapDiag = diag
-                    }
-                )
-            } else {
-                GeofenceMapCanvas(
-                    location = location,
-                    geofences = geofences,
-                    track = emptyList(),
-                    provider = provider,
-                    viewMode = viewMode,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(8.dp),
-                color = Color.White.copy(alpha = 0.92f),
-                shape = RoundedCornerShape(6.dp)
-            ) {
-                Text(
-                    text = "${provider.label} · ${viewMode.label}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF333333),
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                )
-            }
-        }
         Text(
             text = when {
                 useRealMap && amapFailed -> amapFailText(amapDiag)
                 useRealMap ->
-                    "地图由高德提供，坐标为 GCJ-02；设备 GPS（WGS-84）已做偏移转换后绘制；绿色圆圈为各安全区域。"
+                    "地图底图采用国测局 GCJ-02 坐标；设备 GPS（WGS-84）已做偏移转换后绘制；绿色圆圈为各安全区域。"
                 else ->
-                    "未配置高德地图 Key，当前为示意占位图；配置 Key 后将显示真实底图。"
+                    "未配置地图 Key，当前为示意占位图；配置 Key 后将显示真实底图。"
             },
             style = MaterialTheme.typography.labelSmall,
             color = if (useRealMap && amapFailed) PadGuardColors.WarningRed.copy(alpha = 0.8f)
@@ -338,26 +364,146 @@ private fun DeviceLocationCard(
         }
 
         Spacer(modifier = Modifier.height(12.dp))
-        Button(
-            onClick = onLocate,
-            enabled = !isLocating,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Icon(
-                imageVector = Icons.Default.MyLocation,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(if (isLocating) "定位中…" else "立即定位")
-        }
         Text(
-            text = "点击后平板会当场采集一次坐标并上报。孩子此刻未使用平板时受系统后台定位限制，" +
+            text = "点击「立即定位」后平板会当场采集一次坐标并上报。孩子此刻未使用平板时受系统后台定位限制，" +
                 "将在孩子解锁平板后自动补传。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
             modifier = Modifier.padding(top = 6.dp)
         )
+    }
+}
+
+/**
+ * 毛琉璃水晶质感高级按钮。
+ *
+ * 以半透明蓝绿渐变 + 顶部高光 + 玻璃描边模拟磨砂水晶质感；按下时整体透明度降低并轻微收缩，释放后回弹。
+ * 颜色采用品牌蓝绿渐变（与地图主题一致），白色文字保证对比度；禁用态整体降透明度。
+ */
+@Composable
+/**
+ * 「立即定位」按钮——软糖拟态（Soft Candy Neumorphism）风格。
+ *
+ * 设计要点：
+ * - 主体为柔和薄荷绿竖向渐变 + 顶部柔光，呈现「软糖」般饱满通透质感；
+ * - 通过右下暗影 + 左上亮影两层偏移阴影构成拟态浮雕，按钮整体「鼓起」而非扁平；
+ * - 按下时阴影收拢、整体略下沉，提供明确的物理回弹反馈；
+ * - 禁用态整体降透明度，保留形状与文案，不破坏布局。
+ */
+private fun SoftCandyButton(
+    text: String,
+    icon: ImageVector? = null,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val baseAlpha = if (enabled) 1f else 0.5f
+
+    // 软糖配色：薄荷绿渐变，柔和护眼，与高德地图主题色呼应。
+    val candyTop = Color(0xFF7FE3D4)
+    val candyBottom = Color(0xFF3FC9B8)
+    val shadowDark = Color(0xFF1F9E8E).copy(alpha = 0.40f)
+    val shadowLight = Color.White.copy(alpha = 0.92f)
+
+    // 按下时阴影收拢、按钮下沉，模拟被「按进去」的软糖回弹。
+    val press = if (isPressed) 1 else 0
+    val elevation = (4 - press).dp
+    val offset = (4 - press).dp
+
+    Box(
+        modifier = modifier
+            .height(54.dp)
+            .padding(6.dp) // 为拟态双层阴影预留呼吸空间，避免裁切
+            .clickable(
+                enabled = enabled,
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        // 暗色阴影层（右下偏移），构成软糖底部厚度感。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .offset(x = offset, y = offset)
+                .shadow(
+                    elevation = elevation,
+                    shape = RoundedCornerShape(18.dp),
+                    ambientColor = shadowDark,
+                    spotColor = shadowDark
+                )
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color.Transparent)
+        )
+        // 亮色高光阴影层（左上偏移），构成软糖顶部受光面。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .offset(x = -offset, y = -offset)
+                .shadow(
+                    elevation = elevation,
+                    shape = RoundedCornerShape(18.dp),
+                    ambientColor = shadowLight,
+                    spotColor = shadowLight
+                )
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color.Transparent)
+        )
+        // 主体：软糖渐变 + 描边 + 顶部柔光。
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(18.dp))
+                .background(
+                    brush = Brush.verticalGradient(
+                        colorStops = arrayOf(
+                            0f to candyTop.copy(alpha = baseAlpha),
+                            1f to candyBottom.copy(alpha = baseAlpha)
+                        )
+                    )
+                )
+                .border(
+                    width = 1.dp,
+                    color = Color.White.copy(alpha = 0.55f * baseAlpha),
+                    shape = RoundedCornerShape(18.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            // 顶部柔光：模拟软糖表面反光，增强果冻通透感。
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(
+                        brush = Brush.linearGradient(
+                            colorStops = arrayOf(
+                                0f to Color.White.copy(alpha = 0.42f * baseAlpha),
+                                0.5f to Color.Transparent
+                            )
+                        )
+                    )
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (icon != null) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(alpha = baseAlpha)
+                )
+            }
+        }
     }
 }
 
@@ -629,7 +775,6 @@ private fun GeofenceMapCanvas(
     modifier: Modifier = Modifier
 ) {
     val accent = when (provider) {
-        MapProvider.BAIDU -> Color(0xFF2F6BFF)
         MapProvider.AMAP -> Color(0xFF00A37A)
     }
     val backgroundColor = Color(0xFFF2F5FA)

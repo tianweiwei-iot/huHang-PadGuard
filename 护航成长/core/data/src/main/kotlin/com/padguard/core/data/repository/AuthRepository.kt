@@ -77,6 +77,15 @@ class AuthRepository @Inject constructor(
          * 跑完写到当前版本，**且补跑是幂等的**（已就绪的项不会重复打扰）。
          */
         val CONSENT_VERSION = intPreferencesKey("consent_version")
+
+        /**
+         * 家长已在授权流程中明确跳过设备管理员(DA)引导的标记。
+         *
+         * 入口分流在「DA 未激活」时会强制弹回一次性授权页（见 [com.padguard.child.MainActivity]），
+         * 但家长若在该流程里主动跳过 DA（[com.padguard.child.consent.OneTimeConsentViewModel.finishAnyway]），
+         * 置位本标记后不再强制，避免每次冷启动都卡在授权页；「我的」页仍保留手动开启入口与缺失提示。
+         */
+        val DEVICE_ADMIN_PROMPT_ACK = booleanPreferencesKey("device_admin_prompt_ack")
     }
 
     /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
@@ -270,6 +279,19 @@ class AuthRepository @Inject constructor(
             it[Keys.CONSENT_VERSION] = version
             it[Keys.PERMISSIONS_DONE] = true
         }
+    }
+
+    /**
+     * 家长是否已明确跳过 DA 引导（见 [Keys.DEVICE_ADMIN_PROMPT_ACK]）。
+     * 入口分流据此决定是否仍因「DA 未激活」强制弹回授权页。
+     */
+    val isDeviceAdminPromptAck: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.DEVICE_ADMIN_PROMPT_ACK] ?: false }
+
+    /** 标记家长已明确跳过 DA 引导，停止强制弹回授权流程。 */
+    suspend fun setDeviceAdminPromptAck() {
+        runCatching { store.edit { it[Keys.DEVICE_ADMIN_PROMPT_ACK] = true } }
+            .onFailure { Logger.w(TAG) { "set device admin prompt ack failed" } }
     }
 
     /** 标记权限引导已完成，后续登录不再重复申请。 */

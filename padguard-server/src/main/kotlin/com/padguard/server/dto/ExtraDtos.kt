@@ -239,11 +239,42 @@ data class UsageSessionDto(
     /** 单日累计延时上限（分钟） */
     val maxDailyExtendMinutes: Int = 120,
     /** 最近一次延时申请的服务端墙钟 */
-    val lastDelayEpoch: Long? = null
+    val lastDelayEpoch: Long? = null,
+    /**
+     * 当前正在等待家长审批的延时分钟数（PENDING 工单之和）。
+     * 孩子端据此展示"已提交，等待家长审核"，家长端据此在计时卡片上提示"有审核中的申请"。
+     * 与 [extendedMinutes] 解耦：只有被 APPROVED 的才会计入真正额度。
+     */
+    val pendingDelayMinutes: Int = 0
 )
 
 /** 延时申请请求：minutes 必须落在 delayOptions 内 */
 data class UsageDelayRequest(val minutes: Int = 0)
+
+/** 延时审批工单（家长端审批列表 / 消息中心展示用） */
+data class UsageDelayTicketDto(
+    val id: String,
+    val deviceId: String,
+    val minutes: Int,
+    val reason: String?,
+    val status: String,
+    val createdAt: Long,
+    val resolvedAt: Long?
+)
+
+/** 家长同意延时申请（按申请分钟数延长额度） */
+data class UsageDelayApproveRequest(val reason: String? = null)
+
+/** 家长拒绝延时申请（下发给孩子的拒因） */
+data class UsageDelayRejectRequest(val reason: String? = null)
+
+/**
+ * 护眼强制休息时长上报请求。
+ *
+ * @param restId 本次休息唯一标识（孩子端用休息开始墙钟生成），服务端幂等去重，避免重试重复扣减
+ * @param restMs 实际休息毫秒（已钳制到 [0, restMinutes*60000]）
+ */
+data class UsageRestReportRequest(val restId: String = "", val restMs: Long = 0L)
 
 // ============ 统计 ============
 /**

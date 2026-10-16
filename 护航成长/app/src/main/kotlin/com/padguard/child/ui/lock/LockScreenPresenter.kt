@@ -86,6 +86,11 @@ class LockScreenPresenter @Inject constructor(
                     notifier.cancel()
                     LockScreenActivity.dismiss(context)
                     overlay.dismiss()
+                } else if (desiredDetail == null) {
+                    // 由未锁定 → 锁定首帧：立即渲染锁定层。即便 App 在后台，
+                    // 悬浮窗也能铺上；下方 show() 内的系统级 lockNow 兜底同时触发，
+                    // 实现"时间到立即锁屏"。desiredDetail 守卫确保每次锁定只触发一次。
+                    show(state.primaryDetail)
                 }
             }
         }
@@ -136,10 +141,16 @@ class LockScreenPresenter @Inject constructor(
         // 已经稳稳在前台了：只刷新原因，不重复走升级链（会闪一下）
         if (LockScreenActivity.visible) {
             LockScreenActivity.show(context, detail)
-            overlay.dismiss()
+            // 非 DO 设备（无 LOCK_TASK 屏幕固定能力）下，悬浮窗是锁屏被划走后的唯一兜底地板，
+            // 即便锁屏页此刻在前台也绝不能撤掉；只有 DO 的屏幕固定真正锁死手势时才冗余可撤。
+            if (admin.can(Capability.LOCK_TASK)) overlay.dismiss()
             return
         }
         attemptOnce(detail)
+        // 进入锁定态首帧立即唤起系统锁屏（keyguard）：即便 PadGuard 品牌锁屏 Activity 因后台限制
+        // 未即时到前台，系统 keyguard 也已压下，孩子无法绕过——这是"时间到立即锁屏"的硬兜底。
+        // 仅设备管理员 / 设备所有者可用，且受 systemLockPushed 守卫避免反复灭屏。
+        if (admin.can(Capability.LOCK_NOW) && !systemLockPushed) pushSystemLock()
         startEscalation()
     }
 
@@ -244,7 +255,9 @@ class LockScreenPresenter @Inject constructor(
             return
         }
         if (LockScreenActivity.visible) {
-            overlay.dismiss()
+            // 仅 DO（具备 LOCK_TASK 屏幕固定能力）时可撤悬浮窗：此时手势已被系统级固定封死，
+            // 悬浮窗纯属冗余。非 DO 设备上它是「锁屏页被划走后」的唯一地板，撤掉即等于洞开。
+            if (admin.can(Capability.LOCK_TASK)) overlay.dismiss()
             notifier.cancel()
             Logger.i(TAG) { "lock screen confirmed on foreground" }
         } else {
