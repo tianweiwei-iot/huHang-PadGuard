@@ -1,7 +1,9 @@
 package com.padguard.core.engine.lock
 
+import android.content.Context
 import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -28,14 +30,65 @@ import javax.inject.Singleton
  * 若用墙钟，孩子把系统时间往前调 30 分钟就能续期 —— 而这恰恰是最容易被想到的绕过方式。
  * 单调时钟在重启后归零，所以这里额外记录墙钟到期点做双重校验：
  * 重启后单调时钟不可比，退回墙钟判定（重启同样是一种代价，且重启会触发策略重新拉取）。
+ *
+ * ## REMOTE 锁定为什么必须持久化
+ * [LockReason.REMOTE] 只能由远程指令置位、远程指令清除，而**指令是一次性的**：
+ * 服务端在回执后即把锁屏指令收敛为终态，不会再补发。若 REMOTE 态只活在内存里，
+ * 进程被回收（息屏后被 ROM 杀掉是常态）或设备重启后，锁定态凭空消失：
+ * - 孩子端表现为"锁屏自己没了"——重启即成绕过手段；
+ * - 更糟的是，压着系统 keyguard 的记账还在，家长随后点「解锁」时 App 侧早已
+ *   "未锁定"，解锁链路会误判为"无需操作"，系统锁永远没人撤 —— 正是
+ *   「家长反复解锁、孩子端始终黑屏」的隐蔽成因之一。
+ * 因此 REMOTE 态落盘（[PREFS_NAME]）：置位即写、清除即删、进程启动即恢复。
+ * 重启不该成为管控真空，家长解锁指令到达前设备保持锁定，是安全的失败方向。
  */
 @Singleton
 class LockController @Inject constructor(
-    private val timeProvider: TimeProvider
+    private val timeProvider: TimeProvider,
+    @ApplicationContext context: Context
 ) {
+
+    private val remoteLockPrefs =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private val _state = MutableStateFlow(LockState())
     val state: StateFlow<LockState> = _state.asStateFlow()
+
+    init {
+        restoreRemoteLock()
+    }
+
+    /**
+     * 进程启动时恢复持久化的 REMOTE 锁定。
+     *
+     * 在 init 里做而不是懒加载：任何收集者（LockScreenPresenter 的解锁分流、
+     * GuardService 的周期自检）拿到 state 的第一帧就必须已经包含 REMOTE，
+     * 否则会出现"启动瞬间判定未锁定 → 误触解锁链路"的竞态。
+     */
+    private fun restoreRemoteLock() {
+        if (!remoteLockPrefs.getBoolean(KEY_REMOTE_LOCKED, false)) return
+        val detail = remoteLockPrefs.getString(KEY_REMOTE_DETAIL, "").orEmpty()
+        val current = _state.value
+        if (LockReason.REMOTE in current.reasons) return
+        _state.value = current.copy(
+            reasons = current.reasons + LockReason.REMOTE,
+            details = current.details + (LockReason.REMOTE to detail)
+        )
+        Logger.i(TAG) { "remote lock restored after process restart (detail='$detail')" }
+    }
+
+    private fun persistRemoteLock(detail: String) {
+        remoteLockPrefs.edit()
+            .putBoolean(KEY_REMOTE_LOCKED, true)
+            .putString(KEY_REMOTE_DETAIL, detail)
+            .apply()
+    }
+
+    private fun clearPersistedRemoteLock() {
+        if (!remoteLockPrefs.getBoolean(KEY_REMOTE_LOCKED, false)) return
+        remoteLockPrefs.edit().remove(KEY_REMOTE_LOCKED).remove(KEY_REMOTE_DETAIL).apply()
+        Logger.i(TAG) { "persisted remote lock cleared" }
+    }
 
     /** 临时解锁到期的单调时钟点；0 表示未处于临时解锁 */
     private var tempUnlockUntilElapsed: Long = 0L
@@ -67,6 +120,8 @@ class LockController @Inject constructor(
         val details = current.details + (reason to detail)
         val untils = if (untilMillis > 0) current.untilMillis + (reason to untilMillis) else current.untilMillis - reason
         _state.value = LockState(reasons, details, untils)
+        // REMOTE 置位即落盘：指令是一次性的，不回写的话进程一死锁定态就凭空消失
+        if (reason == LockReason.REMOTE) persistRemoteLock(detail)
         Logger.i(TAG) { "lock requested: $reason, until=$untilMillis, reasons=$reasons" }
     }
 
@@ -79,6 +134,7 @@ class LockController @Inject constructor(
             details = current.details - reason,
             untilMillis = current.untilMillis - reason
         )
+        if (reason == LockReason.REMOTE) clearPersistedRemoteLock()
         Logger.i(TAG) { "lock released: $reason, remaining=${_state.value.reasons}" }
     }
 
@@ -105,6 +161,7 @@ class LockController @Inject constructor(
     fun releaseAll() {
         if (_state.value.reasons.isEmpty()) return
         _state.value = LockState()
+        clearPersistedRemoteLock()
         Logger.i(TAG) { "all locks released" }
     }
 
@@ -130,6 +187,8 @@ class LockController @Inject constructor(
         tempUnlockUntilWall = timeProvider.now() + durationMs
         tempUnlockPackage = packageName.trim()
         _state.value = LockState(tempUnlockUntilMillis = tempUnlockUntilWall)
+        // 临时解锁即放行：REMOTE 锁定态一并清除（家长主动放行优先于一切锁定）
+        clearPersistedRemoteLock()
         Logger.i(TAG) { "temp unlock for $minutes min, pkg='${tempUnlockPackage}', until=$tempUnlockUntilWall" }
     }
 
@@ -177,11 +236,19 @@ class LockController @Inject constructor(
         tempUnlockUntilWall = 0L
         tempUnlockPackage = ""
         _state.value = LockState()
+        // 重启不应成为管控真空：持久化的 REMOTE 锁定在开机后继续生效，
+        // 直到家长解锁指令到达（自动锁定原因由策略自检重新派生）。
+        restoreRemoteLock()
         Logger.i(TAG) { "state reset after boot" }
     }
 
     companion object {
         private const val TAG = "LockController"
+
+        /** REMOTE 锁定态的持久化文件（见类注释「REMOTE 锁定为什么必须持久化」） */
+        private const val PREFS_NAME = "padguard_remote_lock"
+        private const val KEY_REMOTE_LOCKED = "remote_locked"
+        private const val KEY_REMOTE_DETAIL = "remote_detail"
 
         /** 单次临时解锁上限 8 小时，防止一次误操作让管控长期失效 */
         const val MAX_TEMP_UNLOCK_MINUTES = 480
@@ -232,6 +299,14 @@ enum class LockReason {
      * 把合规强制项一起关掉。
      */
     CURFEW,
+
+    /**
+     * 定时锁机（家长端「上网管控 → 定时锁机」独立开关）。
+     *
+     * 与 [SCHEDULE]（时段规则表）分开：两者在家长端是互不相关的两个 UI，
+     * 合成一个原因会让其中一个改动另一个的数据源，也会让孩子说不清"为什么被锁了"。
+     */
+    SMART_SHUTDOWN,
 
     /** 每日总时长耗尽 */
     DAILY_LIMIT,

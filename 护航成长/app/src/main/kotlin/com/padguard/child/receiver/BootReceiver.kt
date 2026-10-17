@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.padguard.child.capture.CaptureConsentPrompter
 import com.padguard.child.service.GuardService
+import com.padguard.child.ui.lock.SystemKeyguardBridge
 import com.padguard.core.common.Logger
 
 /**
@@ -43,6 +44,11 @@ class BootReceiver : BroadcastReceiver() {
         // 把"必须确认一次 MediaProjection"收拢到此刻，而不是等家长日后点开实时看屏时
         // 才向孩子弹确认框——那样孩子一旦不点确认，监护就会失败。
         CaptureConsentPrompter.onDeviceInteractive(context)
+        // 解锁自愈的双保险：USER_PRESENT 意味着孩子自己滑开了系统锁屏。
+        // 若那时"待撤锁"标记还在（家长已解锁、撤锁却没追上），系统锁既已不在，
+        // 标记与压锁记账都该清掉 —— 否则残留标记会让自愈触发点追一个不存在的锁。
+        // keyguard 仍锁着时不动，交给带 activity 的触发点去撤。
+        SystemKeyguardBridge.clearIfKeyguardGone(context)
     }
 
     companion object {

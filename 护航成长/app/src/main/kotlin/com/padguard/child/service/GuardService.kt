@@ -10,10 +10,13 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -21,6 +24,8 @@ import androidx.core.content.ContextCompat
 import com.padguard.child.MainActivity
 import com.padguard.child.R
 import com.padguard.child.capture.CaptureConsentPrompter
+import com.padguard.child.capture.CaptureConsent
+import com.padguard.child.capture.AccessibilityScreenshot
 import com.padguard.child.capture.MediaUploadRetry
 import com.padguard.child.capture.PhotoCapture
 import com.padguard.child.capture.ScreenCaptureService
@@ -43,6 +48,7 @@ import com.padguard.child.ui.block.AppBlockActivity
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.usagesession.UsageSessionManager
 import com.padguard.child.ui.lock.LockScreenPresenter
+import com.padguard.child.ui.lock.SystemKeyguardBridge
 import com.padguard.child.ui.message.MessageActivity
 import com.padguard.child.ui.overlay.WatermarkOverlay
 import com.padguard.core.common.Logger
@@ -145,6 +151,8 @@ class GuardService : Service() {
     @Inject lateinit var appGuardStore: AppGuardPolicyStore
     /** 锁屏呈现统一入口：前台走 Activity、后台走悬浮层（后台启动 Activity 会被系统拦截） */
     @Inject lateinit var lockScreenPresenter: LockScreenPresenter
+    /** 系统 keyguard 生命周期：解锁自愈（待撤锁标记的追逐） */
+    @Inject lateinit var keyguardBridge: SystemKeyguardBridge
     /** 护眼滤镜；与水印同为悬浮层，但互不相关（一个护眼、一个署名），分开管理 */
     @Inject lateinit var eyeProtectionOverlay: EyeProtectionOverlay
 
@@ -159,6 +167,12 @@ class GuardService : Service() {
     @Inject lateinit var guardPassword: GuardPasswordManager
     /** 媒体上传重试队列；解绑时随采集缓存一并清空 */
     @Inject lateinit var mediaRetry: MediaUploadRetry
+
+    /**
+     * 无障碍截屏通道：远程截屏优先走这里 —— 授权（启用无障碍）持久有效，
+     * 不再向孩子弹"是否允许录制屏幕"；不可用时退回 MediaProjection 链路。
+     */
+    @Inject lateinit var accessibilityScreenshot: AccessibilityScreenshot
 
     /**
      * 当前是否"已绑定"（由 [observeBinding] 维护）。
@@ -212,9 +226,36 @@ class GuardService : Service() {
 
     /**
      * 上次兜底拉取指令的时刻（见 [drainPendingCommands]）。
-     * 初值取当前时间：避免刚启动就把历史上遗留的 PENDING 指令全部捞回来执行一遍。
+     *
+     * ## 为什么必须持久化
+     * 旧实现初值取 `System.currentTimeMillis()`（进程内内存）：进程一旦被回收
+     * （息屏后被 ROM 杀掉是常态），游标重置为"当前时刻"，**进程死亡期间下达的指令
+     * 会被 `createdAt >= cursor` 永久过滤掉** —— 家长在孩子端息屏时点「解锁」，
+     * 指令入库后轮询永远取不到，正是"解锁毫无反应"的隐蔽成因之一。
+     * 现改为落盘：重启后从上次成功拉取处续接，漏网的指令自然被补拉。
+     * 首次安装（无记录）取 0：拉回全部未过期 PENDING —— 服务端只返回 PENDING
+     * 且指令有 expiresAt，量有界；去重在 CommandExecutor 内按 msgId 收敛。
+     *
+     * ## 为什么在 onCreate 里加载而不是字段初始化器
+     * Android 组件（Service/Activity/Receiver）的实例化走
+     * `AppComponentFactory.instantiateService → Class.newInstance()`，**发生在
+     * `attachBaseContext()` 之前** —— 字段初始化器里碰任何 Context 方法都是
+     * NPE。2026-10-17 线上事故：游标加载写在字段初始化器里，导致 GuardService
+     * 每次启动都在 `<init>` 崩溃（进程连环重启），表现为"绑定成功但设备永远
+     * 上不了线、守护进程没生效"。**所有 Context 相关初始化必须推迟到 onCreate
+     * 或首次访问（by lazy）**，这条纪律对全部 Android 组件生效。
      */
-    @Volatile private var lastCommandPullAtMs = System.currentTimeMillis()
+    @Volatile private var lastCommandPullAtMs: Long = 0L
+
+    /**
+     * 指令轮询游标的落盘文件。
+     *
+     * 必须 by lazy：实例化期 Context 尚不可用（见 [lastCommandPullAtMs] 的事故说明），
+     * 首次被访问时（drainPendingCommands / onCreate）服务已 attach，此刻才安全。
+     */
+    private val commandPollPrefs: SharedPreferences by lazy {
+        applicationContext.getSharedPreferences(PREFS_COMMAND_POLL, Context.MODE_PRIVATE)
+    }
 
     /**
      * 动态重启广播：监听「屏幕亮起 / 网络恢复」。
@@ -235,15 +276,38 @@ class GuardService : Service() {
     private val restartReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent?) {
             val action = intent?.action ?: return
-            if (isRunning) return // 已在跑就不动，避免无谓重启
-            Logger.i(TAG) { "restart trigger ($action), guard not running -> restarting" }
-            runCatching { start(applicationContext, "restart:$action") }
-                .onFailure { Logger.e(TAG, it) { "restart via broadcast failed" } }
+            if (!isRunning) {
+                Logger.i(TAG) { "restart trigger ($action), guard not running -> restarting" }
+                runCatching { start(applicationContext, "restart:$action") }
+                    .onFailure { Logger.e(TAG, it) { "restart via broadcast failed" } }
+                return
+            }
+            // 屏幕刚点亮：这是锁定覆盖最容易被撕开的时刻。
+            //
+            // 息屏期间按设计不铺悬浮地板（它带 FLAG_KEEP_SCREEN_ON，会把屏幕唤醒、
+            // 破坏「锁屏并熄屏」），而锁屏 Activity 的后台抢占在 Android 10+ 上会被 ROM
+            // 静默丢弃。于是孩子按下电源键的这一瞬间，屏幕上很可能什么都没有 ——
+            // 等到下一个 15s 自检周期才补，已经够他点开一个应用了。
+            // 这里在亮屏后立刻对账一次，把窗口从 15 秒压到百毫秒级。
+            if (action == Intent.ACTION_SCREEN_ON) {
+                // 稍作延迟：广播到达时 PowerManager.isInteractive 可能尚未翻转，
+                // 立刻判定会误以为是息屏而跳过铺地板。
+                Handler(Looper.getMainLooper()).postDelayed({
+                    runCatching { lockScreenPresenter.reenforce() }
+                        .onFailure { Logger.w(TAG, it) { "lock coverage recheck on screen-on failed" } }
+                }, SCREEN_ON_RECHECK_DELAY_MS)
+            }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
+        // 兜底拉取游标从盘上恢复。必须在 startCommandLoop 之前加载：字段初始化器
+        // 不能碰 Context（实例化先于 attachBaseContext，见 lastCommandPullAtMs 注释），
+        // 故推迟到这里；若懒加载到首次使用，进程重启后第一轮拉取会误用 0 把全部
+        // 历史 PENDING 捞一遍。无记录时 getLong 默认 0 = 拉回全部未过期 PENDING，
+        // 与首次安装语义一致。
+        lastCommandPullAtMs = commandPollPrefs.getLong(KEY_LAST_PULL_AT, 0L)
         // 必须第一时间进入前台：Android 对 startForegroundService 后的宽限期只有 5 秒，
         // 超时直接 ForegroundServiceDidNotStartInTimeException 崩溃。
         // 所以先挂一个"启动中"的通知，真实状态等拿到数据后再刷。
@@ -374,8 +438,22 @@ class GuardService : Service() {
         // 服务端判 TOKEN_INVALID(40101)，进而触发自愈解绑把有效凭据清掉（启动竞态自残）。
         scope.launch {
             runSafely("loadCredentials") { credentials.refresh() }
+            // 绑定镜像自愈：暖令牌的前置门（CaptureConsent.isDeviceBound）在绑定成功时写入，
+            // 但"旧版本升级上来、早已绑定却没写过镜像"的设备只有在这里能补上。
+            // 缺省不写 false —— 未绑定设备的镜像本就是 false，无需擦写。
+            if (credentials.isBound) {
+                CaptureConsent.markDeviceBound(this@GuardService, true)
+            }
             startMainLoop()
             startCommandLoop()
+            // 解锁自愈：进程刚启动就可能带着"待撤锁"遗留（上次解锁时进程死掉 /
+            // FSI 与直接启动都被 ROM 吞掉）。家长已解锁的意图不允许因为进程重启而丢失 ——
+            // 此刻追一次（内部限频 + 幂等），剩下的交给看门狗与周期自检。
+            runSafely("chasePendingUnlock") {
+                if (!lockController.state.value.locked) {
+                    LockScreenActivity.chaseUnlock(this@GuardService)
+                }
+            }
         }
     }
 
@@ -677,7 +755,14 @@ class GuardService : Service() {
 
         // 息屏时不弹任何界面：此刻拉起 Activity 只会点亮屏幕、白耗电，
         // 而且部分 ROM 会把它记成"后台弹窗"从而限制我们后续的启动权限。
-        if (!screenOn) return
+        //
+        // 唯一例外是**解锁追逐**：家长已解锁（App 侧未锁定）但系统 keyguard 还被
+        // 我们压着时，点屏+拉过渡页正是目的 —— 那片刻意点亮的屏幕就是"解锁生效"的
+        // 可见信号。chaseUnlock 内部限频（5s）且幂等，不会每 15s 都亮一次屏。
+        if (!screenOn) {
+            if (!tick.lockState.locked) LockScreenActivity.chaseUnlock(this)
+            return
+        }
 
         // 锁定态自愈：升级链可能因 ROM 限制没能把锁定页一次顶到前台，
         // 这里随自检重新确认一次，杜绝"家长已锁屏、平板却还能正常使用"的空洞。
@@ -1189,12 +1274,24 @@ class GuardService : Service() {
             // 因此这里必须把最终成败写进日志流，否则管控端只会看到"受理成功"却永远等不到产物。
             is EngineEffect.CaptureScreenshot -> {
                 val captureIntent = ScreenCaptureService.screenshotIntent(this, effect.shotId)
-                // 已授权 → 静默执行；未授权 → 高优先级通知引导一次（后台不能直接弹 Activity）
-                val silent = dispatchCapture(captureIntent)
-                reportEffectResult(
-                    effect.msgId, "screenshot", true,
-                    if (silent) "已静默采集并上传" else "已下发（需孩子在通知中点一次开启屏幕采集）"
-                )
+                // 投影令牌缺失时，原有路径只有两种结果：直接弹"是否允许录制屏幕"系统框，
+                // 或发一条通知等孩子来点。先试无障碍通道：它的授权（启用无障碍服务）持久有效，
+                // 截屏全程无弹窗、无令牌、不起前台服务；任一环节不可用都如实退回原路径。
+                if (!ScreenCaptureSession.hasToken() &&
+                    accessibilityScreenshot.captureAndUpload(effect.shotId)
+                ) {
+                    reportEffectResult(
+                        effect.msgId, "screenshot", true,
+                        "已静默采集并上传（无障碍通道，无授权弹窗）"
+                    )
+                } else {
+                    // 已授权 → 静默执行；未授权 → 高优先级通知引导一次（后台不能直接弹 Activity）
+                    val silent = dispatchCapture(captureIntent)
+                    reportEffectResult(
+                        effect.msgId, "screenshot", true,
+                        if (silent) "已静默采集并上传" else "已下发（需孩子在通知中点一次开启屏幕采集）"
+                    )
+                }
             }
 
             is EngineEffect.CapturePhoto -> {
@@ -1440,6 +1537,8 @@ class GuardService : Service() {
             is ApiResult.Success -> {
                 val resp = r.value
                 lastCommandPullAtMs = System.currentTimeMillis()
+                // 游标落盘：进程被回收后续接，杜绝"息屏期间下达的指令被永久跳过"
+                commandPollPrefs.edit().putLong(KEY_LAST_PULL_AT, lastCommandPullAtMs).apply()
                 // 指令轮询响应顺带回传最新策略版本号：这是家长改策略后最坏 3s 内生效的关键。
                 // 即便 MQTT 未启用、policy 推送必然丢失，3s 高频轮询也能立刻感知版本漂移并全量拉新，
                 // 不必苦等 30s 心跳（且长轮询挂起时本地往往拿不到心跳真实版本，对账会退化）。
@@ -1521,6 +1620,8 @@ class GuardService : Service() {
         // 只清设备绑定、保留家庭账号登录态：解绑后应直接回到绑定页重新绑定，
         // 而不是退回登录页（孩子不知道家长密码，会永久卡死）。
         authRepository.clearDeviceBinding()
+        // 绑定镜像同步清除：暖令牌的前置门重新关上，解绑后不再向孩子弹采集确认框。
+        CaptureConsent.markDeviceBound(this, false)
         // 解绑即释放操作闸门密码与本地软拦截策略缓存。
         // 若不清，平板转手后旧家庭的操作密码（GuardPasswordManager）与 AppGuardPolicyStore
         // 仍残留在新家庭设备上——孩子可凭旧密码绕过软拦截，隐私/管控承诺从第一天即不可信。
@@ -1586,11 +1687,24 @@ class GuardService : Service() {
     companion object {
         private const val TAG = "GuardService"
 
+        /** 指令轮询游标的持久化文件（见 [lastCommandPullAtMs]） */
+        private const val PREFS_COMMAND_POLL = "padguard_command_poll"
+        private const val KEY_LAST_PULL_AT = "last_pull_at"
+
         /** 临时解锁申请本地保留天数，到期随上报周期安全销毁 */
         private const val UNLOCK_REQUEST_RETENTION_DAYS = 30
 
         private const val CHANNEL_ID = "padguard_guard"
         private const val NOTIFICATION_ID = 1001
+
+        /**
+         * 亮屏后重新对账锁定覆盖的延迟：200ms。
+         *
+         * 取这个值有两个理由：① `ACTION_SCREEN_ON` 广播到达时 `PowerManager.isInteractive`
+         * 可能还没翻转，立刻判定会误当息屏而跳过铺地板；② 200ms 对"孩子按下电源键 →
+         * 手指移到屏幕开始上滑"这段时间来说仍然是瞬时的，覆盖缺口几乎不可感知。
+         */
+        private const val SCREEN_ON_RECHECK_DELAY_MS = 200L
 
         const val EXTRA_REASON = "reason"
         const val REASON_BOOT = "boot"

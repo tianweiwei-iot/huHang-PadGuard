@@ -9,6 +9,12 @@
   - android:packageNames 留空（监听全部应用）：因为我们要拦截的「系统设置」「PackageInstaller」
     本身就是不同包名，无法在静态声明里穷举，只能运行时按包名白名单判断。
   - canRetrieveWindowContent=false：我们只在事件回调里拿 packageName，不需要遍历节点树。
+  - canTakeScreenshot=true：远程截屏走 AccessibilityService.takeScreenshot（API 30+）。
+    该能力与"检索窗口内容"是两回事——它只用于家长下发截屏指令时取一帧当前画面，
+    不遍历任何节点。其授权来自「启用本服务」这一持久授权，因此截屏不再依赖
+    MediaProjection，不会再向孩子弹"是否允许录制屏幕"。
+    注意：用户在服务已启用之后升级到带此能力的版本时，系统不会重读元数据，
+    需在系统无障碍设置里关闭再打开一次（运行时会在日志中如实记录能力缺失）。
   - android:settingsActivity：给用户一个「去设置里开无障碍」的直达入口（Android 9+ 支持）。
 -->
 <accessibility-service
@@ -17,6 +23,7 @@
     android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFlags="flagDefault"
     android:canRetrieveWindowContent="false"
+    android:canTakeScreenshot="true"
     android:description="@string/guard_accessibility_description"
     android:notificationTimeout="100"
     android:packageNames="@null" />
