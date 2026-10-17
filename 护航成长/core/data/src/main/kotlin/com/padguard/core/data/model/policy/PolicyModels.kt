@@ -377,7 +377,18 @@ data class WebPolicy(
      * 设备端据此对命中分类的已知域名做域名级封锁（本地分类→域名映射为兜底，
      * 与云端分类 API 配合可覆盖更广；实际拦截见 [com.padguard.core.engine.enforcer.WebEnforcer]）。
      */
-    @SerialName("blockedCategories") val blockedCategories: List<String> = emptyList()
+    @SerialName("blockedCategories") val blockedCategories: List<String> = emptyList(),
+    /**
+     * 定时锁机（夜间锁机）开关。到点由引擎踢起锁屏，与 [SchedulePolicy] 的时段锁彼此独立。
+     *
+     * 家长端有独立开关就该有独立字段：把它塞进 schedule.rules 就必须让家长端的这一个开关
+     * 去改写那一张表，两个 UI 抢同一份数据源，迟早互相覆盖。
+     */
+    @SerialName("smartShutdownEnabled") val smartShutdownEnabled: Boolean = false,
+    /** 锁机起始时刻，"HH:mm" */
+    @SerialName("smartShutdownStartTime") val smartShutdownStartTime: String? = null,
+    /** 锁机结束时刻，"HH:mm"，允许早于起始时刻表示跨零点 */
+    @SerialName("smartShutdownEndTime") val smartShutdownEndTime: String? = null
 )
 
 @Serializable

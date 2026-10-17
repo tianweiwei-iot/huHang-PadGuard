@@ -107,6 +107,19 @@ class OneTimeConsentViewModel @Inject constructor(
     /** 本机确实没有入口、或家长选择不再处理的项 */
     private val skippedKeys = mutableSetOf<String>()
 
+    /**
+     * 系统运行时权限弹窗序列进行中（结果回调尚未送达）。
+     *
+     * `RequestMultiplePermissions` 会按权限组一枚一枚地弹（定位 → 相机 → 麦克风 → 通知），
+     * 部分 ROM 在相邻两枚弹窗交替时会让本页面短暂 `onResume`。此时 [onReturnedToApp]
+     * 若照常推进，就会在家长还没答完权限时把第 ③ 步（系统设置页）提前拉起来 ——
+     * 表现为"权限弹窗答到一半，界面自己跳到别的设置页"，正是授权跳转混乱的主因之一。
+     *
+     * 运行时权限的申请结果由 [onRuntimePermissionsResult] 保证回调（系统契约，拒绝也回调），
+     * 因此这期间拒绝一切基于 `onResume` 的推进是安全的：不依赖 ROM 的行为差异。
+     */
+    private var runtimeInFlight = false
+
     init {
         admin.refreshControlMode()
         refreshItemStates()
@@ -133,6 +146,7 @@ class OneTimeConsentViewModel @Inject constructor(
 
     /** 运行时权限弹窗的整体结果。被拒只降级对应能力，不阻断装机。 */
     fun onRuntimePermissionsResult(result: Map<String, Boolean>) {
+        runtimeInFlight = false
         val denied = result.filterValues { !it }.keys
         if (denied.isNotEmpty()) {
             val names = denied.map { permissionGranter.labelOf(it) }
@@ -151,9 +165,13 @@ class OneTimeConsentViewModel @Inject constructor(
      * ⚠️ 这里**刻意不清空 [currentKey]**：`advance` 要靠它判断
      * "刚带家长去的就是这一项、回来却还是没开"，据此停止自动跳转，
      * 否则会在不允许开启该开关的 ROM 上变成"返回→又跳回去"的无限循环。
+     *
+     * 系统权限弹窗序列进行中（[runtimeInFlight]）一律不推进：那期间的 `onResume`
+     * 只是弹窗交替的副产品，推进就会把家长从"答权限"直接扔到"下一个设置页"。
      */
     fun onReturnedToApp() {
         if (!started || _phase.value != Phase.WAITING_PARENT) return
+        if (runtimeInFlight) return
         // 授权页已回到前台：撤掉"返回引导"通知，并停掉后台盯守（advance 会按需重新挂上）
         consentReturn.cancelNotification()
         advance("returned-to-app")
@@ -202,7 +220,10 @@ class OneTimeConsentViewModel @Inject constructor(
         _phase.value = Phase.WAITING_PARENT
         when (key) {
             KEY_DEVICE_ADMIN -> tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
-            KEY_RUNTIME -> tryEmit(ConsentLaunch.Runtime(permissionGranter.missingRuntimePermissions()))
+            KEY_RUNTIME -> {
+                runtimeInFlight = true
+                tryEmit(ConsentLaunch.Runtime(permissionGranter.missingRuntimePermissions()))
+            }
             KEY_CAPTURE -> tryEmit(ConsentLaunch.MediaProjection)
             else -> SpecialPermission.fromKey(key)?.let { openAgain(it.key) }
         }
@@ -259,6 +280,8 @@ class OneTimeConsentViewModel @Inject constructor(
                 runSilentGrant()
             } else {
                 _phase.value = Phase.WAITING_PARENT
+                // 弹窗序列期间屏蔽 onResume 推进，答完由 onRuntimePermissionsResult 接力
+                runtimeInFlight = true
                 tryEmit(ConsentLaunch.Runtime(missingRuntime))
             }
             return
@@ -315,6 +338,7 @@ class OneTimeConsentViewModel @Inject constructor(
 
     private fun finish() {
         _currentKey.value = null
+        runtimeInFlight = false
         // 授权收尾：停掉后台盯守、撤掉返回引导通知，避免残留
         consentReturn.stop()
         consentReturn.cancelNotification()

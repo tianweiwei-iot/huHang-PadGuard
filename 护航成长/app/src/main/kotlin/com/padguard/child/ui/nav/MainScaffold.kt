@@ -19,6 +19,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.padguard.child.ui.apps.AppInventoryScreen
 import com.padguard.child.ui.home.HomeScreen
 import com.padguard.child.ui.message.MessageDetailScreen
 import com.padguard.child.ui.message.MessageListScreen
@@ -87,8 +88,12 @@ fun PadGuardApp() {
                 ProfileScreen(
                     onPermissionGuide = { kind ->
                         navController.navigate(Route.PermissionGuide.build(kind))
-                    }
+                    },
+                    onAppInventory = { navController.navigate(Route.AppInventory.path) }
                 )
+            }
+            composable(Route.AppInventory.path) {
+                AppInventoryScreen(onBack = { navController.popBackStack() })
             }
             composable(
                 route = Route.PermissionGuide.path,

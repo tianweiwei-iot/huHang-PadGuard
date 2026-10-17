@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.child.agreement.AgreementDialogHost
+import com.padguard.child.agreement.AgreementSessionState
 import com.padguard.child.bind.BindActivity
 import com.padguard.child.consent.OneTimeConsentScreen
 import com.padguard.child.login.ChildLoginScreen
@@ -46,6 +47,9 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var permissionGranter: PermissionGranter
 
+    @Inject
+    lateinit var agreementSessionState: AgreementSessionState
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -54,7 +58,8 @@ class MainActivity : ComponentActivity() {
                 EntryRouter(
                     authRepository = authRepository,
                     admin = admin,
-                    permissionGranter = permissionGranter
+                    permissionGranter = permissionGranter,
+                    agreementSessionState = agreementSessionState
                 )
             }
         }
@@ -90,7 +95,8 @@ class MainActivity : ComponentActivity() {
 private fun EntryRouter(
     authRepository: AuthRepository,
     admin: DeviceAdminBridge,
-    permissionGranter: PermissionGranter
+    permissionGranter: PermissionGranter,
+    agreementSessionState: AgreementSessionState
 ) {
     val consentDone by authRepository.isConsentDone.collectAsState(initial = null)
     val loggedIn by authRepository.isChildLoggedIn.collectAsState(initial = null)
@@ -147,7 +153,13 @@ private fun EntryRouter(
             }
 
             // 仅在协议正文升版时征求重新同意；正常装机已在第 ② 步同意过，不会弹。
-            if (agreed != true) AgreementDialogHost()
+            //
+            // declined 是「本次运行期已拒绝」的会话级标记：家长点了「暂不同意」就收起弹窗、
+            // 进入受限预览模式（不授予高敏权限），但**不落库**，冷启动后重新征求。
+            // 少了这一个条件，弹窗在 decline 之后仍然满足挂载判定，
+            // 而弹窗本身又不可点外部关闭 —— 设备会被永久卡死在协议页上。
+            val declined by agreementSessionState.declined.collectAsStateWithLifecycle()
+            if (agreed != true && !declined) AgreementDialogHost()
         }
     }
 }

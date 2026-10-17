@@ -13,15 +13,21 @@ import com.padguard.core.data.model.policy.SchedulePolicy
 import com.padguard.core.data.model.policy.ScheduleRule
 import com.padguard.core.data.model.policy.ScheduleAction
 import com.padguard.core.engine.PolicyEngine
+import com.padguard.core.transport.Downlink
+import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.common.TimeProvider
 import com.padguard.core.common.Logger
 import com.padguard.child.usagesession.UsageSessionManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -48,21 +54,49 @@ class HomeViewModel @Inject constructor(
     private val logRepository: LogRepository,
     private val policyEngine: PolicyEngine,
     private val timeProvider: TimeProvider,
-    private val usageSessionManager: UsageSessionManager
+    private val usageSessionManager: UsageSessionManager,
+    private val remoteDataSource: RemoteDataSource
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(HomeUiState())
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
 
+    /**
+     * 下行通道是否在线。
+     *
+     * 首帧先给一次 [RemoteDataSource.isOnline] 快照：[Downlink] 是**无 replay 的** SharedFlow，
+     * 晚来的订阅者收不到历史上最后一次连通性变化，只 collect downlink 会让首页长期停在初始值上。
+     * 之后由 [Downlink.ConnectivityChanged] 驱动后续变化。
+     */
+    private val onlineFlow: Flow<Boolean> = flow {
+        emit(remoteDataSource.isOnline())
+        remoteDataSource.downlink
+            .filterIsInstance<Downlink.ConnectivityChanged>()
+            .collect { emit(it.online) }
+    }.distinctUntilChanged()
+
+    /**
+     * 用户态 + 在线态 合流。
+     *
+     * kotlinx.coroutines 的 [combine] 重载最多支持 5 个上游流，而这里需要
+     * 「昵称 / 在线 / 策略 / 时长 / 拦截 / 会话」共 6 路输入。
+     * 把两路**无业务耦合**的标量先合成 Pair 是最小侵入的做法：
+     * 比起改用 `combine(List<Flow<*>>)` 丢泛型后再手动强转，Pair 保留了编译期类型。
+     */
+    private val identityFlow: Flow<Pair<String, Boolean>> =
+        combine(authRepository.studentName, onlineFlow) { name, online -> name to online }
+
     init {
         viewModelScope.launch {
             combine(
-                authRepository.studentName,
+                identityFlow,
                 policyRepository.observePolicy(),
                 usageRepository.observeTodayUsageMinutes(),
                 logRepository.observeRecentBlocks(limit = 5),
                 usageSessionManager.state
-            ) { studentName, rawPolicy, usedMinutes, blocks, session ->
+            ) { identity, rawPolicy, usedMinutes, blocks, session ->
+                val studentName = identity.first
+                val online = identity.second
                 val nowMillis = timeProvider.now()
                 // 时间轴是「策略时区」的一天：游标、读数、时段判定必须同一时区，
                 // 否则会出现“图例说进行中、游标却停在别处”的自相矛盾
@@ -101,8 +135,11 @@ class HomeViewModel @Inject constructor(
 
                 HomeUiState(
                     studentName = studentName,
-                    statusLabel = "在线",
-                    isOnline = true,
+                    // 在线态必须取自真实下行通道：写死 true 会让断网、Token 失效、
+                    // MQTT 掉线这三种状态在首页全部显示为"在线"，
+                    // 家长端看到设备离线、孩子端却显示一切正常，故障无从归因。
+                    statusLabel = if (online) "在线" else "离线",
+                    isOnline = online,
                     usedMinutes = used,
                     quotaMinutes = dailyQuota,
                     remainingMinutes = remaining,
@@ -227,8 +264,10 @@ class HomeViewModel @Inject constructor(
  */
 data class HomeUiState(
     val studentName: String = "",
-    val statusLabel: String = "在线",
-    val isOnline: Boolean = true,
+    // 默认值必须取"未知"而非"在线"：首帧数据尚未就绪时撒谎成正面向，
+    // 会让刚进首页的家长看到在线、实际通道还没建立。
+    val statusLabel: String = "连接中",
+    val isOnline: Boolean = false,
     val usedMinutes: Int = 0,
     val quotaMinutes: Int = 0,
     val remainingMinutes: Int = 0,

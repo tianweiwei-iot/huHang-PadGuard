@@ -20,17 +20,18 @@ import javax.inject.Singleton
  * 拨完开关后，Android 默认**停在设置页**，家长必须手动按返回 —— 这正是用户反馈的
  * "选择了还要手动返回，太不合理"。
  *
- * 根因与锁屏一致：Android 10+ 禁止后台启动 Activity。我们没法在家长拨完开关的那一刻
- * 直接把自家界面拉回来，除非借系统之力。这里复用 [com.padguard.child.ui.lock.LockScreenNotifier]
- * 验证过的全屏 Intent 机制：当 [ConsentReturnPresenter] 后台检测到目标权限已被授予，
- * 由系统代我们把 [MainActivity]（授权页宿主）拉回前台。授权页 onResume 后自动复检并跳下一项，
- * 于是整条授权链"拨一个开关就自动前进一个"，家长全程无需按返回。
+ * 首选方案是 [ConsentReturnPresenter] 的直接 `startActivity`（设置页落在本 App 任务栈内，
+ * 命中后台启动豁免，绝大多数机型上这条路直接生效）；本通知是**兜底通道**：
+ * 当直接启动不成立时（ROM 把设置页开到独立任务栈、豁免暂未生效等），由系统代我们
+ * 把 [MainActivity]（授权页宿主）拉回前台。
  *
- * ## 与锁屏共用同一套可靠底座
- * 全屏 Intent 由系统代拉，不受后台启动限制；AOSP《Full-screen intent limits》矩阵表明
- * 权限授予前提下无论解锁/锁屏/息屏都会 Launch。本产品侧载/DO 预置部署，FSI 权限保持授予；
- * 仍用 [canUseFullScreenIntent] 如实探测，不可用时上层退化为"直接 startActivity 兜底"
- * （已持有 SYSTEM_ALERT_WINDOW 时该豁免同样生效），再不行则退回需手动返回的旧行为。
+ * ## 全屏 Intent 的能力边界（必须如实，不能假装一定能用）
+ * AOSP《Full-screen intent limits》明确：**用户正在使用设备期间，系统 UI 可以选择
+ * 只展示一条悬浮通知而不 Launch 该 Intent**；息屏 / 锁屏态才会直接 Launch。
+ * 也就是说授权场景（家长正盯着平板操作）下，它大概率以"可点的悬浮通知"形态出现 ——
+ * 这依然比"按物理返回键"轻：点一下通知同样回到授权页并自动接续下一项。
+ * Android 14+ 还需 `USE_FULL_SCREEN_INTENT` 特殊权限，用 [canUseFullScreenIntent]
+ * 如实探测，不可用时由上层走通知点击 / 手动返回，不假装成功。
  */
 @Singleton
 class ConsentReturnNotifier @Inject constructor(
@@ -52,9 +53,11 @@ class ConsentReturnNotifier @Inject constructor(
     /**
      * 发一条全屏通知，把授权页宿主（[MainActivity]）拉回前台。
      *
+     * @param label 刚被开启的权限名（如"悬浮窗"）。带上它，家长在通知栏能一眼看出
+     *   "哪一项开好了、点下去继续哪一项"，而不是一条看不懂的通用提示。
      * @return 是否真的发出（权限缺失时返回 false，由上层降级）
      */
-    fun postReturnToConsent(): Boolean {
+    fun postReturnToConsent(label: String? = null): Boolean {
         val mgr = manager ?: return false
         if (!canUseFullScreenIntent()) {
             Logger.w(TAG) { "full screen intent not permitted: consent auto-return degrades to manual back" }
@@ -80,8 +83,8 @@ class ConsentReturnNotifier @Inject constructor(
         }.getOrNull() ?: return false
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle("授权已开启")
-            .setContentText("正在返回护航守护，继续完成剩余授权…")
+            .setContentTitle(label?.let { "「$it」已开启" } ?: "授权已开启")
+            .setContentText("点此返回护航守护，继续完成剩余授权…")
             .setSmallIcon(
                 context.applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_dialog_info
             )

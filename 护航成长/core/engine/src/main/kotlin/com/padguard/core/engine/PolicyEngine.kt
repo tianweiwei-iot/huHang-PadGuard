@@ -28,6 +28,7 @@ import com.padguard.core.engine.enforcer.MonitoringEnforcer
 import com.padguard.core.engine.enforcer.MonitoringRuntime
 import com.padguard.core.engine.enforcer.PeripheralEnforcer
 import com.padguard.core.engine.enforcer.SecurityEnforcer
+import com.padguard.core.engine.enforcer.SmartShutdownEnforcer
 import com.padguard.core.engine.enforcer.SystemLockEnforcer
 import com.padguard.core.engine.enforcer.WebEnforcer
 import com.padguard.core.engine.enforcer.WebVerdict
@@ -82,6 +83,7 @@ class PolicyEngine @Inject constructor(
     private val eyeCareEnforcer: EyeCareEnforcer,
     private val minorModeEnforcer: MinorModeEnforcer,
     private val webEnforcer: WebEnforcer,
+    private val smartShutdownEnforcer: SmartShutdownEnforcer,
     private val kioskEnforcer: KioskEnforcer,
     private val securityEnforcer: SecurityEnforcer,
     private val monitoringEnforcer: MonitoringEnforcer,
@@ -258,6 +260,18 @@ class PolicyEngine @Inject constructor(
             autoReasons[LockReason.CURFEW] = LockDetail(
                 text = minorMode.text,
                 untilMillis = minorMode.untilMillis
+            )
+        }
+
+        // ---------- 1.6 定时锁机 ----------
+        // 家长端「上网管控」页的独立开关；此前只有 UI 与存储，执行侧从未接线。
+        val smartShutdownUntil = smartShutdownEnforcer.evaluate(
+            policy.web, timezone = policy.schedule.timezone
+        )
+        if (smartShutdownUntil != null) {
+            autoReasons[LockReason.SMART_SHUTDOWN] = LockDetail(
+                text = "定时锁机时间已到，请休息",
+                untilMillis = smartShutdownUntil
             )
         }
 

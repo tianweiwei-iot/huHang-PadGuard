@@ -1499,7 +1499,9 @@ class ScreenCaptureService : Service() {
         private const val EXTRA_HIGH_DEFINITION = "highDefinition"
 
         private const val DEFAULT_RESOLUTION = "HD_720P"
-        private const val TRIGGER_REMOTE = "REMOTE"
+
+        /** 截图触发类型：远程指令触发（与 [AccessibilityScreenshot] 共用同一口径，服务端据此统计来源） */
+        const val TRIGGER_REMOTE = "REMOTE"
         private const val MIME_VIDEO_MP4 = "video/mp4"
         private const val MIME_AUDIO_M4A = "audio/mp4"
         private const val VIRTUAL_DISPLAY_NAME = "padguard-shot"

@@ -31,6 +31,13 @@ import com.padguard.core.common.Logger
  *   进程重启后再次拉起授权页拿回令牌是合规且符合预期的；
  * - [requested] 且未 [granted]：用户明确拒绝过。**不再纠缠**，只在家长真正下发
  *   采集指令时由通知引导一次（那时上下文明确，孩子更容易理解）。
+ *
+ * ## 设备绑定镜像（暖令牌的前置门）
+ * MediaProjection 的用户确认是"向孩子弹一个系统框"的高侵扰动作，
+ * 因此它只允许发生在"确实有家长在等这个画面"的前提下 —— 即设备已绑定。
+ * 未绑定（装机阶段：同意协议 → 登录 → 绑定）时没有任何人会下发采集指令，
+ * 此刻每次打开 App 都顶一次"是否允许录制屏幕"纯属骚扰，
+ * 这正是用户反馈"授权乱七糟、每次打开都弹"的直接成因。
  */
 object CaptureConsent {
 
@@ -46,6 +53,19 @@ object CaptureConsent {
      * 重新给一次补授权的机会——监护看屏是家长装机时确立的持久能力，不能被孩子一次点击永久剥夺。
      */
     private const val KEY_DENIED_SESSION = "consent_denied_session"
+
+    /**
+     * 设备绑定镜像。
+     *
+     * 为什么在这里维护一份镜像而不是直接读 DataStore：本对象的调用方
+     * （开机广播、前后台观察者）都是**同步上下文**，而绑定态存在 DataStore 里
+     * 是挂起 API。镜像只在权威时刻写入：绑定成功（[com.padguard.child.bind.BindViewModel]）
+     * 与服务端确认解绑后的清理（[com.padguard.child.service.GuardService]），
+     * 另由 GuardService 装载完凭据后自愈补写 —— 覆盖"旧版本升级上来、
+     * 已绑定但没写过镜像"的设备。缺省 false（未绑定）：宁可不暖令牌
+     * （家长真要下发指令时还有通知引导兜底），也不能在装机阶段反复骚扰孩子。
+     */
+    private const val KEY_DEVICE_BOUND = "device_bound"
 
     /** 同一进程内两次拉起授权页的最小间隔，避免授权页把自己反复拉起 */
     private const val PROMPT_THROTTLE_MS = 60_000L
@@ -120,6 +140,18 @@ object CaptureConsent {
             prefs(context).edit().putBoolean(KEY_DENIED_SESSION, false).apply()
             Logger.i(TAG) { "capture consent deny cooldown cleared on device interactive" }
         }
+    }
+
+    /** 设备是否已绑定家长账号（决定暖令牌是否允许打扰孩子）。 */
+    fun isDeviceBound(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_DEVICE_BOUND, false)
+
+    /** 写入绑定镜像。绑定成功 / 解绑清理时调用；值未变化时跳过写盘。 */
+    fun markDeviceBound(context: Context, bound: Boolean) {
+        val p = prefs(context)
+        if (p.getBoolean(KEY_DEVICE_BOUND, false) == bound) return
+        p.edit().putBoolean(KEY_DEVICE_BOUND, bound).apply()
+        Logger.i(TAG) { "device bound mirror -> $bound" }
     }
 
     private fun throttled(): Boolean {

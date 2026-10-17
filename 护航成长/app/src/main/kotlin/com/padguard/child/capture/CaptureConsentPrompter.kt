@@ -29,6 +29,14 @@ import com.padguard.core.common.Logger
  * MediaProjection 的用户确认是 Android 的隐私红线，Device Owner / 系统签名都绕不过，
  * 任何声称"完全静默"的实现都不可信。正确做法是**把这一次确认放在装机环节由家长完成**，
  * 之后长期复用（进程内存活期间永不重复弹窗）—— 这也是主流家长管控产品的通行做法。
+ *
+ * 两条已落地的降扰设计：
+ * 1. **未绑定不打扰**：装机阶段（协议 → 登录 → 绑定）没有任何家长会下发采集指令，
+ *    暖令牌整体跳过，不再每次打开 App 都弹系统确认框；
+ * 2. **截屏走无障碍通道**（见 [AccessibilityScreenshot]）：`CMD_SCREENSHOT` 优先用
+ *    无障碍服务的 takeScreenshot 完成，该通道的授权（启用无障碍服务）本身持久有效，
+ *    截屏从此与 MediaProjection 无关，不会再弹"是否允许录制屏幕"。
+ *    实时看屏 / 录屏仍依赖投影令牌，保持"装机一次 + 每次重启后首次解锁"的最少确认。
  */
 object CaptureConsentPrompter {
 
@@ -89,12 +97,22 @@ object CaptureConsentPrompter {
      * 不是静默（Android 隐私红线，Device Owner 也绕不过），
      * 但把"必须确认一次"压缩到装机一次 + 之后每次重启后第一次解锁，
      * 且帧面就是 Android 原生确认框，不含任何"家长正在看"之类会引导孩子抵触的文案。
+     *
+     * **前置门：设备必须已绑定**（见 [CaptureConsent.isDeviceBound]）。
+     * 未绑定时没有家长会下发采集指令，此刻顶系统确认框纯属骚扰 ——
+     * 装机阶段（协议 → 登录 → 绑定）每次打开 App 都弹一次"是否允许录制屏幕"
+     * 正是"授权乱七糟"的成因。绑定完成后，守护服务（前台服务）会保住进程，
+     * 令牌随进程存活，正常情况下也不会再触发本路径。
      */
     fun warmUp(context: Context) {
         if (ScreenCaptureSession.hasToken()) return
         if (!AppForeground.isForeground) return
         if (!CaptureConsent.shouldRequest(context)) return
-        Logger.i(TAG) { "warm-up capture consent at device interactive" }
+        if (!CaptureConsent.isDeviceBound(context)) {
+            Logger.v(TAG) { "warm-up skipped: device not bound yet (setup phase)" }
+            return
+        }
+        Logger.i(TAG) { "warm-up capture consent (device bound, token missing)" }
         dispatch(context, ScreenCaptureService.warmupIntent(context), silentIfBackground = true)
     }
 
