@@ -55,7 +55,7 @@
     const list = await PG.api.listDevices({});
     const d = list.find(x => x.deviceId === id);
     if (!d) return;
-    PG.ui.drawer({
+    const dl = PG.ui.drawer({
       title: "设备详情 · " + U.esc(d.name),
       body: `<div class="stat-line"><span>设备ID</span><span>${U.esc(d.deviceId)}</span></div>
         <div class="stat-line"><span>序列号</span><span>${U.esc(d.deviceSn)}</span></div>
@@ -69,10 +69,30 @@
         <div class="stat-line"><span>区域</span><span>${U.esc(d.region)}</span></div>
         <div class="row" style="margin-top:16px;gap:10px">
           <button class="btn btn-primary" id="dl-lock">${d.remoteLocked ? "解锁" : "远程锁屏"}</button>
-          <button class="btn" data-go="parents">查看家长</button>
+          <button class="btn" id="dl-parent">查看家长</button>
         </div>`,
       width: 460,
     });
+
+    // 这两个按钮此前只渲染、从不绑定事件：抽屉里点「远程锁屏」毫无反应，
+    // 而列表页的同类按钮是正常的 —— 同一个操作在两处表现不一致，最容易被当成"功能坏了"。
+    dl.el.querySelector("#dl-lock").onclick = async () => {
+      const locked = d.remoteLocked;
+      const rootNow = document.getElementById("view");
+      try {
+        if (locked) await PG.api.unlockDevice(d.deviceId); else await PG.api.lockDevice(d.deviceId);
+        PG.ui.toast("ok", locked ? "解锁指令已下发" : "锁屏指令已下发", d.deviceId);
+        dl.close();
+        load(rootNow);
+      } catch (err) {
+        PG.ui.toast("err", "操作失败", err.message);
+      }
+    };
+    dl.el.querySelector("#dl-parent").onclick = () => {
+      dl.close();
+      PG.state.search = d.parentPhone || d.parentName || "";
+      PG.router.go("parents");
+    };
   }
 
   function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }

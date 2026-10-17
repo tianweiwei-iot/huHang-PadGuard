@@ -440,6 +440,17 @@ data class BrowserDisableRequest(
     val disabled: Boolean
 )
 
+/**
+ * 定时锁机（夜间锁机）请求体。
+ * 字段名与后端 SmartShutdownRequest 一致：[startTime] / [endTime] 均为 "HH:mm"。
+ */
+@JsonClass(generateAdapter = true)
+data class SmartShutdownRequest(
+    val enabled: Boolean,
+    val startTime: String?,
+    val endTime: String?
+)
+
 @JsonClass(generateAdapter = true)
 data class ModeChangeRequest(
     val mode: String   // "NORMAL" | "LEARNING" | "FOCUS"

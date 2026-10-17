@@ -14,6 +14,7 @@ import com.padguard.parent.data.model.OrderDto
 import com.padguard.parent.data.model.PayChannelDto
 import com.padguard.parent.data.model.PlanDto
 import com.padguard.parent.data.model.SubscriptionDto
+import com.padguard.parent.data.model.SmartShutdownRequest
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -932,6 +933,14 @@ class ApiDataSource @Inject constructor(
 
     override suspend fun setBrowserDisabled(deviceId: String, disabled: Boolean): Result<Unit> =
         exec { policyApi.setBrowserDisabled(deviceId, BrowserDisableRequest(disabled)) }.map { Unit }
+
+    override suspend fun setSmartShutdown(
+        deviceId: String,
+        enabled: Boolean,
+        start: String?,
+        end: String?
+    ): Result<Unit> =
+        exec { policyApi.setSmartShutdown(deviceId, SmartShutdownRequest(enabled, start, end)) }.map { Unit }
 
     override suspend fun lockScreen(deviceId: String): Result<CommandResult> =
         exec { policyApi.lockScreen(deviceId) }

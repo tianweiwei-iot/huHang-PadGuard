@@ -770,6 +770,13 @@ class LocalDataSource @Inject constructor(
     override suspend fun setBrowserDisabled(deviceId: String, disabled: Boolean): Result<Unit> =
         Result.success(Unit)
 
+    override suspend fun setSmartShutdown(
+        deviceId: String,
+        enabled: Boolean,
+        start: String?,
+        end: String?
+    ): Result<Unit> = Result.success(Unit)
+
     override suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit> =
         Result.success(Unit)
 

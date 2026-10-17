@@ -175,6 +175,19 @@ data class WebPolicyDto(
 data class UrlBlacklistRequest(val urls: List<String> = emptyList())
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class BrowserDisableRequest(val disabled: Boolean = false)
+
+/**
+ * 定时锁机（夜间锁机）设置。
+ *
+ * [startTime] / [endTime] 为 "HH:mm" 格式。区间允许跨零点（如 22:30–06:30），
+ * 判定逻辑在孩子端按「跨零点则拆成两段」处理，服务端只负责原样存储与下发。
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
+data class SmartShutdownRequest(
+    val enabled: Boolean = false,
+    val startTime: String? = null,
+    val endTime: String? = null
+)
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class ModeChangeRequest(val mode: String)
 data class PolicyTemplateDto(

@@ -439,6 +439,17 @@ interface PolicyRepository {
     /** 设置浏览器禁用 */
     suspend fun setBrowserDisabled(deviceId: String, disabled: Boolean): Result<Unit>
 
+    /**
+     * 定时锁机（夜间锁机）：写入 [start]–[end] 区间并在到点时由孩子端自动锁屏。
+     * @param enabled 为 false 时忽略 [start] / [end]，服务端会一并清空。
+     */
+    suspend fun setSmartShutdown(
+        deviceId: String,
+        enabled: Boolean,
+        start: String?,
+        end: String?
+    ): Result<Unit>
+
     // === 系统与安全 ===
     /**
      * 一键锁屏。

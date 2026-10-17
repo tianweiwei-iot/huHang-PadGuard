@@ -64,7 +64,9 @@
   const PARENT_STATUS = { active: ["green", "正常"], suspended: ["red", "已冻结"], pending: ["amber", "待激活"] };
   const SUB_STATUS = { active: ["green", "生效中"], expired: ["gray", "已过期"], trial: ["amber", "试用"] };
   const ORDER_STATUS = { paid: ["green", "已支付"], unpaid: ["amber", "待支付"], refunded: ["gray", "已退款"] };
-  function badge(map, key) { const v = map[key] || ["gray", key]; return '<span class="badge ' + v[0] + '">' + v[1] + '</span>'; }
+  // 关键：v[1] 可能来自服务端字段（controlMode / status 等枚举都来自 DB），
+  // 未命中映射时会直接回退成原始 key 插入 HTML —— 一旦字段被污染即为存储型 XSS。
+  function badge(map, key) { const v = map[key] || ["gray", key]; return '<span class="badge ' + esc(v[0]) + '">' + esc(v[1]) + '</span>'; }
 
   // ---------- SVG 图表 ----------
   function donut(data, opts) {

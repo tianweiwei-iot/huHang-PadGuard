@@ -21,6 +21,11 @@
     mount: async (root) => {
       root.querySelector("#p-create").onclick = openCreate;
       const reload = () => load(root);
+      // 顶栏全局搜索跳转过来时回填关键字（消费后立即清空，避免下次进页面误命中）
+      if (PG.state && PG.state.search) {
+        root.querySelector("#p-kw").value = PG.state.search;
+        PG.state.search = "";
+      }
       root.querySelector("#p-reset").onclick = () => { root.querySelector("#p-kw").value = ""; root.querySelector("#p-status").value = ""; root.querySelector("#p-plan").value = ""; reload(); };
       root.querySelector("#p-kw").oninput = debounce(reload, 300);
       root.querySelector("#p-status").onchange = reload;
