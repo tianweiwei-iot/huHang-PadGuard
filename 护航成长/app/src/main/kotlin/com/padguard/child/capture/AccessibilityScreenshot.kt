@@ -126,6 +126,67 @@ class AccessibilityScreenshot @Inject constructor(
     /** 取一帧 JPEG；任一步骤失败都返回 null（不抛异常打扰调用方）。 */
     @RequiresApi(Build.VERSION_CODES.R)
     private suspend fun grabJpeg(): ByteArray? {
+        val software = grabSoftwareBitmap() ?: return null
+        return withContext(Dispatchers.IO) {
+            try {
+                val baos = ByteArrayOutputStream(256 * 1024)
+                if (!software.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)) {
+                    Logger.w(TAG) { "jpeg compress returned false" }
+                    return@withContext null
+                }
+                baos.toByteArray()
+            } finally {
+                software.recycle()
+            }
+        }
+    }
+
+    /**
+     * 取一帧并按看屏规格缩放压缩 —— **实时看屏无障碍通道的取帧口**（见 [AccessibilityLiveStreamer]）。
+     *
+     * 与单帧截屏（[captureAndUpload]）共用同一条系统拍照链路，但帧不落盘、不上传，
+     * 只把 JPEG 交给调用方推流。缩放与质量由调用方按当前画质档位指定，
+     * 口径与投影推流（effWidth/effQuality）一致，家长端无需区分帧来自哪条通道。
+     *
+     * @return JPEG 字节；通道不可用/采集失败返回 null，由调用方决定跳帧或降级
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    suspend fun grabScaledJpeg(maxWidth: Int, quality: Int): ByteArray? {
+        if (!isAvailable()) return null
+        val software = grabSoftwareBitmap() ?: return null
+        return withContext(Dispatchers.IO) {
+            try {
+                val scale = (maxWidth.toFloat() / software.width).coerceAtMost(1f)
+                val src = if (scale < 1f) {
+                    val sw = (software.width * scale).toInt().coerceAtLeast(1)
+                    val sh = (software.height * scale).toInt().coerceAtLeast(1)
+                    Bitmap.createScaledBitmap(software, sw, sh, true)
+                } else software
+                try {
+                    val baos = ByteArrayOutputStream(256 * 1024)
+                    if (!src.compress(Bitmap.CompressFormat.JPEG, quality, baos)) {
+                        Logger.w(TAG) { "scaled jpeg compress returned false" }
+                        return@withContext null
+                    }
+                    baos.toByteArray()
+                } finally {
+                    if (src !== software) src.recycle()
+                }
+            } catch (t: Throwable) {
+                Logger.e(TAG, t) { "a11y scaled jpeg failed" }
+                null
+            } finally {
+                software.recycle()
+            }
+        }
+    }
+
+    /**
+     * 挂起等待系统拍照并转成**软件位图**（ARGB_8888）。
+     * 硬件位图无法直接压缩/缩放，这里统一先 copy 成软件副本；调用方负责 recycle。
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    private suspend fun grabSoftwareBitmap(): Bitmap? {
         val service = serviceRef?.get() ?: return null
         val result = runCatching {
             withTimeout(CAPTURE_TIMEOUT_MS) { takeScreenshot(service) }
@@ -133,7 +194,7 @@ class AccessibilityScreenshot @Inject constructor(
             Logger.w(TAG) { "a11y takeScreenshot aborted: ${it.message}" }
             null
         } ?: return null
-        return withContext(Dispatchers.IO) { toJpeg(result) }
+        return withContext(Dispatchers.IO) { toSoftwareBitmap(result) }
     }
 
     /**
@@ -164,14 +225,15 @@ class AccessibilityScreenshot @Inject constructor(
         }
 
     /**
-     * HardwareBuffer → 软件位图 → JPEG。
+     * HardwareBuffer → 软件位图（ARGB_8888）。
      *
      * 顺序不能反：先 [Bitmap.wrapHardwareBuffer] 包出硬件位图，立刻
-     * [Bitmap.copy] 成 ARGB_8888 软件副本（硬件位图无法直接压缩），
+     * [Bitmap.copy] 成 ARGB_8888 软件副本（硬件位图无法直接压缩/缩放），
      * 两张位图都 recycle，最后按官方要求 [HardwareBuffer.close] 释放底层缓冲。
+     * 压缩/缩放交给调用方按场景做（单帧截屏 vs 看屏推流规格不同）。
      */
     @RequiresApi(Build.VERSION_CODES.R)
-    private fun toJpeg(result: AccessibilityService.ScreenshotResult): ByteArray? {
+    private fun toSoftwareBitmap(result: AccessibilityService.ScreenshotResult): Bitmap? {
         val buffer: HardwareBuffer = result.hardwareBuffer
         return try {
             val hardware = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
@@ -185,16 +247,7 @@ class AccessibilityScreenshot @Inject constructor(
                     Logger.w(TAG) { "software bitmap copy returned null" }
                     return null
                 }
-                try {
-                    val baos = ByteArrayOutputStream(256 * 1024)
-                    if (!software.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, baos)) {
-                        Logger.w(TAG) { "jpeg compress returned false" }
-                        return null
-                    }
-                    baos.toByteArray()
-                } finally {
-                    software.recycle()
-                }
+                software
             } finally {
                 hardware.recycle()
             }

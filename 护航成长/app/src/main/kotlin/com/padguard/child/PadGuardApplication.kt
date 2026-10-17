@@ -25,11 +25,11 @@ class PadGuardApplication : Application() {
         AppForeground.install(this)
         installAppCategoryProvider()
         seedClockOffset()
-        // 设备解锁 / 开机后主动暖令牌：孩子端每次回到前台（含开机后首次进入桌面）
-        // 若尚未持有屏幕采集凭据，就在前台态下补一次系统确认，保证家长随时看屏都无需再确认。
-        AppForeground.addForegroundListener {
-            com.padguard.child.capture.CaptureConsentPrompter.warmUp(this@PadGuardApplication)
-        }
+        // 注意：这里**不再**挂暖令牌监听（历史遗留已移除）。
+        // 此前"每次 0→1 回到前台"都会尝试补 MediaProjection 凭据，而孩子每次打开
+        // 被管控应用时拦截页也是本应用的 Activity —— 结果"每次违规/每次切页
+        // 都可能弹一次投屏授权框"，与"装机时确认一次、日常无感"的预期相悖。
+        // 令牌的取得只剩：装机向导的一次性授权 + 投影类功能下发时的按需引导。
     }
 
     /**

@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.child.capture.CaptureConsent
 import com.padguard.child.capture.ScreenCaptureSession
+import com.padguard.child.guard.GuardGateSuspension
 import com.padguard.child.permission.DeviceAdminRequest
 import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.permission.SpecialPermission
@@ -62,7 +63,8 @@ class OneTimeConsentViewModel @Inject constructor(
     private val admin: DeviceAdminBridge,
     private val authRepository: AuthRepository,
     private val deviceAdminRequest: DeviceAdminRequest,
-    private val consentReturn: ConsentReturnPresenter
+    private val consentReturn: ConsentReturnPresenter,
+    private val gateSuspension: GuardGateSuspension
 ) : ViewModel() {
 
     enum class Phase {
@@ -196,6 +198,9 @@ class OneTimeConsentViewModel @Inject constructor(
         tryEmit(ConsentLaunch.Settings(key, intent))
         // 盯着这项：家长拨完开关，后台守护会自动把授权页拉回前台（免手动返回）
         consentReturn.watch(setOf(perm))
+        // 豁免操作闸门对设置页的拦截：向导自己正带家长去设置页，
+        // 否则刚启用的无障碍闸门会把设置页 1 秒内弹回，装机卡死。
+        gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
     }
 
     /**
@@ -308,6 +313,8 @@ class OneTimeConsentViewModel @Inject constructor(
             tryEmit(ConsentLaunch.Settings(next.key, intent))
             // 盯着这项：家长拨完开关，后台守护自动把授权页拉回前台并跳下一项（免手动返回）
             consentReturn.watch(setOf(next))
+            // 豁免操作闸门对设置页的拦截（窗口随每次跳转续期，向导结束在 finish() 里清除）
+            gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
             return
         }
 
@@ -339,9 +346,10 @@ class OneTimeConsentViewModel @Inject constructor(
     private fun finish() {
         _currentKey.value = null
         runtimeInFlight = false
-        // 授权收尾：停掉后台盯守、撤掉返回引导通知，避免残留
+        // 授权收尾：停掉后台盯守、撤掉返回引导通知、恢复操作闸门对设置页的拦截，避免残留
         consentReturn.stop()
         consentReturn.cancelNotification()
+        gateSuspension.clear()
         viewModelScope.launch {
             runCatching { authRepository.saveConsentDone() }
                 .onFailure { Logger.e(TAG, it) { "save consent failed" } }
@@ -443,6 +451,13 @@ class OneTimeConsentViewModel @Inject constructor(
         const val KEY_DEVICE_ADMIN = "deviceAdmin"
         const val KEY_RUNTIME = "runtimePermissions"
         const val KEY_CAPTURE = "mediaProjection"
+
+        /**
+         * 每次发起设置页跳转时的闸门豁免窗口时长。
+         * 覆盖「家长找到开关 + 拨完 + 自动回前台」的完整过程（轮询预算约 60s），
+         * 10 分钟远大于最坏情况；向导每跳一次续期一次，结束即 clear。
+         */
+        private const val SETTINGS_GATE_SUSPEND_MS = 10 * 60 * 1000L
 
         /** 运行时权限 → 缺失后果（家长语言） */
         private val RUNTIME_IMPACT = mapOf(

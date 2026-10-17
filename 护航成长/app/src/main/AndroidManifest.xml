@@ -88,10 +88,18 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
         </intent>
+        <!-- 浏览器 scheme 枚举：一个 <intent> 只能放一个 <data android:scheme>，
+             两个 scheme 必须拆成两条 <intent> —— 部分系统版本的安装解析器
+             （installPackageLI）对多 scheme intent 直接报
+             INSTALL_PARSE_FAILED_MANIFEST_MALFORMED，装都装不上。 -->
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="http" />
         </intent>
     </queries>

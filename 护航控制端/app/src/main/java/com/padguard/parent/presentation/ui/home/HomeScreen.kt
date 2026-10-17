@@ -211,36 +211,43 @@ private fun HomeTopBar(
                 color = PadGuardColors.TextSecondary
             )
         }
-        // 通知按钮：白底圆形轻投影 + 未读红点
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .shadow(elevation = 2.dp, shape = CircleShape, spotColor = PadGuardColors.CardShadow, ambientColor = PadGuardColors.CardShadow)
-                .clip(CircleShape)
-                .background(Color.White)
-                .clickable(onClick = onBellClick),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                Icons.Default.Notifications,
-                contentDescription = "消息中心",
-                tint = if (unreadCount > 0) PadGuardColors.PrimaryBlue else PadGuardColors.TextSecondary,
-                modifier = Modifier.size(20.dp)
-            )
+        // 通知按钮：白底圆形轻投影 + 未读角标
+        // 外层比圆大 4dp：给角标留出"压角外溢"的空间。历史实现把角标塞进 40dp 圆内
+        // 并 align TopEnd，再叠加父容器的 clip(CircleShape)，数字直接被圆边裁掉。
+        Box {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .shadow(elevation = 2.dp, shape = CircleShape, spotColor = PadGuardColors.CardShadow, ambientColor = PadGuardColors.CardShadow)
+                    .clip(CircleShape)
+                    .background(Color.White)
+                    .clickable(onClick = onBellClick),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.Notifications,
+                    contentDescription = "消息中心",
+                    tint = if (unreadCount > 0) PadGuardColors.PrimaryBlue else PadGuardColors.TextSecondary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
             if (unreadCount > 0) {
-                // 红点画在右上角：只给数量不遮挡图标，超过 99 收敛为 99+
+                // 微信样式角标：右上角压角、白描边、自适应宽度
+                // （单数字为圆形，多位数自动变胶囊），数字永不裁剪，超过 99 收敛为 99+
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .size(16.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFFF3B30)),
+                        .defaultMinSize(minWidth = 17.dp, minHeight = 17.dp)
+                        .background(Color(0xFFFF3B30), RoundedCornerShape(50))
+                        .border(1.5.dp, Color.White, RoundedCornerShape(50))
+                        .padding(horizontal = 4.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = if (unreadCount > 99) "99+" else unreadCount.toString(),
                         color = Color.White,
-                        fontSize = 9.sp,
+                        fontSize = 10.sp,
+                        lineHeight = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }

@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.parent.domain.model.DistributableApp
 import com.padguard.parent.domain.model.InstalledApp
+import com.padguard.parent.di.AppManagePrefs
 import com.padguard.parent.domain.repository.DeviceRepository
 import com.padguard.parent.domain.repository.PolicyRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -76,12 +77,15 @@ data class AppManageUiState(
 class AppManageViewModel @Inject constructor(
     private val policyRepository: PolicyRepository,
     private val deviceRepository: DeviceRepository,
+    private val appManagePrefs: AppManagePrefs,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
     private val deviceId: String = savedStateHandle.get<String>("deviceId").orEmpty()
 
-    private val _uiState = MutableStateFlow(AppManageUiState())
+    // 「是否显示系统应用」从本地偏好初始化：ViewModel 跟随导航返回栈销毁，
+    // 家长勾选后返回首页再进，若不落盘勾选会被重置（曾因此被当成筛选失灵）。
+    private val _uiState = MutableStateFlow(AppManageUiState(showSystemApps = appManagePrefs.getShowSystemApps()))
     val uiState: StateFlow<AppManageUiState> = _uiState.asStateFlow()
 
     init {
@@ -370,7 +374,7 @@ class AppManageViewModel @Inject constructor(
     /**
      * 一键授权全部 / 一键取消全部（使用权限：显示 / 隐藏）。
      *
-     * 「系统」勾选框（[AppManageUiState.showSystemApps]）决定批量操作的作用范围：
+     * 「系统应用」勾选框（[AppManageUiState.showSystemApps]）决定批量操作的作用范围：
      * - 勾选系统（true）：作用于全部已安装应用，含系统应用。以 `all=true` 交给服务端一次性下发，避免逐条循环打接口。
      * - 不勾选系统（false）：仅作用于非系统应用，系统应用保留原有授权状态。
      *   此时改用显式包名列表 + `all=false`，由服务端只下发给非系统应用。
@@ -384,7 +388,7 @@ class AppManageViewModel @Inject constructor(
         // 显式构造「作用范围内」的完整包名列表，并以 all=false 下发：
         // 不依赖服务端 all=true 的隐式语义，确保「一次点击」即覆盖范围内全部应用，
         // 避免「只关了系统应用、要点第二次才全关」的异常。
-        // 范围由「系统」勾选框决定：勾选=全部（含系统），不勾选=仅非系统（系统保留）。
+        // 范围由「系统应用」勾选框决定：勾选=全部（含系统），不勾选=仅非系统（系统保留）。
         val targetPackages = _uiState.value.apps
             .filter { it.installed && (includeSystem || !it.isSystem) }
             .map { it.packageName }
@@ -495,6 +499,8 @@ class AppManageViewModel @Inject constructor(
 
     fun setShowSystemApps(show: Boolean) {
         _uiState.value = _uiState.value.copy(showSystemApps = show)
+        // 同步落本地偏好：返回首页 / 杀进程重进后勾选不丢。
+        appManagePrefs.setShowSystemApps(show)
     }
 
     fun setQuery(query: String) {

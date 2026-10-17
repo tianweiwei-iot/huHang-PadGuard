@@ -262,7 +262,7 @@ private fun SearchBarRow(
         )
         Spacer(Modifier.width(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("系统", style = MaterialTheme.typography.bodySmall)
+            Text("系统应用", style = MaterialTheme.typography.bodySmall)
             Checkbox(checked = showSystemApps, onCheckedChange = onShowSystemAppsChange)
         }
     }

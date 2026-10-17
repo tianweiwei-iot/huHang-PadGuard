@@ -71,16 +71,15 @@ import javax.inject.Inject
  * ## 资源边界
  * 录屏是长任务，停止后才上传。
  *
- * **服务生命周期与投影绑定（关键）**：`MediaProjection` 与"带 mediaProjection 类型的前台服务"
- * 在 Android 14+ 上是一体的 —— 服务实例一旦销毁，投影随即失效。表现为：首次截屏成功、服务
- * `stopSelf()` 退出后，第二次截屏会重新 `startForegroundService` 起一个新服务实例，系统视之为
- * "foreground service change"，在 `createVirtualDisplay` 前就把缓存投影回收掉，日志形如：
- * `MediaProjectionManagerService: Stopped MediaProjection due to foreground service change`
- * → `SecurityException: Cannot create VirtualDisplay with non-current MediaProjection`。
- *
- * 因此只要 [ScreenCaptureSession] 里还持有有效投影，本服务就必须**继续存活**（详见 [stopIfIdle]），
- * 这样后续截屏/录屏都在同一个 FGS 会话内复用投影，无需再次授权；投影失效时由
- * [ScreenCaptureSession.setOnProjectionLost] 回调通知服务退出。
+ * **服务生命周期与投影（2026-10-17 策略变更）**：`MediaProjection` 与"带 mediaProjection
+ * 类型的前台服务"在 Android 14+ 上是一体的 —— 任务执行期间（截屏/录屏/投影推流中）服务必须
+ * 持续存活、投影复用同一 FGS 会话，否则系统以 "foreground service change" 回收投影。
+ * 但**任务一结束就必须释放投影并退出**（见 [stopIfIdle]）：Android 15 QPR1 起，投影活着
+ * 状态栏就常驻系统强制的"正在共享屏幕"芯片，任务结束后仍挂着既暴露监控又给孩子留反制入口
+ * （点芯片可一键 Stop sharing）。跨会话复用令牌的收益已不抵常驻芯片的代价——
+ * 截屏与实时看屏已首选无障碍通道（[AccessibilityScreenshot] / [AccessibilityLiveStreamer]），
+ * 投影只剩录屏与兜底职责，需要时由暖令牌/通知引导重新授权。
+ * 投影被外部掐断时由 [ScreenCaptureSession.setOnProjectionLost] 回调负责收尾。
  */
 @AndroidEntryPoint
 class ScreenCaptureService : Service() {
@@ -277,6 +276,10 @@ class ScreenCaptureService : Service() {
                 scope.launch(Dispatchers.IO) { runCatching { finalizeRecording(upload = true) } }
             }
             stopIfIdle()
+            // 不在这里补暖令牌（历史遗留已移除）：投影被外部掐断（锁屏/ROM 回收/
+            // 孩子点状态栏芯片）时若主动弹系统确认框，只会出现在孩子正常使用平板的
+            // 中途。令牌的重新取得交给按需路径——投影类功能真正下发且无令牌时，
+            // 由 CaptureConsentPrompter 按前台/后台给弹框或通知引导。
         }
         // 服务启动时先把上一轮上传失败攒下的队列重传一遍（弱网恢复后的自然时机）
         scope.launch { runCatching { mediaRetry.drain() } }
@@ -296,7 +299,13 @@ class ScreenCaptureService : Service() {
         }
         // 前台类型必须与本次任务匹配（见 [enterForeground]）：
         // 先解析动作再进前台，截屏这类纯投影任务绝不携带 microphone 类型。
-        enterForeground(action, intent.getBooleanExtra(EXTRA_WITH_AUDIO, false))
+        // 停止/控制类动作不进前台：停止不需要任何采集授权；此刻多半已无 appop，
+        // 强行 startForeground 只会抛 SecurityException 留一条错误日志（见 [stopDirect]）。
+        val isControlAction = action == ACTION_LIVE_STOP ||
+            action == ACTION_STOP_RECORD || action == ACTION_STOP_AUDIO_RECORD
+        if (!isControlAction) {
+            enterForeground(action, intent.getBooleanExtra(EXTRA_WITH_AUDIO, false))
+        }
         when (action) {
             ACTION_SCREENSHOT -> captureScreenshot(intent.getStringExtra(EXTRA_SHOT_ID).orEmpty(), intent)
             ACTION_SCREEN_RECORD -> startScreenRecord(
@@ -1338,12 +1347,18 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * 空闲收尾：决定本服务是否退出。
+     * 空闲收尾：主动释放投影并退出服务。
      *
-     * **只要 [ScreenCaptureSession] 还持有有效投影，就绝不能 stopSelf**（见类注释）：
-     * 服务一退出，投影就被系统标记为"非当前"，后续每次截屏都会以
-     * `Cannot create VirtualDisplay with non-current MediaProjection` 失败并被迫重新授权。
-     * 因此服务与投影同生命周期 —— 投影丢失时由 [ScreenCaptureSession] 的失效回调负责收尾。
+     * **策略变更（2026-10-17）**：旧实现"只要还持有有效投影就绝不停Self"，
+     * 目的是跨会话复用投影令牌免二次授权。但 Android 15 QPR1 起，只要投影活着，
+     * 状态栏左上角就常驻一块系统强制的高亮芯片（"正在共享屏幕 + 计时"），孩子点它
+     * 还会弹"Stop sharing screen?"并可一键掐断——监控结束后红标仍挂在孩子屏幕上，
+     * 既暴露监控行为又给孩子留了反制入口，直接违背监护场景的隐蔽性要求。
+     *
+     * 现行分工下（截屏/实时看屏首选无障碍通道，见 [AccessibilityScreenshot] 与
+     * [AccessibilityLiveStreamer]），投影只剩"录屏 + 无障碍不可用时的兜底"两个消费者，
+     * 复用令牌的收益已不抵常驻芯片的代价。因此：**任务一空闲就释放投影、退出服务**，
+     * 芯片随手任务结束立即消失；下次录屏需要投影时，由解锁/开机暖令牌或通知引导重新授权。
      */
     private fun stopIfIdle() {
         if (mediaRecorder != null || audioRecorder != null) return
@@ -1354,7 +1369,12 @@ class ScreenCaptureService : Service() {
         if (screenRecording.get()) return
         // 推流中不能退出：服务一死投影就废，画面会断在最后一帧
         if (streaming.get()) return
-        if (ScreenCaptureSession.projection() != null) return
+        // 主动释放投影：注意暖令牌路径（ACTION_WARMUP）只有令牌、尚未取投影，
+        // release() 会把刚存的令牌一并清掉导致装机向导的授权白做 —— 必须仅在有
+        // 活投影时才释放。
+        if (ScreenCaptureSession.projection() != null) {
+            ScreenCaptureSession.release()
+        }
         stopSelf()
     }
 
@@ -1666,9 +1686,8 @@ class ScreenCaptureService : Service() {
             .putExtra(EXTRA_WITH_AUDIO, withAudio)
 
         fun stopScreenRecord(context: Context) {
-            val intent = Intent(context, ScreenCaptureService::class.java)
-                .putExtra(EXTRA_ACTION, ACTION_STOP_RECORD)
-            start(context, intent)
+            stopDirect(context, Intent(context, ScreenCaptureService::class.java)
+                .putExtra(EXTRA_ACTION, ACTION_STOP_RECORD))
         }
 
         fun startAudioRecord(context: Context, taskId: String) {
@@ -1679,9 +1698,33 @@ class ScreenCaptureService : Service() {
         }
 
         fun stopAudioRecord(context: Context) {
-            val intent = Intent(context, ScreenCaptureService::class.java)
-                .putExtra(EXTRA_ACTION, ACTION_STOP_AUDIO_RECORD)
-            start(context, intent)
+            stopDirect(context, Intent(context, ScreenCaptureService::class.java)
+                .putExtra(EXTRA_ACTION, ACTION_STOP_AUDIO_RECORD))
+        }
+
+        /** 仅构建实时推流停止 Intent（直达服务用，不经授权派发） */
+        private fun liveStreamStopIntent(context: Context): Intent =
+            Intent(context, ScreenCaptureService::class.java)
+                .putExtra(EXTRA_ACTION, ACTION_LIVE_STOP)
+
+        /**
+         * 停止/控制类意图**直达服务**，绝不经过 [CaptureConsentPrompter.dispatch]。
+         *
+         * 为什么必须有这条独立通道（历史 bug：停止监控反而弹授权框）：
+         * 旧实现把 ACTION_LIVE_STOP 等停止指令与采集指令混走同一条 [start] 路由，
+         * 令牌缺失时 dispatch 会把"停止看屏"包装进授权页 —— 孩子端在监控**结束**的
+         * 一瞬间弹出"Share your screen with 护航成长?"系统确认框，荒谬且暴露监控。
+         * 早期未暴露是因为旧策略令牌常驻（hasToken 恒真走静默分支）；
+         * 自"任务空闲即释放投影"与"看屏走无障碍通道"起，停止时无令牌成为常态。
+         *
+         * 用普通 startService（非 startForegroundService）：GuardService 自身是前台服务，
+         * 应用不处于后台态，startService 合法；服务处理完停止动作即 stopSelf，
+         * 不触发"必须 5s 内 startForeground"的义务，也不需要任何采集授权。
+         */
+        private fun stopDirect(context: Context, intent: Intent) {
+            runCatching {
+                context.startService(intent)
+            }.onFailure { Logger.w(TAG) { "failed to route capture stop: ${it.message}" } }
         }
 
         /**
@@ -1720,9 +1763,7 @@ class ScreenCaptureService : Service() {
                 .putExtra(EXTRA_HIGH_DEFINITION, highDefinition)
 
         fun stopLiveStream(context: Context) {
-            val intent = Intent(context, ScreenCaptureService::class.java)
-                .putExtra(EXTRA_ACTION, ACTION_LIVE_STOP)
-            start(context, intent)
+            stopDirect(context, liveStreamStopIntent(context))
         }
 
         /**

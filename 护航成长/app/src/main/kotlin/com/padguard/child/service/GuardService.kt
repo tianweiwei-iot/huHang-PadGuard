@@ -174,6 +174,12 @@ class GuardService : Service() {
      */
     @Inject lateinit var accessibilityScreenshot: AccessibilityScreenshot
 
+    /** 实时看屏的无障碍推流通道：令牌缺失时的"零弹窗"路径（见 AccessibilityLiveStreamer） */
+    @Inject lateinit var a11yLiveStreamer: com.padguard.child.capture.AccessibilityLiveStreamer
+
+    /** 无障碍截屏能力自愈：陈旧元数据（升级后能力位缺失）时静默重切换服务 */
+    @Inject lateinit var a11yCapabilityHealer: com.padguard.child.guard.AccessibilityCapabilityHealer
+
     /**
      * 当前是否"已绑定"（由 [observeBinding] 维护）。
      *
@@ -302,6 +308,13 @@ class GuardService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // 无障碍截屏能力自愈：服务启用早于 canTakeScreenshot 能力版本时（覆盖升级场景），
+        // 系统不重读元数据，截屏/实时看屏被迫走投影链路（红标+授权框）。
+        // Device Owner 有权静默重切换无障碍服务迫使系统重读 —— 启动时检测并自愈一次。
+        scope.launch {
+            runCatching { a11yCapabilityHealer.healIfNeeded() }
+                .onFailure { Logger.w(TAG) { "a11y capability heal failed: ${it.message}" } }
+        }
         // 兜底拉取游标从盘上恢复。必须在 startCommandLoop 之前加载：字段初始化器
         // 不能碰 Context（实例化先于 attachBaseContext，见 lastCommandPullAtMs 注释），
         // 故推迟到这里；若懒加载到首次使用，进程重启后第一轮拉取会误用 0 把全部
@@ -1340,15 +1353,30 @@ class GuardService : Service() {
             is EngineEffect.StartLiveView -> {
                 // 画质档位随指令一路带到推流侧：家长改了「高清画面」后，
                 // 下一次续期（或重新开流）就按新档位出帧，不必退出看屏页重进。
+                // 两级分工（2026-10-17 调序，解决"看屏时孩子端状态栏常驻录屏红标"）：
+                // 1) 无障碍可用 → 无障碍推流（约2fps，**零弹窗且无系统投影芯片**）——
+                //    Android 15 QPR1 只要投影活着状态栏就常驻高亮"正在共享屏幕"芯片，
+                //    孩子点它还能一键 Stop sharing 掐断监控；无障碍授权持久有效，
+                //    彻底绕开 MediaProjection，看屏从此既不弹框也不亮红标；
+                // 2) 无障碍不可用（能力缺失/服务被关）→ 投影推流（约4fps），
+                //    接受"观看期间短暂显示系统芯片"的代价——能用总比不能用强。
                 val captureIntent = ScreenCaptureService.liveStreamIntent(this, effect.highDefinition)
-                val silent = dispatchCapture(captureIntent)
+                val silent = if (a11yLiveStreamer.start(effect.highDefinition)) {
+                    Logger.i(TAG) { "live view via a11y channel (no projection chip, no dialog)" }
+                    true
+                } else {
+                    dispatchCapture(captureIntent)
+                }
                 reportEffectResult(
                     effect.msgId, "liveView", silent,
                     if (silent) "已开始实时推流" else "未取得屏幕采集授权：已发送引导通知，待孩子点击开启"
                 )
             }
 
-            EngineEffect.StopLiveView -> ScreenCaptureService.stopLiveStream(this)
+            EngineEffect.StopLiveView -> {
+                a11yLiveStreamer.stop()
+                ScreenCaptureService.stopLiveStream(this)
+            }
 
             is EngineEffect.StartAudioRecord -> {
                 ScreenCaptureService.startAudioRecord(this, effect.taskId)

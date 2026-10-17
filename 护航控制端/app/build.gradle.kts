@@ -15,7 +15,10 @@ plugins {
 // 若没有这个加载点，把 amapKey 写进 local.properties 是不生效的（曾因此底图不加载排查半天）。
 val localProps = Properties().apply {
     val f = rootProject.file("local.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
+    // 必须用 UTF-8 Reader 加载：Properties.load(InputStream) 固定按 ISO-8859-1 解码，
+    // 而 local.properties 以 UTF-8 保存，中文路径（如 D:/.../护航PadGuard/...）会被拆成
+    // mojibake（æ¤èªPadGuard），导致 validateSigningRelease 报 keystore 不存在。
+    if (f.exists()) f.reader(Charsets.UTF_8).use { load(it) }
 }
 
 android {

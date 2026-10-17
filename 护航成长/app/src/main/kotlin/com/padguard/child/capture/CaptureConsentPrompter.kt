@@ -50,8 +50,7 @@ object CaptureConsentPrompter {
     /**
      * 派发一条采集请求。
      *
-     * @param silentIfBackground 后台态下是否静默（不弹通知）。暖令牌场景用 true：
-     *   设备解锁/开机时若暂不是前台，不主动打扰，等真正回到前台再补。
+     * @param silentIfBackground 后台态下是否静默（不弹通知）。
      * @return true = 已授权，请求已直接下发（静默）；false = 尚无授权，已发通知引导（或静默跳过）
      */
     fun dispatch(context: Context, captureIntent: Intent, silentIfBackground: Boolean = false): Boolean {
@@ -86,50 +85,23 @@ object CaptureConsentPrompter {
     }
 
     /**
-     * 设备解锁 / 开机后主动补齐 MediaProjection 凭据（"暖令牌"）。
+     * 授权节奏（2026-10-17 定稿）：**装机时确认一次，日常永不主动弹**。
      *
-     * 只要孩子在用平板，家长端随时可能下发实时看屏/截屏/录屏；
-     * 若凭据在重启后丢失却只在"家长点开看屏"那一刻才去要授权，
-     * 孩子就会看到突兀的弹窗、甚至因一时不点确认导致监护失败。
-     * 因此把这一次要授权收拢到设备解锁/开机这个天然时刻，由应用在前台态下
-     * 把系统确认框顶起来——此刻孩子本就在操作设备，体验远好于看屏中途打断。
+     * ## 为什么"暖令牌"系列主动弹框全部移除（warmUp / onDeviceInteractive 已删）
+     * 曾尝试把系统确认框收拢到"解锁 / 开机 / 回到前台"等时刻（暖令牌），
+     * 实测全部违背产品预期：挂解锁 → "每次打开平板都弹"；挂回前台 →
+     * "每次打开被管控应用、拦截页一出来就弹"。只要存在任何主动触发点，
+     * 孩子就会周期性看到投屏授权框——与监护场景的隐蔽性要求根本冲突。
      *
-     * 不是静默（Android 隐私红线，Device Owner 也绕不过），
-     * 但把"必须确认一次"压缩到装机一次 + 之后每次重启后第一次解锁，
-     * 且帧面就是 Android 原生确认框，不含任何"家长正在看"之类会引导孩子抵触的文案。
-     *
-     * **前置门：设备必须已绑定**（见 [CaptureConsent.isDeviceBound]）。
-     * 未绑定时没有家长会下发采集指令，此刻顶系统确认框纯属骚扰 ——
-     * 装机阶段（协议 → 登录 → 绑定）每次打开 App 都弹一次"是否允许录制屏幕"
-     * 正是"授权乱七糟"的成因。绑定完成后，守护服务（前台服务）会保住进程，
-     * 令牌随进程存活，正常情况下也不会再触发本路径。
-     */
-    fun warmUp(context: Context) {
-        if (ScreenCaptureSession.hasToken()) return
-        if (!AppForeground.isForeground) return
-        if (!CaptureConsent.shouldRequest(context)) return
-        if (!CaptureConsent.isDeviceBound(context)) {
-            Logger.v(TAG) { "warm-up skipped: device not bound yet (setup phase)" }
-            return
-        }
-        Logger.i(TAG) { "warm-up capture consent (device bound, token missing)" }
-        dispatch(context, ScreenCaptureService.warmupIntent(context), silentIfBackground = true)
-    }
-
-    /**
-     * 新一轮设备交互（解锁 / 开机 / 覆盖安装）：先解除上一轮拒绝冷却，再暖令牌。
-     * 拒绝只在"本次解锁"内有效，下一轮重新给机会，避免孩子一次点取消就永久失监护。
-     */
-    fun onDeviceInteractive(context: Context) {
-        CaptureConsent.clearDenyCooldown(context)
-        warmUp(context)
-    }
-
-    /**
-     * 直接拉起授权页。
-     *
-     * @return 是否真的把 Activity 拉起来了。系统对后台启动是**静默丢弃**而不是抛异常，
-     * 因此这里用前台标记先判断一次，再兜一层 runCatching 防止个别 ROM 抛异常。
+     * ## 现行节奏
+     * 1. **装机时一次**：装机向导（OneTimeConsent）显式引导确认一次，
+     *    `CaptureConsent.markGranted` 记账——唯一一次主动授权；
+     * 2. **日常零弹窗**：截屏与实时看屏首选无障碍通道（持久授权，无令牌）；
+     * 3. **按需引导兜底**：投影类功能（录屏 / 无障碍不可用时的兜底）真正下发
+     *    且无令牌时，才由 [dispatch] 给前台弹框或后台通知——此刻上下文明确
+     *    （家长确实在等画面），是平台约束下唯一可接受的再授权时机。
+     *    无障碍不可用的设备（服务启用早于能力版本）需在系统设置里关闭再
+     *    打开无障碍服务一次，恢复后回到"日常零弹窗"。
      */
     private fun launchConsentActivity(context: Context, captureIntent: Intent): Boolean =
         runCatching {

@@ -77,6 +77,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     @Inject
     lateinit var authRepository: AuthRepository
 
+    /** 装机向导豁免：向导带家长去设置页办理授权期间，闸门对设置页暂时放行（见类文档）。 */
+    @Inject
+    lateinit var gateSuspension: GuardGateSuspension
+
     @Inject
     @ApplicationScope
     lateinit var scope: CoroutineScope
@@ -304,6 +308,14 @@ class OperationGuardAccessibilityService : AccessibilityService() {
                 .onFailure { Logger.e(TAG, it) { "failed to launch app access gate (hidden app)" } }
             return
         }
+
+        // 装机向导豁免（务必放在防卸载自检之后、S11 之前）：
+        // 向导正带着家长去设置页办理「安装未知应用」等授权，此刻照常顶回会把设置页
+        // 1 秒内弹回，装机流程卡死（实测日志："guarded foreground: com.android.settings
+        // reason=settings, guard password not set, bouncing back" 每次跳转后必现）。
+        // 仅豁免设置页顶回：上方防卸载（应用详情页）、隐藏应用、下方安装器拦截均不受影响，
+        // 孩子无法借豁免窗口卸载本应用或绕过应用门禁。
+        if (reason == REASON_SETTINGS && gateSuspension.isActive()) return
 
         // S11 拆层：密码未设置时的降级拦截。
         // 设置页必须拦：它正是关闭本无障碍服务的入口，放行等于允许"先关无障碍、

@@ -3,7 +3,6 @@ package com.padguard.child.receiver
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import com.padguard.child.capture.CaptureConsentPrompter
 import com.padguard.child.service.GuardService
 import com.padguard.child.ui.lock.SystemKeyguardBridge
 import com.padguard.core.common.Logger
@@ -40,10 +39,10 @@ class BootReceiver : BroadcastReceiver() {
             else -> "boot"
         }
         GuardService.start(context, reason = reason)
-        // 设备解锁 / 开机后主动补齐屏幕采集凭据（暖令牌）：
-        // 把"必须确认一次 MediaProjection"收拢到此刻，而不是等家长日后点开实时看屏时
-        // 才向孩子弹确认框——那样孩子一旦不点确认，监护就会失败。
-        CaptureConsentPrompter.onDeviceInteractive(context)
+        // 注意：这里**不做**暖令牌（历史遗留已移除）。此前解锁/开机广播会主动补齐
+        // MediaProjection 凭据，结果孩子每次解锁都可能看到一次投屏授权框，
+        // 与"装机时确认一次、日常无感"的产品预期相悖。令牌的重新取得只剩两条路：
+        // 装机向导的一次性授权，与投影类功能真正下发时的按需引导（通知/前台弹框）。
         // 解锁自愈的双保险：USER_PRESENT 意味着孩子自己滑开了系统锁屏。
         // 若那时"待撤锁"标记还在（家长已解锁、撤锁却没追上），系统锁既已不在，
         // 标记与压锁记账都该清掉 —— 否则残留标记会让自愈触发点追一个不存在的锁。
