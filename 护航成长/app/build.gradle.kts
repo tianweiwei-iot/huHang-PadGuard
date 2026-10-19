@@ -46,7 +46,10 @@ android {
         create("release") {
             val localProps = Properties().apply {
                 val f = rootProject.file("local.properties")
-                if (f.exists()) f.inputStream().use { load(it) }
+                // 必须用 UTF-8 Reader 加载：Properties.load(InputStream) 固定按 ISO-8859-1 解码，
+                // local.properties 中的中文路径（护航PadGuard）会被解码成 mojibake，
+                // 导致 release 签名校验报 keystore 文件不存在。
+                if (f.exists()) f.reader(Charsets.UTF_8).use { load(it) }
             }
             val ksFile = (findProperty("RELEASE_STORE_FILE") as? String) ?: localProps.getProperty("RELEASE_STORE_FILE")
             val ksPass = (findProperty("RELEASE_STORE_PASSWORD") as? String) ?: localProps.getProperty("RELEASE_STORE_PASSWORD")

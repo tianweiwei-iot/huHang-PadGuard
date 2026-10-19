@@ -233,6 +233,11 @@ class ParentPolicyExtendedController(
     fun webBrowser(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: BrowserDisableRequest) =
         ApiResponse.ok<Any?>(run { policyExtensionService.updateBrowser(userId, deviceId, req); null })
 
+    /** 定时锁机（夜间锁机）：到点由孩子端自动锁屏，家长端不再只是看到一条空的成功提示。 */
+    @PutMapping("/{deviceId}/web/smart-shutdown")
+    fun smartShutdown(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String, @RequestBody req: SmartShutdownRequest) =
+        ApiResponse.ok<Any?>(run { policyExtensionService.updateSmartShutdown(userId, deviceId, req); null })
+
     @GetMapping("/templates")
     fun templates(@RequestParam(required = false) sceneType: String?) =
         ApiResponse.ok(policyExtensionService.listTemplates(sceneType))

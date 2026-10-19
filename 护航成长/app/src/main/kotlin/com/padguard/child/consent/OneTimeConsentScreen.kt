@@ -145,7 +145,7 @@ fun OneTimeConsentScreen(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
                 Column(modifier = Modifier.padding(vertical = 8.dp)) {
-                    items.forEach { item -> ConsentRow(item) }
+                    items.forEach { item -> ConsentRow(item, currentKey) }
                 }
             }
 
@@ -200,7 +200,10 @@ fun OneTimeConsentScreen(
 }
 
 @Composable
-private fun ConsentRow(item: ConsentItem) {
+private fun ConsentRow(item: ConsentItem, currentKey: String? = null) {
+    // 当前正在等家长去系统页开启的那一项。高亮出来，家长才不必在整列待办里猜"现在该开哪个"；
+    // 自动接续生效时，这一行会随着流水线推进逐项前移，本身就是进度反馈。
+    val waiting = item.state == ConsentItem.State.NEED_MANUAL && currentKey == item.key
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -216,7 +219,7 @@ private fun ConsentRow(item: ConsentItem) {
             else -> Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = tint,
+                tint = if (waiting) MaterialTheme.colorScheme.primary else tint,
                 modifier = Modifier.size(20.dp)
             )
         }
@@ -233,11 +236,18 @@ private fun ConsentRow(item: ConsentItem) {
                 item.state == ConsentItem.State.SKIPPED
             ) {
                 Text(
-                    text = if (item.state == ConsentItem.State.SKIPPED) "已跳过" else "需您在系统页面中确认",
+                    text = when {
+                        item.state == ConsentItem.State.SKIPPED -> "已跳过"
+                        waiting -> "正在等待您开启，开启后自动跳转下一项"
+                        else -> "需您在系统页面中确认"
+                    },
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (item.state == ConsentItem.State.SKIPPED)
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
-                    else Color(0xFFF9A825)
+                    color = when {
+                        item.state == ConsentItem.State.SKIPPED ->
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                        waiting -> MaterialTheme.colorScheme.primary
+                        else -> Color(0xFFF9A825)
+                    }
                 )
             }
         }

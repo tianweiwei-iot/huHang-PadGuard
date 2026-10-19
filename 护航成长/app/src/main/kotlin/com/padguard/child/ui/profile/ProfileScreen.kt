@@ -52,6 +52,8 @@ import com.padguard.child.ui.components.GlyphKind
 import com.padguard.child.ui.settings.ServerConfigDialog
 import android.graphics.BitmapFactory
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.provider.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -68,6 +70,8 @@ import android.net.Uri
 @Composable
 fun ProfileScreen(
     onPermissionGuide: (String) -> Unit,
+    /** 本机应用台账：从「我的 → 应用管理」进入独立页面 */
+    onAppInventory: () -> Unit,
     viewModel: ProfileViewModel = hiltViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -81,6 +85,8 @@ fun ProfileScreen(
     var showNicknameDialog by remember { mutableStateOf(false) }
     var nicknameInput by remember { mutableStateOf("") }
     var showLogoutDialog by remember { mutableStateOf(false) }
+    var showHelpDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
 
     val avatarPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -132,8 +138,22 @@ fun ProfileScreen(
         },
         onSetAvatar = { avatarPicker.launch("image/*") },
         onClearCredentials = viewModel::clearRememberedCredentials,
+        onAppInventory = onAppInventory,
+        onHelp = { showHelpDialog = true },
+        onAbout = { showAboutDialog = true },
         onLogout = { showLogoutDialog = true }
     )
+
+    if (showHelpDialog) {
+        HelpDialog(onDismiss = { showHelpDialog = false })
+    }
+
+    if (showAboutDialog) {
+        AboutDialog(
+            deviceSn = state.deviceSn,
+            onDismiss = { showAboutDialog = false }
+        )
+    }
 
     if (showLogoutDialog) {
         // 二次确认：点错一下就登出、又要输一遍密码，代价不对称。
@@ -220,6 +240,10 @@ private fun ProfileContent(
     onEditNickname: () -> Unit,
     onSetAvatar: () -> Unit,
     onClearCredentials: () -> Unit,
+    /** 本机应用台账与管控状态（独立页面） */
+    onAppInventory: () -> Unit,
+    onHelp: () -> Unit,
+    onAbout: () -> Unit,
     /** 退出家庭账号：回调交给 ProfileScreen 弹二次确认，本函数只负责入口 */
     onLogout: () -> Unit
 ) {
@@ -296,6 +320,9 @@ private fun ProfileContent(
             item {
                 MoreCard(
                     onSetServer = onSetServer,
+                    onAppInventory = onAppInventory,
+                    onHelp = onHelp,
+                    onAbout = onAbout,
                     canLogout = state.isChildLoggedIn,
                     onLogout = onLogout
                 )
@@ -932,6 +959,9 @@ private fun OwnerCapabilityCard(state: ProfileUiState) {
 @Composable
 private fun MoreCard(
     onSetServer: () -> Unit,
+    onAppInventory: () -> Unit,
+    onHelp: () -> Unit,
+    onAbout: () -> Unit,
     canLogout: Boolean,
     onLogout: () -> Unit
 ) {
@@ -939,11 +969,11 @@ private fun MoreCard(
         Column {
             SimpleRow(title = "⚙ 高级设置", subtitle = "服务器地址 / 端口等（连不上管控端时修改）", onClick = onSetServer)
             HorizontalDivider()
-            SimpleRow(title = "应用管理", subtitle = "查看本机已安装应用与受限情况")
+            SimpleRow(title = "应用管理", subtitle = "查看本机已安装应用与受限情况", onClick = onAppInventory)
             HorizontalDivider()
-            SimpleRow(title = "帮助与反馈", subtitle = "常见问题 + 提交反馈")
+            SimpleRow(title = "帮助与反馈", subtitle = "常见问题 + 联系家长", onClick = onHelp)
             HorizontalDivider()
-            SimpleRow(title = "关于护航成长", subtitle = "版本号 / 开源许可")
+            SimpleRow(title = "关于护航成长", subtitle = "版本号 / 隐私政策摘要", onClick = onAbout)
             // 退出登录：装上 App 后唯一能"换个账号 / 退出家庭账号"的地方。
             // 之前没做，导致装完就退不出去、换手机号只能清数据。
             if (canLogout) {
@@ -993,3 +1023,112 @@ private fun SimpleRow(
         )
     }
 }
+
+/**
+ * 常见问题弹窗。
+ *
+ * 文案口径：本端是被管控端，**不具备**独立联系客服或提交在线反馈的通道（无对应后端接口）。
+ * 与其放一个点了没反应的"提交反馈"按钮，不如把真实可用的路径讲清楚 ——
+ * 需要调整的走「临时解锁申请」，需要改策略的由家长在管控端操作。
+ */
+@Composable
+private fun HelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("常见问题") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                HelpItem(
+                    q = "某个应用打不开了？",
+                    a = "这是家长设置的限制。打开应用时若看到拦截页，可直接点「申请临时解锁」，" +
+                        "家长同意后立即恢复 15 / 30 / 60 分钟。"
+                )
+                HelpItem(
+                    q = "今天的时间不够用？",
+                    a = "首页顶部的进度条显示今日剩余额度。额度用完后可回到首页点「申请临时解锁」，" +
+                        "或请家长在管控端调整每日限额。"
+                )
+                HelpItem(
+                    q = "家长收不到我的解锁申请？",
+                    a = "先看首页右上角的连接状态：显示「离线」时申请会先存在本机，联网后自动补发。" +
+                        "长时间离线请到「高级设置」检查服务器地址。"
+                )
+                HelpItem(
+                    q = "还有别的需要调整？",
+                    a = "时长、应用、上网这些策略都在家长的管控端里设置，本端无法自行修改 —— " +
+                        "这也是设计上的安排。"
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("知道了") } }
+    )
+}
+
+@Composable
+private fun HelpItem(q: String, a: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(text = q, style = MaterialTheme.typography.titleSmall)
+        Text(
+            text = a,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+    }
+}
+
+/**
+ * 关于页。
+ *
+ * 版本号**真实读取自 PackageInfo**，而不是写死字符串 ——
+ * 写死的版本号在发版后会与安装包脱节，家长报障时报出的版本号永远对不上真实版本，
+ * 排障链路第一步就断了。
+ */
+@Composable
+private fun AboutDialog(deviceSn: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val version = remember(context) { readAppVersion(context) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("关于护航成长") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                AboutRow("软件版本", version)
+                AboutRow("包名", context.packageName)
+                if (deviceSn.isNotBlank()) AboutRow("设备序列号", deviceSn)
+                HorizontalDivider()
+                Text(
+                    text = "本应用由家长（监护人）为其监护的未成年人安装并配置，" +
+                        "运行期间会按家长设置的策略采集设备使用数据。" +
+                        "详细的数据范围与使用边界见安装时的《使用授权协议》与《隐私政策》。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+@Composable
+private fun AboutRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(text = label, style = MaterialTheme.typography.bodySmall)
+        Text(text = value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+    }
+}
+
+/** 读取自身安装包版本；取不到时如实返回「未知」，不编造版本号。 */
+private fun readAppVersion(context: android.content.Context): String = runCatching {
+    val pm = context.packageManager
+    val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        pm.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+    } else {
+        @Suppress("DEPRECATION") pm.getPackageInfo(context.packageName, 0)
+    }
+    buildString {
+        append(info.versionName ?: "未知")
+        append(" (")
+        append(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode)
+        append(")")
+    }
+}.getOrDefault("未知")

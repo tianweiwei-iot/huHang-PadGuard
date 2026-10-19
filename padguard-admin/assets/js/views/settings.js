@@ -14,7 +14,7 @@
       <div class="grid grid-2">
         <div class="card">
           <div class="card-head"><h3>基础</h3></div>
-          <div class="form-row"><div class="field"><label>品牌名称</label><input id="st-brand" value="${U.esc(s.brand)}"></div><div class="field"><label>结算币种</label><select id="st-cur"><option>CNY</option><option>USD</option></select></div></div>
+          <div class="form-row"><div class="field"><label>品牌名称</label><input id="st-brand" value="${U.esc(s.brand)}"></div><div class="field"><label>结算币种</label><select id="st-cur">${["CNY", "USD"].map(c => "<option" + (s.currency === c ? " selected" : "") + ">" + c + "</option>").join("")}</select></div></div>
           <div class="field"><label>免费试用天数</label><input id="st-trial" type="number" value="${s.trialDays}"></div>
         </div>
         <div class="card">

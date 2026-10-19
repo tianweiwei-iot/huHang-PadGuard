@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.child.capture.CaptureConsent
 import com.padguard.child.capture.ScreenCaptureSession
+import com.padguard.child.guard.GuardGateSuspension
 import com.padguard.child.permission.DeviceAdminRequest
 import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.permission.SpecialPermission
@@ -62,7 +63,8 @@ class OneTimeConsentViewModel @Inject constructor(
     private val admin: DeviceAdminBridge,
     private val authRepository: AuthRepository,
     private val deviceAdminRequest: DeviceAdminRequest,
-    private val consentReturn: ConsentReturnPresenter
+    private val consentReturn: ConsentReturnPresenter,
+    private val gateSuspension: GuardGateSuspension
 ) : ViewModel() {
 
     enum class Phase {
@@ -110,6 +112,19 @@ class OneTimeConsentViewModel @Inject constructor(
     /** 本机确实没有入口、或家长选择不再处理的项 */
     private val skippedKeys = mutableSetOf<String>()
 
+    /**
+     * 系统运行时权限弹窗序列进行中（结果回调尚未送达）。
+     *
+     * `RequestMultiplePermissions` 会按权限组一枚一枚地弹（定位 → 相机 → 麦克风 → 通知），
+     * 部分 ROM 在相邻两枚弹窗交替时会让本页面短暂 `onResume`。此时 [onReturnedToApp]
+     * 若照常推进，就会在家长还没答完权限时把第 ③ 步（系统设置页）提前拉起来 ——
+     * 表现为"权限弹窗答到一半，界面自己跳到别的设置页"，正是授权跳转混乱的主因之一。
+     *
+     * 运行时权限的申请结果由 [onRuntimePermissionsResult] 保证回调（系统契约，拒绝也回调），
+     * 因此这期间拒绝一切基于 `onResume` 的推进是安全的：不依赖 ROM 的行为差异。
+     */
+    private var runtimeInFlight = false
+
     init {
         admin.refreshControlMode()
         refreshItemStates()
@@ -136,6 +151,7 @@ class OneTimeConsentViewModel @Inject constructor(
 
     /** 运行时权限弹窗的整体结果。被拒只降级对应能力，不阻断装机。 */
     fun onRuntimePermissionsResult(result: Map<String, Boolean>) {
+        runtimeInFlight = false
         val denied = result.filterValues { !it }.keys
         if (denied.isNotEmpty()) {
             val names = denied.map { permissionGranter.labelOf(it) }
@@ -154,9 +170,13 @@ class OneTimeConsentViewModel @Inject constructor(
      * ⚠️ 这里**刻意不清空 [currentKey]**：`advance` 要靠它判断
      * "刚带家长去的就是这一项、回来却还是没开"，据此停止自动跳转，
      * 否则会在不允许开启该开关的 ROM 上变成"返回→又跳回去"的无限循环。
+     *
+     * 系统权限弹窗序列进行中（[runtimeInFlight]）一律不推进：那期间的 `onResume`
+     * 只是弹窗交替的副产品，推进就会把家长从"答权限"直接扔到"下一个设置页"。
      */
     fun onReturnedToApp() {
         if (!started || _phase.value != Phase.WAITING_PARENT) return
+        if (runtimeInFlight) return
         // 授权页已回到前台：撤掉"返回引导"通知，并停掉后台盯守（advance 会按需重新挂上）
         consentReturn.cancelNotification()
         advance("returned-to-app")
@@ -181,6 +201,9 @@ class OneTimeConsentViewModel @Inject constructor(
         tryEmit(ConsentLaunch.Settings(key, intent))
         // 盯着这项：家长拨完开关，后台守护会自动把授权页拉回前台（免手动返回）
         consentReturn.watch(setOf(perm))
+        // 豁免操作闸门对设置页的拦截：向导自己正带家长去设置页，
+        // 否则刚启用的无障碍闸门会把设置页 1 秒内弹回，装机卡死。
+        gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
     }
 
     /**
@@ -204,12 +227,11 @@ class OneTimeConsentViewModel @Inject constructor(
         Logger.i(TAG) { "retry current step: $key" }
         _phase.value = Phase.WAITING_PARENT
         when (key) {
-            KEY_DEVICE_ADMIN -> {
-                tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
-                // 重试激活 DA 同样需要盯守：家长点「激活」后自动拉回授权页并跳下一项
-                consentReturn.watch(listOf(KEY_DEVICE_ADMIN))
+            KEY_DEVICE_ADMIN -> tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
+            KEY_RUNTIME -> {
+                runtimeInFlight = true
+                tryEmit(ConsentLaunch.Runtime(permissionGranter.missingRuntimePermissions()))
             }
-            KEY_RUNTIME -> tryEmit(ConsentLaunch.Runtime(permissionGranter.missingRuntimePermissions()))
             KEY_CAPTURE -> tryEmit(ConsentLaunch.MediaProjection)
             else -> SpecialPermission.fromKey(key)?.let { openAgain(it.key) }
         }
@@ -259,9 +281,6 @@ class OneTimeConsentViewModel @Inject constructor(
             _currentKey.value = KEY_DEVICE_ADMIN
             _phase.value = Phase.WAITING_PARENT
             tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
-            // 设备管理员激活页没有「完成」回调：挂盯守，家长点「激活」后由前台服务自动把授权页
-            // 拉回前台并跳下一项（与悬浮窗/使用情况访问等 MANUAL_SETTING 步骤一致，免手动返回）。
-            consentReturn.watch(listOf(KEY_DEVICE_ADMIN))
             return
         }
 
@@ -278,6 +297,8 @@ class OneTimeConsentViewModel @Inject constructor(
                 runSilentGrant()
             } else {
                 _phase.value = Phase.WAITING_PARENT
+                // 弹窗序列期间屏蔽 onResume 推进，答完由 onRuntimePermissionsResult 接力
+                runtimeInFlight = true
                 tryEmit(ConsentLaunch.Runtime(missingRuntime))
             }
             return
@@ -304,6 +325,8 @@ class OneTimeConsentViewModel @Inject constructor(
             tryEmit(ConsentLaunch.Settings(next.key, intent))
             // 盯着这项：家长拨完开关，后台守护自动把授权页拉回前台并跳下一项（免手动返回）
             consentReturn.watch(setOf(next))
+            // 豁免操作闸门对设置页的拦截（窗口随每次跳转续期，向导结束在 finish() 里清除）
+            gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
             return
         }
 
@@ -334,9 +357,11 @@ class OneTimeConsentViewModel @Inject constructor(
 
     private fun finish() {
         _currentKey.value = null
-        // 授权收尾：停掉后台盯守、撤掉返回引导通知，避免残留
+        runtimeInFlight = false
+        // 授权收尾：停掉后台盯守、撤掉返回引导通知、恢复操作闸门对设置页的拦截，避免残留
         consentReturn.stop()
         consentReturn.cancelNotification()
+        gateSuspension.clear()
         viewModelScope.launch {
             runCatching { authRepository.saveConsentDone() }
                 .onFailure { Logger.e(TAG, it) { "save consent failed" } }
@@ -438,6 +463,13 @@ class OneTimeConsentViewModel @Inject constructor(
         const val KEY_DEVICE_ADMIN = "deviceAdmin"
         const val KEY_RUNTIME = "runtimePermissions"
         const val KEY_CAPTURE = "mediaProjection"
+
+        /**
+         * 每次发起设置页跳转时的闸门豁免窗口时长。
+         * 覆盖「家长找到开关 + 拨完 + 自动回前台」的完整过程（轮询预算约 60s），
+         * 10 分钟远大于最坏情况；向导每跳一次续期一次，结束即 clear。
+         */
+        private const val SETTINGS_GATE_SUSPEND_MS = 10 * 60 * 1000L
 
         /** 运行时权限 → 缺失后果（家长语言） */
         private val RUNTIME_IMPACT = mapOf(

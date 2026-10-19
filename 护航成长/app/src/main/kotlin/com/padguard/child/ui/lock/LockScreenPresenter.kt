@@ -1,6 +1,7 @@
 package com.padguard.child.ui.lock
 
 import android.content.Context
+import android.os.PowerManager
 import com.padguard.core.common.Logger
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
@@ -66,7 +67,8 @@ class LockScreenPresenter @Inject constructor(
     private val admin: DeviceAdminBridge,
     private val lockController: LockController,
     private val logRepository: LogRepository,
-    private val authRepository: AuthRepository
+    private val authRepository: AuthRepository,
+    private val keyguardBridge: SystemKeyguardBridge
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -108,17 +110,70 @@ class LockScreenPresenter @Inject constructor(
     private var systemLockPushed = false
 
     /**
-     * 是否存在「系统级硬锁」能力：设备所有者(DO) 或设备管理员已激活。
+     * 是否存在「系统级硬锁」能力：设备所有者(DO) 或设备管理员已激活，**且系统锁屏是安全锁**。
      *
      * 有它，[LockScreenActivity] 才能通过屏幕固定(Lock Task)或 [DeviceAdminBridge.lockNow]
      * 真正锁死屏幕（物理禁手势）。没有它（绝大多数 C 端平板，无法在不恢复出厂前提下成为 DO），
      * Activity 只是普通页面、会被手势滑走，后台拉起还被 ROM 拒绝；此时应用内锁定**只能**
      * 靠悬浮窗这一层"软锁"。这个判定是本次修复的分水岭：它决定了锁屏走哪条主干。
+     *
+     * ## 为什么必须叠加 [SystemKeyguardBridge.isKeyguardSecure]
+     * `lockNow()` 压的是**系统 keyguard**，而 keyguard 的强度取决于设备有没有设置
+     * PIN / 图案 / 密码：设了才需要凭证，没设就是一扇"滑动锁"——孩子上滑即解，
+     * 等于什么都没锁。只判 `admin.can(LOCK_NOW)` 会把"能压锁"误当成"锁得住"，
+     * 于是这类设备被错分到"硬锁主干"，从而拿不到悬浮窗地板（地板在硬锁分支里
+     * 会被 [reconcile] / Activity 的 onResume 主动撤掉），最终表现为
+     * 「家长锁屏平板的确熄屏了，孩子按电源键亮屏一滑就进桌面，还能操作应用」。
+     *
+     * 因此：**没有安全锁的设备一律视同无硬锁**，走悬浮窗地板主干。
      */
-    private fun hardLockAvailable(): Boolean = admin.can(Capability.LOCK_NOW)
+    private fun hardLockAvailable(): Boolean =
+        admin.can(Capability.LOCK_NOW) && keyguardBridge.isKeyguardSecure()
+
+    /** 屏幕当前是否点亮（息屏时不铺悬浮地板：它会带 FLAG_KEEP_SCREEN_ON，反而把屏幕唤醒） */
+    private fun isScreenOn(): Boolean =
+        (context.getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive == true
+
+    /**
+     * 锁定态下保证「屏幕上一定有一层」—— 锁定地板的唯一收口。
+     *
+     * ## 为什么需要它（本次缺陷的直接成因）
+     * 过去地板只在"非硬锁分支"里补铺，且 Activity 一到前台就被撤掉；硬锁分支里
+     * [reenforce] 只重拉 Activity。于是只要 Activity 被上滑带走，屏幕上就是光秃秃的桌面，
+     * 没有任何一层兜住 —— 尤其在**无障碍服务未授予**的设备上（看门狗不存在），
+     * 逃逸后 15s 内无人补救，孩子可以从容点开任意应用。
+     *
+     * ## 规则（与 Activity 互补，不是互斥）
+     * - Activity 已在前台 → 撤掉地板（两层叠着会吃掉触摸与输入焦点，弹不出键盘）；
+     * - Activity 不在前台且屏幕亮着 → 地板**必须**在位；
+     * - 息屏 → 不动。此时孩子什么都看不到，且地板带 FLAG_KEEP_SCREEN_ON 会把屏幕点亮，
+     *   破坏「锁屏并熄屏」这个用户认可的行为；亮屏时 Activity 会自行 onResume 回来。
+     */
+    private fun ensureCoverage(detail: String) {
+        // 用 [LockScreenActivity.resumedNow] 而不是 [LockScreenActivity.visible]：
+        // 后者到 onStop 才落，孩子上滑逃逸的判定窗口正好落在那几百毫秒里，
+        // 用它会误判"锁定页还在前面"，从而撤掉本该铺上的地板。
+        if (LockScreenActivity.resumedNow) {
+            overlay.dismiss()
+            return
+        }
+        if (!isScreenOn()) return
+        if (overlay.canDrawOverlay()) {
+            if (!overlay.isShowing()) {
+                Logger.i(TAG) { "lock screen floor re-armed (activity not in foreground)" }
+            }
+            overlay.show(detail)
+        } else {
+            reportUnprotected(detail)
+        }
+    }
 
     fun show(detail: String) {
         desiredDetail = detail
+        // 新锁会话使一切"待撤锁"意图失效：设备又被锁上了（可能是家长解锁后策略
+        // 立刻重锁，如时段锁仍生效）。不清掉的话，自愈触发点会在锁定期内
+        // 反复撤我们刚压下的系统锁，把硬锁态撕开一道缝。
+        keyguardBridge.clearUnlockPending()
         if (!hardLockAvailable()) {
             // 非 DO / 非设备管理员设备：无系统级硬锁。
             // 悬浮窗是唯一可靠的"软锁"地板（盖在桌面之上、吃掉触摸，且从后台也能铺设，
@@ -154,6 +209,14 @@ class LockScreenPresenter @Inject constructor(
         startEscalation()
     }
 
+    /**
+     * 收起锁屏呈现（家长解锁 / 自动解锁 / 状态翻转到未锁定）。
+     *
+     * 真正的收尾分流在 [LockScreenActivity.dismiss]：若系统 keyguard 是我们压下去的
+     * （"锁屏并熄屏"的那一侧），必须先撤锁再退出页面，否则孩子端表现为
+     * "家长解锁了却毫无反应"——屏幕照旧熄着、系统锁屏照旧锁着。本方法只负责
+     * 清调度状态与地板/通知，把"撤系统锁"这半边交给页面自己完成。
+     */
     fun dismiss() {
         desiredDetail = null
         escalationJob?.cancel()
@@ -172,7 +235,10 @@ class LockScreenPresenter @Inject constructor(
      * 悬浮层是地板，Activity 一旦到前台就会被 [reconcile] 撤掉。
      */
     private fun attemptOnce(detail: String) {
-        overlay.show(detail)
+        // 经地板收口而不是无条件 addView：已在前台的锁定页之上再铺一层会吃掉触摸与
+        // 输入焦点（表现为"看得见却点不动、弹不出键盘"）；息屏时则不该用带
+        // FLAG_KEEP_SCREEN_ON 的浮层把屏幕点亮。
+        ensureCoverage(detail)
         LockScreenActivity.show(context, detail)
         val posted = notifier.post(detail)
         // 全屏通知不可用（Android 14 起该权限可被撤销）且悬浮层也没铺上：
@@ -220,25 +286,25 @@ class LockScreenPresenter @Inject constructor(
      * 悬浮窗缺失则补铺，仍缺失才上报"锁屏失效"告警。
      */
     fun reenforce() {
-        val detail = desiredDetail ?: return
-        if (!hardLockAvailable()) {
-            if (overlay.canDrawOverlay() && !overlay.isShowing()) {
-                Logger.i(TAG) { "lock screen (overlay-only) re-armed" }
-                overlay.show(detail)
-            } else if (!overlay.canDrawOverlay()) {
-                reportUnprotected(detail)
-            }
-            // 兜底：锁屏 Activity 不在前台（后台被 ROM 隐藏 / 被滑走）时重新顶上来。
-            // 无障碍上下文下可后台启动 Activity，是华为非 DO 设备把锁屏拉回前台的可靠手段。
-            if (!LockScreenActivity.visible) {
-                LockScreenActivity.show(context, detail)
-            }
-            return
-        }
-        if (LockScreenActivity.visible || overlay.isShowing()) return
-        Logger.i(TAG) { "lock screen lost coverage, re-arming escalation" }
+        // 权威状态优先于内存态：进程重启后 desiredDetail 为空，但锁定态已持久化
+        // （LockController 的 REMOTE 态落盘）。若这里按旧写法直接 return，
+        // 重启后到下一次指令到达之间锁定态就"有名无实"——界面上什么都没有。
+        val state = lockController.state.value
+        if (!state.locked) return
+        val detail = desiredDetail ?: state.primaryDetail
+
+        // 地板收口（不分硬锁与否）：Activity 不在前台就必须有一层盖住屏幕。
+        // 这是本次缺陷的正面修复 —— 旧实现只在非硬锁分支补铺，硬锁分支漏了，
+        // 于是"设备管理员已激活但未设系统密码"的伪硬锁设备滑走后无任何兜底。
+        ensureCoverage(detail)
+
+        if (LockScreenActivity.visible) return
+        // Activity 兜底：前台时即刻可见；后台由无障碍看门狗借特权重新顶回前台
+        // （无障碍服务可后台启动 Activity，绕过 ROM 限制）。绝不作为唯一手段。
         LockScreenActivity.show(context, detail)
-        startEscalation()
+        // 升级链只在真硬锁设备上有意义：全屏通知与 lockNow() 能借系统之力封手势；
+        // 非硬锁设备上它们只会被 ROM 静默丢弃并刷日志，不重复自讨没趣。
+        if (hardLockAvailable()) startEscalation()
     }
 
     /**
@@ -261,9 +327,11 @@ class LockScreenPresenter @Inject constructor(
             notifier.cancel()
             Logger.i(TAG) { "lock screen confirmed on foreground" }
         } else {
-            // 升级链走到头仍未拉起 Activity：保留悬浮层作为唯一可见的锁定界面，
-            // 无悬浮窗权限时至少已打过系统级 lockNow()，不会出现"完全没锁"。
+            // 升级链走到头仍未拉起 Activity：悬浮层是唯一可见的锁定界面，必须确保它在位
+            // （旧实现只留一句日志，浮层若已被撤掉就成了"完全没锁"）。
+            // 无悬浮窗权限时至少已打过系统级 lockNow()，并会在此触发失效告警。
             Logger.w(TAG) { "lock screen degraded to overlay-only coverage" }
+            ensureCoverage(detail)
         }
     }
 
@@ -273,15 +341,19 @@ class LockScreenPresenter @Inject constructor(
      * 只在升级链前几轮全部失败后才动用：`lockNow()` 会立刻灭屏并唤起系统锁屏，
      * 能借 keyguard 禁掉手势导航与最近任务，但代价是孩子会看到一次灭屏。
      * 因此它是"最后一道保险"，不是首选路径。
+     *
+     * 压锁必须经 [SystemKeyguardBridge] 记账：解锁时据此判断该不该由我们撤 keyguard，
+     * 否则家长端解锁只清了 App 内状态，系统锁与熄屏依旧——"解锁了却毫无反应"。
      */
     private fun pushSystemLock() {
         if (!admin.can(Capability.LOCK_NOW)) {
             Logger.w(TAG) { "no device admin: system-level lock unavailable" }
             return
         }
-        systemLockPushed = true
-        admin.lockNow()
-        Logger.i(TAG) { "system lockNow() pushed as last resort" }
+        if (keyguardBridge.pushSystemLock()) {
+            systemLockPushed = true
+            Logger.i(TAG) { "system lockNow() pushed as last resort" }
+        }
     }
 
     /**
@@ -306,8 +378,10 @@ class LockScreenPresenter @Inject constructor(
                     type = RiskType.LOCK_SCREEN_UNPROTECTED,
                     level = RiskLevel.HIGH,
                     detail = mapOf(
-                        "note" to "设备无系统锁（非 DO / 设备管理员未激活）且无悬浮窗权限，" +
-                            "锁屏指令无法生效，请引导孩子在装机流程中授予悬浮窗权限或激活设备管理员",
+                        "note" to "锁屏覆盖层铺不开：本设备缺少悬浮窗权限（SYSTEM_ALERT_WINDOW）。" +
+                            "请在装机流程中授予它；若设备尚未设置系统锁屏密码（PIN/图案/密码），" +
+                            "请一并设置 —— 没有安全锁时 lockNow() 只能压出一滑就开的滑动锁，" +
+                            "锁屏形同虚设（这是「锁屏后孩子上滑就能进桌面」最常见的成因）",
                         "lockDetail" to lockDetail
                     ),
                     deviceId = authRepository.getDeviceId()

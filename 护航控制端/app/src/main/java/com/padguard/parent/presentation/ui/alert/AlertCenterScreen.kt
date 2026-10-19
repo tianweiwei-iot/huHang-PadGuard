@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -108,6 +109,10 @@ fun AlertCenterScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        // App 是 enableEdgeToEdge 的：顶栏必须避让系统状态栏，
+                        // 否则返回键/角标顶进时钟与电量图标里（自绘 Row 不像
+                        // Material3 TopAppBar 那样自带 statusBars insets）
+                        .statusBarsPadding()
                         .background(Color.White)
                         .padding(horizontal = 8.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically

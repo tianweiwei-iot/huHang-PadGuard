@@ -95,11 +95,16 @@ class ControlPolicyViewModel @Inject constructor(
                 _uiState.value = _uiState.value.copy(installedApps = list)
             }
             policyRepository.getWebPolicy(deviceId).onSuccess { wp ->
-                _uiState.value = _uiState.value.copy(
-                    webPolicy = wp,
-                    eyeProtectionEnabled = false,
-                    eyeProtectionLevel = 2
-                )
+                // 只回写上网策略本身。
+                //
+                // 这里曾经同时在 copy 里写死 eyeProtectionEnabled = false / eyeProtectionLevel = 2：
+                // 护眼状态属于独立的 device_settings，不在 getWebPolicy 的返回里，
+                // 于是每次进页面都会把家长已经开启的护眼"显示"回退成关闭，
+                // 家长再点一次保存又把这个 false 写回服务端 —— 开关反复失效且无从察觉。
+                //
+                // 根治要服务端补出 GET /policies/{deviceId}/eye-protection；
+                // 在那之前先停止用常量覆盖，保留本会话内 UI 侧的真实操作结果。
+                _uiState.value = _uiState.value.copy(webPolicy = wp)
             }
             // 家长端「时间管控」页设置（平板使用时间，权威来源：weekday/weekend 额度）
             val tablet = policyRepository.getTabletUsageSettings(deviceId).getOrNull()
@@ -291,19 +296,43 @@ class ControlPolicyViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 定时锁机（夜间锁机）。
+     *
+     * ## 历史缺陷
+     * 此前这里只改内存 `_uiState` 并弹出"已开启定时锁机"，**没有任何持久化动作**。
+     * 后果是三重的：服务端策略包里始终没有这两个字段、孩子端永远不执行、
+     * 家长离开页面再回来开关就复位了 —— 一条提示成功的 toast 换来一个完全不生效的功能。
+     *
+     * ## 现在的语义
+     * 先写服务端，写成功才更新 UI。写失败时保留原状态并如实报错，
+     * 绝不先给用户成功的假象再悄悄回退。
+     */
     fun setSmartShutdown(enabled: Boolean, start: String?, end: String?) {
         viewModelScope.launch {
-            val current = _uiState.value.webPolicy ?: WebPolicy(deviceId = deviceId)
-            _uiState.value = _uiState.value.copy(
-                webPolicy = current.copy(
-                    smartShutdownEnabled = enabled,
-                    smartShutdownStartTime = start,
-                    smartShutdownEndTime = end
-                ),
-                toast = if (enabled) {
-                    "已开启定时锁机（${start?.takeIf { it.isNotBlank() }?.let { TimeFormat.formatClock(it) } ?: "--:--"} ~ ${end?.takeIf { it.isNotBlank() }?.let { TimeFormat.formatClock(it) } ?: "--:--"}）"
-                } else "已关闭定时锁机"
-            )
+            policyRepository.setSmartShutdown(deviceId, enabled, start, end)
+                .onSuccess {
+                    val current = _uiState.value.webPolicy ?: WebPolicy(deviceId = deviceId)
+                    val normalizedStart = start?.takeIf { it.isNotBlank() && enabled }
+                    val normalizedEnd = end?.takeIf { it.isNotBlank() && enabled }
+                    _uiState.value = _uiState.value.copy(
+                        webPolicy = current.copy(
+                            smartShutdownEnabled = enabled,
+                            smartShutdownStartTime = normalizedStart,
+                            smartShutdownEndTime = normalizedEnd
+                        ),
+                        toast = if (enabled) {
+                            val s = normalizedStart?.let { TimeFormat.formatClock(it) } ?: "--:--"
+                            val e = normalizedEnd?.let { TimeFormat.formatClock(it) } ?: "--:--"
+                            "已开启定时锁机（$s ~ $e）"
+                        } else "已关闭定时锁机"
+                    )
+                }
+                .onFailure { t ->
+                    _uiState.value = _uiState.value.copy(
+                        toast = "定时锁机保存失败：${t.message ?: "请重试"}"
+                    )
+                }
         }
     }
 

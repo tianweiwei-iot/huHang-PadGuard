@@ -115,6 +115,18 @@ interface PolicyApi {
         @Body request: BrowserDisableRequest
     ): Response<ApiResponse<Unit>>
 
+    /**
+     * 定时锁机（夜间锁机）。
+     *
+     * 服务端此前只有「读」没有「写」：家长端开关 beat 到 `WebPolicyDto.smartShutdownEnabled`
+     * 却无从回写，UI 只得改内存 State —— 表现为"提示已开启"、刷新后丢失、孩子端永不受影响。
+     */
+    @PUT("policies/{deviceId}/web/smart-shutdown")
+    suspend fun setSmartShutdown(
+        @Path("deviceId") deviceId: String,
+        @Body request: SmartShutdownRequest
+    ): Response<ApiResponse<Unit>>
+
     // === 远程指令 ===
     //
     // 这几个指令接口**一律用 ResponseBody 不解析响应体**：

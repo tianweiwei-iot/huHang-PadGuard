@@ -5,6 +5,8 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
@@ -52,12 +54,23 @@ import kotlinx.coroutines.launch
 @Singleton
 class LockScreenOverlay @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val unlockRequestRepository: UnlockRequestRepository
+    private val unlockRequestRepository: UnlockRequestRepository,
+    private val keyguardBridge: SystemKeyguardBridge
 ) {
 
     private val wm: WindowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val handler = Handler(Looper.getMainLooper())
     private var root: View? = null
+
+    /**
+     * 「拉起申请页被 ROM 静默丢弃」的兜底提交。
+     *
+     * 后台启动 Activity 在部分 ROM 上不抛异常、直接被吃掉，孩子点了「申请解锁」
+     * 却毫无反应。这里给 1.5s 宽限：锁屏页仍未到前台就退回悬浮窗内直接提交，
+     * 与历史行为保持一致（理由可为空）。
+     */
+    private var pendingFallbackSubmit: Runnable? = null
 
     /** 是否具备悬浮窗权限。缺失时必须由调用方明确降级/上报，不能静默当作已锁。 */
     fun canDrawOverlay(): Boolean =
@@ -116,6 +129,8 @@ class LockScreenOverlay @Inject constructor(
     fun dismiss() {
         val view = root ?: return
         root = null
+        pendingFallbackSubmit?.let { handler.removeCallbacks(it) }
+        pendingFallbackSubmit = null
         runCatching { wm.removeView(view) }
             .onFailure { Logger.w(TAG) { "failed to remove lock overlay: ${it.message}" } }
     }
@@ -183,10 +198,50 @@ class LockScreenOverlay @Inject constructor(
             text = "申请解锁"
             setPadding(0, (16 * density).toInt(), 0, 0)
             setOnClickListener {
-                submitUnlock(input.text?.toString().orEmpty().trim())
+                // 系统锁屏（keyguard）锁定态下，悬浮窗输入框同样弹不出输入法——
+                // 平台限制：IME 窗口无法显示在 keyguard 之上，只有 Activity 能经
+                // requestDismissKeyguard 撤锁后正常弹键盘。此时拉起锁屏页走正规申请流程
+                // （LockScreenActivity.MODE_REQUEST：撤锁 → 对话框+键盘 → 提交后补压系统锁）。
+                // 非硬锁设备（无 keyguard）保持旧行为：悬浮窗内直接提交，不跳页面。
+                if (!keyguardBridge.isKeyguardLocked()) {
+                    submitUnlock(input.text?.toString().orEmpty().trim())
+                    return@setOnClickListener
+                }
+                val launched = runCatching {
+                    context.startActivity(
+                        LockScreenActivity.intent(
+                            context,
+                            detail,
+                            LockScreenActivity.MODE_REQUEST
+                        )
+                    )
+                }.isSuccess
+                if (launched) {
+                    scheduleFallbackSubmit(input)
+                } else {
+                    // 直接拉起即失败（罕见）：立刻退回悬浮窗内提交，不让孩子按了没反应
+                    submitUnlock(input.text?.toString().orEmpty().trim())
+                }
             }
         })
         return container
+    }
+
+    /**
+     * 兜底提交：锁屏页 1.5s 内未到前台（ROM 静默丢弃后台启动），
+     * 退回悬浮窗内直接提交。锁屏页到位后本兜底由 [dismiss] 撤掉。
+     */
+    private fun scheduleFallbackSubmit(input: EditText) {
+        pendingFallbackSubmit?.let { handler.removeCallbacks(it) }
+        val fallback = Runnable {
+            pendingFallbackSubmit = null
+            if (!LockScreenActivity.visible) {
+                Logger.w(TAG) { "request activity never came up, falling back to in-overlay submit" }
+                submitUnlock(input.text?.toString().orEmpty().trim())
+            }
+        }
+        pendingFallbackSubmit = fallback
+        handler.postDelayed(fallback, REQUEST_LAUNCH_FALLBACK_MS)
     }
 
     /**
@@ -238,6 +293,12 @@ class LockScreenOverlay @Inject constructor(
         const val ID_INPUT = 0x00D0_0002
         /** 与 LockScreenActivity 的默认申请时长保持一致 */
         const val DEFAULT_REQUEST_MINUTES = 30
+
+        /**
+         * 拉起申请页后的兜底等待：约 1.5s。
+         * 覆盖"ROM 静默丢弃后台启动"——锁屏页到前台会撤掉本兜底（见 [dismiss]）。
+         */
+        const val REQUEST_LAUNCH_FALLBACK_MS = 1500L
 
         /** 锁定层吞掉的按键 */
         private val BLOCKED_KEYS = setOf(

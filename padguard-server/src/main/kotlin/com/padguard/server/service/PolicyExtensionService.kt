@@ -284,6 +284,43 @@ class PolicyExtensionService(
         rebuildPolicy(deviceId)
     }
 
+    /**
+     * 定时锁机（夜间锁机）。
+     *
+     * 存储与下发此前都已就绪（见 [com.padguard.server.domain.ExtraModels.DeviceSetting] 的三个字段
+     * 与下方 [getWebPolicy] 的回读），但缺写入与判定两端，导致家长端「已开启定时锁机」
+     * 是一条空反馈。这个方法补齐写入侧。
+     *
+     * 时间格式在入口做校验而不是存进去再说：非法值会被孩子端解析失败并静默降级为"永不锁机"，
+     * 届时家长端显示开启、实际完全不管用 —— 与本服务其余策略项一致的失效模式，必须前置拦掉。
+     */
+    fun updateSmartShutdown(userId: String, deviceId: String, req: SmartShutdownRequest) {
+        requireOwned(userId, deviceId)
+        if (!req.enabled) {
+            val s = deviceSettingOf(deviceId)
+            s.smartShutdownEnabled = false
+            s.smartShutdownStart = null
+            s.smartShutdownEnd = null
+            deviceSettingRepository.save(s)
+            auditService.record(userId, deviceId, AuditAction.POLICY_WEB_UPDATE,
+                targetType = "device", targetId = deviceId, detail = "smartShutdown=off")
+            rebuildPolicy(deviceId)
+            return
+        }
+        val start = req.startTime?.takeIf { HHMM.matches(it) }
+            ?: throw IllegalArgumentException("smartShutdown.startTime 必须为 HH:mm 格式")
+        val end = req.endTime?.takeIf { HHMM.matches(it) }
+            ?: throw IllegalArgumentException("smartShutdown.endTime 必须为 HH:mm 格式")
+        val s = deviceSettingOf(deviceId)
+        s.smartShutdownEnabled = true
+        s.smartShutdownStart = start
+        s.smartShutdownEnd = end
+        deviceSettingRepository.save(s)
+        auditService.record(userId, deviceId, AuditAction.POLICY_WEB_UPDATE,
+            targetType = "device", targetId = deviceId, detail = "smartShutdown=$start-$end")
+        rebuildPolicy(deviceId)
+    }
+
     // ---------- 平板使用时间设置（「时间管控」页） ----------
     fun getTabletUsageSettings(userId: String, deviceId: String): TabletUsageSettingsDto {
         requireOwned(userId, deviceId)
@@ -545,6 +582,12 @@ class PolicyExtensionService(
             "web" to mapOf(
                 "mode" to "BLACKLIST", "blacklist" to webUrls,
                 "browserDisabled" to settings.browserDisabled,
+                // 定时锁机：此前已经落库也在 getWebPolicy 里回读给家长端，
+                // 唯独组装下发包时漏了这三个字段 —— 孩子端 WebPolicy 因为拿不到值永远不执行锁机。
+                // 家长端的"已开启"因此是一条纯装饰反馈。
+                "smartShutdownEnabled" to settings.smartShutdownEnabled,
+                "smartShutdownStartTime" to settings.smartShutdownStart,
+                "smartShutdownEndTime" to settings.smartShutdownEnd,
                 "safeSearch" to (settings.webSafeSearch ?: false),
                 "blockedCategories" to blockedCategories
             ),
@@ -656,5 +699,8 @@ class PolicyExtensionService(
         /** 护眼滤镜强度的有效区间：孩子端按此映射遮罩透明度，两端必须同源。 */
         const val MIN_EYE_LEVEL = 1
         const val MAX_EYE_LEVEL = 5
+
+        /** 定时锁机时间格式校验。非法值会造成"策略存了但不生效"，必须在入口拦掉。 */
+        val HHMM: Regex = Regex("^([01]\\d|2[0-3]):[0-5]\\d$")
     }
 }

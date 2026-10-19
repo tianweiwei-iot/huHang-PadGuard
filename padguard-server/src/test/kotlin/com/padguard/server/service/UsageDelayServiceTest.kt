@@ -9,6 +9,7 @@ import com.padguard.server.dto.UsageDelayRejectRequest
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UsageDelayRepository
 import com.padguard.server.repository.UsageSessionRepository
+import com.padguard.server.ws.WebSocketPushService
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.DisplayName
@@ -215,7 +216,7 @@ class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
     // DeviceRepository 的派生查询（findByUserId 等）测试用不到，保持默认未实现即可
     override fun findByUserId(userId: String): List<Device> = table.values.filter { it.userId == userId }
     override fun countByUserId(userId: String): Long = findByUserId(userId).size.toLong()
-    override fun countByOnlineStatus(onlineStatus: String): Long = table.values.count { it.onlineStatus == onlineStatus }
+    override fun countByOnlineStatus(onlineStatus: String): Long = table.values.count { it.onlineStatus == onlineStatus }.toLong()
     override fun findByDeviceSn(deviceSn: String): List<Device> = emptyList()
     override fun findByLastActiveAtGreaterThan(since: Long): List<Device> = emptyList()
 }
@@ -232,10 +233,22 @@ class FakeUsageDelayRepo : FakeJpaRepository<UsageDelayTicket, String>(), UsageD
     override fun sumEffectiveMinutes(deviceId: String): Int =
         table.values.filter { it.deviceId == deviceId && it.status in listOf("PENDING", "APPROVED") }
             .sumOf { it.minutes }
+
+    override fun deleteByDeviceId(deviceId: String): Int {
+        val before = table.size
+        table.values.removeIf { it.deviceId == deviceId }
+        return before - table.size
+    }
 }
 
 class FakeUsageSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionRepository {
     override val table = LinkedHashMap<String, UsageSession>()
     override fun idOf(entity: UsageSession): String = entity.deviceId
     override fun findByDeviceId(deviceId: String): UsageSession? = table[deviceId]
+
+    override fun deleteByDeviceId(deviceId: String): Int {
+        val before = table.size
+        table.remove(deviceId)
+        return before - table.size
+    }
 }

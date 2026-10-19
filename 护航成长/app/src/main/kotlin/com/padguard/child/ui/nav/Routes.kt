@@ -28,6 +28,9 @@ sealed class Route(val path: String) {
         fun build(kind: String) = "profile/permission/$kind"
     }
 
+    /** 本机应用台账（只读）：展示已安装应用及其受限/限额状态 */
+    data object AppInventory : Route("profile/apps")
+
     /** 临时解锁申请。从首页进入时不带包名（申请整机时间） */
     data object UnlockRequest : Route("unlock/request")
 }

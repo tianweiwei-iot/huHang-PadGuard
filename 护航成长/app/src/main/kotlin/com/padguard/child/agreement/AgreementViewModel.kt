@@ -24,7 +24,8 @@ import javax.inject.Inject
 @HiltViewModel
 class AgreementViewModel @Inject constructor(
     private val permissionGranter: PermissionGranter,
-    private val authRepository: AuthRepository
+    private val authRepository: AuthRepository,
+    private val sessionState: AgreementSessionState
 ) : ViewModel() {
 
     private val _granting = MutableStateFlow(false)
@@ -43,11 +44,24 @@ class AgreementViewModel @Inject constructor(
             } finally {
                 _granting.value = false
             }
+            // 同意已持久化，会话级拒绝标记随之失效（防御性清零，避免脏状态残留）
+            sessionState.clear()
             // 无需手动关闭：isAgreementAccepted 翻转会驱动 EntryRouter 重组收起弹窗
         }
     }
 
+    /**
+     * 暂不同意：进入受限预览模式。
+     *
+     * 历史上这里是空方法体，配合 [AgreementDialog] 的 `onDismissRequest = { }`（点外部不关闭）
+     * 与入口只看持久化同意位的挂载条件，三者叠加构成一个死局：
+     * 点了「暂不同意」界面毫无反应、返回键也关不掉，设备被永久卡在协议弹窗上。
+     *
+     * 修复的落点是给这条分支一个真实出口 —— 翻转会话级标记让弹窗收起，
+     * 同时**刻意不写任何持久化状态**：不授予高敏权限这一事实不需要记录，
+     * 持久化的只会是"同意"。冷启动后 [AgreementSessionState] 复位，重新征求同意。
+     */
     fun decline() {
-        // 受限预览模式：不授予任何高敏权限，等下次冷启动再提示
+        sessionState.markDeclined()
     }
 }

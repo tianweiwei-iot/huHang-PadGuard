@@ -165,4 +165,10 @@ class FakeSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionR
     override val table = LinkedHashMap<String, UsageSession>()
     override fun idOf(entity: UsageSession): String = entity.deviceId
     override fun findByDeviceId(deviceId: String): UsageSession? = table[deviceId]
+
+    override fun deleteByDeviceId(deviceId: String): Int {
+        val before = table.size
+        table.remove(deviceId)
+        return before - table.size
+    }
 }

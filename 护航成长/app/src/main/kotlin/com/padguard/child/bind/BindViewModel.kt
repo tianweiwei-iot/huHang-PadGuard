@@ -15,12 +15,17 @@ import com.padguard.core.transport.http.BindByAccountRequest
 import com.padguard.core.transport.http.BindRequest
 import com.padguard.core.transport.http.PadGuardApi
 import com.padguard.child.service.GuardService
+import com.padguard.child.capture.CaptureConsent
+import com.padguard.core.common.Logger
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+private const val TAG = "BindViewModel"
 
 /**
  * 绑定流程 ViewModel。
@@ -146,12 +151,19 @@ class BindViewModel @Inject constructor(
             is ApiResult.Success -> {
                 runCatching {
                     authRepository.saveBindResult(result.value, deviceSn = req.deviceSn)
+                    // 绑定镜像：暖令牌的前置门到此打开——设备有了家长，才允许向孩子补
+                    // "是否允许录制屏幕"这类高侵扰确认（装机阶段一次都不弹）。
+                    CaptureConsent.markDeviceBound(app, true)
                     // 绑定成功后记录账号密码：便于掉线/重置后直接恢复，也供「我的」页查看
                     authRepository.saveChildCredentials(account, pwd)
                     // 绑定成功 ≠ 可控：守护服务承担心跳/策略同步/MQTT 上行，
                     // 而它早期只在开机或设备管理员启用时启动，绑定完成后从未拉起，
                     // 导致设备一直 OFFLINE、家长端看得到设备却管不了。这里立即拉起。
                     GuardService.start(app, "bindSuccess-account")
+                    // 启动只是"投递意图"，服务可能没真的起来（实例化崩溃 / FGS 被系统
+                    // 拒绝 / ROM 静默丢弃）——2026-10-17 事故正是"绑定成功但守护进程
+                    // 每次启动都崩，设备永远上不了线"。必须验证 + 前台补拉。
+                    ensureGuardAlive()
                 }.getOrElse { e ->
                     _state.value = _state.value.copy(
                         step = BindStep.Failed,
@@ -180,8 +192,11 @@ class BindViewModel @Inject constructor(
             is ApiResult.Success -> {
                 val saved = runCatching {
                     authRepository.saveBindResult(result.value, deviceSn = req.deviceSn)
+                    // 同账号密码方式：绑定镜像在此写入，暖令牌前置门打开。
+                    CaptureConsent.markDeviceBound(app, true)
                     // 同上：绑定码方式同样必须在成功后立刻拉起守护服务，否则设备永远离线。
                     GuardService.start(app, "bindSuccess-code")
+                    ensureGuardAlive()
                 }.getOrElse { e ->
                     _state.value = _state.value.copy(
                         step = BindStep.Failed,
@@ -207,6 +222,33 @@ class BindViewModel @Inject constructor(
         "无法连接服务器：${transportSettings.baseUrl.value}\n" +
             "原因：$detail\n" +
             "请到「高级设置」确认地址为家长电脑的 IP 与端口（默认 8090）。"
+
+    /**
+     * 绑定后确认守护进程真的在跑，没起来就前台补拉。
+     *
+     * `GuardService.start()` 只是投递启动意图：服务实例化崩溃、FGS 启动被系统拒绝
+     * （Android 12+ 后台限制）、ROM 静默丢弃，都会让它静默无效 —— 而绑定接口已经
+     * 返回成功，家长端看得到设备，孩子端却"上不了线"。
+     *
+     * 策略：此刻绑定页仍在前台（补拉不会被后台启动限制拦截），至多等 3 轮；
+     * 仍不起来也不阻塞绑定成功流程（设备确实已绑定，卡住用户才是错误），
+     * 剩余交给看门狗（5 分钟周期）与主页入口兜底，并留下可检索的告警日志。
+     */
+    private suspend fun ensureGuardAlive() {
+        repeat(3) { attempt ->
+            if (GuardService.isRunning) return
+            if (attempt > 0) {
+                // 首轮刚投递过启动意图，直接查；后续轮次先补拉一次再查
+                runCatching { GuardService.start(app, "bindSuccess-retry$attempt") }
+            }
+            delay(if (attempt == 0) 700 else 800)
+        }
+        if (GuardService.isRunning) return
+        Logger.w(TAG) {
+            "guard service not running after bind (started but dead); " +
+                "device will stay offline until watchdog/main-entry retry"
+        }
+    }
 
     /**
      * 组装绑定请求体（契约 §5.1）。

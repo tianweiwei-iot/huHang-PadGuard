@@ -18,8 +18,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.child.agreement.AgreementDialogHost
+import com.padguard.child.agreement.AgreementSessionState
 import com.padguard.child.bind.BindActivity
 import com.padguard.child.consent.OneTimeConsentScreen
+import com.padguard.child.hidden.AppHider
 import com.padguard.child.login.ChildLoginScreen
 import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.service.GuardService
@@ -29,7 +31,6 @@ import com.padguard.core.common.Logger
 import com.padguard.core.data.model.policy.ControlMode
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.engine.admin.DeviceAdminBridge
-import com.padguard.child.hidden.AppHider
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
@@ -48,6 +49,9 @@ class MainActivity : ComponentActivity() {
     lateinit var permissionGranter: PermissionGranter
 
     @Inject
+    lateinit var agreementSessionState: AgreementSessionState
+
+    @Inject
     lateinit var appHider: AppHider
 
     /** 家长经悬浮卡密码验证后启动本界面时携带，标记这是一个"家长揭示会话"而非普通进入。 */
@@ -63,6 +67,7 @@ class MainActivity : ComponentActivity() {
                     authRepository = authRepository,
                     admin = admin,
                     permissionGranter = permissionGranter,
+                    agreementSessionState = agreementSessionState,
                     isRevealSession = isRevealSession
                 )
             }
@@ -123,6 +128,7 @@ private fun EntryRouter(
     authRepository: AuthRepository,
     admin: DeviceAdminBridge,
     permissionGranter: PermissionGranter,
+    agreementSessionState: AgreementSessionState,
     isRevealSession: Boolean
 ) {
     val consentDone by authRepository.isConsentDone.collectAsState(initial = null)
@@ -133,12 +139,6 @@ private fun EntryRouter(
     // 家长是否已明确跳过设备管理员引导：为 true 时不再因「DA 未激活」强制弹回授权页
     val daPromptAck by authRepository.isDeviceAdminPromptAck.collectAsState(initial = false)
     val context = LocalContext.current
-    // 前台服务把授权页顶回前台时携带的「续跑」标记：实例被回收重建后仍需自动续跑授权链，
-    // 否则会卡在初始态（表现为"点了完成没反应"）。
-    val resumeConsent =
-        (context as? MainActivity)?.intent?.getBooleanExtra(
-            com.padguard.child.consent.ConsentReturnService.EXTRA_RESUME_CONSENT, false
-        ) ?: false
 
     when {
         // 任一流尚未就绪前先显示启动页，避免裸奔
@@ -153,7 +153,7 @@ private fun EntryRouter(
         //    autoStart 仅在「已同意过协议但 DA 缺失」的补授权场景置 true，跳过「同意并授权」
         //    按钮直接拉起 DA 激活页；首次装机(consentDone==false)仍需家长主动点一次。
         consentDone == false || (!admin.isAdminActive() && !daPromptAck) ->
-            OneTimeConsentScreen(autoStart = consentDone == true || resumeConsent)
+            OneTimeConsentScreen(autoStart = consentDone == true)
 
         // ③ 已登录但未绑定设备：跳绑定流程（扫码 / 验证码 / NFC 绑定家长）
         //
@@ -202,7 +202,13 @@ private fun EntryRouter(
                 }
 
                 // 仅在协议正文升版时征求重新同意；正常装机已在第 ② 步同意过，不会弹。
-                if (agreed != true) AgreementDialogHost()
+                //
+                // declined 是「本次运行期已拒绝」的会话级标记：家长点了「暂不同意」就收起弹窗、
+                // 进入受限预览模式（不授予高敏权限），但**不落库**，冷启动后重新征求。
+                // 少了这一个条件，弹窗在 decline 之后仍然满足挂载判定，
+                // 而弹窗本身又不可点外部关闭 —— 设备会被永久卡死在协议页上。
+                val declined by agreementSessionState.declined.collectAsStateWithLifecycle()
+                if (agreed != true && !declined) AgreementDialogHost()
             }
         }
     }

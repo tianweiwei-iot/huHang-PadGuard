@@ -11,7 +11,8 @@
     set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
   };
 
-  const state = { admin: null };
+  // search：顶栏全局搜索的关键字，由目标列表页 mount 时消费后清空，避免跨页残留
+  const state = { admin: null, search: "" };
   PG.state = state;
 
   // 主题
@@ -43,8 +44,14 @@
       mock ? "演示数据已下线，开关仅用于调试，界面将显示为空" : "将请求 " + PG.api.config.baseUrl);
   };
 
-  // 全局搜索 → 家长账号列表
-  $("global-search").addEventListener("keydown", (e) => { if (e.key === "Enter") { PG.router.go("parents"); } });
+  // 全局搜索 → 带关键字跳转到对应列表页（原实现丢弃了用户输入，是伪搜索）
+  $("global-search").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const kw = $("global-search").value.trim();
+    // 关键字先落到全局状态，由目标页 mount 时回填到自己的搜索框，避免值在跳转中丢失
+    PG.state.search = kw;
+    PG.router.go("parents");
+  });
 
   // 通知铃 → 审计告警
   $("bell-btn").onclick = () => PG.router.go("audit");
@@ -70,19 +77,40 @@
     } finally { btn.disabled = false; btn.textContent = "登 录"; }
   };
 
-  function enterApp() {
+  async function enterApp() {
     $("login-screen").classList.add("hidden");
     $("app-shell").classList.remove("hidden");
     const a = state.admin;
     $("user-name").textContent = a.name;
     $("user-role").textContent = a.roleName;
     $("user-avatar").textContent = (a.name || "A").charAt(0);
-    const alerts = (PG.Mock && Array.isArray(PG.Mock.alerts)) ? PG.Mock.alerts.filter(x => x.status !== "closed").length : 0;
-    $("bell-count").textContent = alerts;
-    $("bell-count").style.display = alerts ? "block" : "none";
     PG.router.buildSidebar();
     if (!location.hash) location.hash = "dashboard"; else PG.router.render((location.hash || "#dashboard").slice(1));
+    // 未读告警角标必须走真实接口：
+    // 去 mock 重构时把 PG.Mock.alerts 清空了，但这里漏改，导致角标恒为 0 —— 未读告警永远不提示。
+    await refreshAlertBadge();
   }
+
+  /**
+   * 刷新未读告警角标。
+   *
+   * 取不到数据时不报错也不假装为 0，而是隐藏角标：
+   * 显示一个确定的「0」会让管理员以为当前确实没有告警。
+   */
+  async function refreshAlertBadge() {
+    const el = $("bell-count");
+    if (!el) return;
+    try {
+      const list = await PG.api.alerts();
+      const open = (list || []).filter(x => x.status !== "closed").length;
+      el.textContent = open;
+      el.style.display = open ? "block" : "none";
+    } catch (err) {
+      el.style.display = "none";
+      console.warn("[padguard] load alerts failed:", err.message);
+    }
+  }
+  PG.refreshAlertBadge = refreshAlertBadge;
 
   // 用户菜单（修改密码 / 退出登录）
   (function setupUserMenu() {

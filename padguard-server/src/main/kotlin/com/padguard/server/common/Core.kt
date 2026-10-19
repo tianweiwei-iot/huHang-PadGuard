@@ -1,12 +1,22 @@
 package com.padguard.server.common
 
+import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.springframework.dao.OptimisticLockingFailureException
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
+import org.springframework.http.converter.HttpMessageNotReadableException
+import org.springframework.web.ErrorResponse
+import org.springframework.web.HttpMediaTypeNotAcceptableException
+import org.springframework.web.HttpMediaTypeNotSupportedException
+import org.springframework.web.HttpRequestMethodNotSupportedException
+import org.springframework.web.bind.MethodArgumentNotValidException
+import org.springframework.web.bind.MissingPathVariableException
+import org.springframework.web.bind.MissingServletRequestParameterException
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException
 import org.springframework.web.multipart.MaxUploadSizeExceededException
 import org.springframework.web.servlet.resource.NoResourceFoundException
 
@@ -238,6 +248,87 @@ class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
             .contentType(MediaType.APPLICATION_JSON)
             .body(ApiResponse<Any>(ParentErr.PARAM_ERROR, "not found"))
+    }
+
+    /**
+     * Spring MVC 内建的「调用协议错误」：405 方法不对 / 415 媒体类型 / 406 / 400 参数或报文不可读。
+     *
+     * 这些异常自带正确的 HTTP 语义（都实现 [ErrorResponse]），**是调用方的问题，不是服务端的故障**。
+     * 缺了这个分支，它们会全部落到 [handleOther] 变成 500，带来两个实打实的后果：
+     *
+     * 1. **日志被假故障淹没** —— 健康检查脚本 / 前端用 GET 探测一个只接受 PUT 的接口，
+     *    就会刷一条 `ERROR unhandled exception`。上线后这类噪音会让真正的服务器故障看不见，
+     *    这是排障时最贵的那种损失：告警还在响，但没人信它了。
+     * 2. **客户端行为被误导** —— 500 的含义是"服务端出错，可以重试"。而 405/400 重试一万次也是一样的结果。
+     *    客户端据此退避重打，只会把错误放大，且掩盖"其实是自己调错了"这一事实。
+     *
+     * 这里保留异常自带的准确状态码，日志降到 WARN（够用且不污染 ERROR），
+     * 并把技术细节换成中文可执行提示 —— 终端用户看到的是"该接口只接受 PUT"，
+     * 而不是一句没头没尾的 "Request method 'GET' is not supported"。
+     */
+    @ExceptionHandler(
+        HttpRequestMethodNotSupportedException::class,
+        HttpMediaTypeNotSupportedException::class,
+        HttpMediaTypeNotAcceptableException::class,
+        HttpMessageNotReadableException::class,
+        MethodArgumentNotValidException::class,
+        MissingServletRequestParameterException::class,
+        MissingPathVariableException::class,
+        MethodArgumentTypeMismatchException::class
+    )
+    fun handleProtocolError(
+        e: Exception,
+        request: HttpServletRequest,
+        response: HttpServletResponse
+    ): ResponseEntity<*>? {
+        if (!resetIfPossible(response)) return null
+
+        // 注意：这里的参数刻意声明为 Exception 而不是 ErrorResponse。
+        // 上述异常里 HttpMessageNotReadableException 并未实现 ErrorResponse（Spring 6.1 就此为止），
+        // 若写成 ErrorResponse，它在编译期看不出来，却会在 Spring 分派异常的那一刻
+        // 因参数类型不匹配而失败 —— 即"异常处理器自己抛异常"，比原问题更难排查。
+        val err = e as? ErrorResponse
+        val status = err?.statusCode?.let { HttpStatus.valueOf(it.value()) } ?: HttpStatus.BAD_REQUEST
+        val hint = err?.let { protocolHint(it) } ?: "请求体无法解析：不是合法 JSON，或字段类型与接口定义不匹配"
+
+        // 端区分口径必须与拦截器一致：孩子端统一在 /api/v1/**（见 WebConfig.addInterceptors 的
+        // childAuthInterceptor）。两处各写各的判定迟早会漂移，届时孩子端会收到家长版的响应包装，
+        // 而 {timestamp} 与 {serverTime} 字段不同名，反序列化直接丢内容。
+        val audience = if (request.requestURI.startsWith("/api/")) Audience.CHILD else Audience.PARENT
+
+        log.warn(
+            "request rejected by protocol check: {} {} -> {} ({})",
+            request.method, request.requestURI, status.value(), err?.body?.detail
+        )
+        return if (audience == Audience.CHILD) {
+            ResponseEntity.status(status)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(DeviceApiResponse<Any>(ChildErr.PARAM_ERROR, hint))
+        } else {
+            ResponseEntity.status(status)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(ApiResponse<Any>(ParentErr.PARAM_ERROR, hint))
+        }
+    }
+
+    /** 把框架抛出的英文技术异常，翻译成调用方能直接照做的提示。 */
+    private fun protocolHint(e: ErrorResponse): String = when (e) {
+        is HttpRequestMethodNotSupportedException -> {
+            val allowed = e.supportedHttpMethods?.joinToString(" / ") { it.name() }
+            if (allowed.isNullOrBlank()) "请求方法不支持，请检查接口文档" else "请求方法不支持，该接口只接受 $allowed"
+        }
+        is HttpMediaTypeNotSupportedException -> "请求体格式不支持，请带上请求头 Content-Type: application/json"
+        is HttpMediaTypeNotAcceptableException -> "服务端无法按 Accept 指定的格式返回内容，请检查 Accept 请求头"
+        is HttpMessageNotReadableException -> "请求体无法解析：不是合法 JSON，或字段类型与接口定义不匹配"
+        is MethodArgumentNotValidException -> {
+            val first = e.bindingResult.fieldErrors.firstOrNull()
+            if (first == null) "请求参数校验未通过"
+            else "请求参数校验未通过：${first.field} ${first.defaultMessage.orEmpty()}".trim()
+        }
+        is MissingServletRequestParameterException -> "缺少必需参数：${e.parameterName}"
+        is MissingPathVariableException -> "缺少路径参数：${e.variableName}"
+        is MethodArgumentTypeMismatchException -> "参数 ${e.name} 的值类型不正确"
+        else -> "请求参数有误"
     }
 
     @ExceptionHandler(Exception::class)

@@ -88,10 +88,18 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
         </intent>
+        <!-- 浏览器 scheme 枚举：一个 <intent> 只能放一个 <data android:scheme>，
+             两个 scheme 必须拆成两条 <intent> —— 部分系统版本的安装解析器
+             （installPackageLI）对多 scheme intent 直接报
+             INSTALL_PARSE_FAILED_MANIFEST_MALFORMED，装都装不上。 -->
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="http" />
         </intent>
     </queries>
@@ -304,18 +312,6 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="device management / parental-control guard service" />
         </service>
-
-        <!--
-          授权自动回前台服务（"免手动返回"执行体）。
-          家长在系统设置页拨开关时本 App 处于后台，Android 10+ 禁止后台启动 Activity、
-          全屏通知在解锁态又会降级成需手动点按的悬浮通知；本服务自前台态（授权页仍可见时）
-          拉起，常驻轮询目标权限，检测到授予后直接把授权页顶回前台，实现"拨一个开关自动前进一个"。
-          dataSync 类型已声明对应权限（FOREGROUND_SERVICE_DATA_SYNC）。
-        -->
-        <service
-            android:name=".consent.ConsentReturnService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
 
         <!--
           守护服务看门狗：由系统进程周期回调（应用进程被杀也照样回调），

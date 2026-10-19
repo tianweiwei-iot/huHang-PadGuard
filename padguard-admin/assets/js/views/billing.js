@@ -62,7 +62,10 @@
 
   async function openManual() {
     // 套餐取自服务端真实可购套餐（Mock 已清空，用 PG.Mock.PLANS 会得到空下拉——与 parents.js 同款修复）
-    const list = ((await PG.api.listPlans()) || []).filter(p => p.id !== "free");
+    // 免费档必须剔除：手工把付费家长降到"免费试用"是不可逆的资费损失。
+    // 原来的过滤条件写的是 p.id !== "free"，而实际 key 是 TRIAL（见 BillingModels.kt），
+    // 条件恒不成立＝免费试用一直留在下拉里。这里按 key 而不是按展示名匹配。
+    const list = ((await PG.api.listPlans()) || []).filter(p => !/^(TRIAL|FREE)$/i.test(String(p.id || "")));
     const plans = list.map(p => '<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + (p.priceFen ? '（' + U.money(p.priceFen) + '/期）' : '') + '</option>').join("");
     const m = PG.ui.modal({
       title: "手动开通 / 延长订阅", width: 460,

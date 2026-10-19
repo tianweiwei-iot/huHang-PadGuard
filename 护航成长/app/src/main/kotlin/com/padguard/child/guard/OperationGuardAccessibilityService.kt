@@ -3,11 +3,14 @@ package com.padguard.child.guard
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
+import android.os.Build
 import android.view.accessibility.AccessibilityEvent
+import com.padguard.child.capture.AccessibilityScreenshot
 import com.padguard.child.di.ApplicationScope
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.ui.lock.LockScreenPresenter
 import com.padguard.child.ui.lock.NoPermissionOverlay
+import com.padguard.child.ui.lock.SystemKeyguardBridge
 import com.padguard.core.common.Logger
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
@@ -77,6 +80,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     @Inject
     lateinit var authRepository: AuthRepository
 
+    /** 装机向导豁免：向导带家长去设置页办理授权期间，闸门对设置页暂时放行（见类文档）。 */
+    @Inject
+    lateinit var gateSuspension: GuardGateSuspension
+
     @Inject
     @ApplicationScope
     lateinit var scope: CoroutineScope
@@ -92,6 +99,17 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     /** "您当前无权限操作"瞬时提示覆盖层：受控态连点达阈值时弹出。 */
     @Inject
     lateinit var noPermissionOverlay: NoPermissionOverlay
+
+    /** 系统 keyguard 生命周期：解锁自愈追逐要读"待撤锁"持久标记 */
+    @Inject
+    lateinit var keyguardBridge: SystemKeyguardBridge
+
+    /**
+     * 无障碍截屏通道：远程截屏优先走这里（授权持久、无 MediaProjection 弹窗）。
+     * 实例在本服务连接期间有效，见 [AccessibilityScreenshot]。
+     */
+    @Inject
+    lateinit var accessibilityScreenshot: AccessibilityScreenshot
 
     /** 去抖：同一受保护窗口 1.5s 内只拦截一次，避免 performGlobalAction 导致事件风暴。 */
     private var lastTriggerAt = 0L
@@ -115,7 +133,25 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Logger.i(TAG) { "operation guard accessibility service connected" }
+        // 注册截屏通道：远程截屏优先走 takeScreenshot，避免每次进程重建都向孩子弹
+        // "是否允许录制屏幕"（该通道的授权 = 启用本服务，系统持久记录）。
+        accessibilityScreenshot.attach(this)
+        // 能力缺失的唯一常见原因：用户在服务已启用之后才升级到带 canTakeScreenshot 的版本，
+        // 系统不会重读元数据。此时如实留痕，便于排查"为什么截屏还在走投影弹窗"。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val caps = runCatching { serviceInfo?.capabilities ?: 0 }.getOrDefault(0)
+            if (caps and AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT == 0) {
+                Logger.w(TAG) { "screenshot capability absent: re-toggle this service in system a11y settings to pick up canTakeScreenshot" }
+            }
+        }
         startLockWatchdog()
+    }
+
+    override fun onDestroy() {
+        // 与 attach 严格配对：服务销毁后通道必须立即失效，否则弱引用之外的
+        // 任何残留都会让调用方误判"通道可用"而在投影链路上多等一轮超时。
+        accessibilityScreenshot.detach(this)
+        super.onDestroy()
     }
 
     /**
@@ -127,6 +163,14 @@ class OperationGuardAccessibilityService : AccessibilityService() {
      * 这样即使孩子连续快速上滑回到桌面（手势导航 HOME），锁屏也会在至多
      * [LOCK_WATCH_INTERVAL_MS] 内被拉回，无法"停"在桌面上——从根本上堵死
      * "快速滑动退出锁屏"的绕过。
+     *
+     * ## 解锁方向的自愈（与锁定对称）
+     * 看门狗同时是**解锁追逐**的可靠通道：家长解锁后，若撤锁失败、页面被回收、
+     * 或进程刚重启，"待撤锁"标记（[SystemKeyguardBridge.isUnlockPending]）会留在
+     * 磁盘上。此时 App 侧已解锁、系统 keyguard 却仍被我们压着 —— 孩子端就是
+     * "解锁了却始终黑屏"。无障碍服务可后台启动 Activity（豁免 ROM 限制），
+     * 由它拉一次性过渡页去撤锁，是这条自愈链里最不容易被吞掉的一环。
+     * 过渡页到前台后自行完成撤锁并清标记，本循环随之静默。
      */
     private fun startLockWatchdog() {
         if (watchdogStarted) return
@@ -134,6 +178,19 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         scope.launch {
             while (isActive) {
                 delay(LOCK_WATCH_INTERVAL_MS)
+                // ---- 解锁自愈：App 侧已解锁，但系统锁还没撤成 ----
+                if (!lockController.state.value.locked && keyguardBridge.isUnlockPending()) {
+                    // 过渡页不在前台才追：它活着的时候自己会完成撤锁，避免重复拉起。
+                    // chaseUnlock 内部限频（5s）并自带点屏，不会每 500ms 亮一次屏。
+                    if (!LockScreenActivity.visible) {
+                        Logger.i(TAG) { "lock watchdog: chasing pending system-keyguard unlock" }
+                        // FSI 优先，失败降级直接 startActivity —— 无障碍上下文里
+                        // 这条降级路径同样豁免后台启动限制，是最不易被 ROM 吞掉的一环。
+                        runCatching { LockScreenActivity.chaseUnlock(this@OperationGuardAccessibilityService) }
+                            .onFailure { Logger.w(TAG, it) { "unlock chase via accessibility failed" } }
+                    }
+                    continue
+                }
                 if (!lockController.state.value.locked) continue
                 val fg = lastForegroundPkg
                 if (fg != null && fg.startsWith(OWN_PACKAGE_PREFIX)) continue
@@ -259,6 +316,14 @@ class OperationGuardAccessibilityService : AccessibilityService() {
                 .onFailure { Logger.e(TAG, it) { "failed to launch app access gate (hidden app)" } }
             return
         }
+
+        // 装机向导豁免（务必放在防卸载自检之后、S11 之前）：
+        // 向导正带着家长去设置页办理「安装未知应用」等授权，此刻照常顶回会把设置页
+        // 1 秒内弹回，装机流程卡死（实测日志："guarded foreground: com.android.settings
+        // reason=settings, guard password not set, bouncing back" 每次跳转后必现）。
+        // 仅豁免设置页顶回：上方防卸载（应用详情页）、隐藏应用、下方安装器拦截均不受影响，
+        // 孩子无法借豁免窗口卸载本应用或绕过应用门禁。
+        if (reason == REASON_SETTINGS && gateSuspension.isActive()) return
 
         // S11 拆层：密码未设置时的降级拦截。
         // 判定已在 decide() 里完成（这个界面是否需要保护），此处只决定"没凭据时怎么拦"。
