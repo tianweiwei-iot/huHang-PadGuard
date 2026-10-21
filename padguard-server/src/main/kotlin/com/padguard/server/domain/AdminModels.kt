@@ -26,6 +26,24 @@ class Admin(
     @Column(name = "status", nullable = false) var status: String = "active",
     /** 是否开启 MFA（双因素认证）；预留字段，登录流程后续可强制校验 */
     @Column(name = "mfa_enabled") var mfaEnabled: Boolean = false,
+    /**
+     * 令牌版本号（登出吊销的权威真相源）。
+     *
+     * JWT 一旦签发，在过期前始终有效，服务端无法主动作废 —— 这意味着运营点击"退出登录"
+     * 后，被复制走的令牌在 TTL 内依然能操作后台（改权限、退款、删账号）。
+     *
+     * 本字段是唯一需要的状态：登录时把当前版本号写进令牌的 `ver` 声明，
+     * 每次请求由 [com.padguard.server.security.AdminAuthInterceptor] 比对令牌里的 `ver`
+     * 与库里的当前值，不符即判定为已吊销并拒绝。
+     *
+     * 相比"已吊销 jti 黑名单"方案的取舍：
+     * - 黑名单需要存储每条待过期令牌并逐条查，退出一次就要留一条记录直到 TTL 到期；
+     * - 版本号只需一个整数：登出 / 改密码 / 停用账号时 +1，即可**一次性作废该管理员的全部会话**，
+     *   无需知道对方手里有几张令牌。
+     *
+     * 语义约定：`ver` 缺失（历史令牌）一律按 0 处理，与新建账号的初始值一致，不误杀存量会话。
+     */
+    @Column(name = "token_version", nullable = false) var tokenVersion: Long = 0,
     @Column(name = "last_login_at") var lastLoginAt: Long? = null,
     @Column(name = "created_at") var createdAt: Long = 0
 )

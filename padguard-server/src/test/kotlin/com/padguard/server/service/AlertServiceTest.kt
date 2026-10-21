@@ -233,6 +233,42 @@ class AlertServiceTest {
         assertThrows(BizException::class.java) { svc.acknowledge("u1", "no-such-alert") }
     }
 
+    // ----------------------------- 恢复即关闭闭环 -----------------------------
+
+    @Test
+    fun `resolveActiveByCategory closes only ACTIVE of device and category`() {
+        val a1 = event("dev1", "ACCESSIBILITY_DISABLED", "HIGH")
+        val aGpd = event("dev1", "GUARD_PERMISSION_DROPPED", "HIGH")
+        val a3 = event("dev2", "ACCESSIBILITY_DISABLED", "HIGH")
+        val a4 = event("dev1", "ACCESSIBILITY_DISABLED", "HIGH")
+
+        // 先把 dev1 的 GUARD_PERMISSION_DROPPED 处置掉，验证 resolve 不碰已 CLOSED
+        svc.close("u1", aGpd.id, "家长已处理")
+
+        svc.resolveActiveByCategory("dev1", "ACCESSIBILITY_DISABLED", "已自动恢复")
+
+        // 同设备同类别 ACTIVE 全关，且写 resolvedAt
+        assertEquals("CLOSED", alertRepo.findById(a1.id).get().status)
+        assertEquals("CLOSED", alertRepo.findById(a4.id).get().status)
+        assertNotNull(alertRepo.findById(a1.id).get().resolvedAt)
+        // 另一设备的同类应保留
+        assertEquals("ACTIVE", alertRepo.findById(a3.id).get().status)
+        // 已 CLOSED（不同类别或家长已处置）不受影响
+        assertEquals("CLOSED", alertRepo.findById(aGpd.id).get().status)
+        // 未读：u1 两条 ACCESSIBILITY_DISABLED 已关，u2 的 a3 仍 ACTIVE
+        assertEquals(0L, svc.unreadCount("u1"))
+        assertEquals(1L, svc.unreadCount("u2"))
+    }
+
+    @Test
+    fun `resolveActiveByCategory leaves unrelated category untouched`() {
+        event("dev1", "ACCESSIBILITY_DISABLED", "HIGH")
+        // 以不相关的类别请求关闭，不应误伤真正的告警
+        svc.resolveActiveByCategory("dev1", "ROOT_DETECTED", "自愈")
+        assertEquals(1L, svc.unreadCount("u1"))
+        assertEquals("ACTIVE", alertRepo.findByUserIdAndDeviceId("u1", "dev1", PageRequest.of(0, 20)).first().status)
+    }
+
     // ----------------------------- 未读数 -----------------------------
 
     @Test

@@ -86,30 +86,52 @@ class JwtTokenProvider(
 
     fun parseRefreshToken(token: String): String = parseWithTyp(token, "refresh")
 
-    fun parseAdminToken(token: String): String = parseWithTyp(token, "admin_access")
+    /**
+     * 解析管理员令牌，返回身份与令牌版本号。
+     *
+     * [AdminTokenPayload.version] 取自签发时写入的 `ver` 声明；历史令牌没有该声明时回落 0，
+     * 与 `admins.token_version` 的默认值一致 —— 这样新列上线不会把已登录的运营一次性踢下线。
+     * 调用方（拦截器）负责拿它与库里的当前值比对，实现登出吊销。
+     */
+    fun parseAdminToken(token: String): AdminTokenPayload {
+        val claims = parseClaimsWithTyp(token, "admin_access")
+        val version = (claims["ver"] as? Number)?.toLong() ?: 0L
+        return AdminTokenPayload(adminId = claims.subject, version = version)
+    }
 
-    private fun parseWithTyp(token: String, expectedTyp: String): String {
+    private fun parseWithTyp(token: String, expectedTyp: String): String =
+        parseClaimsWithTyp(token, expectedTyp).subject
+
+    private fun parseClaimsWithTyp(token: String, expectedTyp: String): io.jsonwebtoken.Claims {
         val claims = Jwts.parser().verifyWith(key).build().parseSignedClaims(token).payload
         val typ = claims["typ"] as? String
         if (typ != expectedTyp) {
             throw io.jsonwebtoken.JwtException("token typ mismatch: expected=$expectedTyp actual=$typ")
         }
-        return claims.subject
+        return claims
     }
 
     /**
      * 签发管理员令牌。与家长令牌用同一密钥，但带 `scope=admin` 声明，
      * 由 [com.padguard.server.security.AdminAuthInterceptor] 区分两类令牌，
      * 家长令牌即便被拿到也无法通过 admin 端点的鉴权（scope 不符）。
+     *
+     * [tokenVersion] 为管理员当前的令牌版本号（取自 `admins.token_version`），写入 `ver` 声明。
+     * 登出 / 改密码时服务端把库内值 +1，持有旧令牌的请求会因版本号落后而被拒绝 ——
+     * 这是 JWT 无状态下实现"主动吊销"的唯一可靠途径。
      */
-    fun createAdminToken(adminId: String): String = Jwts.builder()
+    fun createAdminToken(adminId: String, tokenVersion: Long): String = Jwts.builder()
         .subject(adminId)
         .claim("typ", "admin_access")
         .claim("scope", "admin")
+        .claim("ver", tokenVersion)
         .issuedAt(java.util.Date())
         .expiration(java.util.Date(System.currentTimeMillis() + accessTtlMinutes * 60_000))
         .signWith(key)
         .compact()
+
+    /** 管理员令牌解析结果：[version] 用于与库内 `admins.token_version` 比对以实现吊销 */
+    data class AdminTokenPayload(val adminId: String, val version: Long)
 
     /** 判定令牌是否为管理员令牌（scope=admin）；解析失败一律返回 false */
     fun isAdminToken(token: String): Boolean = runCatching {

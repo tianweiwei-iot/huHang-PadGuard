@@ -40,7 +40,7 @@
       <td>${d.online ? '<span class="dot green"></span> 在线' : '<span class="dot gray"></span> 离线'}</td>
       <td>${d.remoteLocked ? '<span class="badge red">已锁</span>' : '<span class="badge gray">未锁</span>'}</td>
       <td>${d.minorMode ? '<span class="badge green">开启</span>' : '<span class="badge gray">关闭</span>'}</td>
-      <td>${d.todayUsageMinutes ? Math.floor(d.todayUsageMinutes / 60) + 'h' + (d.todayUsageMinutes % 60) + 'm' : '—'}</td>
+      <td>${U.fmtMinutes(d.todayUsageMinutes)}</td>
       <td><div class="row-actions">
         <button class="btn btn-xs" data-detail="${U.esc(d.deviceId)}">详情</button>
         ${d.remoteLocked ? '<button class="btn btn-xs btn-primary" data-act="unlock" data-id="' + U.esc(d.deviceId) + '">解锁</button>' : '<button class="btn btn-xs" data-act="lock" data-id="' + U.esc(d.deviceId) + '">锁屏</button>'}
@@ -66,7 +66,7 @@
         <div class="stat-line"><span>远程锁屏</span><span>${d.remoteLocked ? "已锁" : "未锁"}</span></div>
         <div class="stat-line"><span>未成年人模式</span><span>${d.minorMode ? "开启" : "关闭"}</span></div>
         <div class="stat-line"><span>绑定时间</span><span>${U.esc(d.boundAt)}</span></div>
-        <div class="stat-line"><span>区域</span><span>${U.esc(d.region)}</span></div>
+        <div class="stat-line"><span>区域</span><span>${U.esc(d.region || "—")}</span></div>
         <div class="row" style="margin-top:16px;gap:10px">
           <button class="btn btn-primary" id="dl-lock">${d.remoteLocked ? "解锁" : "远程锁屏"}</button>
           <button class="btn" id="dl-parent">查看家长</button>

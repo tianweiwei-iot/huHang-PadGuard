@@ -36,15 +36,22 @@ class AdminAuthInterceptor(
         if (!jwt.isAdminToken(token)) {
             throw BizException(ParentErr.UNAUTHORIZED, "invalid admin token", Audience.PARENT)
         }
-        val adminId = try {
+        val payload = try {
             jwt.parseAdminToken(token)
         } catch (e: Exception) {
             throw BizException(ParentErr.UNAUTHORIZED, "invalid token", Audience.PARENT)
         }
+        val adminId = payload.adminId
         val admin = adminRepository.findById(adminId).orElse(null)
             ?: throw BizException(ParentErr.UNAUTHORIZED, "管理员不存在或已被删除", Audience.PARENT)
         if (admin.status != "active") {
             throw BizException(ParentErr.UNAUTHORIZED, "管理员账号已停用", Audience.PARENT)
+        }
+        // 令牌版本号闸门：登出 / 改密码 / 停用账号都会把库内值 +1，
+        // 令牌里的 ver 一旦落后即判定为已吊销。JWT 本身无法主动作废，这是唯一的吊销途径。
+        // 历史令牌无 ver 声明时解析为 0，与新列的默认值一致，不会误杀存量会话。
+        if (payload.version < admin.tokenVersion) {
+            throw BizException(ParentErr.UNAUTHORIZED, "登录已失效，请重新登录", Audience.PARENT)
         }
         request.setAttribute("adminId", adminId)
         return true

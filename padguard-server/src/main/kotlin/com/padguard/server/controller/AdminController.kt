@@ -3,6 +3,7 @@ package com.padguard.server.controller
 import com.padguard.server.common.ApiResponse
 import com.padguard.server.dto.*
 import com.padguard.server.security.RateLimit
+import com.padguard.server.service.AdminAuthService
 import com.padguard.server.service.AdminService
 import org.springframework.web.bind.annotation.*
 
@@ -24,6 +25,7 @@ import org.springframework.web.bind.annotation.*
 @RequestMapping("/v1/admin")
 class AdminController(
     private val adminService: AdminService,
+    private val adminAuthService: AdminAuthService,
     private val rateLimit: RateLimit
 ) {
 
@@ -36,6 +38,19 @@ class AdminController(
                 adminService.login(req.username, req.password)
             }
         )
+
+    /**
+     * 退出登录：服务端吊销当前令牌。
+     *
+     * 仅清浏览器本地 token 是不够的 —— JWT 在过期前始终有效，复制走的令牌仍能操作后台。
+     * 本端点把 `admins.token_version` +1，使该管理员名下**全部**已签发令牌立即失效。
+     *
+     * 关于"重复退出"：已吊销的令牌再调本端点会被 [com.padguard.server.security.AdminAuthInterceptor]
+     * 拦在 401。这是预期行为（目标状态已是"未登录"），前端需把 401 同样视为退出成功并清理本地态。
+     */
+    @PostMapping("/logout")
+    fun logout(@RequestAttribute("adminId") adminId: String): ApiResponse<Map<String, Any>> =
+        ApiResponse.ok(adminAuthService.logout(adminId))
 
     // ---------- 自助修改当前管理员密码（需当前密码，免 RBAC 闸门） ----------
     @PostMapping("/me/password")
@@ -249,11 +264,26 @@ class AdminController(
         ApiResponse.ok(adminService.serverLogs(adminId))
 
     // ---------- 审计 / 告警 ----------
+    /**
+     * 审计领域下拉的元数据。由服务端权限定义单向派生（含此前前端漏掉的 `audit` 领域），
+     * 前端不再自带副本，避免"服务端有 7 个领域、下拉只有 6 项"这类入口缺失。
+     */
+    @GetMapping("/audit/areas")
+    fun auditAreas(@RequestAttribute("adminId") adminId: String): ApiResponse<List<Map<String, String>>> =
+        ApiResponse.ok(adminService.auditAreas(adminId))
+
+    /**
+     * 审计日志（按领域筛选后截断）。
+     *
+     * 返回的是 **分页对象** 而非裸数组：裸数组会让消费方把"最近 200 条"当作"全部历史"，
+     * 进而在被截断的情况下得出"该领域最近无异常"的错误结论。
+     * `truncated=true` 时前端必须显式提示，不能静默展示。
+     */
     @GetMapping("/audit")
     fun audit(
         @RequestAttribute("adminId") adminId: String,
         @RequestParam(required = false) area: String?
-    ): ApiResponse<List<AuditItem>> = ApiResponse.ok(adminService.audit(adminId, area))
+    ): ApiResponse<AuditPageDto> = ApiResponse.ok(adminService.auditPage(adminId, area))
 
     @GetMapping("/alerts")
     fun alerts(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AlertItem>> =

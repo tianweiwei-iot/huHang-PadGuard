@@ -112,6 +112,20 @@
   }
   PG.refreshAlertBadge = refreshAlertBadge;
 
+  /**
+   * 回到登录页：清理本地会话态并切换视图。
+   *
+   * 注意这里**不做**服务端吊销 —— 那是 `PG.api.logout()` 的职责。
+   * 两者分开的原因：改密码场景下服务端已自行把令牌版本号 +1（旧令牌当场作废），
+   * 再调一次 logout 只会拿到 401；退出登录场景才需要显式请求吊销。
+   */
+  function leaveToLogin() {
+    PG.api.config.token = "";
+    PG.state.admin = null;
+    $("app-shell").classList.add("hidden");
+    $("login-screen").classList.remove("hidden");
+  }
+
   // 用户菜单（修改密码 / 退出登录）
   (function setupUserMenu() {
     const chip = $("user-chip");
@@ -135,11 +149,18 @@
       const a = PG.state.admin;
       menu.querySelector("#um-name").textContent = a ? (a.name || a.username) : "";
       menu.querySelector("#um-chgpwd").onclick = () => { menu.remove(); menu = null; openChangePassword(); };
-      menu.querySelector("#um-logout").onclick = () => {
+      menu.querySelector("#um-logout").onclick = async () => {
         if (menu) { menu.remove(); menu = null; }
-        PG.api.config.token = ""; PG.state.admin = null;
-        $("app-shell").classList.add("hidden");
-        $("login-screen").classList.remove("hidden");
+        // 先请服务端吊销令牌，再清本地态。顺序不能反 —— 本地 token 一清，
+        // 吊销请求就发不出去了（请求头里没凭据）。
+        const r = await PG.api.logout();
+        leaveToLogin();
+        // 吊销失败也要让人退出去，但必须如实告知：此时令牌只是"本地看不见了"，
+        // 在过期前依然可用，管理员得知道这件事，而不是以为已经安全。
+        if (r && r.revoked === false && r.reason && r.reason !== "mock") {
+          PG.ui.toast("warn", "已退出，但服务端吊销未成功",
+            "该令牌将在过期后自动失效：" + r.reason);
+        }
       };
       const close = () => { if (menu) { menu.remove(); menu = null; } document.removeEventListener("click", close); };
       setTimeout(() => document.addEventListener("click", close), 0);
@@ -175,11 +196,8 @@
         await PG.api.changeOwnPassword(cur, nw);
         m.close();
         PG.ui.toast("ok", "密码已修改", "请使用新密码重新登录");
-        PG.api.config.token = ""; PG.state.admin = null;
-        setTimeout(() => {
-          $("app-shell").classList.add("hidden");
-          $("login-screen").classList.remove("hidden");
-        }, 900);
+        // 服务端改密时已把令牌版本号 +1，旧令牌当场作废，无需再调 logout。
+        setTimeout(leaveToLogin, 900);
       } catch (e) { PG.ui.toast("err", "修改失败", e.message); }
     };
   }

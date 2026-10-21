@@ -326,6 +326,17 @@ class DeviceService(
                 (loc["lng"] as? Number)?.toDouble()?.let { dev.longitude = it }
             }
             hb.controlMode?.let { dev.controlMode = it }
+            // P3 守护健康度快照：持久化孩子端上报的守护状态，供 T3 失联判定与家长端展示。
+            hb.daemonAlive?.let { alive ->
+                dev.daemonAlive = alive
+                if (alive) dev.daemonAliveAt = System.currentTimeMillis()
+                // 守护恢复后清零"已告警"标记，允许下次失联再次告警。
+                if (alive && dev.daemonLostAlerted == true) dev.daemonLostAlerted = false
+            }
+            hb.a11yAlive?.let { dev.a11yAlive = it }
+            hb.onlineState?.let { dev.daemonOnlineState = it }
+            hb.lastRestartReason?.let { dev.lastRestartReason = it }
+            hb.permissionVersion?.let { dev.permissionVersion = it }
             deviceRepository.save(dev)
             if (wasOffline) {
                 webSocketPush.pushToUser(dev.userId, mapOf(
@@ -333,6 +344,17 @@ class DeviceService(
                     "timestamp" to System.currentTimeMillis()
                 ))
             }
+        }
+    }
+
+    /**
+     * T3 守护失联：标记已推送告警，避免 [OfflineMonitorService] 每轮重复推送。
+     * 守护恢复后由 [applyHeartbeat] 在 daemonAlive 回到 true 时清零。
+     */
+    fun markDaemonLost(deviceId: String) {
+        deviceRepository.findById(deviceId).ifPresent { dev ->
+            dev.daemonLostAlerted = true
+            deviceRepository.save(dev)
         }
     }
 
@@ -389,6 +411,10 @@ class DeviceService(
         dev.onlineStatus = "OFFLINE"
         dev.groupId = null
         dev.deviceTokenHash = "revoked_" + UUID.randomUUID().toString()
+        // 清空操作/守护密码哈希：解绑后设备不再归属任何家长，按空串语义视为"未设密码"。
+        // 否则旧哈希残留会使重绑后服务端仍上报 guardPasswordSet=true，家长端据此跳过管理密码引导
+        // （Bug ⑦ 在重绑场景复现）；且隐藏形态前置校验会把应用留在可见态，家长无法补设密码。
+        dev.guardPasswordHash = ""
         deviceRepository.save(dev)
         // 解绑即清理该设备全部私有业务数据：截图、轨迹、用量、指令、告警、已装应用、围栏、
         // 设备设置等。早期只把 userId 置空，这些行永久残留在库里（且下次有人绑到同一台平板
@@ -638,7 +664,14 @@ class DeviceService(
         childNickname = childNickname,
         childAvatar = childAvatar,
         ageBand = ageBand,
-        guardPasswordSet = guardPasswordHash?.isNotBlank() ?: false
+        guardPasswordSet = guardPasswordHash?.isNotBlank() ?: false,
+        // P3 守护健康度快照下发
+        daemonAlive = daemonAlive,
+        a11yAlive = a11yAlive,
+        daemonOnlineState = daemonOnlineState,
+        lastRestartReason = lastRestartReason,
+        permissionVersion = permissionVersion,
+        daemonLost = daemonLostAlerted ?: false
     )
 
     /**

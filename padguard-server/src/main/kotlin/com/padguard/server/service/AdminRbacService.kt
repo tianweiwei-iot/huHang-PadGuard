@@ -179,8 +179,10 @@ class AdminRbacService(
             ?: throw BizException(ParentErr.PARAM_ERROR, "管理员不存在", Audience.PARENT)
         val newPwd = genPassword(systemSettingRepository, objectMapper)
         target.passwordHash = Passwords.encode(newPwd)
+        // 密码已变更，旧令牌必须立即作废：否则拿到旧令牌的人仍能以该管理员身份操作后台。
+        target.tokenVersion = target.tokenVersion + 1
         adminRepository.save(target)
-        auditService.record(adminId, target.id, AdminAudit.RBAC_RESET_PWD, targetType = "admin", targetId = target.id, detail = "重置管理员密码 ${target.username}")
+        auditService.record(adminId, target.id, AdminAudit.RBAC_RESET_PWD, targetType = "admin", targetId = target.id, detail = "重置管理员密码 ${target.username}（已吊销其全部令牌）")
         // 重置生效后立即邮件通知对方（若已登记邮箱且已配置 SMTP）；否则退回后台弹窗明文转告
         val emailed = mailService.sendPasswordReset(target.email, target.username, "管理员账号", newPwd)
         return mapOf("ok" to true, "newPwd" to newPwd, "emailed" to emailed)
@@ -201,9 +203,12 @@ class AdminRbacService(
             throw BizException(ParentErr.UNAUTHORIZED, "当前密码错误", Audience.PARENT)
         }
         admin.passwordHash = Passwords.encode(newPassword)
+        // 同上：改完密码即吊销本人全部会话。副作用是调用方当前这张令牌也会失效，
+        // 前端改密成功后应直接跳登录页重新登录 —— 这是刻意的，也是"改密码即踢人"的标准行为。
+        admin.tokenVersion = admin.tokenVersion + 1
         adminRepository.save(admin)
-        auditService.record(adminId, null, "RBAC_SELF_CHG_PWD", targetType = "admin", targetId = adminId, detail = "修改自身密码")
-        return mapOf("ok" to true)
+        auditService.record(adminId, null, "RBAC_SELF_CHG_PWD", targetType = "admin", targetId = adminId, detail = "修改自身密码（已吊销其全部令牌）")
+        return mapOf("ok" to true, "reloginRequired" to true)
     }
 
     /** 统计处于启用状态的超级管理员数量（用于防锁死护栏） */

@@ -68,7 +68,8 @@ data class DeviceMini(
     val deviceId: String,
     val controlMode: String?,
     val online: Boolean,
-    val todayUsageMinutes: Int
+    /** 今日已用分钟；**null 表示今日尚未开始计时**，前端须显示"—"而非 0 */
+    val todayUsageMinutes: Int?
 )
 
 data class SubMini(val planName: String, val status: String, val autoRenew: Boolean)
@@ -87,8 +88,16 @@ data class DeviceRow(
     val lastOnlineAt: String?,
     val remoteLocked: Boolean,
     val minorMode: Boolean,
-    val todayUsageMinutes: Int,
-    val region: String,
+    /**
+     * 今日已用分钟；**null 表示今日尚未开始计时**（孩子还没确认 / 设备当天没被使用）。
+     *
+     * 早先这里恒为 0，前端于是每台设备都显示"0h0m"—— 把一个"没有数据"的事实
+     * 粉饰成了"今天一分钟都没用"，运营照着它判断活跃度必然失真。
+     * 改成可空后，无数据就是无数据，前端显示"—"。
+     */
+    val todayUsageMinutes: Int?,
+    /** 家长所属地区；无归属或家长未填时为 null（同样显示"—"，不要显示空字符串） */
+    val region: String?,
     val boundAt: String?
 )
 
@@ -144,13 +153,46 @@ data class Kpis(
     val serverStatus: String
 )
 
+/**
+ * 单个 KPI 的趋势。
+ *
+ * 三个字段**全部可空**是刻意的：算不出来就必须说算不出来，
+ * 而不是返回一条看起来很正常的假曲线。先前前端写死 `[3,5,4,6,7,9,8]` 这类字面量数组、
+ * 文案硬编码成"环比 +12%"且方向与箭头自相矛盾（down 配 +12%），
+ * 运营照着它做的判断就是错的 —— 这比"没有趋势图"危险得多。
+ * 前端拿到 null 应当**不渲染**，而不是回落到任何硬编码数组。
+ */
+data class KpiTrend(
+    /** 近 N 天（或近 N 月）序列，sparkline 数据源；数据不足以计算时为 null */
+    val series: List<Int>?,
+    /** 变化量：增长类 KPI 为"近 7 天新增数"；营收为"本月 − 上月"的差额 */
+    val delta: Int?,
+    /** delta 的单位：`count`=条数、`fen`=分（金额，前端按 ¥ 格式化） */
+    val unit: String,
+    /** 方向：up / down / flat；无法判定时为 null */
+    val direction: String?,
+    /** 变化量的语义标签，如"近 7 天""较上月"；由服务端给出以保证前后端口径一致 */
+    val label: String
+)
+
+/** 仪表盘四张 KPI 卡的趋势数据（与 [Kpis] 四个卡片一一对应） */
+data class DashboardTrends(
+    val parent: KpiTrend,
+    val device: KpiTrend,
+    val subscription: KpiTrend,
+    /** 营收：series 为近 6 月营收（分），delta 为本月较上月的差额（分） */
+    val revenue: KpiTrend
+)
+
 data class DashboardResponse(
     val kpis: Kpis,
     val revenueSeries: List<Int>,
     val planDist: List<NameCount>,
     val regionDist: List<NameCount>,
     val alertsOpen: Long,
-    val recent: List<AuditItem>
+    val recent: List<AuditItem>,
+    /** KPI 趋势；仅在有足够历史数据时返回，否则前端不画趋势线 */
+    val trends: DashboardTrends? = null
 )
 
 /** 服务端监控指标 */
@@ -187,6 +229,24 @@ data class AuditItem(
     val target: String,
     val ip: String?,
     val result: String
+)
+
+/**
+ * 审计日志分页（截断）返回体。
+ *
+ * 关键在 [truncated] / [maxRows]：服务端对单次返回条数有上限。
+ * 若只给一个裸数组，运营看到"共 200 条"会当这就是全部历史，
+ * 进而据此下"最近没有异常操作"的结论 —— 而真实情况可能只是被截断了。
+ * 把"我截断了、上限多少、筛选后实际匹配多少条"如实返回，比给一个看起来完整的列表更安全。
+ */
+data class AuditPageDto(
+    val items: List<AuditItem>,
+    /** true 表示 [items] 被 [maxRows] 截断，还有更多记录未返回 */
+    val truncated: Boolean,
+    /** 单次返回条数上限 */
+    val maxRows: Int,
+    /** 当前筛选条件下匹配到的总条数（截断前） */
+    val total: Int
 )
 
 /** 风险告警项 */

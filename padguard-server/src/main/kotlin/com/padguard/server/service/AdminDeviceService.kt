@@ -22,7 +22,8 @@ class AdminDeviceService(
     private val userRepository: UserRepository,
     private val commandService: CommandService,
     private val adminPerm: AdminPermissionService,
-    private val auditService: AuditService
+    private val auditService: AuditService,
+    private val usageSessionService: UsageSessionService
 ) {
     private val log = LoggerFactory.getLogger(AdminDeviceService::class.java)
 
@@ -41,6 +42,9 @@ class AdminDeviceService(
         }
         if (online == "1") devs = devs.filter { online(it) }
         else if (online == "0") devs = devs.filter { !online(it) }
+        // 一次性取全部设备的今日用量，避免逐台查询。
+        // 取不到的（今日尚未开始计时）保持 null，前端显示"—"而不是伪造一个 0。
+        val usedMinutes = usageSessionService.usedMinutesBatch(devs.map { it.id })
         return devs.map { d ->
             val owner = userMap[d.userId]
             DeviceRow(
@@ -50,7 +54,8 @@ class AdminDeviceService(
                 model = d.model, osVersion = d.osVersion, controlMode = d.controlMode,
                 online = online(d), lastOnlineAt = fmt(d.lastOnlineAt),
                 remoteLocked = d.remoteLocked ?: false, minorMode = d.ageBand != null,
-                todayUsageMinutes = 0, region = "", boundAt = fmt(d.createdAt)
+                todayUsageMinutes = usedMinutes[d.id], region = owner?.region,
+                boundAt = fmt(d.createdAt)
             )
         }
     }

@@ -32,7 +32,25 @@ class AdminAuthService(
         }
         admin.lastLoginAt = System.currentTimeMillis()
         adminRepository.save(admin)
-        val token = jwt.createAdminToken(admin.id)
+        val token = jwt.createAdminToken(admin.id, admin.tokenVersion)
         return AdminLoginResponse(token, toAdminDto(admin))
+    }
+
+    /**
+     * 退出登录：把该管理员的令牌版本号 +1，作废其名下**全部**已签发的令牌。
+     *
+     * 设计说明：
+     * - 幂等 —— 重复调用只是继续递增，不报错。前端"点两次退出"或令牌已过期后再点都不会炸。
+     * - 覆盖全部会话 —— 同一个账号在多个浏览器登录时，一次退出全部失效；
+     *   这也是选版本号而非 jti 黑名单的原因（后者只能吊销调用方手里的那一张）。
+     * - 管理员已被删除时静默返回 —— 退出登录本就是"让自己失效"，账号不存在时目标已达成，
+     *   抛错只会让前端卡在退出界面出不去。
+     */
+    fun logout(adminId: String): Map<String, Any> {
+        val admin = adminRepository.findById(adminId).orElse(null) ?: return mapOf("revoked" to false)
+        admin.tokenVersion = admin.tokenVersion + 1
+        adminRepository.save(admin)
+        log.info("管理员退出登录，已吊销其全部令牌: adminId={} newVersion={}", adminId, admin.tokenVersion)
+        return mapOf("revoked" to true)
     }
 }

@@ -9,6 +9,7 @@ import com.padguard.server.domain.Screenshot
 import com.padguard.server.dto.*
 import com.padguard.server.stream.ScreenStreamHub
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.scheduling.annotation.Scheduled
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.DeviceSettingRepository
 import com.padguard.server.repository.MediaTaskRepository
@@ -18,6 +19,7 @@ import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 import org.slf4j.LoggerFactory
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 @Service
 class MonitorService(
@@ -32,6 +34,39 @@ class MonitorService(
     @Value("\${padguard.stream.max-live-devices:1000}") private val maxLiveDevices: Int = 1000
 ) {
     private val log = LoggerFactory.getLogger(MonitorService::class.java)
+
+    /**
+     * 实时看屏"正在观看"会话：家长端打开看屏页期间持续续期，服务端据此在孩子端推流中断时自动重发开流指令。
+     *
+     * 根因修复：原实现只下发一条一次性 [CommandType.LIVE_VIEW_START]，孩子端回执后即移出 PENDING 不再重发。
+     * 孩子端进程被杀/崩溃/断网/息屏卡死时推流消失，画面永远停在上一条死连接——既不自动恢复，也不提示。
+     * 把"正在观看"持久化后，[reconcileLiveSessions] 定时扫描，对孩子端未在推流的活跃会话重发开流指令，
+     * 覆盖杀进程重开、崩溃、弱网等所有"推流意外中断"场景，家长无需任何操作。
+     * 单实例部署下用内存 Map 即可；若未来多实例需改为共享存储（Redis）。
+     */
+    private val liveSessions = ConcurrentHashMap<String, LiveViewSession>()
+
+    private companion object {
+        /** 会话 TTL：家长端续期间隔 120s，取 180s 留足余量，避免续期间隙误清会话 */
+        const val SESSION_TTL_MS = 180_000L
+
+        /** 同一会话两次重发开流指令的最小间隔，避免孩子端未推流时高频刷指令 */
+        const val REISSUE_COOLDOWN_MS = 8_000L
+
+        /**
+         * 判定"仍在推流"的最近帧新鲜度窗口：超过即视为推流已中断（含僵尸连接）。
+         * 需与 ParentStreamController.MAX_IDLE_MS(30s) 同量级、略小于它，避免与"设备离线"误判打架。
+         */
+        const val PUBLISHER_STALE_MS = 15_000L
+
+        /** 正在观看会话：孩子端推流意外中断时由 [reconcileLiveSessions] 重发开流指令 */
+        data class LiveViewSession(
+            val deviceId: String,
+            var highDefinition: Boolean,
+            var expiresAt: Long,
+            var lastReissueAt: Long
+        )
+    }
 
     /** 家长请求实时截屏：落 PENDING 截图记录 + 下发 SCREENSHOT 指令（带 shotId 便于回传关联） */
     fun requestScreenshot(userId: String, deviceId: String): ScreenshotRequestResult {
@@ -154,6 +189,13 @@ class MonitorService(
             )
         }
         val highDefinition = runCatching { deviceSettingOf(deviceId).highDefinition }.getOrDefault(false)
+        // 登记/刷新"正在观看"会话：家长端持续续期，服务端据此在孩子端推流中断时自动重发开流指令。
+        liveSessions[deviceId] = LiveViewSession(
+            deviceId = deviceId,
+            highDefinition = highDefinition,
+            expiresAt = System.currentTimeMillis() + SESSION_TTL_MS,
+            lastReissueAt = 0L
+        )
         commandService.issueCommand(
             deviceId, CommandType.LIVE_VIEW_START,
             mapOf(CommandKey.HIGH_DEFINITION to highDefinition),
@@ -164,10 +206,58 @@ class MonitorService(
 
     fun stopLiveView(userId: String, deviceId: String): Map<String, Any> {
         requireOwned(userId, deviceId)
+        // 家长主动停止观看：立即清除会话，避免自愈在 TTL 内继续重发开流指令。
+        liveSessions.remove(deviceId)
         commandService.issueCommand(
             deviceId, CommandType.LIVE_VIEW_STOP, emptyMap(), priority = "HIGH"
         )
         return mapOf("deviceId" to deviceId, "live" to false)
+    }
+
+    /**
+     * 实时看屏会话自愈：家长端正在观看期间，孩子端推流可能因进程被杀/崩溃/断网/息屏而中断。
+     *
+     * 仅依赖家长端周期续期或一次性指令时，中断后画面会永久停在死连接上。把"正在观看"变成服务端
+     * 持久会话后，这里每 3s 扫描：
+     * - 会话过期（家长端停止观看且未续期）→ 下发 LIVE_VIEW_STOP 并清理；
+     * - 会话仍活跃但孩子端未在推流 → 重发 LIVE_VIEW_START，触发孩子端重新推帧。
+     *
+     * 孩子端收到指令后会等待无障碍通道就绪（进程重启后系统重绑无障碍服务有延迟窗口）再推流，
+     * 因此"杀进程重开"能在数秒内自动恢复，家长无需任何操作。重发指令带冷却，避免未推流时高频刷指令。
+     */
+    @Scheduled(fixedDelay = 3_000L)
+    fun reconcileLiveSessions() {
+        if (liveSessions.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val iterator = liveSessions.entries.iterator()
+        while (iterator.hasNext()) {
+            val (deviceId, session) = iterator.next()
+            if (now > session.expiresAt) {
+                iterator.remove()
+                log.info("live session expired, issuing stop: device=$deviceId")
+                runCatching {
+                    commandService.issueCommand(deviceId, CommandType.LIVE_VIEW_STOP, emptyMap(), "HIGH")
+                }
+                continue
+            }
+            // "正在推流"判定必须叠加最近帧时间：仅看 publishers 会误判"进程被杀但 TCP 未即时断开"的
+            // 僵尸连接，导致漏发恢复指令；最近一帧超过 PUBLISHER_STALE_MS 即视为推流已实质中断。
+            val activelyUploading = hub.isPublishing(deviceId) &&
+                (now - hub.lastFrameAt(deviceId) <= PUBLISHER_STALE_MS)
+            if (!activelyUploading && now - session.lastReissueAt >= REISSUE_COOLDOWN_MS) {
+                session.lastReissueAt = now
+                session.highDefinition =
+                    runCatching { deviceSettingOf(deviceId).highDefinition }.getOrDefault(session.highDefinition)
+                log.info("live session reissue start: device=$deviceId (child not uploading)")
+                runCatching {
+                    commandService.issueCommand(
+                        deviceId, CommandType.LIVE_VIEW_START,
+                        mapOf(CommandKey.HIGH_DEFINITION to session.highDefinition),
+                        priority = "HIGH"
+                    )
+                }
+            }
+        }
     }
 
     /**

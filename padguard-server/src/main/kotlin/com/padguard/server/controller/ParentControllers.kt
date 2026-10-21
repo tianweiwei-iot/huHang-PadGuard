@@ -212,6 +212,31 @@ class PolicyController(
     }
 
     /**
+     * 整机管控 暂停 / 恢复（家长端「释放 / 恢复对平板的全部管控」主开关）。
+     *
+     * 这是应对「取消应用管控后仍进不了设置」「切换权限被系统强重应用导致管控残缺」
+     * 的根治入口：家长一键把设备整体交还（active=false）或收回（active=true）。
+     * 孩子端 [GuardMasterSwitch] 收到后统一释放 / 重铺锁屏浮层、设置 / 应用拦截、DO 权限与 Kiosk。
+     *
+     * 与锁屏对称：先校验归属再下发指令；指令本身只关心是否被服务端接受，
+     * 故走 [com.padguard.server.service.CommandService.issueCommand] 返回指令回执。
+     */
+    @PostMapping("/policies/{deviceId}/management-active")
+    fun setManagementActive(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestBody(required = false) req: ManagementActiveRequest?
+    ): ApiResponse<*> {
+        deviceService.getDevice(userId, deviceId) // 校验设备归属
+        val active = req?.active ?: true
+        return ApiResponse.ok(
+            commandService.issueCommand(
+                deviceId, CommandType.SET_MANAGEMENT_ACTIVE, mapOf(CommandKey.ACTIVE to active)
+            )
+        )
+    }
+
+    /**
      * 操作密码闸门：家长端设置 / 清除「设备操作密码」。
      *
      * ## 数据流（必须和服务端下发、孩子端落库口径一致）

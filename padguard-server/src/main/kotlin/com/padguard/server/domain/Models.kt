@@ -108,6 +108,22 @@ class Device(
      */
     // 可空：ddl-auto 给老库加列时已有行是 NULL，非空 Boolean 会在读取时直接抛
     // "Can not set boolean field to null value"，整个应用起不来。DTO 出口处再兜底成 false。
+    // ===== P3 守护健康度快照（孩子端心跳上报，服务端持久化）=====
+    @Column(name = "daemon_alive") var daemonAlive: Boolean? = false,
+    @Column(name = "a11y_alive") var a11yAlive: Boolean? = false,
+    /** 孩子端上报的在线三态（ONLINE / MQTT_DOWN），与服务端自身 onlineStatus 区分展示 */
+    @Column(name = "daemon_online_state") var daemonOnlineState: String? = null,
+    @Column(name = "last_restart_reason") var lastRestartReason: String? = null,
+    // 可空：与上方 daemonAlive / a11yAlive 等字段同理——ddl-auto 给老库加列时已有行是
+    // NULL，非空 Int 在读取时会抛 "Can not set int field to null value"，导致设备列表 / 接入
+    // 等所有加载 Device 的接口 500。DTO 出口处已按 Int? 处理，这里对齐即可。
+    @Column(name = "guard_permission_version") var permissionVersion: Int? = 0,
+    /** 守护进程最近一次上报 alive 的时间戳，用于 T3 失联判定的时效窗口 */
+    @Column(name = "daemon_alive_at") var daemonAliveAt: Long? = null,
+    /** T3 守护失联告警已推送标记，避免重复告警（守护恢复后由 applyHeartbeat 清零） */
+    @Column(name = "daemon_lost_alerted", columnDefinition = "boolean default false")
+    var daemonLostAlerted: Boolean? = false,
+
     @Column(name = "remote_locked", columnDefinition = "boolean default false")
     var remoteLocked: Boolean? = false,
     /**

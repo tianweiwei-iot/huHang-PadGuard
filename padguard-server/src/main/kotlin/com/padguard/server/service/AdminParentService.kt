@@ -29,7 +29,8 @@ class AdminParentService(
     private val adminBillingService: AdminBillingService,
     private val auditService: AuditService,
     private val systemSettingRepository: SystemSettingRepository,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    private val usageSessionService: UsageSessionService
 ) {
     private val log = LoggerFactory.getLogger(AdminParentService::class.java)
 
@@ -56,8 +57,14 @@ class AdminParentService(
         requireRead(adminPerm, adminId, "parents")
         val u = userRepository.findById(id).orElse(null) ?: return null
         val sub = subscriptionRepository.findByUserId(id)
-        val devices = deviceRepository.findByUserId(id).map {
-            DeviceMini(name = it.name, deviceId = it.id, controlMode = it.controlMode, online = online(it), todayUsageMinutes = 0)
+        // 与设备列表页同源取今日用量；取不到为 null（今日尚未开始计时），前端显示"—"
+        val owned = deviceRepository.findByUserId(id)
+        val usedMinutes = usageSessionService.usedMinutesBatch(owned.map { it.id })
+        val devices = owned.map {
+            DeviceMini(
+                name = it.name, deviceId = it.id, controlMode = it.controlMode,
+                online = online(it), todayUsageMinutes = usedMinutes[it.id]
+            )
         }
         val subscription = sub?.let {
             SubMini(planName = planLabel(it.plan), status = subStatusLower(it.status), autoRenew = it.autoRenew)

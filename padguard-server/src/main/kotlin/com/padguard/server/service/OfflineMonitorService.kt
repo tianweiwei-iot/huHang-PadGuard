@@ -56,6 +56,23 @@ class OfflineMonitorService(
                         category = "CONTROL_LOST"
                     )
                 }
+                // T3 守护失联判定：设备仍在正常上报心跳（ONLINE 且近期有心跳），
+                // 但守护进程 daemonAlive=false —— 多为被强制停止（Force Stop），
+                // 双进程互保已失效，管控可能在停止后被解除，需家长干预重开。
+                // 注意：此处 dev.onlineStatus 仍为 ONLINE（主进程活着、还在发心跳），
+                // 离线分支已先行把"真离线"设备置为 OFFLINE，不会重复处理。
+                if (dev.onlineStatus == "ONLINE" && (dev.lastOnlineAt ?: 0) > staleBefore &&
+                    dev.daemonAlive == false && dev.daemonLostAlerted != true) {
+                    log.warn("device {} guardian daemon lost (heartbeat alive but daemonAlive=false), notifying parent", dev.id)
+                    deviceService.markDaemonLost(dev.id)
+                    alertService.create(
+                        deviceId = dev.id,
+                        level = "WARNING",
+                        title = "守护进程疑似失联",
+                        message = "孩子端主进程在线，但守护进程（双进程互保）已停止，管控可能在强制停止后被解除。请确认设备是否被强制停止或卸载，并重新打开孩子端。",
+                        category = "GUARD_DAEMON_LOST"
+                    )
+                }
             }
         }.onFailure { log.error("offline monitor scan failed", it) }
     }

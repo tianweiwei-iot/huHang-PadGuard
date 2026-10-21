@@ -116,6 +116,34 @@ class UsageSessionService(
     }
 
     /**
+     * 批量取多台设备的「今日已用分钟」——[usedMinutesIfActive] 的列表版。
+     *
+     * 存在理由：后台设备列表要给每台设备显示今日用量，逐台调 [usedMinutesIfActive]
+     * 会退化成 N 次数据库往返（N+1）。这里把会话表的一次 `findAllById` 提出来，
+     * 其余判定（跨日重置、护眼休息扣减、封顶到总额度）与单点版本**逐字保持一致**，
+     * 保证"列表里的数字"和"点进去看到的数字"永远同源，不会各算一套。
+     *
+     * 返回值**只包含有真实数据的设备**：今日未开始计时的设备不在 map 里，
+     * 调用方据此显示"—"，而不是拿 0 冒充"用了 0 分钟"。
+     */
+    fun usedMinutesBatch(deviceIds: Collection<String>): Map<String, Int> {
+        if (deviceIds.isEmpty()) return emptyMap()
+        val now = System.currentTimeMillis()
+        val today = dayKey(now)
+        val sessions = usageSessionRepository.findAllById(deviceIds).associateBy { it.deviceId }
+        val out = HashMap<String, Int>(deviceIds.size)
+        for (id in deviceIds) {
+            val s = sessions[id] ?: continue
+            val startEpoch = s.startEpoch ?: continue
+            if (s.dayKey != today) continue
+            val totalMinutes = resolveQuota(id, now) + s.extendedMinutes
+            val elapsedMin = ((now - startEpoch - s.restAccumulatedMs) / 60_000L).coerceAtLeast(0L).toInt()
+            out[id] = minOf(elapsedMin, totalMinutes)
+        }
+        return out
+    }
+
+    /**
      * 上报一次护眼强制休息的实际时长（毫秒），从当日总时长中扣除。
      *
      * 三端一致性的关键落地：休息由孩子端本地 [com.padguard.core.engine.enforcer.EyeCareEnforcer] 触发，

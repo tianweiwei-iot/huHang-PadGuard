@@ -35,16 +35,30 @@
         <ul style="margin:10px 0 0;padding-left:18px;color:var(--text-2);font-size:13px">${p.features.map(f => "<li>" + U.esc(f) + "</li>").join("")}</ul>
       </div>`).join("") + '</div>';
     } else if (t === "subs") {
-      const subs = await PG.api.listSubscriptions({});
-      el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="s-st" class="btn" style="height:36px"><option value="">全部状态</option><option value="active">生效中</option><option value="trial">试用</option><option value="expired">已过期</option></select></div><div class="table-wrap"><table class="tbl"><thead><tr><th>家长</th><th>套餐</th><th>状态</th><th>开始</th><th>到期</th><th>自动续费</th><th>渠道</th></tr></thead><tbody id="s-body"></tbody></table></div>';
-      const draw = (st) => { const f = st ? subs.filter(s => s.status === st) : subs; root.querySelector("#s-body").innerHTML = f.map(s => `<tr><td>${U.esc(s.parentName)}<div class="cell-sub">${U.esc(s.parentPhone)}</div></td><td>${U.esc(s.planName)}</td><td>${U.badge(U.SUB_STATUS, s.status)}</td><td class="cell-sub">${U.esc(s.startedAt)}</td><td class="cell-sub">${U.esc(s.expiredAt)}</td><td>${s.autoRenew ? "是" : "否"}</td><td class="muted">${U.esc(s.channel)}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">暂无数据</td></tr>'; };
-      draw(""); root.querySelector("#s-st").onchange = (e) => draw(e.target.value);
+      el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="s-st" class="btn" style="height:36px"><option value="">全部状态</option><option value="active">生效中</option><option value="trial">试用</option><option value="expired">已过期</option></select></div><div id="s-wrap"><div class="empty">加载中…</div></div>';
+      // 筛选走服务端（?status=）而非"拉全量 + 前端过滤"：
+      // 全量拉取会把整张订阅表灌进浏览器内存；更糟的是运营无从判断
+      // 眼前这批数据是"全部"还是"筛过的"，规模感失真。服务端本就支持该参数。
+      const load = async (st) => {
+        const subs = await PG.api.listSubscriptions(st ? { status: st } : {});
+        root.querySelector("#s-wrap").innerHTML = '<div class="table-wrap"><table class="tbl"><thead><tr><th>家长</th><th>套餐</th><th>状态</th><th>开始</th><th>到期</th><th>自动续费</th><th>渠道</th></tr></thead><tbody>' +
+          (subs.map(s => `<tr><td>${U.esc(s.parentName)}<div class="cell-sub">${U.esc(s.parentPhone)}</div></td><td>${U.esc(s.planName)}</td><td>${U.badge(U.SUB_STATUS, s.status)}</td><td class="cell-sub">${U.esc(s.startedAt)}</td><td class="cell-sub">${U.esc(s.expiredAt)}</td><td>${s.autoRenew ? "是" : "否"}</td><td class="muted">${U.esc(s.channel)}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">暂无数据</td></tr>') +
+          '</tbody></table></div>';
+      };
+      await load("");
+      root.querySelector("#s-st").onchange = (e) => load(e.target.value);
     } else if (t === "orders") {
-      const orders = await PG.api.listOrders({});
-      el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="o-st" class="btn" style="height:36px"><option value="">全部</option><option value="paid">已支付</option><option value="refunded">已退款</option><option value="unpaid">待支付</option></select></div><div class="table-wrap"><table class="tbl"><thead><tr><th>订单号</th><th>家长</th><th>套餐</th><th>金额</th><th>状态</th><th>渠道</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="o-body"></tbody></table></div>';
-      const draw = (st) => { const f = st ? orders.filter(o => o.status === st) : orders; root.querySelector("#o-body").innerHTML = f.map(o => `<tr><td class="cell-strong">${U.esc(o.orderNo)}</td><td>${U.esc(o.parentName)}<div class="cell-sub">${U.esc(o.parentPhone)}</div></td><td>${U.esc(o.planName)}</td><td class="cell-strong">${U.money(o.amountFen)}</td><td>${U.badge(U.ORDER_STATUS, o.status)}</td><td class="muted">${U.esc(o.channel)}</td><td class="cell-sub">${U.esc(o.createdAt)}</td><td>${o.status === "paid" ? '<button class="btn btn-xs" data-ref="' + U.esc(o.orderNo) + '">退款</button>' : "—"}</td></tr>`).join("") || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
-        el.querySelectorAll("[data-ref]").forEach(b => b.onclick = () => PG.ui.confirm("订单退款", "确认对订单 " + b.dataset.ref + " 发起退款？", async () => { await PG.api.refund(b.dataset.ref); PG.ui.toast("ok", "已退款", b.dataset.ref); renderTab(root, "orders"); }, true)); };
-      draw(""); root.querySelector("#o-st").onchange = (e) => draw(e.target.value);
+      el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="o-st" class="btn" style="height:36px"><option value="">全部</option><option value="paid">已支付</option><option value="refunded">已退款</option><option value="unpaid">待支付</option></select></div><div id="o-wrap"><div class="empty">加载中…</div></div>';
+      // 同上：状态筛选交给服务端（?status=）
+      const load = async (st) => {
+        const orders = await PG.api.listOrders(st ? { status: st } : {});
+        root.querySelector("#o-wrap").innerHTML = '<div class="table-wrap"><table class="tbl"><thead><tr><th>订单号</th><th>家长</th><th>套餐</th><th>金额</th><th>状态</th><th>渠道</th><th>创建时间</th><th>操作</th></tr></thead><tbody>' +
+          (orders.map(o => `<tr><td class="cell-strong">${U.esc(o.orderNo)}</td><td>${U.esc(o.parentName)}<div class="cell-sub">${U.esc(o.parentPhone)}</div></td><td>${U.esc(o.planName)}</td><td class="cell-strong">${U.money(o.amountFen)}</td><td>${U.badge(U.ORDER_STATUS, o.status)}</td><td class="muted">${U.esc(o.channel)}</td><td class="cell-sub">${U.esc(o.createdAt)}</td><td>${o.status === "paid" ? '<button class="btn btn-xs" data-ref="' + U.esc(o.orderNo) + '">退款</button>' : "—"}</td></tr>`).join("") || '<tr><td colspan="8" class="empty">暂无数据</td></tr>') +
+          '</tbody></table></div>';
+        root.querySelectorAll("#o-wrap [data-ref]").forEach(b => b.onclick = () => PG.ui.confirm("订单退款", "确认对订单 " + b.dataset.ref + " 发起退款？", async () => { await PG.api.refund(b.dataset.ref); PG.ui.toast("ok", "已退款", b.dataset.ref); renderTab(root, "orders"); }, true));
+      };
+      await load("");
+      root.querySelector("#o-st").onchange = (e) => load(e.target.value);
     } else if (t === "revenue") {
       const rev = await PG.api.revenue();
       const total = rev.reduce((s, r) => s + r.amount, 0);

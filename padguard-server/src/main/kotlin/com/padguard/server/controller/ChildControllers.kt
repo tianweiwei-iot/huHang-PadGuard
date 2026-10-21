@@ -1,6 +1,9 @@
 package com.padguard.server.controller
 
 import com.padguard.server.common.DeviceApiResponse
+import com.padguard.server.common.Audience
+import com.padguard.server.common.BizException
+import com.padguard.server.common.ParentErr
 import com.padguard.server.dto.*
 import com.padguard.server.service.*
 import com.padguard.server.mqtt.ChildUplinkHandler
@@ -113,8 +116,46 @@ class ChildReportController(
     private val fileStorageService: FileStorageService,
     private val monitorService: MonitorService,
     private val appManageService: AppManageService,
-    private val childUplinkHandler: ChildUplinkHandler
+    private val childUplinkHandler: ChildUplinkHandler,
+    private val alertService: AlertService
 ) {
+
+    /**
+     * 孩子端自愈成功后关闭对应类别的 ACTIVE 告警（恢复即关闭闭环）。
+     *
+     * ## 为何需要
+     * 此前告警只能由家长手动关闭。DO 设备静默重授予权限后，服务端 ACTIVE 告警仍长期挂起，
+     * 家长端持续提示"权限被撤销 / 无障碍已关闭"——"修好了还在报警"。
+     * 孩子端在权限自愈成功时调用本接口，形成"自愈成功 → 告警消失"的闭环。
+     *
+     * ## 安全约束
+     * - deviceId 一律取鉴权注入值，禁止报文伪造（防越权关闭他人告警）；
+     * - category 限定白名单 [RESOLVABLE_ALERT_CATEGORIES]，孩子端只能关闭"权限自愈"相关类别，
+     *   无法借此关闭越界 / 卸载 / root 等其它告警。
+     */
+    @PostMapping("/alerts/resolve")
+    fun resolveAlerts(
+        @RequestAttribute("deviceId") deviceId: String,
+        @RequestBody req: AlertResolveRequest
+    ): DeviceApiResponse<*> {
+        for (category in req.categories) {
+            if (category !in RESOLVABLE_ALERT_CATEGORIES) {
+                throw BizException(ParentErr.PARAM_ERROR, "不被允许的告警类别: $category", Audience.CHILD)
+            }
+            alertService.resolveActiveByCategory(deviceId, category, req.reason ?: "已自动恢复")
+        }
+        return DeviceApiResponse.ok(mapOf("resolved" to req.categories.size))
+    }
+
+    private companion object {
+        /** 孩子端仅可关闭"权限自愈"相关类别，禁止关闭越界 / 卸载 / root 等其它告警 */
+        val RESOLVABLE_ALERT_CATEGORIES = setOf(
+            "ACCESSIBILITY_DISABLED",
+            "GUARD_PERMISSION_DROPPED",
+            "PERMISSION_REVOKED"
+        )
+    }
+
     @PostMapping("/logs")
     fun logs(
         @RequestAttribute("deviceId") deviceId: String,

@@ -14,6 +14,18 @@
   const moneyK = (fen) => { const y = (fen || 0) / 100; return y >= 10000 ? "¥" + (y / 10000).toFixed(1) + "万" : "¥" + y.toFixed(0); };
   const pct = (n) => (n || 0) + "%";
 
+  /**
+   * 分钟数 → "2h30m"。
+   *
+   * 关键在于 **null / 非数字必须显示"—"，绝不回落成 "0h0m"**：
+   * 服务端对"今日尚未开始计时"返回 null，若这里当成 0 处理，
+   * 运营看到的就是"这孩子今天一分钟都没用"——把一个"没有数据"的事实
+   * 粉饰成了确切的零，照它判断活跃度必然失真。
+   */
+  const fmtMinutes = (m) => (m == null || isNaN(m))
+    ? "—"
+    : Math.floor(m / 60) + "h" + (m % 60) + "m";
+
   // ---------- Toast ----------
   function toast(type, title, msg) {
     const root = doc.getElementById("toast-root");
@@ -122,7 +134,7 @@
   }
 
   PG.ui = {
-    esc, money, moneyK, pct, toast, modal, drawer, confirm,
+    esc, money, moneyK, pct, fmtMinutes, toast, modal, drawer, confirm,
     badge, PARENT_STATUS, SUB_STATUS, ORDER_STATUS,
     donut, line, bar, sparkline,
   };

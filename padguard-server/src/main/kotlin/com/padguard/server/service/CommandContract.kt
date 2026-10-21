@@ -61,6 +61,18 @@ object CommandType {
      * 至少在管控生效时段给出明确提示。
      */
     const val SET_WATERMARK = "SET_WATERMARK"
+    /**
+     * 整机管控 暂停 / 恢复。
+     *
+     * 对应家长端「一键释放 / 恢复对平板的全部管控」诉求：
+     * 下发后孩子端 [com.padguard.core.engine.guard.GuardMasterSwitch] 置为对应态——
+     * - active=false：收起锁屏浮层、解除设置 / 应用拦截、DO 设备归还权限、不钉 Kiosk，
+     *   设备回到完全可用，家长 / 操作员可自由进入系统设置；
+     * - active=true：恢复管控（仍处于锁定态时重铺锁屏等）。
+     * 缺省按 true 处理（见孩子端 CommandExecutor.payloadBoolean 的默认值）。
+     * payload { active }，字段名必须与孩子端 CommandExecutor.KEY_ACTIVE 一致（"active"）。
+     */
+    const val SET_MANAGEMENT_ACTIVE = "SET_MANAGEMENT_ACTIVE"
 }
 
 /** payload 字段名，取值必须与孩子端 CommandExecutor 的 KEY_* 常量一致 */
@@ -114,6 +126,8 @@ object CommandKey {
     const val WITH_AUDIO = "withAudio"
     /** 布尔开关，孩子端读取后决定启用还是关闭（水印 / 挂起 / 隐藏等通用开关字段） */
     const val ENABLED = "enabled"
+    /** 整机管控 暂停/恢复 开关：true=恢复管控，false=释放整机（必须与孩子端 CommandExecutor.KEY_ACTIVE 一致） */
+    const val ACTIVE = "active"
     /**
      * 实时看屏画质档位：true=高清（更宽、更高 JPEG 质量），false=标准（省带宽）。
      *

@@ -113,6 +113,12 @@ class ScreenStreamHub {
     /** 注册/注销推流设备（在 ChildStreamController 的推流长连接起止处调用） */
     fun registerPublisher(deviceId: String) = publishers.add(deviceId)
     fun unregisterPublisher(deviceId: String) = publishers.remove(deviceId)
+
+    /**
+     * 该设备当前是否存在活跃上行连接。注意：进程被杀但 TCP 未即时断开时会残留"僵尸连接"，
+     * 调用方必须叠加 [lastFrameAt] 的新鲜度判定，才能真正区分"在推流"与"连接残骸"。
+     */
+    fun isPublishing(deviceId: String): Boolean = publishers.contains(deviceId)
     fun publisherCount(): Int = publishers.size
     /** 推流中设备的快照（用于 /metrics 聚合，避免直接暴露并发集合） */
     fun publishersSnapshot(): List<String> = publishers.toList()

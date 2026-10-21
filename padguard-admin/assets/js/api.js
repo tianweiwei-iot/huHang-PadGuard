@@ -1,8 +1,8 @@
 /* ============================================================
    PadGuard 管控后台 · API 客户端
    - 后台真实接口（/v1/admin/**）已在服务端落地，**默认走 Live**。
-   - 实时接口不可用时，按下方 ENDPOINTS 契约请求真实 padguard-server，
-     失败则降级到空数据并提示（不再返回任何编造的演示数据）。
+   - 网络层不可用时降级为空数据并如实提示（不再返回任何编造的演示数据）；
+     收到服务端响应的 4xx/5xx 一律上抛，绝不降级成假数据。
    ============================================================ */
 (function (global) {
   const PG = global.PG || (global.PG = {});
@@ -47,37 +47,13 @@
     return m;
   }
 
-  // 真实端点契约（admin 端点已并入 padguard-server：controller/AdminController.kt）
-  const ENDPOINTS = {
-    login: "POST /v1/admin/login",
-    dashboard: "GET /v1/admin/dashboard",
-    parents: "GET /v1/admin/parents",
-    parentSuspend: "POST /v1/admin/parents/{id}/suspend",
-    parentResetPwd: "POST /v1/admin/parents/{id}/reset-password",
-    parentUpdate: "PUT /v1/admin/parents/{id}",
-    parentDelete: "DELETE /v1/admin/parents/{id}",
-    devices: "GET /v1/admin/devices",
-    deviceLock: "POST /v1/admin/devices/{id}/lock",
-    plans: "GET /v1/admin/billing/plans",
-    subscriptions: "GET /v1/admin/billing/subscriptions",
-    orders: "GET /v1/admin/billing/orders",
-    revenue: "GET /v1/admin/billing/revenue",
-    roles: "GET /v1/admin/rbac/roles",
-    admins: "GET /v1/admin/rbac/admins",
-    adminUpdate: "PUT /v1/admin/rbac/admins/{id}",
-    adminDelete: "DELETE /v1/admin/rbac/admins/{id}",
-    adminResetPwd: "POST /v1/admin/rbac/admins/{id}/reset-password",
-    createRole: "POST /v1/admin/rbac/roles",
-    deleteRole: "DELETE /v1/admin/rbac/roles/{id}",
-    serverHealth: "GET /health",
-    serverMetrics: "GET /v1/admin/server/metrics",
-    serverLogs: "GET /v1/admin/server/logs",
-    serverProfile: "GET /v1/admin/server-profile",
-    saveServerProfile: "PUT /v1/admin/server-profile",
-    audit: "GET /v1/admin/audit",
-    alerts: "GET /v1/admin/alerts",
-    settings: "GET /v1/admin/settings",
-  };
+  // 端点契约：各方法自带的 `http(method, path)` 调用即为唯一事实源，
+  // admin 端点已并入 padguard-server（controller/AdminController.kt）。
+  //
+  // 这里原先维护过一张 `ENDPOINTS` 常量表，但它**从未被任何代码读取** ——
+  // 每个方法仍然各写各的字面量路径。结果就是：新增端点时改了方法、忘了改表，
+  // 表里 10 多条记录长期过期（缺 audit/areas、logout、rbac 多数端点）。
+  // 一张没人读的"契约表"比没有更危险：它会让人误以为端点清单就这些。故直接删除。
 
   const wait = (ms) => new Promise(r => setTimeout(r, ms));
   // 安全深拷贝：undefined/null 原样返回，避免 JSON.parse(undefined) 抛 "undefined" is not valid JSON
@@ -132,7 +108,7 @@
 
   // ---------------- 实现 ----------------
   const api = {
-    config, ENDPOINTS,
+    config,
     setMock(v) { config.useMock = v; },
     toggleEnv() { config.useMock = !config.useMock; return config.useMock; },
 
@@ -146,6 +122,29 @@
       const r = await http("POST", "/v1/admin/login", { username, password });
       if (!r || !r.token) throw new Error("服务端登录响应缺少 token");
       return r;
+    },
+
+    /**
+     * 退出登录：请求服务端吊销当前令牌（admins.token_version +1）。
+     *
+     * 只清浏览器本地 token 是不够的 —— JWT 过期前始终有效，被复制走的令牌仍能操作后台。
+     *
+     * 容错策略（刻意宽松）：本方法**不抛错**，只返回吊销是否成功。
+     * 退出是"让用户离开"的操作，任何原因（网络断开、令牌其实早已过期返回 401）
+     * 都不该把人卡在退出这一步。调用方拿到 revoked=false 时如实提示即可 ——
+     * 本地态照清，只是令牌要等到自然过期才失效，这比"退出按钮点了没反应"安全得多。
+     */
+    async logout() {
+      if (config.useMock) return { revoked: false, reason: "mock" };
+      try {
+        const r = await http("POST", "/v1/admin/logout", {});
+        return { revoked: !!(r && r.revoked), reason: null };
+      } catch (e) {
+        // 401 表示令牌已被吊销或已过期 —— 目标状态本就是"未登录"，按成功处理
+        const m = String((e && e.message) || e);
+        if (/重新登录|失效|HTTP 401/i.test(m)) return { revoked: true, reason: "already_invalid" };
+        return { revoked: false, reason: m };
+      }
     },
 
     async dashboard() {
@@ -354,7 +353,28 @@
     },
 
     // 审计 / 告警
-    async audit(q) { return liveOrMock(() => http("GET", "/v1/admin/audit?" + new URLSearchParams(q || {})), () => { let a = clone(M.audit); if (q && q.area) a = a.filter(x => x.area === q.area); return a; }); },
+    /**
+     * 审计领域下拉项 [{key,name}]，取自服务端权限定义（含前端此前漏掉的 `audit` 领域）。
+     *
+     * 不使用 `liveOrMock`：这是**渲染下拉所需的元数据**，不是业务数据。
+     * 取不到时上抛让调用方显示"— 无法加载筛选 —"，而不是拿一份残缺的本地副本糊过去
+     * （那正是"下拉少一项"这个缺陷的成因）。
+     */
+    async auditAreas() { return http("GET", "/v1/admin/audit/areas"); },
+
+    // 审计列表：真实接口返回分页对象 {items,truncated,maxRows,total}。
+    // 降级路径**必须**返回同构对象，否则调用方拿到的数据结构会随网络状况漂移
+    // （在线是对象、离线是数组），页面会被迫写两套分支 —— 这类形状不一致是线上事故的高发区。
+    async audit(q) {
+      return liveOrMock(
+        () => http("GET", "/v1/admin/audit?" + new URLSearchParams(q || {})),
+        () => {
+          let a = clone(M.audit);
+          if (q && q.area) a = a.filter((x) => x.area === q.area);
+          return { items: a, truncated: false, maxRows: a.length, total: a.length };
+        }
+      );
+    },
     async alerts() { return liveOrMock(() => http("GET", "/v1/admin/alerts"), () => clone(M.alerts)); },
     async closeAlert(id) { return liveOrMock(() => http("POST", "/v1/admin/alerts/" + id + "/close"), () => { const a = M.alerts.find(x => x.id === id); if (a) a.status = "closed"; return { ok: true }; }); },
 

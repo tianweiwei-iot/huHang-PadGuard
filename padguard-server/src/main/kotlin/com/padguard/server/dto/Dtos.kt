@@ -179,10 +179,22 @@ data class DeviceDto(
      * 家长端「设备详情」与「应用管理」两处共用这一事实来源，
      * 不再依赖各页面易失的会话内乐观标记，避免冷启动时状态失真。
      */
-    val guardPasswordSet: Boolean = false
+    val guardPasswordSet: Boolean = false,
+    /**
+     * P3 守护健康度快照（孩子端心跳上报，持久化于 devices 表）。
+     * 家长端据以展示守护健康度；服务端据 daemonAlive=false 判定 T3 守护失联。
+     */
+    val daemonAlive: Boolean? = null,
+    val a11yAlive: Boolean? = null,
+    val daemonOnlineState: String? = null,
+    val lastRestartReason: String? = null,
+    val permissionVersion: Int? = null,
+    val daemonLost: Boolean? = null
 )
 
 data class LockRequest(val reason: String? = null)
+/** 整机管控 暂停/恢复：active=true 恢复管控，false 释放整机（payload 字段名与孩子端 KEY_ACTIVE 一致） */
+data class ManagementActiveRequest(val active: Boolean = true)
 data class ModeRequest(val mode: String)
 
 /**
@@ -316,7 +328,14 @@ data class HeartbeatDto(
     val controlMode: String? = null,
     val battery: Map<String, Any?>? = null,
     val location: Map<String, Any?>? = null,
-    val network: Map<String, Any?>? = null
+    val network: Map<String, Any?>? = null,
+    // P3 守护健康度快照：孩子端随 15s 心跳上报，服务端持久化并据以判定 T3 守护失联。
+    // 均为可空带默认，旧/非守护设备不上报时不破坏既有契约。
+    val daemonAlive: Boolean? = null,
+    val a11yAlive: Boolean? = null,
+    val onlineState: String? = null,
+    val lastRestartReason: String? = null,
+    val permissionVersion: Int? = null
 )
 
 // ============ MQTT 数据包 ============
@@ -359,6 +378,17 @@ data class EventPacket(
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class EventsRequest(val deviceId: String, val events: List<EventPacket>)
+
+/**
+ * 孩子端自愈成功后请求关闭对应类别 ACTIVE 告警（恢复即关闭闭环）。
+ *
+ * categories 必须是服务端白名单内的"权限自愈"相关类别，非白名单类别会被拒绝，
+ * 防止孩子端借此关闭越界 / 卸载 / root 等与自愈无关的告警。
+ */
+data class AlertResolveRequest(
+    val categories: List<String>,
+    val reason: String? = null
+)
 
 /**
  * 批量导入设备台账：单行（对应 Excel / CSV 的一行）。
