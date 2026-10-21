@@ -7,6 +7,7 @@ import android.app.job.JobService
 import android.content.ComponentName
 import android.content.Context
 import android.os.Build
+import com.padguard.child.receiver.GuardAlarmReceiver
 import com.padguard.core.common.Logger
 
 /**
@@ -31,13 +32,30 @@ import com.padguard.core.common.Logger
 class GuardWatchdogService : JobService() {
 
     override fun onStartJob(params: JobParameters?): Boolean {
+        val bound = GuardHeartbeat.readGuardState(this)
         if (GuardService.isRunning) {
             Logger.v(TAG) { "watchdog: guard service alive" }
-        } else {
+        } else if (bound) {
             Logger.w(TAG) { "watchdog: guard service NOT running, restarting" }
             runCatching { GuardService.start(this, GuardService.REASON_WATCHDOG) }
                 .onFailure { Logger.e(TAG, it) { "watchdog restart failed" } }
+        } else {
+            Logger.v(TAG) { "watchdog: guard not running but device not bound, skip" }
         }
+        // 双进程互保的另一半：守护进程（:daemon）心跳陈旧且已绑定 → 拉起。
+        // 它自身也是 START_STICKY + 开机广播保活，这里是第三层。
+        val daemonAge = GuardHeartbeat.readDaemonAliveAgeMs(this)
+        if (bound && (daemonAge == null || daemonAge > GuardHeartbeat.DAEMON_STALE_MS)) {
+            Logger.w(TAG) { "watchdog: daemon NOT alive (age=$daemonAge), restarting" }
+            GuardDaemonService.start(this)
+        }
+        // 顺带排上闹钟兜底通道（与 JobScheduler 并行的第二条系统调度路径，幂等）
+        if (bound) GuardAlarmReceiver.schedule(this)
+        // 自调度下一次探测：用「一次性任务 + 自唤起」替代 setPeriodic，
+        // 绕开 JobScheduler 对周期任务最低 15 分钟的硬性下限（见 schedule 注释），
+        // 把进程被杀后的恢复窗口从 ≤15 分钟压到 ≤ WATCHDOG_DEADLINE_MS。
+        runCatching { schedule(this) }
+            .onFailure { Logger.e(TAG, it) { "watchdog reschedule failed" } }
         // 本次工作已同步完成，不需要持有 wakelock
         return false
     }
@@ -49,28 +67,42 @@ class GuardWatchdogService : JobService() {
         private const val JOB_ID = 2026_1007
 
         /**
-         * 看门狗周期。5 分钟是权衡结果：太短徒增系统调度与耗电（且国产 ROM 会因此限流），
-         * 太长则"设备脱管"的窗口过大 —— 家长最长要等五分钟才恢复控制。
-         * 注：看门狗只在「应用进程已死、但系统仍调度 JobScheduler」时起作用（被设置强制停止
-         * 进入停止态时它同样失效）。更常见的「后台清理 / 灭屏被杀」已由 [GuardService] 的
-         * 屏幕亮起/网络恢复动态广播在秒级内自愈，本周期仅作最后兜底。
+         * 看门狗探测节奏。
+         *
+         * ## 关键修正：弃用 setPeriodic
+         * 早期用 `setPeriodic(5min)` 设定周期，但 Android 对所有周期任务有**最低 15 分钟**
+         * 的硬性下限（[JobInfo.getMinPeriodMillis]），传入 5 分钟会被系统**静默钳制为 15 分钟**。
+         * 后果：守护进程被杀后，最长要等 15 分钟才被拉起 —— 这正是「孩子端掉线很久才恢复 /
+         * 守护进程没生效」的根因之一（离线期间指令轮询退化为慢速且 pull 必然失败）。
+         *
+         * 改用「一次性任务 + 自唤起」：每次作业执行完后由 [onStartJob] 再排下一跳，
+         * 最低延迟可取 60s、最迟 90s（[setOverrideDeadline] 保证即使空闲也按时跑）。
+         * 这样把恢复窗口从 ≤15 分钟压到 ≤90 秒，且不触发国产 ROM 对高频周期任务的限流。
+         *
+         * 说明：看门狗只在「应用进程已死、但系统仍调度 JobScheduler」时起作用（被设置强制停止
+         * 进入停止态时它同样失效，这是 Android 安全模型，应用层绕不过，唯一正解是 Device Owner）。
+         * 更常见的「后台清理 / 灭屏被杀」已由 [GuardService] 的屏幕亮起/网络恢复动态广播在秒级自愈，
+         * 本机制作为最后兜底，把最坏恢复时间从 15 分钟降到约 1 分钟。
          */
-        private val INTERVAL_MS = java.util.concurrent.TimeUnit.MINUTES.toMillis(5)
+        private val WATCHDOG_LATENCY_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(60)
+        private val WATCHDOG_DEADLINE_MS = java.util.concurrent.TimeUnit.SECONDS.toMillis(90)
 
-        /** 幂等注册：已排过同 ID 的作业就不再重复排（系统会自动续期）。 */
+        /** 幂等注册：已排过同 ID 的作业（尚未触发）就不再重复排（系统会自动续期）。 */
         fun schedule(context: Context) {
             val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler
                 ?: return
             val existing = runCatching { scheduler.getPendingJob(JOB_ID) }.getOrNull()
             if (existing != null) return
 
+            // 一次性任务：setMinimumLatency 不受 15 分钟下限约束；setOverrideDeadline 兜底保证最坏 90s 必跑。
+            // setPersisted 让作业在设备重启后依然生效，不依赖开机广播那一跳。
             val info = JobInfo.Builder(JOB_ID, ComponentName(context, GuardWatchdogService::class.java))
-                .setPeriodic(INTERVAL_MS)
-                // 设备重启后自动恢复调度，不需要再依赖开机广播那一跳
+                .setMinimumLatency(WATCHDOG_LATENCY_MS)
+                .setOverrideDeadline(WATCHDOG_DEADLINE_MS)
                 .setPersisted(true)
                 .build()
             runCatching { scheduler.schedule(info) }
-                .onSuccess { Logger.i(TAG) { "watchdog scheduled" } }
+                .onSuccess { Logger.i(TAG) { "watchdog scheduled (self-rescheduling one-shot, ~${WATCHDOG_DEADLINE_MS / 1000}s)" } }
                 .onFailure { Logger.e(TAG, it) { "watchdog schedule failed" } }
         }
 

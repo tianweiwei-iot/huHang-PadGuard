@@ -29,6 +29,7 @@ import com.padguard.child.capture.AccessibilityScreenshot
 import com.padguard.child.capture.MediaUploadRetry
 import com.padguard.child.capture.PhotoCapture
 import com.padguard.child.capture.ScreenCaptureService
+import com.padguard.child.receiver.GuardAlarmReceiver
 import com.padguard.child.time.TimeOffsetPrefs
 import com.padguard.child.capture.ScreenCaptureSession
 import com.padguard.child.guard.AppGuardPolicyStore
@@ -36,26 +37,31 @@ import com.padguard.child.guard.EyeProtectionOverlay
 import com.padguard.child.guard.GuardA11y
 import com.padguard.child.guard.GuardPasswordManager
 import com.padguard.child.hidden.AppHider
-import com.padguard.child.hidden.FloatingStatusController
 import com.padguard.child.maintain.AppInstaller
 import com.padguard.child.monitor.AppInventoryCollector
 import com.padguard.child.monitor.DeviceSnapshotCollector
 import com.padguard.child.AppForeground
 import com.padguard.child.monitor.ForegroundAppMonitor
+import com.padguard.child.permission.AuthorizationKeeper
 import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.monitor.LocationCollector
 import com.padguard.child.monitor.LocationOutcome
 import com.padguard.child.monitor.LocationAutoReporter
 import com.padguard.child.ui.block.AppBlockActivity
+import com.padguard.core.data.model.policy.BlacklistAction
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.usagesession.UsageSessionManager
 import com.padguard.child.ui.lock.LockScreenPresenter
 import com.padguard.child.guard.DeviceOwnerEnforcer
+import com.padguard.child.guard.PermissionHealthChecker
 import com.padguard.child.ui.lock.SystemKeyguardBridge
 import com.padguard.child.ui.message.MessageActivity
+import com.padguard.child.ui.message.MessageOverlayController
+import com.padguard.child.guard.UninstallDefenseModule
 import com.padguard.child.ui.overlay.WatermarkOverlay
 import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
+import com.padguard.core.engine.guard.GuardMasterSwitch
 import com.padguard.core.data.model.Heartbeat
 import com.padguard.core.data.model.LogType
 import com.padguard.core.data.db.ParentMessageEntity
@@ -96,6 +102,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
 /**
@@ -178,10 +185,10 @@ class GuardService : Service() {
     @Inject lateinit var guardPassword: GuardPasswordManager
     /** 媒体上传重试队列；解绑时随采集缓存一并清空 */
     @Inject lateinit var mediaRetry: MediaUploadRetry
-    /** 绑定后隐藏管理控制台（图标消失），仅留悬浮状态卡给孩子 */
+    /** 绑定后隐藏管理控制台（图标消失），仅留玻璃球给孩子 */
     @Inject lateinit var appHider: AppHider
-    /** 悬浮状态卡控制器（绑定后常驻展示使用时长，是隐藏形态下唯一的家长触点） */
-    @Inject lateinit var floatingStatus: FloatingStatusController
+    /** 玻璃球悬浮控制器（绑定后常驻展示已用/剩余，是隐藏形态下孩子可见、家长可触达的唯一载体） */
+    @Inject lateinit var glassBall: com.padguard.child.glassball.GlassBallController
 
     /**
      * 无障碍截屏通道：远程截屏优先走这里 —— 授权（启用无障碍）持久有效，
@@ -195,6 +202,27 @@ class GuardService : Service() {
     /** 无障碍截屏能力自愈：陈旧元数据（升级后能力位缺失）时静默重切换服务 */
     @Inject lateinit var a11yCapabilityHealer: com.padguard.child.guard.AccessibilityCapabilityHealer
 
+    /** 整机管控总开关（权威真相源）：active=false 时释放设备，锁屏浮层/无障碍拦截/DO 回收入口都来此问询 */
+    @Inject lateinit var guardMasterSwitch: GuardMasterSwitch
+
+    /** 权限掉失自愈：设备重启（如国产 ROM 授予特殊权限触发强制重启）后核对无障碍/悬浮窗是否仍在 */
+    @Inject lateinit var permissionHealthChecker: PermissionHealthChecker
+
+    /** 授权保持器：装机授权完成后仍全量复检，缺失则 DO 静默补 / 非 DO 拉回引导流程（防回退自愈） */
+    @Inject lateinit var authorizationKeeper: AuthorizationKeeper
+
+    /**
+     * 信息发布「系统级置顶」渲染控制器：把家长下发的信息置于所有 Activity（含锁屏）之上。
+     * 其内部在无悬浮窗权限时自动回退到 [MessageActivity]，故 ShowMessage 一律走它。
+     */
+    @Inject lateinit var messageOverlay: MessageOverlayController
+
+    /**
+     * 卸载防御聚合（问题二·非 DO 加固）：权限活性自检 / 系统级封死 / 密码闸门告警。
+     * 在 [refreshPolicy] 中周期性触发，确保「管控悄然失效」能被家长端及时看到。
+     */
+    @Inject lateinit var uninstallDefense: UninstallDefenseModule
+
     /**
      * 当前是否"已绑定"（由 [observeBinding] 维护）。
      *
@@ -203,6 +231,18 @@ class GuardService : Service() {
      * 而系统级 lockNow() 一旦落下，应用自身再也解不开，只能靠 adb 救援。
      */
     private val boundNow = AtomicBoolean(false)
+
+    /**
+     * 上一次本服务被拉起的触发原因（见 [REASON_BOOT]/[REASON_DAEMON]/[REASON_WATCHDOG] 等），
+     * 供「守护状态快照」随 15s 心跳上报，使服务端/家长端能区分进程是被谁拉回的。
+     */
+    private var lastStartReason: String = "unknown"
+
+    /**
+     * 权限自愈版本号：每次运行期危险权限被实际重新授予（[PermissionHealthChecker.healRuntimePermissions] 返回值 > 0）
+     * 即 +1。服务端据此识别「权限状态是否发生变化」，无需解析具体权限细节。
+     */
+    private val permissionVersion = AtomicInteger(0)
 
     /**
      * 服务自己的作用域，不用 `@ApplicationScope`。
@@ -303,21 +343,58 @@ class GuardService : Service() {
                     .onFailure { Logger.e(TAG, it) { "restart via broadcast failed" } }
                 return
             }
-            // 屏幕刚点亮：这是锁定覆盖最容易被撕开的时刻。
-            //
-            // 息屏期间按设计不铺悬浮地板（它带 FLAG_KEEP_SCREEN_ON，会把屏幕唤醒、
-            // 破坏「锁屏并熄屏」），而锁屏 Activity 的后台抢占在 Android 10+ 上会被 ROM
-            // 静默丢弃。于是孩子按下电源键的这一瞬间，屏幕上很可能什么都没有 ——
-            // 等到下一个 15s 自检周期才补，已经够他点开一个应用了。
-            // 这里在亮屏后立刻对账一次，把窗口从 15 秒压到百毫秒级。
-            if (action == Intent.ACTION_SCREEN_ON) {
-                // 稍作延迟：广播到达时 PowerManager.isInteractive 可能尚未翻转，
-                // 立刻判定会误以为是息屏而跳过铺地板。
-                Handler(Looper.getMainLooper()).postDelayed({
-                    runCatching { lockScreenPresenter.reenforce() }
-                        .onFailure { Logger.w(TAG, it) { "lock coverage recheck on screen-on failed" } }
-                }, SCREEN_ON_RECHECK_DELAY_MS)
+            when (action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    // 锁屏 / 息屏：MediaProjection 会被系统强制断开，令牌随之失效。
+                    // 主动清掉进程内凭据，避免 hasToken() 基于陈旧 resultIntent 误判"仍可用"——
+                    // 否则看屏恢复链路会复用已死的投影（黑屏），或 consent 页跳过系统确认框，
+                    // 造成"点了授权通知却无确认弹窗、无法确认授权"（2026-10-21 现场复发）。
+                    runCatching { ScreenCaptureSession.release() }
+                        .onFailure { Logger.w(TAG) { "release projection on screen-off failed: ${it.message}" } }
+                }
+                Intent.ACTION_SCREEN_ON -> {
+                    // 屏幕刚点亮：锁定覆盖最容易被撕开的时刻，立即对账一次（见原注释）。
+                    // 稍作延迟：广播到达时 PowerManager.isInteractive 可能尚未翻转。
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        runCatching { lockScreenPresenter.reenforce() }
+                            .onFailure { Logger.w(TAG, it) { "lock coverage recheck on screen-on failed" } }
+                    }, SCREEN_ON_RECHECK_DELAY_MS)
+                    // 解锁后抢恢复看屏（见 maybeResumeLiveViewOnUnlock）
+                    maybeResumeLiveViewOnUnlock()
+                }
+                Intent.ACTION_USER_PRESENT -> {
+                    // 用户已解锁（亮屏且过了锁屏页）：同样触发一次看屏恢复
+                    maybeResumeLiveViewOnUnlock()
+                }
             }
+        }
+    }
+
+    /**
+     * 解锁后用无障碍通道抢恢复看屏会话。
+     *
+     * 锁屏会把投影令牌强制回收（见 [restartReceiver] 的 [Intent.ACTION_SCREEN_OFF] 处理），
+     * 且 EMUI 常把无障碍服务一并关掉。解锁后若仍处看屏窗口，立刻：
+     *   1) DO 静默重启用无障碍服务（EMUI 把它自动关掉时自愈，非 DO 设备则记日志引导）；
+     *   2) 走无障碍零弹窗通道推流，不等服务端 reconcile（8s 冷却重发）+ 60s 等待窗口。
+     * 这样"锁屏/进程被杀后家长点看屏"能秒级恢复，而不是退回投影授权通知逼孩子确认。
+     * 仅当无障碍确实不可用（服务被关且非 DO、或服务重绑失败）时，才由
+     * [com.padguard.child.capture.AccessibilityLiveStreamer.onA11yUnavailable] 退回投影引导。
+     */
+    private fun maybeResumeLiveViewOnUnlock() {
+        scope.launch {
+            runCatching {
+                val live = GuardHeartbeat.readLiveView(applicationContext) ?: return@runCatching
+                if (System.currentTimeMillis() > live.deadlineWallMs) {
+                    Logger.i(TAG) { "unlock: live view session expired, skip resume" }
+                    return@runCatching
+                }
+                Logger.i(TAG) {
+                    "unlock: live view session still active, re-routing to a11y channel (hd=${live.highDefinition})"
+                }
+                runCatching { a11yCapabilityHealer.ensureEnabled() }
+                a11yLiveStreamer.start(live.highDefinition)
+            }.onFailure { Logger.w(TAG) { "resume live view on unlock failed: ${it.message}" } }
         }
     }
 
@@ -340,6 +417,16 @@ class GuardService : Service() {
         // 超时直接 ForegroundServiceDidNotStartInTimeException 崩溃。
         // 所以先挂一个"启动中"的通知，真实状态等拿到数据后再刷。
         enterForeground()
+        // 实时看屏兜底接线：无障碍通道在等待窗口内始终不可用（用户确未启用/能力缺失）时，
+        // 退回投影推流路径，与既有"无障碍不可用→投影"语义一致。
+        // 进程刚被系统杀死、无障碍服务重绑有延迟时，[AccessibilityLiveStreamer] 会先等待就绪再推流，
+        // 正常情况下远早于超时即恢复，不会走到这里——这是"杀进程重开仍自动恢复看屏"的关键。
+        a11yLiveStreamer.onA11yUnavailable = { hd ->
+            runCatching {
+                val intent = ScreenCaptureService.liveStreamIntent(this@GuardService, hd)
+                dispatchCapture(intent)
+            }.onFailure { Logger.w(TAG) { "a11y unavailable fallback to projection failed: ${it.message}" } }
+        }
         // 监听本机应用装卸：孩子手动安装/卸载是即时管理动作，命中即触发台账同步，
         // 避免家长端在 30 分钟周期内看到"幽灵应用"且对其授权无效。
         registerAppChangeReceiver()
@@ -350,16 +437,30 @@ class GuardService : Service() {
         // 避免崩溃的指令被 7 天幂等窗口判重丢弃而永久静默丢失。
         scope.launch { runCatching { commandRepository.resetInFlightOnStartup() } }
         isRunning = true
+        // 写第一条心跳：守护进程（:daemon）与闹钟/看门狗据此判断主进程死活。
+        // 必须在任何可能拖延的启动流程之前落盘，否则进程若在 bootstrap 中途被杀，
+        // 心跳文件还是旧的，外部通道会误判"刚写过"而延迟拉起。
+        GuardHeartbeat.writeGuardAlive(this)
         // 注册看门狗：进程被系统/清理工具杀掉后由系统侧周期拉起（START_STICKY 并不保证重建）。
         // 放在 onCreate 而不是绑定流程里：即便这台设备还没绑定，守护也要在，
         // 否则"家长扫码绑定后立刻下发指令"会因为没有宿主而丢失。
         runCatching { GuardWatchdogService.schedule(this) }
             .onFailure { Logger.w(TAG) { "watchdog schedule failed: ${it.message}" } }
+        // 双进程守护：拉起独立 :daemon 进程（幂等）。主进程被整体杀掉时，
+        // 进程内的 onTaskRemoved/START_STICKY/动态广播全部失效，只有它能跨进程把主进程拉回。
+        GuardDaemonService.start(this)
+        // 闹钟兜底通道：与 JobScheduler 并行的第二条系统调度路径（已绑定才排班）
+        if (GuardHeartbeat.readGuardState(this)) {
+            GuardAlarmReceiver.schedule(this)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val reason = intent?.getStringExtra(EXTRA_REASON).orEmpty().ifBlank { "unknown" }
         Logger.i(TAG) { "onStartCommand reason=$reason" }
+        lastStartReason = reason
+        // 每次被唤起都刷心跳：进程重建（START_STICKY intent=null）后外部通道要立刻看到新鲜值
+        GuardHeartbeat.writeGuardAlive(this)
 
         // 前台状态可能因进程重建而丢失，每次进来都确保一次（内部幂等）
         enterForeground()
@@ -417,8 +518,8 @@ class GuardService : Service() {
         // 滤镜必须跟着服务一起撤：服务销毁意味着退出管控，
         // 留一层黄蒙蒙的遮罩在孩子屏幕上，家长会以为平板坏了。
         eyeProtectionOverlay.remove()
-        // 悬浮状态卡同样随守护服务撤收：服务销毁即退出管控，不应再留悬浮入口。
-        floatingStatus.dispose()
+        // 玻璃球同样随守护服务撤收：服务销毁即退出管控，不应再留悬浮入口。
+        glassBall.dispose()
         scope.cancel()
         super.onDestroy()
     }
@@ -435,6 +536,25 @@ class GuardService : Service() {
         // 自愈补授必须放在最前：通知权限一旦缺失，屏幕采集的引导通知孩子收不到，
         // 实时看屏就会永久卡在"连接中"，且平板上毫无提示。
         scope.launch { runSafely("ensurePermissions") { permissionGranter.ensureGranted() } }
+        // 权限掉失自检：国产 ROM 在系统设置里切换"后台弹出界面/悬浮窗"等权限时会强制重启本应用，
+        // 重启后无障碍服务绑定被解除、MediaProjection 录屏授权被清空——表现为"权限全部被取消"。
+        // 启动即核对，掉了就 DO 静默重治愈、非 DO 诚实告警并引导重新授权，避免静默处于管控残缺态。
+        scope.launch { runSafely("permissionHealth") { permissionHealthChecker.check() } }
+        // 授权回退自愈：装机授权完成后仍全量复检（设备管理员 / 运行时 / 全部特殊权限）。
+        // 缺失则 DO 静默补回能补的，其余与非 DO 缺失项把家长拉回引导流程重新勾选，
+        // 落实"授权不会自动丢失"。
+        scope.launch { runSafely("authReconcile") { authorizationKeeper.reconcile() } }
+        // 启动即做一轮 DO 静默重授权：进程被"划任务/清理工具"杀掉、再由守护进程拉回这一窗口里，
+        // 国产 ROM 常会静默回收权限（尤其切换权限后强制重启应用）。把原本每 5 分钟一次的
+        // heal 前置到启动即跑，让"权限失效自动恢复"在重启后零等待生效，落实"权限永远可用"。
+        // 二者均带 guardMasterSwitch/绑定态守卫，幂等且对未绑定/非 DO 设备无副作用。
+        scope.launch { runSafely("permHealNow") {
+            val healed = permissionHealthChecker.healRuntimePermissions()
+            if (healed > 0) permissionVersion.incrementAndGet()
+        } }
+        scope.launch { runSafely("capHealNow") { permissionHealthChecker.recheckSpecialCapabilities() } }
+        // 周期自检：服务长期存活但 App 未打开时，也能周期性发现授权掉失并拉回引导。
+        scope.launch { runSafely("authReconcileLoop") { authReconcileLoop() } }
         // 周期性位置上报：策略里 locationIntervalSec 的落地执行者（策略为 0 时自动不采）。
         // 放在这里而不是某个界面：守护服务是唯一长期存活的宿主，
         // 放在界面里孩子一按 Home 就断，轨迹数据会大面积缺失。
@@ -456,6 +576,8 @@ class GuardService : Service() {
                 } else {
                     policyEngine.applyCurrent(force = true)
                 }
+                // 服务（重）启动时按本地缓存策略恢复水印 —— 这正是"重启后水印消失"的修复点
+                syncWatermarkFromPolicy()
             }
         }
 
@@ -476,6 +598,8 @@ class GuardService : Service() {
             }
             startMainLoop()
             startCommandLoop()
+            // 授权回退周期自检：独立协程跑，不阻塞后续解锁自愈
+            scope.launch { runSafely("authReconcileLoop") { authReconcileLoop() } }
             // 解锁自愈：进程刚启动就可能带着"待撤锁"遗留（上次解锁时进程死掉 /
             // FSI 与直接启动都被 ROM 吞掉）。家长已解锁的意图不允许因为进程重启而丢失 ——
             // 此刻追一次（内部限频 + 幂等），剩下的交给看门狗与周期自检。
@@ -484,6 +608,50 @@ class GuardService : Service() {
                     LockScreenActivity.chaseUnlock(this@GuardService)
                 }
             }
+            // 看屏会话恢复：进程被杀前家长正在观看（live_view 窗口仍有效）→ 主动恢复推流，
+            // 不等服务端重发（那是 8s 冷却后的第二保险）。无障碍优先，未就绪时
+            // a11yLiveStreamer 内部会等待系统重绑（最长 60s）再自动开始，超时才走投影兜底。
+            runSafely("resumeLiveView") { resumeLiveViewIfActive() }
+        }
+    }
+
+    /**
+     * 进程重启后恢复中断的实时看屏。
+     *
+     * ## 为什么需要主动恢复
+     * 服务端 `MonitorService.reconcileLiveSessions` 虽会在家长观看期间重发
+     * LIVE_VIEW_START，但有 8s 冷却、且依赖家长端仍在续期；孩子端若能自己识别
+     * "死前我正在推流"，就能在进程重启后秒级接回，家长端画面不再苦等。
+     *
+     * ## 通道选择与既有语义一致
+     * 1. 投影令牌还在（进程未被杀的边缘情况）→ 投影推流；
+     * 2. 否则走无障碍通道 —— 授权持久有效、零弹窗，正是"杀进程重开仍自动恢复看屏"的关键；
+     * 3. 无障碍未就绪 → [AccessibilityLiveStreamer] 挂起等待系统重绑，超时才回调投影兜底
+     *    （onA11yUnavailable 已在 onCreate 挂接，走通知引导，不静默失败）。
+     */
+    private suspend fun resumeLiveViewIfActive() {
+        val live = GuardHeartbeat.readLiveView(this) ?: return
+        Logger.i(TAG) { "live view session still active (hd=${live.highDefinition}), resuming" }
+        // 与 StartLiveView 同口径：优先无障碍零弹窗主路；a11y 不可用时才退回投影（有令牌复用 / 无令牌弹授权）。
+        if (accessibilityScreenshot.isAvailable()) {
+            a11yLiveStreamer.start(live.highDefinition)
+            return
+        }
+        dispatchCapture(ScreenCaptureService.liveStreamIntent(this, live.highDefinition))
+    }
+
+    /**
+     * 授权回退周期自检。
+     *
+     * 守护服务是唯一长期存活的宿主，孩子一按 Home 界面侧的复检就失效；
+     * 这里用一条独立循环每 [REAUTH_CHECK_INTERVAL_MS] 全量核对一次授权，
+     * 发现掉失即交给 [AuthorizationKeeper] 分级处理（DO 静默补 / 非 DO 拉回引导）。
+     * 仅在 [scope] 存活期间运行，服务销毁随 [scope.cancel] 一并停掉，不泄漏。
+     */
+    private suspend fun authReconcileLoop() {
+        while (scope.isActive) {
+            delay(REAUTH_CHECK_INTERVAL_MS)
+            runSafely("authReconcileTick") { authorizationKeeper.reconcile() }
         }
     }
 
@@ -505,6 +673,14 @@ class GuardService : Service() {
                     // "家长端看不到设备、孩子端却锁死无法操作"的死锁 —— 而系统级 lockNow()
                     // 一旦落下，应用自身再也解不开（lockNow 只能锁、不能程序化解）。
                     boundNow.set(false)
+                    // 持久化绑定态：守护进程（:daemon）只在"已绑定"时才拉起主进程，
+                    // 未绑定即停机不拉，防止解绑后反复重启打扰（与 boundNow 语义一致）。
+                    // 注意 this@GuardService：collect  lambda 内 this 是 CoroutineScope。
+                    GuardHeartbeat.writeGuardState(this@GuardService, false)
+                    // 解绑即取消闹钟兜底排班，停止无谓唤醒
+                    GuardAlarmReceiver.cancel(this@GuardService)
+                    // 解绑即结束看屏会话恢复窗口，防止重新绑定后恢复陈旧推流
+                    GuardHeartbeat.clearLiveView(this@GuardService)
                     lockController.releaseAll()
                     // 解绑即清空会话状态，避免陈旧会话继续驱动 UI 与锁定
                     usageSessionManager.reset()
@@ -518,20 +694,26 @@ class GuardService : Service() {
                         .onSuccess { Logger.i(TAG) { "control released on unbound observe (${it.size} ops)" } }
                         .onFailure { t -> Logger.e(TAG, t) { "releaseControl failed on unbound observe" } }
                     Logger.w(TAG) { "device not bound: all app locks + DPM control released" }
-                    // 解绑后恢复管理控制台可见性，并将悬浮卡收起：设备回到普通可用状态，
+                    // 解绑后恢复管理控制台可见性，并将玻璃球收起：设备回到普通可用状态，
                     // 便于家长重新绑定或在设置里正常卸载。
                     runSafely("revealOnUnbind") { appHider.revealManagementUi() }
-                    runSafely("hideFloatingOnUnbind") { floatingStatus.hide() }
+                    runSafely("hideBallOnUnbind") { glassBall.hide() }
                     return@collect
                 }
                 boundNow.set(true)
+                // 持久化绑定态并排上闹钟兜底：守护进程据此决定"主进程死了要不要拉"，
+                // 闹钟通道与 JobScheduler 看门狗并行，互为 ROM 限制下的备份。
+                // 注意 this@GuardService：collect lambda 内 this 是 CoroutineScope。
+                GuardHeartbeat.writeGuardState(this@GuardService, true)
+                GuardAlarmReceiver.schedule(this@GuardService)
                 startTransport()
                 // 绑定成功即拉取会话：让「计时开始」确认弹窗尽快出现（若今日尚未确认）
                 runSafely("sessionSyncOnBind") { usageSessionManager.refresh() }
-                // 绑定完成：隐藏管理控制台图标（孩子端隐形），仅以悬浮状态卡展示基本信息。
+                // 绑定完成：隐藏管理控制台图标（孩子端隐形），仅以玻璃球向孩子展示
+                // 已用/剩余等基本信息，并承载「双击申请延时」入口。
                 // 隐藏态持久写入系统 PMS，重启/覆盖安装后仍生效；开机自启会再次确认。
                 runSafely("hideOnBind") { appHider.hideManagementUi() }
-                runSafely("showFloatingOnBind") { floatingStatus.show() }
+                runSafely("showBallOnBind") { glassBall.show() }
             }
         }
     }
@@ -597,6 +779,7 @@ class GuardService : Service() {
             var nextHeartbeat = 0L
             var nextSelfCheck = SystemClock.elapsedRealtime() + SELF_CHECK_INTERVAL_MS
             var nextTamperScan = SystemClock.elapsedRealtime() + TAMPER_SCAN_INTERVAL_MS
+            var nextPermHeal = 0L
             var nextLogUpload = SystemClock.elapsedRealtime() + LOG_UPLOAD_MIN_INTERVAL_MS
             // 首次台账同步刻意提前：设备刚绑定/服务刚启动时家长往往正盯着应用列表，
             // 等 30 分钟会让「应用」Tab 一直空白；首报完成后回到正常周期。
@@ -611,6 +794,31 @@ class GuardService : Service() {
 
             while (isActive) {
                 val now = SystemClock.elapsedRealtime()
+                // 主进程心跳：守护进程（:daemon）与闹钟/看门狗据此判断本进程死活。
+                // 放在循环体首行：即使后面某个子任务抛异常（已被 runSafely 收敛），
+                // 心跳依然最新 —— 绝不会出现"服务卡死但心跳新鲜"的假活状态被漏掉。
+                // 注意 this@GuardService：launch lambda 内 this 是 CoroutineScope。
+                GuardHeartbeat.writeGuardAlive(this@GuardService)
+                // 双进程互保的另一半：守护进程心跳陈旧 → 就地拉起（本进程是 FGS 上下文，
+                // Android 12+ 下启动服务不受后台限制）。
+                val daemonAge = GuardHeartbeat.readDaemonAliveAgeMs(this@GuardService)
+                if (daemonAge == null || daemonAge > GuardHeartbeat.DAEMON_STALE_MS) {
+                    Logger.w(TAG) { "daemon heartbeat stale (age=$daemonAge) -> restarting" }
+                    GuardDaemonService.start(this@GuardService)
+                }
+                // 系统调度通道自愈（2026-10-21 华为实测补充）：EMUI 等激进 ROM 会在
+                // 杀应用时一并清除已登记的 JobScheduler 任务与 AlarmManager 闹钟
+                // （实测整夜无人拉起：Job 无登记、闹钟被清，两条系统通道同时消失）。
+                // 应用存活期间每 tick 顺手补登记：Job 用 getPendingJob 探测缺失，
+                // 闹钟用同一 PendingIntent 重复 setWindow 即替换（幂等续期）。
+                // 仅在已绑定态做——未绑定设备没有管控对象，不空耗系统唤醒。
+                if (boundNow.get()) {
+                    if (!GuardWatchdogService.isScheduled(this@GuardService)) {
+                        Logger.w(TAG) { "watchdog job missing (ROM evicted?) -> rescheduling" }
+                        runCatching { GuardWatchdogService.schedule(this@GuardService) }
+                    }
+                    GuardAlarmReceiver.schedule(this@GuardService)
+                }
                 // C1'：monitoring() 与其余 7 个子任务同列，必须 runSafely 包裹。
                 // 它读的是 MonitoringEnforcer 的内存快照，正常不会抛 —— 但主循环的死法
                 // 永远来自"现在不会抛的代码将来会抛"，一次异常 = 服务活着但
@@ -637,7 +845,12 @@ class GuardService : Service() {
                     // force = true：这里的目的就是把"被用户绕过去的限制"重新压回来，
                     // 版本没变也必须重下，否则自检等于空转。
                     if (boundNow.get()) {
-                        runSafely("selfCheck") { policyEngine.applyCurrent(force = true) }
+                        runSafely("selfCheck") {
+                            policyEngine.applyCurrent(force = true)
+                            // 兜底对齐：水印被用户手动关掉悬浮窗权限后恢复权限时，
+                            // 由这里重新贴回，不必等设备重启
+                            syncWatermarkFromPolicy()
+                        }
                     }
                     nextSelfCheck = now + SELF_CHECK_INTERVAL_MS
                 }
@@ -646,6 +859,16 @@ class GuardService : Service() {
                 if (now >= nextTamperScan) {
                     runSafely("tamperScan") { policyEngine.scanTamper() }
                     nextTamperScan = now + TAMPER_SCAN_INTERVAL_MS
+                }
+
+                // ---------- 运行期权限自愈（DO 形态无感恢复被系统回收的危险权限） ----------
+                if (now >= nextPermHeal) {
+                    runSafely("permHeal") {
+                        val healed = permissionHealthChecker.healRuntimePermissions()
+                        if (healed > 0) permissionVersion.incrementAndGet()
+                    }
+                    runSafely("capHeal") { permissionHealthChecker.recheckSpecialCapabilities() }
+                    nextPermHeal = now + PERM_HEAL_INTERVAL_MS
                 }
 
                 // ---------- 日志批量上报 ----------
@@ -733,11 +956,13 @@ class GuardService : Service() {
         ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
-    /** 注册屏幕亮起 / 网络恢复的动态重启广播（见 [restartReceiver] 注释）。 */
+    /** 注册屏幕亮起 / 息屏 / 解锁 / 网络恢复的动态重启广播（见 [restartReceiver] 注释）。 */
     private fun registerRestartReceiver() {
         runCatching {
             val filter = IntentFilter().apply {
                 addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_USER_PRESENT)
                 addAction(ConnectivityManager.CONNECTIVITY_ACTION)
             }
             ContextCompat.registerReceiver(
@@ -858,7 +1083,8 @@ class GuardService : Service() {
             // 说清是"时长用完"还是"已被管控"才能形成预期。
             reason = tick.blockedReason.ifBlank {
                 (tick.limit as? LimitVerdict.Blocked)?.message().orEmpty()
-            }
+            },
+            action = tick.blockedAction
         )
     }
 
@@ -874,15 +1100,22 @@ class GuardService : Service() {
     }
 
     /**
-     * 单应用超额拦截。
+     * 单应用拦截（限额超额 / 命中黑名单）。
      *
-     * 只在"超额的那个应用正处于前台"时才弹拦截页 —— 后台超额没有打扰用户的必要。
-     * 同一个包不重复弹，切到别的应用再切回来才会再弹一次。
+     * 只在"被拦的那个应用正处于前台"时才处置 —— 后台被拦没有打扰用户的必要。
+     * 同一个包不重复处置，切到别的应用再切回来才会再触发一次。
+     *
+     * 两种处置方式由 `app.blacklistAction` 决定（见 [EngineTick.blockedAction]）：
+     * - [BlacklistAction.BLOCK_DIALOG]：弹出拦截页说明理由；
+     * - [BlacklistAction.SILENT_CLOSE]：不弹页，把孩子送回桌面。
+     *   此前该字段只有 Mock 引用，无论家长选哪种都一律弹页 ——
+     *   选了"静默关闭"的家长以为孩子会直接被送回桌面，实际看到的仍是拦截页。
      */
     private fun reconcileAppBlock(
         blockedPackage: String?,
         foreground: String?,
-        reason: String
+        reason: String,
+        action: BlacklistAction
     ) {
         if (blockedPackage == null) {
             // 家长放行（或额度跨日重置）后必须主动收掉拦截页：
@@ -895,7 +1128,36 @@ class GuardService : Service() {
         if (blockedPackage != foreground) return
         if (blockedPackage == lastBlockedPackage) return
         lastBlockedPackage = blockedPackage
-        AppBlockActivity.show(this, blockedPackage, reason)
+        when (action) {
+            BlacklistAction.SILENT_CLOSE -> goHomeSilently(blockedPackage)
+            BlacklistAction.BLOCK_DIALOG -> AppBlockActivity.show(this, blockedPackage, reason)
+        }
+    }
+
+    /**
+     * 静默关闭（[BlacklistAction.SILENT_CLOSE]）：把孩子送回桌面，不弹任何页面。
+     *
+     * 用 `ACTION_MAIN + CATEGORY_HOME` 而不是杀进程：
+     * 普通应用无权结束其他应用的进程，能做的只有"把桌面切到前台" ——
+     * 效果等同于孩子自己按了 Home 键，被拦应用留在后台由系统自行回收。
+     * 这是 Android 的权限边界，不是实现偷懒；若需真正阻止启动，要靠 Device Owner
+     * 的 `setApplicationHidden`，那条路径由 DO 通道负责，与本开关互不干扰。
+     */
+    private fun goHomeSilently(packageName: String) {
+        runCatching {
+            startActivity(
+                Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_HOME)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+            Logger.i(TAG) { "blacklist silent close: $packageName -> home" }
+        }.onFailure {
+            // 极端情况（无桌面应用 / ROM 限制）下退回拦截页：宁可多一个解释页面，
+            // 也不能让孩子留在被禁应用里 —— 那才是真正的管控失效。
+            Logger.w(TAG) { "silent close failed, fallback to block dialog: ${it.message}" }
+            AppBlockActivity.show(this, packageName, "该应用已被家长管控，无法使用")
+        }
     }
 
     // ==================== 心跳与上报 ====================
@@ -907,20 +1169,36 @@ class GuardService : Service() {
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return
 
+        // 硬件采集受策略开关门控：家长关掉「采集硬件信息」后，
+        // 电量/存储/内存/网络/屏幕一律不再随心跳上传（此前该开关在端上无人读取，形同虚设）。
+        // 设备在线判定所需的 deviceId/timestamp/foregroundApp 不受影响。
+        val collectHardware = policyEngine.monitoring().collectHardware
+        // 守护状态快照（P3 可观测性）：复用既有 15s 心跳通道，不新增网络量级。
+        // 数值均为实时状态读取，不触发任何动作；守护进程/无障碍是否存活是系统级事实，
+        // 与家长"暂停管控"开关无关，始终如实上报以便观测。
+        val daemonAlive = GuardHeartbeat.readDaemonAliveAgeMs(this)
+            ?.let { it <= GuardHeartbeat.DAEMON_STALE_MS } ?: false
+        val a11yAlive = GuardA11y.isAlive(this)
+        val onlineState = if (remote.isOnline()) "ONLINE" else "MQTT_DOWN"
         val heartbeat = Heartbeat(
             deviceId = deviceId,
             timestamp = timeProvider.now(),
             policyVersion = policyRepository.currentVersion(),
             transportMode = transportSettings.mode.value.name,
             controlMode = admin.controlMode.value.name,
-            network = snapshot.network(),
-            battery = snapshot.battery(),
-            storage = snapshot.storage(),
-            memory = snapshot.memory(),
-            screen = snapshot.screen(),
+            network = if (collectHardware) snapshot.network() else null,
+            battery = if (collectHardware) snapshot.battery() else null,
+            storage = if (collectHardware) snapshot.storage() else null,
+            memory = if (collectHardware) snapshot.memory() else null,
+            screen = if (collectHardware) snapshot.screen() else null,
             foregroundApp = foregroundApp.current().orEmpty(),
             location = null,
-            pendingLogCount = logRepository.pendingCount()
+            pendingLogCount = logRepository.pendingCount(),
+            daemonAlive = daemonAlive,
+            a11yAlive = a11yAlive,
+            lastRestartReason = lastStartReason,
+            onlineState = onlineState,
+            permissionVersion = permissionVersion.get()
         )
 
         when (val result = remote.sendHeartbeat(heartbeat)) {
@@ -1135,6 +1413,9 @@ class GuardService : Service() {
                     val saved = policyRepository.save(body.policy, body.rawJson)
                     val report = policyEngine.applyAll(saved, force = true)
                     Logger.i(TAG) { "policy v${saved.version} applied: ${report.summary()}" }
+                    // 策略落地后对齐一次水印：家长在后台改水印内容/位置/透明度即刻生效，
+                    // 不必等下一次重启，也不依赖指令通道。
+                    syncWatermarkFromPolicy()
                     // 操作密码闸门：把服务端下发的密码哈希落到本地（明文永不出网）。
                     // 约定：clear 为真 → 清密码；passwordHash 非空 → 启用并落库；
                     // 两者皆空 → 不改动（避免策略合并时误清空）。
@@ -1143,6 +1424,53 @@ class GuardService : Service() {
             }
             else -> Logger.w(TAG) { "fetch policy failed: $r" }
         }
+        // 策略落地后顺带做卸载防御自检：① 权限活性（DO/管理员被摘除即告警）；
+        // ② 持有 DO/PO 时系统级封死自身卸载。两项均为幂等，失败仅记日志不影响主流程。
+        runSafely("uninstallDefense") {
+            uninstallDefense.verifyLiveness()
+            uninstallDefense.applyUninstallBlockIfSupported()
+        }
+    }
+
+    /**
+     * 按策略包的 `kiosk.watermark` 同步悬浮水印（**幂等**，可在任意策略落地后安全重复调用）。
+     *
+     * ## 为什么需要它
+     * 水印此前只有 **指令**（SET_WATERMARK）一条驱动源，而指令是一次性的：
+     * 设备重启、服务重建之后，策略里配好的水印不会自动恢复 ——
+     * 家长看到的是"我明明开了水印，重启后就没了"。
+     * 与此同时策略包里的 `kiosk.watermark.*` 四个字段（enabled / content / position / opacity）
+     * 反序列化之后**没有任何一处读取**，位置与透明度更是被硬编码在
+     * [com.padguard.child.ui.overlay.WatermarkOverlay] 里 —— 两条证据指向同一条断链。
+     *
+     * ## 与指令通道的关系（两条驱动源刻意并存）
+     * - **策略是持久真相源**：每次策略落地（启动 / 刷新 / 自检）都按它对齐一次，
+     *   于是"重启后水印没了"与"调了位置不生效"同时被解决；
+     * - **指令是即时覆盖**：家长点一次立即生效，下一次策略对齐时回归策略值。
+     *
+     * ## 为什么 content 为空时要"不动"
+     * 老版本服务端下发的策略包没有 watermark 字段，反序列化后 content 为空、
+     * enabled 为 false。若据此一律 hide，就会把指令通道刚打开的水印误关掉 ——
+     * 那等于用一个"没配置"当成了"要求关闭"。故以 content 是否为空作为
+     * "策略确实配置了水印"的判据，只有配置存在时才由策略接管。
+     */
+    private suspend fun syncWatermarkFromPolicy() {
+        val wm = policyEngine.kioskRuntime().watermark
+        if (wm.content.isBlank()) return
+        if (!wm.enabled) {
+            watermark.hide()
+            return
+        }
+        val deviceId = authRepository.getDeviceId()
+        val deviceSn = runCatching { authRepository.deviceSn.first() }.getOrDefault("")
+        // studentName / className 属校园场景字段，孩子端无可靠数据源，留空由模板自行取舍
+        val rendered = wm.render(
+            deviceSn = deviceSn,
+            studentName = "",
+            className = "",
+            deviceId = deviceId
+        )
+        watermark.show(rendered, position = wm.position, alpha = wm.opacity)
     }
 
     /**
@@ -1275,6 +1603,10 @@ class GuardService : Service() {
         appPolicyMirrorJob = scope.launch {
             policyRepository.observePolicy().collect { pkg ->
                 runSafely("mirrorAppPolicy") { appGuardStore.mirror(pkg.app) }
+                // 整机管控总开关随策略落地：guard.active=false 即"暂停管控、释放设备"。
+                // 这是"取消应用管控后设备应可正常使用"的正确驱动点——释放设备由总开关决定，
+                // 而非只清空应用黑白名单。
+                runSafely("applyGuardMaster") { guardMasterSwitch.setActive(pkg.guard.active) }
                 // 护眼滤镜走同一条数据源：策略可能来自首屏拉取 / 指令下发 / 周期自愈任意一条路径，
                 // 监听保证"策略变了 → 滤镜跟着变"，不会出现"家长关了开关但平板还在发黄"。
                 runSafely("applyEyeProtection") { eyeProtectionOverlay.apply(pkg.eyeProtection) }
@@ -1330,7 +1662,9 @@ class GuardService : Service() {
                         )
                     )
                 }
-                MessageActivity.show(
+                // 统一走系统级置顶渲染：有悬浮窗权限时置于所有应用（含锁屏）之上；
+                // 无权限时 MessageOverlayController 内部自动回退到 MessageActivity（方案 A）。
+                messageOverlay.show(
                     context = this,
                     title = effect.title,
                     body = effect.body,
@@ -1419,20 +1753,32 @@ class GuardService : Service() {
             EngineEffect.StopScreenRecord -> ScreenCaptureService.stopScreenRecord(this)
 
             is EngineEffect.StartLiveView -> {
+                // 记录看屏会话窗口：进程被杀重启后据此主动恢复推流（服务端
+                // reconcileLiveSessions 的 8s 冷却重发是第二保险，双通道不冲突）。
+                GuardHeartbeat.writeLiveView(
+                    this,
+                    effect.highDefinition,
+                    System.currentTimeMillis() + GuardHeartbeat.LIVE_VIEW_TTL_MS
+                )
                 // 画质档位随指令一路带到推流侧：家长改了「高清画面」后，
                 // 下一次续期（或重新开流）就按新档位出帧，不必退出看屏页重进。
-                // 两级分工（2026-10-17 调序，解决"看屏时孩子端状态栏常驻录屏红标"）：
-                // 1) 无障碍可用 → 无障碍推流（约2fps，**零弹窗且无系统投影芯片**）——
-                //    Android 15 QPR1 只要投影活着状态栏就常驻高亮"正在共享屏幕"芯片，
-                //    孩子点它还能一键 Stop sharing 掐断监控；无障碍授权持久有效，
-                //    彻底绕开 MediaProjection，看屏从此既不弹框也不亮红标；
-                // 2) 无障碍不可用（能力缺失/服务被关）→ 投影推流（约4fps），
-                //    接受"观看期间短暂显示系统芯片"的代价——能用总比不能用强。
+                // 看屏通道派发（修复 2026-10-21「返回主页面再进入监控权限掉」）：
+                // 主路 = 无障碍零弹窗通道（授权持久、本机已启用且已 attach，约 2fps）。
+                // 投影令牌是一次性进程内存存根，锁屏/返回主页面/进程重启后必然失效，且 StopLiveView
+                // 已清存根——绝不可作为主路复用：否则会复用死投影→黑屏/不上传（服务端 child not
+                // uploading），或令牌被系统回收后落回投影授权引导（"权限掉，需重新确认"）。
+                // 优先级：① a11y 可用 → 直接 a11y 零弹窗；② a11y 不可用但有令牌 → 投影零弹窗复用；
+                // ③ a11y 不可用且无令牌 → 投影授权引导（并行触发 DO 静默重生无障碍服务，自愈）。
                 val captureIntent = ScreenCaptureService.liveStreamIntent(this, effect.highDefinition)
-                val silent = if (a11yLiveStreamer.start(effect.highDefinition)) {
-                    Logger.i(TAG) { "live view via a11y channel (no projection chip, no dialog)" }
+                val silent = if (accessibilityScreenshot.isAvailable()) {
+                    scope.launch { runCatching { a11yCapabilityHealer.ensureEnabled() } }
+                    a11yLiveStreamer.start(effect.highDefinition)
+                    Logger.i(TAG) { "live view via a11y channel (primary, no dialog)" }
                     true
+                } else if (ScreenCaptureSession.hasToken()) {
+                    dispatchCapture(captureIntent)
                 } else {
+                    scope.launch { runCatching { a11yCapabilityHealer.ensureEnabled() } }
                     dispatchCapture(captureIntent)
                 }
                 reportEffectResult(
@@ -1442,8 +1788,16 @@ class GuardService : Service() {
             }
 
             EngineEffect.StopLiveView -> {
+                // 家长停止观看：清除恢复窗口，避免进程重启后恢复一条已结束的推流
+                GuardHeartbeat.clearLiveView(this)
                 a11yLiveStreamer.stop()
                 ScreenCaptureService.stopLiveStream(this)
+                // 关键修复：停推流同时清掉投影令牌存根（resultIntent/mediaProjection）。
+                // 否则 hasToken() 会继续误报 true，"返回主页面再进入监控"时复用已失效的死投影
+                // → 黑屏/服务端 child not uploading，或令牌被系统回收后落回投影授权引导
+                // （"权限掉，需重新确认"）。清存根后下一次进入统一走无障碍零弹窗主路；
+                // 若 a11y 恰在重绑窗口不可用，才退化一次投影授权（可自愈，零风险）。
+                ScreenCaptureSession.release()
             }
 
             is EngineEffect.StartAudioRecord -> {
@@ -1713,11 +2067,25 @@ class GuardService : Service() {
             return
         }
         Logger.w(TAG) { "server confirmed unbind, clearing local credentials" }
+        // 解绑即解除设备管控：必须先清掉 App 内锁定态并释放我们压下的系统 keyguard，
+        // 否则「家长端已解绑」但孩子端仍卡在锁屏页——REMOTE 锁的持久化标记会让进程重启后
+        // 再次锁上，且我们 lockNow() 压下的系统锁不被释放，孩子端表现为"解绑了却毫无反应、黑屏仍锁着"。
+        // 必须在 admin.releaseControl() 之前执行：退出屏幕固定(Lock Task)需要仍持有设备控制能力。
+        // lockController 为 @Singleton，releaseAll() 会同步驱动 LockScreenPresenter /
+        // LockScreenActivity 的状态收集器收起锁屏；lockScreenPresenter.dismiss() 进一步经
+        // SystemKeyguardBridge.ensureUnlocked() 释放系统 keyguard，二者互补、缺一则锁屏残留。
+        lockController.releaseAll()
+        withContext(Dispatchers.Main) {
+            runCatching { lockScreenPresenter.dismiss() }
+                .onFailure { t -> Logger.e(TAG, t) { "lock screen dismiss failed on unbind" } }
+        }
         // 只清设备绑定、保留家庭账号登录态：解绑后应直接回到绑定页重新绑定，
         // 而不是退回登录页（孩子不知道家长密码，会永久卡死）。
         authRepository.clearDeviceBinding()
         // 绑定镜像同步清除：暖令牌的前置门重新关上，解绑后不再向孩子弹采集确认框。
         CaptureConsent.markDeviceBound(this, false)
+        // 解绑即结束看屏会话恢复窗口（家长端此时多半已停止观看，双保险）
+        GuardHeartbeat.clearLiveView(this)
         // 解绑即释放操作闸门密码与本地软拦截策略缓存。
         // 若不清，平板转手后旧家庭的操作密码（GuardPasswordManager）与 AppGuardPolicyStore
         // 仍残留在新家庭设备上——孩子可凭旧密码绕过软拦截，隐私/管控承诺从第一天即不可信。
@@ -1816,6 +2184,10 @@ class GuardService : Service() {
         const val REASON_TASK_REMOVED = "taskRemoved"
         /** 看门狗发现服务不在时拉起（见 GuardWatchdogService） */
         const val REASON_WATCHDOG = "watchdog"
+        /** 双进程守护进程发现主进程心跳陈旧时拉起（见 GuardDaemonService） */
+        const val REASON_DAEMON = "daemon"
+        /** 闹钟兜底通道发现心跳陈旧时拉起（见 GuardAlarmReceiver） */
+        const val REASON_ALARM = "alarm"
 
         /**
          * 守护服务是否在运行。
@@ -1834,6 +2206,13 @@ class GuardService : Service() {
 
         /** 任务被划掉后重启服务的延迟（见 onTaskRemoved）：避开系统清理任务栈的竞态 */
         private const val RESTART_DELAY_MS = 1_000L
+
+        /**
+         * 授权回退周期自检间隔。
+         * 守护服务长期存活但 App 未打开时，靠这条独立循环发现授权掉失并拉回引导；
+         * 30 分钟足够及时，又不至于频繁占用 CPU / 电量。
+         */
+        private const val REAUTH_CHECK_INTERVAL_MS = 30 * 60 * 1000L
 
         /**
          * 指令兜底拉取间隔。
@@ -1857,6 +2236,8 @@ class GuardService : Service() {
 
         /** 篡改自检间隔 */
         private const val TAMPER_SCAN_INTERVAL_MS = 60_000L
+        /** 运行期权限自愈周期：5 分钟一轮，足够及时收复被系统自动回收的权限，又不至于刷屏 */
+        private const val PERM_HEAL_INTERVAL_MS = 5 * 60_000L
 
         /**
          * 服务端判定"这台设备确实已不在绑定关系里"的错误码。

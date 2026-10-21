@@ -22,6 +22,7 @@ import com.padguard.core.transport.http.CommandsResponse
 import com.padguard.core.transport.http.CredentialStore
 import com.padguard.core.transport.http.DeviceNameRequest
 import com.padguard.core.transport.http.EventUploadRequest
+import com.padguard.core.transport.http.AlertResolveRequest
 import com.padguard.core.transport.http.HeartbeatAck
 import com.padguard.core.transport.http.LocationUploadRequest
 import com.padguard.core.transport.http.LogUploadRequest
@@ -355,6 +356,14 @@ class RealRemoteDataSource @Inject constructor(
     override suspend fun updateChildProfile(childName: String?, childNickname: String?): ApiResult<Unit> {
         return caller.callIgnoringData("device-profile") {
             api.updateProfile(DeviceProfileRequest(childName = childName, childNickname = childNickname))
+        }
+    }
+
+    override suspend fun resolveActiveAlerts(categories: List<String>, reason: String?): ApiResult<Unit> {
+        if (categories.isEmpty()) return ApiResult.Success(Unit, timeProvider.now())
+        // 自愈恢复后关闭对应 ACTIVE 告警（恢复即关闭闭环）。失败由上层吞掉日志，不反噬本地自愈主链路。
+        return caller.callIgnoringData("alerts-resolve") {
+            api.resolveAlerts(AlertResolveRequest(categories, reason))
         }
     }
 

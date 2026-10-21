@@ -3,6 +3,8 @@ package com.padguard.child.receiver
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.padguard.child.service.GuardDaemonService
+import com.padguard.child.service.GuardHeartbeat
 import com.padguard.child.service.GuardService
 import com.padguard.child.ui.lock.SystemKeyguardBridge
 import com.padguard.core.common.Logger
@@ -39,6 +41,15 @@ class BootReceiver : BroadcastReceiver() {
             else -> "boot"
         }
         GuardService.start(context, reason = reason)
+        // 双进程守护：拉起独立 :daemon 进程的守护服务（幂等）。
+        // 主进程被"划任务/清理工具"整体杀掉时，进程内的 onTaskRemoved 重启、
+        // START_STICKY、动态广播全部随进程死亡 —— 只有另一个进程能把主进程拉回来。
+        GuardDaemonService.start(context)
+        // 闹钟兜底通道：与 JobScheduler 看门狗并行的第二条系统调度路径。
+        // 已绑定才排班；未绑定设备由 GuardService 绑定成功时补排。
+        if (GuardHeartbeat.readGuardState(context)) {
+            GuardAlarmReceiver.schedule(context)
+        }
         // 注意：这里**不做**暖令牌（历史遗留已移除）。此前解锁/开机广播会主动补齐
         // MediaProjection 凭据，结果孩子每次解锁都可能看到一次投屏授权框，
         // 与"装机时确认一次、日常无感"的产品预期相悖。令牌的重新取得只剩两条路：

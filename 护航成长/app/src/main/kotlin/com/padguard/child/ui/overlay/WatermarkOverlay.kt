@@ -45,17 +45,31 @@ class WatermarkOverlay @Inject constructor(
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
     }
 
-    /** 显示水印。@return 是否真的显示了 */
-    fun show(content: String): Boolean {
+    /**
+     * 显示水印。@return 是否真的显示了
+     *
+     * [position] / [alpha] 对应策略包 `kiosk.watermark.position / opacity`。
+     * 这两个字段此前**反序列化后从未被使用**：无论家长在后台怎么调，
+     * 水印都恒为左上角、固定 0.45 透明度 —— 典型的"配置了但不生效"。
+     * 现在由策略运行时 [com.padguard.core.engine.enforcer.WatermarkRuntime] 驱动。
+     *
+     * 默认值刻意沿用旧的硬编码值，保证指令通道（SET_WATERMARK）的既有行为不回退。
+     */
+    fun show(content: String, position: String = "TOP", alpha: Float = TEXT_ALPHA): Boolean {
         if (!isSupported()) {
             Logger.w(TAG) { "overlay permission missing, watermark not shown" }
             return false
         }
         val safeContent = content.ifBlank { DEFAULT_CONTENT }
-        // 已在显示且内容一致时直接复用，避免重复 addView 触发 WindowManager 的重复添加异常
+        val safeAlpha = alpha.coerceIn(MIN_ALPHA, MAX_ALPHA)
+
+        // 已在显示时复用同一个 view：只更新内容与布局参数，
+        // 避免重复 addView 触发 WindowManager 的"view has already been added"异常。
         val current = view
         if (current != null) {
             current.text = safeContent
+            current.alpha = safeAlpha
+            applyPosition(current, position)
             return true
         }
 
@@ -63,12 +77,13 @@ class WatermarkOverlay @Inject constructor(
             text = safeContent
             setTextColor(TEXT_COLOR)
             textSize = TEXT_SIZE_SP
-            alpha = TEXT_ALPHA
+            this.alpha = safeAlpha
             // 不拦截任何触摸：水印只是"看"的，不能影响正常操作
             isClickable = false
             isFocusable = false
         }
 
+        val (gravity, offsetX, offsetY) = layoutFor(position)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -83,20 +98,38 @@ class WatermarkOverlay @Inject constructor(
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = MARGIN_PX
-            y = MARGIN_PX
+            this.gravity = gravity
+            x = offsetX
+            y = offsetY
         }
 
         return try {
             windowManager?.addView(textView, params)
             view = textView
-            Logger.i(TAG) { "watermark shown: $safeContent" }
+            Logger.i(TAG) { "watermark shown: $safeContent pos=$position alpha=$safeAlpha" }
             true
         } catch (t: Throwable) {
             Logger.e(TAG, t) { "addView failed" }
             false
         }
+    }
+
+    /** 位置变更时就地更新布局，无需重建 view */
+    private fun applyPosition(target: TextView, position: String) {
+        val lp = target.layoutParams as? WindowManager.LayoutParams ?: return
+        val (gravity, offsetX, offsetY) = layoutFor(position)
+        if (lp.gravity == gravity && lp.x == offsetX && lp.y == offsetY) return
+        lp.gravity = gravity
+        lp.x = offsetX
+        lp.y = offsetY
+        runCatching { windowManager?.updateViewLayout(target, lp) }
+            .onFailure { Logger.w(TAG) { "updateViewLayout failed: ${it.message}" } }
+    }
+
+    private fun layoutFor(position: String): Triple<Int, Int, Int> = when (position.uppercase()) {
+        "BOTTOM" -> Triple(Gravity.BOTTOM or Gravity.START, MARGIN_PX, MARGIN_PX)
+        "CENTER" -> Triple(Gravity.CENTER, 0, 0)
+        else -> Triple(Gravity.TOP or Gravity.START, MARGIN_PX, MARGIN_PX)
     }
 
     fun hide() {
@@ -116,6 +149,9 @@ class WatermarkOverlay @Inject constructor(
         private const val DEFAULT_CONTENT = "受管控设备"
         private const val TEXT_SIZE_SP = 13f
         private const val TEXT_ALPHA = 0.45f
+        /** 与 KioskEnforcer 侧的钳制口径保持一致（太淡看不见、太浓挡内容） */
+        private const val MIN_ALPHA = 0.05f
+        private const val MAX_ALPHA = 0.8f
         private const val MARGIN_PX = 24
         private const val TEXT_COLOR = 0xFF333333.toInt()
     }

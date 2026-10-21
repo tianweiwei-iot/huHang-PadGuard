@@ -11,6 +11,7 @@ import android.os.PowerManager
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
@@ -48,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
@@ -61,6 +63,7 @@ import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.lock.LockController
 import com.padguard.core.engine.lock.LockReason
+import com.padguard.core.transport.TransportSettings
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -84,7 +87,9 @@ import javax.inject.Inject
  *
  * 非 DO / 非设备管理员设备上，以上四层都拦不住手势导航，此时由
  * [SystemKeyguardBridge.pushSystemLock] 压一次**系统 keyguard** 借系统之力封堵
- * （灭屏 + keyguard 禁手势），这就是用户认可的「锁屏并熄屏」效果。
+ * （灭屏 + keyguard 禁手势），这就是用户认可的「锁屏并熄屏」效果——但**仅在设备无安全锁
+ * （滑动/无锁）时**：安全锁（PIN/图案/密码）设备上 [SystemKeyguardBridge] 会拒绝下压，
+ * 改由应用覆盖层兜底，以规避「解锁时应用撤不掉系统锁」的永久死锁（详见其 systemLockAllowed）。
  *
  * ## 关于"解锁申请"
  * 锁死不等于不给沟通渠道：孩子可以在锁屏页点「申请解锁」，填写理由与期望时长，
@@ -108,7 +113,7 @@ class LockScreenActivity : ComponentActivity() {
     @Inject lateinit var admin: DeviceAdminBridge
     @Inject lateinit var timeProvider: TimeProvider
     @Inject lateinit var keyguardBridge: SystemKeyguardBridge
-    @Inject lateinit var overlay: LockScreenOverlay
+    @Inject lateinit var transportSettings: TransportSettings
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -350,11 +355,6 @@ class LockScreenActivity : ComponentActivity() {
         // 锁定页真正到达前台 —— 升级链据此停止重试，并撤掉悬浮层与常驻通知
         visible = true
         LockScreenNotifier.cancelFrom(this)
-        // 悬浮地板绝不能盖在已前台的锁屏页之上：它会吃掉全部触摸并抢走输入焦点，
-        // 表现为"页面看得见但点不动、输入框弹不出键盘"。升级链的 reconcile 会在
-        // Activity 确认可见时撤它，这里再兜一次，覆盖不经升级链到来的场景
-        // （悬浮层「申请解锁」直接拉起、看门狗重拉等）。
-        overlay.dismiss()
         // 每次回到前台都重新确认一次锁定任务：系统可能在切后台时解除了固定。
         // startLockTask 幂等，重复调用无副作用（非白名单应用会抛异常，已用 runCatching 兜住）。
         if (mode != MODE_UNLOCKING) enterLockTask()
@@ -367,9 +367,11 @@ class LockScreenActivity : ComponentActivity() {
         // relaunchRunnable 第一次执行就撞上 MAX_RELAUNCH_ATTEMPTS 直接 return，
         // 锁屏页再也回不来 —— 这正是「亮屏后上滑就能进桌面」的直接成因。
         relaunchCount = 0
+        // 安全锁设备上、且当前确实被系统凭据界面挡住时提示孩子先过验证。
+        // 不再要求 wasPushedByUs()：我们已从不在安全锁设备上压系统锁，但设备休眠唤醒后
+        // 仍可能呈现其自身的系统安全锁，此提示同样适用（如实告知，避免误以为故障）。
         secureKeyguardHint = mode != MODE_UNLOCKING &&
             keyguardBridge.isKeyguardSecure() &&
-            keyguardBridge.wasPushedByUs() &&
             keyguardBridge.isKeyguardLocked()
         // 息屏期间到来的解锁/申请意图，此刻才真正执行
         if (pendingUnlockUx) {
@@ -454,20 +456,19 @@ class LockScreenActivity : ComponentActivity() {
         // 只有"仍处于锁定态却被切走"才需要抢回前台；
         // 正常解锁时 lockController 已清空原因，这里不会误拉起。
         if (stillLocked() && !awaitingKeyguardDismiss) {
-            // 上滑逃逸的正面拦截：被切走的**同一时刻**就铺上悬浮地板。
+            // 上滑逃逸的正面拦截：被切走的**同一时刻**就安排抢占复位（relaunchRunnable），
+            // 由锁屏页 Activity 重新拉回前台。
             //
             // 不能等后面那两次补救：① 250ms 后的 Activity 抢占，在 Android 10+ 上属于
             // 后台启动，绝大多数 ROM 会静默丢弃；② 15s 一轮的守护周期自检，太慢；
             // ③ 500ms 的锁屏看门狗依赖无障碍服务，未授予无障碍的设备根本没有这条兜底。
-            // 地板是 WindowManager 浮层，不受后台启动限制，铺上就一定能看见、且吃掉触摸。
             //
-            // 息屏不铺：地板带 FLAG_KEEP_SCREEN_ON，会把屏幕点亮，破坏用户认可的
-            // 「锁屏并熄屏」；且息屏时孩子看不到任何东西，亮屏时本页会自行 onResume 回来。
-            // 等凭证界面回调期间（安全锁验证）也不铺：那会让系统凭证框失去焦点。
-            if (mode != MODE_UNLOCKING && isScreenOn()) {
-                overlay.show(currentDetail)
-            }
-            handler.postDelayed(relaunchRunnable, RELAUNCH_DELAY_MS)
+            // 历史版本在此处立即铺「深灰悬浮窗 LockScreenOverlay」作为地板；该层在部分 ROM 上
+            // 会出现后无法收回的死局，已按产品决策彻底删除。删除后逃逸拦截收口为「抢占复位 +
+            // 无障碍看门狗 + 全屏 intent 通知」把锁屏页重新顶回前台。
+            // 息屏时不触发抢占：亮屏时本页会自行 onResume 回来。
+            // 等凭证界面回调期间（安全锁验证）也不抢占：那会让系统凭证框失去焦点。
+            handler.postDelayed(relaunchRunnable, transportSettings.rearmDelayMs.value.toLong())
         }
     }
 
@@ -491,11 +492,11 @@ class LockScreenActivity : ComponentActivity() {
             if (relaunchCount >= MAX_RELAUNCH_ATTEMPTS) {
                 Logger.w(TAG) {
                     "lock screen relaunch aborted after $relaunchCount attempts " +
-                        "(background start blocked by ROM; overlay floor will keep it covered)"
+                        "(background start blocked by ROM; relying on watchdog/FSI to re-pull)"
                 }
-                // 放弃 Activity 抢占 ≠ 放弃锁定：地板此刻必须在位，否则屏幕就是裸桌面。
-                // 旧实现在这里只留一句日志就放手，孩子随之可以点开任意应用。
-                if (mode != MODE_UNLOCKING && isScreenOn()) overlay.show(currentDetail)
+                // 放弃 Activity 抢占 ≠ 放弃锁定：历史版本在此处铺「深灰悬浮窗」兜底；该层已删除。
+                // 现锁定覆盖力收口为「无障碍看门狗（可后台拉起 Activity）+ 全屏 intent 通知
+                // （系统代拉）」把锁屏页重新顶回前台，避免裸桌面。
                 return
             }
             relaunchCount++
@@ -579,7 +580,11 @@ class LockScreenActivity : ComponentActivity() {
      * 此时退而求其次调用设备管理器级别的 `lockNow()`：它会立刻灭屏并唤起系统锁屏（keyguard）。
      * 在 keyguard 之上，系统的 HOME 手势与最近任务均被禁用，等于借系统之力把手势逃逸堵住；
      * 我们的锁屏页通过 [showOverLockScreen] 的 setShowWhenLocked 显示在 keyguard 之上，
-     * 孩子看到的仍是"平板已锁定"而不是系统锁屏界面。这就是用户认可的「锁屏并熄屏」，保留不变。
+     * 孩子看到的仍是"平板已锁定"而不是系统锁屏界面。这就是用户认可的「锁屏并熄屏」。
+     *
+     * 注意：是否真的下压由 [SystemKeyguardBridge.pushSystemLock] 内部裁决——安全锁
+     * （PIN/图案/密码）设备上它会拒绝（避免解锁死锁），此时本方法只是空转、锁屏改由
+     * 应用锁屏页（LockScreenActivity）兜底，仅牺牲自动灭屏观感，绝不再产生"解不开"的死局。
      *
      * 压锁必须经 [SystemKeyguardBridge] 记账：解锁时据此判断该不该由我们撤 keyguard，
      * 否则家长端解锁只清了 App 内状态，系统锁与熄屏依旧——"解锁了却毫无反应"。
@@ -714,6 +719,9 @@ class LockScreenActivity : ComponentActivity() {
         if (keyguardBridge.isKeyguardLocked()) {
             awaitingKeyguardDismiss = true
             keyguardBridge.requestDismiss(this) { ok ->
+                // 回调已到：无论成败都撤掉兜底定时器，避免重复触发
+                handler.removeCallbacks(requestDismissFallback)
+                if (!awaitingKeyguardDismiss) return@requestDismiss
                 awaitingKeyguardDismiss = false
                 if (ok) {
                     keyguardDismissedForRequest = true
@@ -723,7 +731,35 @@ class LockScreenActivity : ComponentActivity() {
                     requestHint = "系统锁屏验证未通过，暂时无法填写申请理由"
                 }
             }
+            // 兜底：部分 ROM 上 KeyguardDismissCallback 永不回调（即便 keyguard 已被撤掉），
+            // 若只依赖回调，对话框与键盘将永久不出现（这正是「键盘弹不出来」的根因之一）。
+            // 以「权威的 keyguard 状态」为基准，超时后直接放行键盘。
+            handler.postDelayed(requestDismissFallback, KEYGUARD_DISMISS_FALLBACK_MS)
         } else {
+            showRequestDialog = true
+        }
+    }
+
+    /**
+     * 撤系统锁的兜底定时器。
+     *
+     * [SystemKeyguardBridge.requestDismiss] 的回调在部分定制 ROM 上不可靠（永不触发），
+     * 导致申请解锁对话框与软键盘永远不出现。这里不依赖回调，转而轮询权威的 keyguard 状态：
+     * - keyguard 已不在 → 撤锁成功只是回调丢失，直接弹框；
+     * - 仍是安全锁 → 凭证界面还在等输入，再延长一轮等待；
+     * - 非安全锁却仍锁着且回调丢失 → 直接弹框（无安全锁本无需凭证，IME 在对话框出现后立即可用）。
+     */
+    private val requestDismissFallback: Runnable = Runnable {
+        if (!awaitingKeyguardDismiss) return@Runnable
+        awaitingKeyguardDismiss = false
+        if (!keyguardBridge.isKeyguardLocked()) {
+            keyguardDismissedForRequest = true
+            showRequestDialog = true
+        } else if (keyguardBridge.isKeyguardSecure()) {
+            // 安全锁仍在等凭证：再给一轮机会，避免误伤正在输入 PIN 的家长
+            handler.postDelayed(requestDismissFallback, KEYGUARD_DISMISS_FALLBACK_MS)
+        } else {
+            keyguardDismissedForRequest = true
             showRequestDialog = true
         }
     }
@@ -736,6 +772,8 @@ class LockScreenActivity : ComponentActivity() {
      */
     private fun closeRequestDialog() {
         showRequestDialog = false
+        // 对话框关闭即撤掉兜底定时器，避免残留回调在后续状态翻转时误弹
+        handler.removeCallbacks(requestDismissFallback)
         if (keyguardDismissedForRequest && stillLocked()) {
             keyguardDismissedForRequest = false
             keyguardBridge.pushSystemLock()
@@ -744,9 +782,11 @@ class LockScreenActivity : ComponentActivity() {
 
     private fun submitUnlockRequest() {
         val reason = requestReason.trim()
+        // 理由非强制：输入法在个别 ROM / 被 setShowWhenLocked 的 Activity 上仍可能弹不出键盘，
+        // 若因"写不进理由"就硬拦截，会直接卡死整条解锁申请（孩子端永远收不到家长放行后的解锁）。
+        // 故允许空理由提交（悬浮窗路径本就允许空理由），仅给出轻提示，不再 return 阻断。
         if (reason.isBlank()) {
-            requestHint = "请填写申请理由"
-            return
+            requestHint = "未填写理由（可留空），已为你提交申请"
         }
         if (submitting) return
         submitting = true
@@ -915,7 +955,19 @@ class LockScreenActivity : ComponentActivity() {
         // 对话框打开即聚焦输入框：keyguard 已撤，窗口拿到焦点时输入法会随焦点自动弹出，
         // 孩子不必再点一次输入框（少一步操作，就少一分"键盘怎么不出来"的困惑）。
         val focusRequester = remember { FocusRequester() }
-        LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
+        val hostView = LocalView.current
+        LaunchedEffect(Unit) {
+            // 1) 先请求焦点（Compose 常规路径）
+            runCatching { focusRequester.requestFocus() }
+            // 2) 显式兜底弹键盘：被 setShowWhenLocked 的 Activity 在部分 ROM 上仅靠 focusRequester
+            //    不一定弹出输入法，必须显式 showSoftInput，否则孩子看到理由框却写不进字、
+            //    申请流程卡死（"键盘弹不出 / 点了申请解锁却解不开"的根因之一）。
+            runCatching {
+                val imm = hostView.context.getSystemService(Context.INPUT_METHOD_SERVICE)
+                    as? InputMethodManager
+                imm?.showSoftInput(hostView, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
         AlertDialog(
             onDismissRequest = { if (!submitting) closeRequestDialog() },
             title = { Text("申请解锁") },
@@ -1018,10 +1070,11 @@ class LockScreenActivity : ComponentActivity() {
             keyguardDismissedForRequest = false
             keyguardBridge.pushSystemLock()
         }
-        // 页面被回收而锁定态仍在（进程被系统清理 / 任务栈被清）：把锁交接给悬浮地板，
+        // 页面被回收而锁定态仍在（进程被系统清理 / 任务栈被清）：把锁交接给锁屏升级链
+        // （无障碍看门狗 / 全屏 intent 通知会重新把锁屏页顶回前台），
         // 否则孩子回到的是一个既没有锁屏页、也没有浮层的裸桌面 —— 想开什么开什么。
         if (mode != MODE_UNLOCKING && stillLocked() && isScreenOn()) {
-            overlay.show(currentDetail)
+            LockScreenActivity.show(this, currentDetail)
         }
         if (instance === this) instance = null
         super.onDestroy()
@@ -1049,9 +1102,12 @@ class LockScreenActivity : ComponentActivity() {
         /**
          * 被切走后重新抢占前台的延迟。
          * 原为 800ms：孩子上滑后能看到近 1 秒的桌面，足以再点开一个应用，
-         * 观感就是"锁屏能滑走"。压到 250ms，只够看到切换动画，来不及做任何操作。
+         * 观感就是"锁屏能滑走"；后压到 250ms。
+         * 现改为由 [com.padguard.core.transport.TransportSettings.rearmDelayMs] 运行时配置
+         * （默认 16ms，详见 TransportSettings.DEFAULT_REARM_DELAY_MS），可在不发包的前提下
+         * 把间隙压到接近 0。onPause 中读取该值作为 postDelayed 延迟。
+         * 注意：仅 DO（设备所有者）模式下才能真正零间隙（无桌面可滑）。
          */
-        private const val RELAUNCH_DELAY_MS = 250L
 
         /** 抢占未成功时的重试间隔：持续抢占直到真正回到前台 */
         private const val RELAUNCH_RETRY_MS = 500L
@@ -1065,6 +1121,12 @@ class LockScreenActivity : ComponentActivity() {
 
         /** 护眼休息倒计时刷新间隔：每秒一次，足够平滑又不浪费资源 */
         private const val COUNTDOWN_INTERVAL_MS = 1000L
+
+        /**
+         * 撤系统锁兜底等待：requestDismissKeyguard 回调在部分 ROM 上永不触发时的超时。
+         * 800ms 足以覆盖正常「滑动/无锁」keyguard 被立即撤掉的场景，又不至于让家长等太久。
+         */
+        private const val KEYGUARD_DISMISS_FALLBACK_MS = 800L
 
         /**
          * 过渡页自检间隔：拉起时若策略又重新锁上（如时段锁仍生效），

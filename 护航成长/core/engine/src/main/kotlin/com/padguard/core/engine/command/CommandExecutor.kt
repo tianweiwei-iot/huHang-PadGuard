@@ -12,6 +12,7 @@ import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.admin.OpResult
 import com.padguard.core.engine.enforcer.AppLimitEnforcer
+import com.padguard.core.engine.guard.GuardMasterSwitch
 import com.padguard.core.engine.enforcer.EyeCareEnforcer
 import com.padguard.core.engine.enforcer.PeripheralEnforcer
 import com.padguard.core.engine.lock.LockController
@@ -53,7 +54,8 @@ class CommandExecutor @Inject constructor(
     private val peripheralEnforcer: PeripheralEnforcer,
     private val appLimitEnforcer: AppLimitEnforcer,
     private val eyeCareEnforcer: EyeCareEnforcer,
-    private val timeProvider: TimeProvider
+    private val timeProvider: TimeProvider,
+    private val guardMasterSwitch: GuardMasterSwitch
 ) {
 
     private val _effects = MutableSharedFlow<EngineEffect>(extraBufferCapacity = 32)
@@ -118,6 +120,7 @@ class CommandExecutor @Inject constructor(
                 CommandType.SET_WATERMARK -> setWatermark(command, deviceId)
                 CommandType.PERIPHERAL_OVERRIDE -> peripheralOverride(command, deviceId)
                 CommandType.UPDATE_CONFIG -> updateConfig(command, deviceId)
+                CommandType.SET_MANAGEMENT_ACTIVE -> setManagementActive(command, deviceId)
                 CommandType.FLUSH_LOGS -> flushLogs(command, deviceId)
                 CommandType.WIPE -> wipe(command, deviceId)
             }
@@ -387,6 +390,29 @@ class CommandExecutor @Inject constructor(
         }
         _effects.tryEmit(EngineEffect.UpdateRuntimeConfig(command.payload))
         return ack(command, deviceId, AckStatus.SUCCESS)
+    }
+
+    /**
+     * 整机管控总开关：远程暂停 / 恢复设备管控。payload { active }（"true"/"false"）。
+     *
+     * 这是"取消应用管控后设备应可正常使用"的真正落点：释放设备由这个总开关驱动，
+     * 而非只清空应用黑白名单（名单与锁屏浮层、无障碍拦截、DO 权限回收是两套独立机制）。
+     *
+     * 调用 [GuardMasterSwitch.setActive] 后，所有已接入的入口（无障碍拦截、锁屏浮层、
+     * DO 权限回收与 Kiosk）会即时收到 StateFlow 推送并释放设备；恢复时同样即时重铺。
+     * 值持久化落盘，进程/设备重启后不丢失，保持家长最后设定的意图。
+     *
+     * payload 缺省（无 active 键）时按 true 处理，避免服务端漏发字段导致误暂停。
+     */
+    private fun setManagementActive(command: Command, deviceId: String): CommandAck {
+        val active = command.payloadBoolean(KEY_ACTIVE, true)
+        guardMasterSwitch.setActive(active)
+        Logger.i(TAG) { "SET_MANAGEMENT_ACTIVE -> active=$active" }
+        return ack(
+            command, deviceId, AckStatus.SUCCESS,
+            if (active) "RESUMED" else "PAUSED",
+            if (active) "已恢复设备管控" else "已暂停设备管控，设备当前完全可用"
+        )
     }
 
     // ==================== 策略相关 ====================
@@ -675,6 +701,8 @@ class CommandExecutor @Inject constructor(
         const val KEY_SUSPENDED = "suspended"
         const val KEY_ENABLED = "enabled"
         const val KEY_HIDDEN = "hidden"
+        /** 整机管控总开关：payload { active }，"true"/"false" */
+        const val KEY_ACTIVE = "active"
         const val KEY_ITEM = "item"
         const val KEY_CONFIRM = "confirm"
     }

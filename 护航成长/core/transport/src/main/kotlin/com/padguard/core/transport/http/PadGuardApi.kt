@@ -85,6 +85,13 @@ interface PadGuardApi {
     @POST("device/events")
     suspend fun uploadEvents(@Body body: EventUploadRequest): Response<ApiEnvelope<LogUploadResponse>>
 
+    /**
+     * §5.14 自愈成功后关闭对应类别的 ACTIVE 告警（恢复即关闭闭环）。
+     * 由 PermissionHealthChecker 在权限自动恢复后调用，避免家长端"已修复仍提示"。
+     */
+    @POST("device/alerts/resolve")
+    suspend fun resolveAlerts(@Body body: AlertResolveRequest): Response<ApiEnvelope<JsonElement>>
+
     /** §5.5 上报截图 */
     @Multipart
     @POST("device/screenshot")

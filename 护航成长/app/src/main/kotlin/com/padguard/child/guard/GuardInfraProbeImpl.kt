@@ -26,6 +26,9 @@ class GuardInfraProbeImpl @Inject constructor(
     override fun isAccessibilityServiceEnabled(): Boolean =
         GuardA11y.isEnabled(context)
 
+    override fun isAccessibilityServiceAlive(): Boolean =
+        GuardA11y.isAlive(context)
+
     override fun isUsageAccessGranted(): Boolean {
         val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
             ?: return false

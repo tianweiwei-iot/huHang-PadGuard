@@ -253,6 +253,11 @@ class OneTimeConsentViewModel @Inject constructor(
                     .onFailure { Logger.w(TAG) { "mark DA prompt ack failed" } }
             }
         }
+        // 走完（即使有跳过项）即清掉"需重新授权"标记，避免入口分流反复弹回
+        viewModelScope.launch {
+            runCatching { authRepository.clearReauthRequired() }
+                .onFailure { Logger.w(TAG) { "clear reauth required failed" } }
+        }
         skippedKeys.addAll(missingManualKeys())
         advance("parent-opt-out")
     }
@@ -365,6 +370,9 @@ class OneTimeConsentViewModel @Inject constructor(
         viewModelScope.launch {
             runCatching { authRepository.saveConsentDone() }
                 .onFailure { Logger.e(TAG, it) { "save consent failed" } }
+            // 走完引导即清掉"需重新授权"标记（授权回退自愈的闭环）
+            runCatching { authRepository.clearReauthRequired() }
+                .onFailure { Logger.w(TAG) { "clear reauth required failed" } }
             _phase.value = Phase.DONE
         }
     }

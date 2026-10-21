@@ -72,15 +72,15 @@ enum class SpecialPermission(
      * 真正的"免手动返回"由 [ConsentReturnPresenter] 的轮询守护 + 全屏 Intent 兜底，
      * 不靠深链，所以这里只需把家长"送到能找到开关的地方"。
      */
-    ACCESSIBILITY(
-        "accessibility",
-        "无障碍服务（操作闸门）",
-        "密码闸门的系统级拦截依赖它，未启用则孩子可从系统设置绕过管控、卸载本应用"
-    ),
     INSTALL_PACKAGES(
         "installPackages",
         "安装未知应用",
         "家长端远程推送安装应用时需要；已是设备所有者则不需要（可静默安装）"
+    ),
+    ACCESSIBILITY(
+        "accessibility",
+        "无障碍服务（操作闸门）",
+        "密码闸门的系统级拦截依赖它，未启用则孩子可从系统设置绕过管控、卸载本应用"
     );
 
     /**

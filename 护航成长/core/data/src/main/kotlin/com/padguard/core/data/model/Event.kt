@@ -121,13 +121,35 @@ enum class RiskType {
      * 这种"以为锁了其实没锁"的洞比任何漏拦都危险，必须让家长立刻知道，并引导其在装机流程中
      * 授予悬浮窗权限或激活设备管理员。上层据此如实上报 HIGH 告警，不再静默空转。
      */
-    LOCK_SCREEN_UNPROTECTED
+    LOCK_SCREEN_UNPROTECTED,
+
+    /**
+     * 关键权限被系统静默撤销（最高危，仅次于 LOCK_SCREEN_UNPROTECTED）。
+     *
+     * 触发场景：在系统设置里授予/切换某些特殊权限（如国产 ROM 的"后台弹出界面"
+     * /悬浮窗）时，系统会强制重启本应用，重启后无障碍服务绑定被解除、MediaProjection
+     * 录屏授权被清空——表现为"之前打开的无障碍、允许录屏等权限全部被取消"。
+     * 若无障碍失效，设置/应用拦截层整体瘫痪；若录屏授权丢失，看屏/录屏下发即失败。
+     * 必须让家长立刻知道并重新授权，而不是让孩子端静默处于"管控残缺"状态。
+     */
+    GUARD_PERMISSION_DROPPED
 }
 
 @Serializable
 enum class RiskLevel { HIGH, NORMAL, INFO }
 
-/** 心跳包（对应接口契约 §4.3） */
+/**
+ * 心跳包（对应接口契约 §4.3）
+ *
+ * 五项硬件字段改为**可空**：它们受策略开关 `monitoring.collectHardware` 门控
+ * （见 [com.padguard.core.engine.enforcer.MonitoringRuntime.collectHardware]）。
+ * 该开关此前在端上收得下、存得下，却没有任何一处读取它 —— 家长关掉"采集硬件信息"，
+ * 设备照样每个心跳把电量、存储、内存、网络、屏幕状态全量上传，
+ * 开关形同虚设。现在关闭时这些字段为 null，服务端对应字段本就可空，链路无需改动。
+ *
+ * 注意：`deviceId / timestamp / foregroundApp` 等**不属于**硬件采集范畴，
+ * 不受该开关影响 —— 它们是心跳本身的可信性基础，缺了就无法判断设备是否在线。
+ */
 @Serializable
 data class Heartbeat(
     @SerialName("deviceId") val deviceId: String,
@@ -135,14 +157,27 @@ data class Heartbeat(
     @SerialName("policyVersion") val policyVersion: Int,
     @SerialName("transportMode") val transportMode: String,
     @SerialName("controlMode") val controlMode: String,
-    @SerialName("network") val network: NetworkInfo,
-    @SerialName("battery") val battery: BatteryInfo,
-    @SerialName("storage") val storage: StorageInfo,
-    @SerialName("memory") val memory: MemoryInfo,
-    @SerialName("screen") val screen: ScreenInfo,
+    @SerialName("network") val network: NetworkInfo? = null,
+    @SerialName("battery") val battery: BatteryInfo? = null,
+    @SerialName("storage") val storage: StorageInfo? = null,
+    @SerialName("memory") val memory: MemoryInfo? = null,
+    @SerialName("screen") val screen: ScreenInfo? = null,
     @SerialName("foregroundApp") val foregroundApp: String,
     @SerialName("location") val location: LocationInfo? = null,
-    @SerialName("pendingLogCount") val pendingLogCount: Int
+    @SerialName("pendingLogCount") val pendingLogCount: Int,
+    // ============ 守护状态快照（P3 可观测性，2026-10-20 新增） ============
+    // 全部带默认值：旧服务端（HeartbeatDto 已 @JsonIgnoreProperties(ignoreUnknown = true)）无需改动即可兼容；
+    // 新字段随既有 15s 心跳通道上报，不新增网络量级。
+    /** 独立守护进程(:daemon)是否存活（跨进程读 GuardHeartbeat 心跳文件判定，比进程内静态标志可靠） */
+    @SerialName("daemonAlive") val daemonAlive: Boolean = false,
+    /** 操作闸门无障碍服务是否真正在运行（开关打开且近期有心跳，见 GuardA11y.isAlive） */
+    @SerialName("a11yAlive") val a11yAlive: Boolean = false,
+    /** 在线三态：ONLINE / MQTT_DOWN（PROCESS_DOWN 由服务端据"无心跳"推断） */
+    @SerialName("onlineState") val onlineState: String = "",
+    /** 本服务最近一次被拉起的触发原因（boot/daemon/watchdog/alarm/screenOn/unknown），用于区分进程是被谁拉回 */
+    @SerialName("lastRestartReason") val lastRestartReason: String = "",
+    /** 权限自愈版本号：运行期危险权限被实际重新授予一次 +1，服务端据以识别"权限状态是否变化" */
+    @SerialName("permissionVersion") val permissionVersion: Int = 0
 )
 
 @Serializable

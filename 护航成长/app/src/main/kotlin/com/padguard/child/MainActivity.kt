@@ -138,6 +138,8 @@ private fun EntryRouter(
     val controlMode by admin.controlMode.collectAsStateWithLifecycle()
     // 家长是否已明确跳过设备管理员引导：为 true 时不再因「DA 未激活」强制弹回授权页
     val daPromptAck by authRepository.isDeviceAdminPromptAck.collectAsState(initial = false)
+    // 装机授权完成后某项被关掉，需家长重新勾选（见 AuthorizationKeeper）
+    val reauthRequired by authRepository.reauthRequired.collectAsState(initial = false)
     val context = LocalContext.current
 
     when {
@@ -147,7 +149,11 @@ private fun EntryRouter(
         // ① 未登录家庭账号：登录页（复用家长端账号体系）
         loggedIn == false -> ChildLoginScreen()
 
-        // ② 一次性授权：协议同意 + 全部权限在这一条流水线里收走；
+        // ② 授权回退自愈：装机完成后若有项被关掉，自动把家长带回一次性授权引导流程重新勾选，
+        //    落实"授权不会自动丢失"。autoStart=true 跳过「同意并授权」按钮直接续跑缺失项。
+        reauthRequired == true -> OneTimeConsentScreen(autoStart = true)
+
+        // ③ 一次性授权：协议同意 + 全部权限在这一条流水线里收走；
         //    设备管理员(DA)是管控基石，未激活且家长未明确跳过时同样强制进入授权流程，
         //    实现「自动获取管理员权限」——激活页会自动拉起，家长点「激活」即生效（无需手动返回）。
         //    autoStart 仅在「已同意过协议但 DA 缺失」的补授权场景置 true，跳过「同意并授权」

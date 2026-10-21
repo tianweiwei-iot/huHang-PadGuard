@@ -23,6 +23,7 @@ import com.padguard.core.transport.http.AppSyncAck
 import com.padguard.core.transport.http.DeviceNameRequest
 import com.padguard.core.transport.http.ApiCode
 import com.padguard.core.transport.http.ApiResult
+import com.padguard.core.transport.http.AlertResolveRequest
 import com.padguard.core.transport.http.BindRequest
 import com.padguard.core.transport.http.CommandsResponse
 import com.padguard.core.transport.http.HeartbeatAck
@@ -317,7 +318,8 @@ class MockRemoteDataSource @Inject constructor(
             heartbeatCount = count,
             lastHeartbeatAt = timeProvider.now(),
             lastForegroundApp = heartbeat.foregroundApp,
-            lastBatteryLevel = heartbeat.battery.level,
+            // 电量随心跳硬件采集开关走：未采集时为 null，不要填 0
+            lastBatteryLevel = heartbeat.battery?.level,
             pendingCommandCount = pending
         )
         Logger.d(TAG) {
@@ -433,6 +435,13 @@ class MockRemoteDataSource @Inject constructor(
     override suspend fun updateChildProfile(childName: String?, childNickname: String?): ApiResult<Unit> {
         simulateNetwork<Unit>()?.let { return it }
         Logger.i(TAG) { "child profile updated (mock): name=$childName nickname=$childNickname" }
+        return ApiResult.Success(Unit, timeProvider.now())
+    }
+
+    override suspend fun resolveActiveAlerts(categories: List<String>, reason: String?): ApiResult<Unit> {
+        if (categories.isEmpty()) return ApiResult.Success(Unit, timeProvider.now())
+        simulateNetwork<Unit>()?.let { return it }
+        Logger.i(TAG) { "resolve active alerts (mock): categories=$categories" }
         return ApiResult.Success(Unit, timeProvider.now())
     }
 
@@ -659,7 +668,14 @@ data class MockStats(
     val heartbeatCount: Int = 0,
     val lastHeartbeatAt: Long = 0L,
     val lastForegroundApp: String = "",
-    val lastBatteryLevel: Int = 0,
+    /**
+     * 最近一次心跳上报的电量。
+     *
+     * 可空：心跳的硬件字段受 `policy.monitoring.collectHardware` 门控，
+     * 关闭时整块为 null。此处若退化成 0，调试页会把"未采集"显示成"电量 0%"，
+     * 与真实的低电量混淆 —— 因此保留 null 语义，由展示层决定如何呈现。
+     */
+    val lastBatteryLevel: Int? = null,
     val pendingCommandCount: Int = 0,
     val ackCount: Int = 0,
     val lastAck: String = "",

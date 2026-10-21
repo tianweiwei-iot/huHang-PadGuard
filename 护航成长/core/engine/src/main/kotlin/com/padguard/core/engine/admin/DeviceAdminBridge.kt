@@ -335,6 +335,30 @@ class DeviceAdminBridge @Inject constructor(
         }
 
     /**
+     * 以设备所有者身份**主动授予**某包某运行时权限（[DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED]）。
+     *
+     * 与 [revokeRuntimePermission]（强制拒绝）/ [restoreRuntimePermission]（恢复默认）互补，
+     * 用于"系统自动回收了应用权限（Android 11+ 闲置应用权限自动撤销、OEM 省电策略）"后，
+     * 在 DO 形态下**无感重新授予**，彻底闭环"权限被撤销"问题，无需孩子/家长介入。
+     * 非 DO 返回 [OpResult.Unsupported]，调用方据此降级为 UI 引导。
+     */
+    fun grantRuntimePermission(packageName: String, permission: String): OpResult =
+        guarded("grantPermission:$packageName:$permission") {
+            require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) { "requires API 23+" }
+            require(hasOwnerPrivileges()) { "grantRuntimePermission requires Device/Profile Owner" }
+            val admin = requireAdmin()
+            val target = packageName.takeIf { it.isNotBlank() } ?: context.packageName
+            require(target == context.packageName || dpm.isDeviceOwnerApp(context.packageName)) {
+                "grantRuntimePermission can only grant to self or under full Device Owner"
+            }
+            val ok = dpm.setPermissionGrantState(
+                admin, target, permission,
+                DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
+            )
+            require(ok) { "setPermissionGrantState(GRANTED) returned false for $permission on $target" }
+        }
+
+    /**
      * 协议同意后应用的「常开加固基线」（说明书 §11 防绕过）。
      *
      * 这些限制一旦开启未成年人模式就不应被解除，仅 Device Owner 可设。

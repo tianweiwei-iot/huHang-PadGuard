@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -61,6 +62,20 @@ class AccessibilityLiveStreamer @Inject constructor(
     /** 当前推流长连接；停止时必须 cancel，否则 execute() 会一直阻塞 */
     @Volatile private var call: okhttp3.Call? = null
 
+    /**
+     * 无障碍通道在等待窗口内始终不可用时的兜底回调（由 [com.padguard.child.service.GuardService]
+     * 指向投影推流路径）。根因修复：原 [start] 在无障碍未就绪时直接返回 false、退回已随进程死亡
+     * 失效的 MediaProjection 令牌，导致"杀进程重开"永久黑屏；现在改为先等待无障碍重绑，
+     * 真正不可用时才由此回调退回投影，与既有"无障碍不可用→投影"语义一致。
+     */
+    @Volatile var onA11yUnavailable: ((Boolean) -> Unit)? = null
+
+    /**
+     * 投影兜底是否已触发：避免无障碍长期不可用时，服务端自愈每轮重发都对孩子端弹"请授权"通知造成骚扰。
+     * 成功走无障碍推流或主动 [stop] 时复位，确保下次真需要仍能兜底。
+     */
+    @Volatile private var projectionFallbackFired = false
+
     fun isStreaming(): Boolean = streaming.get()
 
     /**
@@ -69,10 +84,10 @@ class AccessibilityLiveStreamer @Inject constructor(
      * 家长端会周期性重发 LIVE_VIEW_START 续期，与投影路径同一套 TTL 语义：
      * 流已存在时只把截止时间往后推，并同步画质档位。
      *
-     * @return true = 流已就绪/续期（无弹窗）；false = 无障碍通道不可用，调用方走投影引导
+     * @return 恒为 true —— 已承诺推流（含"等待无障碍通道就绪后自动开始"）。通道彻底不可用时的
+     *         投影兜底由 [onA11yUnavailable] 异步回调，不在此同步返回，避免调用方误判失败。
      */
     fun start(highDefinition: Boolean): Boolean {
-        if (!a11y.isAvailable()) return false
         this.highDefinition = highDefinition
         if (streaming.get()) {
             deadlineMs = SystemClock.elapsedRealtime() + TTL_MS
@@ -81,12 +96,55 @@ class AccessibilityLiveStreamer @Inject constructor(
         }
         streaming.set(true)
         deadlineMs = SystemClock.elapsedRealtime() + TTL_MS
-        scope.launch { pump() }
-        Logger.i(TAG) { "a11y live stream started (hd=$highDefinition, no consent dialog)" }
+        if (a11y.isAvailable()) {
+            projectionFallbackFired = false
+            Logger.i(TAG) { "a11y live stream started (hd=$highDefinition, no consent dialog)" }
+            scope.launch { pump() }
+        } else {
+            // 无障碍通道尚未就绪：进程刚被系统杀死、无障碍服务重绑有延迟窗口时常见。
+            // 不再"一发即弃"退回已随进程死亡失效的 MediaProjection 令牌（必失败导致永久黑屏），
+            // 而是挂载等待，系统重绑无障碍服务后即刻开始推流——这是"杀进程重开仍自动恢复看屏"的关键。
+            Logger.i(TAG) { "a11y channel not ready yet, waiting for rebind before live stream (hd=$highDefinition)" }
+            scope.launch { waitForA11yThenPump() }
+        }
         return true
     }
 
+    /**
+     * 无障碍通道就绪前等待：轮询 [com.padguard.child.capture.AccessibilityScreenshot.isAvailable]，
+     * 一旦系统重绑无障碍服务立即开始推流；超过 [MAX_A11Y_WAIT_MS] 仍未就绪（用户确实未启用/能力缺失），
+     * 回调 [onA11yUnavailable] 交投影兜底，与既有"无障碍不可用→投影"语义一致。
+     *
+     * 期间 [stop] 被调用会置位 [streaming]，循环自然退出且不触发兜底；[streaming] 已在 [start] 置 true。
+     */
+    private suspend fun waitForA11yThenPump() {
+        var waited = 0L
+        while (streaming.get() && SystemClock.elapsedRealtime() < deadlineMs && waited < MAX_A11Y_WAIT_MS) {
+            delay(A11Y_POLL_INTERVAL_MS)
+            waited += A11Y_POLL_INTERVAL_MS
+            if (a11y.isAvailable()) {
+                Logger.i(TAG) { "a11y channel ready after ${waited}ms, starting live stream" }
+                pump()
+                return
+            }
+        }
+        if (streaming.get()) {
+            // 仅首发一次投影兜底：避免无障碍长期不可用时，每轮等待超时都对孩子端弹"请授权"通知造成骚扰；
+            // 一旦后续成功走无障碍推流或主动停止，标记复位，下次真需要时仍可兜底。
+            if (!projectionFallbackFired) {
+                projectionFallbackFired = true
+                Logger.w(TAG) { "a11y channel not ready after ${MAX_A11Y_WAIT_MS}ms, falling back to projection (once)" }
+                onA11yUnavailable?.invoke(highDefinition)
+            }
+            // 释放推流标记：系统重绑无障碍服务可能晚于等待窗口。置 false 后，服务端自愈重发的 LIVE_VIEW_START
+            // 会再次触发本通道（彼时 isAvailable 多半已为真）从而真正恢复看屏；若继续持有 true，重发只会被当作
+            // "续期"跳过，导致超长窗口内永久黑屏。
+            streaming.set(false)
+        }
+    }
+
     fun stop() {
+        projectionFallbackFired = false
         if (!streaming.getAndSet(false) && call == null) return
         Logger.i(TAG) { "a11y live stream stopped" }
         runCatching { call?.cancel() }
@@ -212,5 +270,14 @@ class AccessibilityLiveStreamer @Inject constructor(
 
         /** 连续失败上限：通道实质失效时及时放弃，别空转烧电 */
         private const val MAX_CONSECUTIVE_FAILURES = 20
+
+        /**
+         * 无障碍就绪等待窗口：进程重启后系统重绑无障碍服务通常数秒内完成，取 60s 留足余量；
+         * 超时仍不可用才退回投影兜底（避免无谓占用），正常重启场景下远早于窗口即开始推流。
+         */
+        private const val MAX_A11Y_WAIT_MS = 60_000L
+
+        /** 无障碍就绪轮询间隔 */
+        private const val A11Y_POLL_INTERVAL_MS = 1_000L
     }
 }

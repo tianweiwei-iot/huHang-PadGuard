@@ -144,11 +144,16 @@ object CaptureConsentPrompter {
             },
             flags
         )
+        // fullScreenIntent：解锁后让系统优先把授权页直接顶到前台（在支持的系统上自动呈现，
+        // Android 12+ 非通话类应用会降级为"点按查看"的悬浮提醒，不自动弹）。
+        // 与 contentIntent 共用同一 PendingIntent，双保险：孩子不必先去通知栏翻找再点，
+        // 解锁瞬间就能看到并确认屏幕采集授权（2026-10-21 修复"通知点不了"的体验兜底）。
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("护航守护")
             .setContentText("为实时守护做准备，请确认屏幕采集授权")
             .setSmallIcon(context.applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_menu_gallery)
             .setContentIntent(pi)
+            .setFullScreenIntent(pi, true)
             .setOngoing(false)
             .setAutoCancel(true)
             .setShowWhen(false)

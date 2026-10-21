@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import com.padguard.child.KidHomeActivity
 import com.padguard.child.MainActivity
+import com.padguard.child.guard.GuardPasswordManager
 import com.padguard.core.common.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -35,15 +36,34 @@ import javax.inject.Singleton
  */
 @Singleton
 class AppHider @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val guard: GuardPasswordManager
 ) {
     private val pm: PackageManager get() = context.packageManager
 
     private val mainComponent = ComponentName(context, MainActivity::class.java)
     private val homeComponent = ComponentName(context, KidHomeActivity::class.java)
 
-    /** 绑定完成后调用：隐藏管理控制台图标（KidHome 非默认桌面时才一并禁用，避免变砖）。 */
+    /**
+     * 隐藏管理控制台图标（绑定完成后 / 家长配置结束退出时调用）。
+     *
+     * ## 安全前置：没有守护密码时禁止隐藏
+     * 揭示管理控制台的唯一入口是 [FloatingActionActivity] 的家长验证闸，而该闸在
+     * [GuardPasswordManager.isEnabledNow] 为 false 时**直接放行失败**（见 ParentGateScreen）。
+     * 因此若允许「未设密码就隐藏」，应用隐藏后将没有任何密码能把它揭示回来——
+     * 家长自己也会被锁在门外，形成「孩子端被隐藏但没有守护密码」的死局（Bug ⑥）。
+     *
+     * 所以这里以守护密码为前置：未设密码时拒绝隐藏、保持图标可见，并提示家长先去家长端
+     * 设置操作密码。等密码就绪后，下一次隐藏触发（配置结束退出 / 重新绑定）即可正常隐藏。
+     */
     fun hideManagementUi() {
+        if (!guard.isEnabledNow()) {
+            Logger.w(TAG) {
+                "hideManagementUi skipped: no guardian password set; " +
+                    "keeping console visible to avoid a hidden-but-unrecoverable state"
+            }
+            return
+        }
         setComponentEnabled(mainComponent, enabled = false)
         if (!isDefaultHome(homeComponent)) {
             setComponentEnabled(homeComponent, enabled = false)

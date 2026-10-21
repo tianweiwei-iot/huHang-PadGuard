@@ -260,6 +260,7 @@ class LogRepository @Inject constructor(
         RiskType.LOCK_SCREEN_UNPROTECTED -> "锁屏已失效：设备无系统锁且无悬浮窗权限"
         RiskType.INVALID_SIGNATURE -> "指令签名校验失败"
         RiskType.HEARTBEAT_TIMEOUT -> "与服务端通信超时"
+        RiskType.GUARD_PERMISSION_DROPPED -> "关键权限被系统撤销，请重新授予"
     }
 
     // ==================== 清理 ====================

@@ -7,6 +7,7 @@ import com.padguard.core.data.model.CommandAck
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
 import com.padguard.core.data.model.policy.AppListMode
+import com.padguard.core.data.model.policy.BlacklistAction
 import com.padguard.core.data.model.policy.PolicyPackage
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.repository.LogRepository
@@ -284,6 +285,9 @@ class PolicyEngine @Inject constructor(
         val limit = appLimitEnforcer.track(policy.appLimit, foregroundPackage, screenOn, eyeCareResting)
         var blockedPackage: String? = null
         var blockedReason = ""
+        // 命中黑名单时的处置方式：默认弹拦截页，黑名单分支按策略覆盖为 SILENT_CLOSE。
+        // 限额超额分支不覆盖 —— 那里必须给解释，见 [EngineTick.blockedAction] 的说明。
+        var blockedAction: BlacklistAction = BlacklistAction.BLOCK_DIALOG
         if (limit is LimitVerdict.Blocked) {
             // 家长已放行（临时解锁）的应用本轮不拦。
             // 孩子端最常见的申请入口是"应用拦截页"，家长同意的正是"再玩一会儿这一个应用"；
@@ -335,6 +339,7 @@ class PolicyEngine @Inject constructor(
             if (isBlacklisted && !lockController.isTempUnlockActive(foregroundPackage)) {
                 blockedPackage = foregroundPackage
                 blockedReason = "该应用已被家长管控，无法使用"
+                blockedAction = policy.app.blacklistAction
                 raiseOnce(
                     key = "blacklist:$foregroundPackage",
                     type = RiskType.BLACKLIST_APP_LAUNCH,
@@ -394,6 +399,7 @@ class PolicyEngine @Inject constructor(
             minorMode = minorMode,
             blockedPackage = blockedPackage,
             blockedReason = blockedReason,
+            blockedAction = blockedAction,
             pendingRestReport = pendingRestReport
         )
     }
@@ -543,6 +549,15 @@ data class EngineTick(
     val blockedPackage: String?,
     /** 拦截原因文案（限额超额/黑名单命中），供拦截页展示 */
     val blockedReason: String = "",
+    /**
+     * 命中**黑名单**时的处置方式，取自 `app.blacklistAction`：
+     * - [BlacklistAction.BLOCK_DIALOG]：弹出拦截页说明理由（默认，也是最诚实的一种 —— 孩子知道为什么被拦）；
+     * - [BlacklistAction.SILENT_CLOSE]：不弹页，直接把孩子送回桌面。
+     *
+     * 仅黑名单命中会覆盖它；**单应用限额超额恒为 BLOCK_DIALOG** ——
+     * 超额是一种"用完额度"的状态，不给解释会让孩子以为应用坏了。
+     */
+    val blockedAction: BlacklistAction = BlacklistAction.BLOCK_DIALOG,
     /**
      * 护眼强制休息结束后待上报服务端的事件（restId, 实际休息毫秒）。
      * 非空时由 [com.padguard.child.service.GuardService] 异步上报，

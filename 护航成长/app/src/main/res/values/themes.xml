@@ -45,4 +45,22 @@
         <item name="android:backgroundDimEnabled">true</item>
         <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="28">shortEdges</item>
     </style>
+
+    <!--
+      屏幕采集授权过渡页（CapturePermissionActivity）用的主题。
+      关键修复（2026-10-21）：原 Theme.Translucent.NoTitleBar 让 EMUI 等国产 ROM 的
+      "后台启动 Activity / 悬浮窗管控"把本页当成"后台弹窗"直接拦截，导致通知点开后
+      系统「是否允许录制屏幕」确认框无法弹出、孩子无法确认授权（现场："点了通知却没反应"）。
+
+      解法：改用"普通（非 translucent）主题 + 透明背景"（fake-transparent 技巧）——
+      视觉上仍透明（系统确认框出现前孩子看不到我们的界面），但系统按"正规前台 Activity"
+      对待，不再触发 OEM 的后台弹窗拦截，系统确认框必现且可点"立即开始"。
+      注意：刻意不设置 android:windowIsTranslucent，否则又被当成透明浮窗拦截。
+    -->
+    <style name="Theme.PadGuard.Consent" parent="Theme.PadGuard">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="28">shortEdges</item>
+    </style>
 </resources>

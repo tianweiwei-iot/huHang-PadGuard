@@ -15,13 +15,15 @@ import javax.inject.Inject
  * 消息详情 ViewModel。
  *
  * 按 [serverMsgId] 从 [MessageRepository] 取回家长发布的单条消息；
- * 媒体地址（服务端默认相对路径）用 [TransportSettings.baseUrl] 拼成绝对地址后再交给 UI 渲染；
+ * 媒体地址（服务端默认相对路径）用 [MediaUrlResolver] 拼成绝对地址后再交给 UI 渲染；
  * 进入详情即标记已读（调用 [MessageRepository.markRead]）。
  */
 @HiltViewModel
 class MessageDetailViewModel @Inject constructor(
     private val messageRepository: MessageRepository,
-    private val transportSettings: TransportSettings
+    private val transportSettings: TransportSettings,
+    private val mediaUrlResolver: MediaUrlResolver,
+    val downloader: MediaDownloader
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<MessageDetailUiState?>(null)
@@ -33,8 +35,7 @@ class MessageDetailViewModel @Inject constructor(
                 _state.value = null
                 return@launch
             }
-            val base = transportSettings.baseUrl.value.trimEnd('/')
-            val absUrl = if (entity.mediaUrl.isNotBlank()) resolveAbsoluteUrl(entity.mediaUrl, base) else ""
+            val absUrl = if (entity.mediaUrl.isNotBlank()) mediaUrlResolver.resolve(entity.mediaUrl) else ""
             _state.value = MessageDetailUiState(
                 serverMsgId = entity.serverMsgId,
                 title = entity.title,

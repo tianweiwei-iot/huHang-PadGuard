@@ -95,6 +95,8 @@ private const val TAG = "MessageActivity"
 class MessageActivity : ComponentActivity() {
 
     @Inject lateinit var transportSettings: TransportSettings
+    @Inject lateinit var mediaUrlResolver: MediaUrlResolver
+    @Inject lateinit var mediaDownloader: MediaDownloader
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -121,11 +123,9 @@ class MessageActivity : ComponentActivity() {
         mediaUrl = intent?.getStringExtra(EXTRA_MEDIA_URL).orEmpty()
         mediaName = intent?.getStringExtra(EXTRA_MEDIA_NAME).orEmpty()
 
-        // 服务端默认返回相对路径（如 /v1/files/{id}），直接交给 HttpURLConnection 会因
-        // MalformedURLException 静默失败，导致图片/视频/音频在孩子端看不到。
-        // 这里按当前服务器 baseUrl 的 origin 拼成绝对地址，一次解析贯穿整条渲染链。
-        val base = transportSettings.baseUrl.value.trimEnd('/')
-        if (mediaUrl.isNotBlank()) mediaUrl = resolveAbsoluteUrl(mediaUrl, base)
+        // 服务端默认返回相对路径（如 /v1/files/{id}），由 MediaUrlResolver 统一解析为绝对地址，
+        // 一次解析贯穿整条渲染链；解析失败会在下载层给出明确错误而非无限转圈。
+        if (mediaUrl.isNotBlank()) mediaUrl = mediaUrlResolver.resolve(mediaUrl)
 
         // 霸屏不提供任何关闭入口；非阻塞且有时长则到点自动关闭
         // 倒计时以「首次展示」为基准：被系统弹窗打断后 re-arm 重拉本页时不重置，
@@ -153,10 +153,11 @@ class MessageActivity : ComponentActivity() {
                     blocking = blocking,
                     durationSec = durationSec,
                     contentType = contentType,
-                    mediaUrl = mediaUrl,
-                    mediaName = mediaName,
-                    onMediaDuration = { sec -> extendSession(sec) },
-                    onDismiss = { finishSafely() }
+                mediaUrl = mediaUrl,
+                mediaName = mediaName,
+                downloader = mediaDownloader,
+                onMediaDuration = { sec -> extendSession(sec) },
+                onDismiss = { finishSafely() }
                 )
             }
         }
@@ -462,6 +463,7 @@ private fun MessageContent(
     contentType: String,
     mediaUrl: String,
     mediaName: String,
+    downloader: MediaDownloader,
     onMediaDuration: (Int) -> Unit = {},
     onDismiss: () -> Unit
 ) {
@@ -497,13 +499,14 @@ private fun MessageContent(
                     contentAlignment = Alignment.Center
                 ) {
                     when (contentType) {
-                        "IMAGE" -> RemoteImage(mediaUrl, Modifier.fillMaxSize())
+                        "IMAGE" -> RemoteImage(mediaUrl, Modifier.fillMaxSize(), downloader = downloader)
                         "VIDEO" -> ResizableVideo(
                             url = mediaUrl,
                             modifier = Modifier.fillMaxSize(),
                             // 发布视频默认铺满屏幕播放；非霸屏时给控制条，霸屏期间不给（避免可点出口）
                             defaultFullscreen = true,
                             showControls = !blocking,
+                            downloader = downloader,
                             onDuration = onMediaDuration
                         )
                     }
@@ -554,7 +557,7 @@ private fun MessageContent(
                                 // 语音一律自动播放：家长发语音就是为了让孩子"听到"，
                                 // 要求孩子先点一下播放，等于把这条信息变成需要打开的通知——
                                 // 孩子不看就等于没发。图片/视频本身是可见的，不存在这个问题。
-                                RemoteAudio(mediaUrl, mediaName, autoPlay = true, onDuration = onMediaDuration)
+                                RemoteAudio(mediaUrl, mediaName, autoPlay = true, downloader = downloader, onDuration = onMediaDuration)
 
                             body.isNotBlank() ->
                                 Text(

@@ -177,11 +177,12 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!--
-      锁屏覆盖层（LockScreenOverlay）依赖 SYSTEM_ALERT_WINDOW：它是 TYPE_APPLICATION_OVERLAY
-      悬浮窗，是「非 DO / 非设备管理员」设备上唯一的可靠锁定层（Activity 后台拉起会被 ROM 拒绝、
-      全屏通知在 targetSdk 34+ 失效、lockNow 需设备管理员）。因此悬浮窗权限是装机流程的必选项，
-      缺失时锁屏将彻底失效（见 LockScreenPresenter.reportUnprotected 上报家长告警）。
-      下方权限声明必须保留。
+      SYSTEM_ALERT_WINDOW 权限声明（必须保留）。
+      说明：原「锁屏覆盖层（LockScreenOverlay）」这一深灰全屏浮窗已按产品决策**彻底删除**
+      （类文件 ui/lock/LockScreenOverlay.kt 已移除；该层在部分 ROM 上会导致「灰色锁屏无法解锁」的
+      永久死局）。本权限现由「无权限提示覆盖层（NoPermissionOverlay）」「护眼暖色遮罩
+      （EyeProtectionOverlay）」「水印覆盖层（WatermarkOverlay）」复用，装机流程仍应授予，
+      缺失时相关提示/遮罩层将静默失效。
     -->
 
     <application
@@ -195,10 +196,17 @@
         android:supportsRtl="true">
 
         <!-- 入口：设备绑定 / 状态查看（管理界面，由应用图标启动） -->
+        <!--
+            excludeFromRecents：绑定后孩子端应对孩子"隐形"——图标已由 AppHider 隐藏，
+            若任务卡仍驻留"最近任务"，孩子划一下就能看到管控应用 UI 并把它杀掉
+            （2026-10-20 现场反馈：历史应用记录里能看到管控应用 UI，划掉后守护不重启）。
+            声明后任务不再出现在最近任务列表；从通知/悬浮球启动不受影响。
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop">
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -239,11 +247,14 @@
             android:theme="@style/Theme.PadGuard" />
 
         <!-- 锁屏覆盖层：无解锁入口 -->
+        <!-- windowSoftInputMode=adjustResize：申请解锁对话框是输入焦点所在，必须随输入法升起而缩放，
+             否则键盘会把对话框顶出屏幕外；同时配合代码内显式 showSoftInput 兜底，保证理由框稳定弹键盘。 -->
         <activity
             android:name=".ui.lock.LockScreenActivity"
             android:exported="false"
             android:launchMode="singleTask"
             android:excludeFromRecents="true"
+            android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.PadGuard.Lock" />
 
         <!--
@@ -290,14 +301,27 @@
             android:theme="@style/Theme.PadGuard.Lock" />
 
         <!--
-          家长验证入口（悬浮状态卡的唯一触点，隐藏形态下孩子端仅此外露）。
-          透明浮层主题复用 Gate（半透明 + 压暗桌面）；由悬浮卡点按经系统唤起，
+          家长验证入口（玻璃球单机的唯一触点，隐藏形态下孩子端仅此外露）。
+          透明浮层主题复用 Gate（半透明 + 压暗桌面）；由玻璃球单击经系统唤起，
           输对家长操作密码后才放行「进入管理控制台 / 退出并卸载」。仅本应用内部拉起，不对外暴露。
         -->
         <activity
             android:name=".hidden.FloatingActionActivity"
             android:exported="false"
             android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.PadGuard.Gate" />
+
+        <!--
+          玻璃球「双击 → 申请延时」对话框：透明浮层主题（Gate），承载 Compose 档位选择。
+          excludeFromRecents + noHistory：它是一次性交互，不该驻留最近任务
+          （2026-10-20 现场反馈的延伸：任何孩子可见的任务卡都是逃逸与误触点）。
+        -->
+        <activity
+            android:name=".glassball.GlassBallDialogActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:theme="@style/Theme.PadGuard.Gate" />
@@ -324,6 +348,38 @@
             android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!--
+          双进程守护服务（独立 :daemon 进程）。
+          主进程被"划任务/清理工具"整体杀掉时，进程内的 onTaskRemoved 重启、
+          START_STICKY、动态广播全部随进程死亡 —— 只有另一个进程能监视心跳并把主进程拉回。
+          该进程极轻（无 Hilt、无数据库），全部决策走 filesDir 下的心跳文件。
+          API 31+ 由服务自行提升为 dataSync 类型前台服务（拿"后台启动 FGS"的豁免身份）；
+          API <31 为普通 Service（当年无后台启动前台服务限制）。
+
+          关键修正（2026-10-20）：此前漏配 android:process=":daemon"，该服务实际跑在
+          **主进程**里，导致"双进程互保"是空壳——主进程被杀时守护进程一并死亡，永远拉不回主进程，
+          进程拉活只能靠 JobScheduler/Alarm 两条系统调度通道（部分 ROM 会限流、Android 12+ 后台起
+          FGS 可能被拒）。本轮补上该属性，使其真正独立，成为主进程死亡后的可靠拉活锚点。
+        -->
+        <service
+            android:name=".service.GuardDaemonService"
+            android:exported="false"
+            android:process=":daemon"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+          闹钟兜底通道：与 JobScheduler 看门狗并行的第二条系统调度路径（60s 窗口闹钟）。
+          部分国产 ROM 会限制 JobScheduler 投递，AlarmManager 在多数 ROM 上更稳定。
+          仅应用自身拉起（exported=false），无外部入口。
+        -->
+        <receiver
+            android:name=".receiver.GuardAlarmReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.padguard.child.action.GUARD_ALARM" />
+            </intent-filter>
+        </receiver>
+
+        <!--
           屏幕采集（截屏 / 录屏 / 录音）：
           API 29+ 起 MediaProjection 必须在带 mediaProjection 类型的前台服务里使用，
           否则 createVirtualDisplay 直接抛 SecurityException。
@@ -334,13 +390,15 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection|microphone" />
 
-        <!-- 采集授权过渡页：无界面（透明），仅用于承接 MediaProjection 授权结果 -->
+        <!-- 采集授权过渡页：无界面（透明），仅用于承接 MediaProjection 授权结果。
+             主题改用 Theme.PadGuard.Consent（普通主题 + 透明背景，非 translucent），
+             避免被 EMUI 后台弹窗管控拦截系统确认框（2026-10-21 修复"点了通知无法确认"）。 -->
         <activity
             android:name=".capture.CapturePermissionActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+            android:theme="@style/Theme.PadGuard.Consent" />
 
         <!-- 静默安装 / 卸载结果回调 -->
         <receiver

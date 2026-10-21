@@ -8,6 +8,7 @@ import com.padguard.child.di.ApplicationScope
 import com.padguard.core.common.Logger
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.admin.OpResult
+import com.padguard.core.engine.guard.GuardMasterSwitch
 import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -50,6 +51,7 @@ class DeviceOwnerEnforcer @Inject constructor(
     private val admin: DeviceAdminBridge,
     private val lockController: LockController,
     private val appGuardStore: AppGuardPolicyStore,
+    private val guardMasterSwitch: GuardMasterSwitch,
     @ApplicationScope private val scope: CoroutineScope
 ) {
 
@@ -67,9 +69,39 @@ class DeviceOwnerEnforcer @Inject constructor(
         lockController.state
             .onEach { state -> onLockStateChanged(state.locked) }
             .launchIn(scope)
+        // 订阅整机管控总开关：家长/操作员在控制端"暂停管控"时，即便当前处于锁定态，
+        // 也立即归还已回收权限并解除 Kiosk；恢复管控时按当前锁定态重新评估。
+        // 复用同一决策入口 onLockStateChanged —— active=false 时内部早返回并释放，
+        // 不重复一套分支。
+        guardMasterSwitch.active
+            .onEach { onManagementActiveChanged(it) }
+            .launchIn(scope)
+    }
+
+    /**
+     * 整机管控总开关变化时的再评估。
+     *
+     * 复用 [onLockStateChanged] 单一决策入口：
+     * - active=false：内部早返回，归还已回收权限并置 Kiosk=false（设备完全可用）；
+     * - active=true：按当前锁定态重新进入/退出受控态。
+     * StateFlow 回放首值会触发一次对账，可自愈"权限残留但开关已暂停"的异常态。
+     */
+    private fun onManagementActiveChanged(active: Boolean) {
+        if (active) {
+            Logger.i(TAG) { "management re-activated, re-evaluating DO controlled-state" }
+        } else {
+            Logger.i(TAG) { "management paused, releasing DO controlled-state (permissions + Kiosk)" }
+        }
+        onLockStateChanged(lockController.state.value.locked)
     }
 
     private fun onLockStateChanged(locked: Boolean) {
+        // 整机管控暂停：无论锁定态如何，DO 都不回收权限、不进 Kiosk，设备完全可用。
+        if (!guardMasterSwitch.active.value) {
+            if (revokedPairs.isNotEmpty()) releasePermissions()
+            _kioskActive.value = false
+            return
+        }
         val isDo = admin.isDeviceOwner()
         _kioskActive.value = isDo && locked
         if (!isDo) {

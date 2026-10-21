@@ -539,7 +539,16 @@ data class SecurityPolicy(
 @Serializable
 data class GuardPolicy(
     @SerialName("passwordHash") val passwordHash: String = "",
-    @SerialName("clear") val clear: Boolean = false
+    @SerialName("clear") val clear: Boolean = false,
+    /**
+     * 整机管控总开关：true=管控生效（默认），false=暂停管控、释放设备。
+     *
+     * 这是"取消应用管控后设备应可正常使用"的正确落地：应用黑白名单只是管控的一部分，
+     * 真正释放设备必须由这个总开关驱动。暂停时孩子端锁屏浮层不铺、无障碍设置/应用拦截
+     * 全部解除、DO 下不回收权限、不钉 Kiosk，设备回到完全可用状态——
+     * 家长/操作员可自由进入系统设置。
+     */
+    @SerialName("active") val active: Boolean = true
 )
 
 // endregion

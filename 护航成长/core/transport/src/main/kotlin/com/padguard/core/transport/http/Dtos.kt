@@ -206,6 +206,13 @@ data class DeviceProfileRequest(
     @SerialName("childAvatar") val childAvatar: String? = null
 )
 
+/** §5.14 孩子端自愈成功后请求服务端关闭的告警类别（恢复即关闭闭环） */
+@Serializable
+data class AlertResolveRequest(
+    @SerialName("categories") val categories: List<String>,
+    @SerialName("reason") val reason: String? = null
+)
+
 // ==================== 应用台账 ====================
 
 /**

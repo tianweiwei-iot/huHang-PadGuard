@@ -2,12 +2,15 @@ package com.padguard.child.capture
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.ComponentName
 import android.content.Context
 import android.graphics.Bitmap
 import android.hardware.HardwareBuffer
 import android.os.Build
 import android.view.Display
+import android.view.accessibility.AccessibilityManager
 import androidx.annotation.RequiresApi
+import com.padguard.child.guard.OperationGuardAccessibilityService
 import com.padguard.core.common.Logger
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.http.ApiResult
@@ -68,13 +71,33 @@ class AccessibilityScreenshot @Inject constructor(
      *
      * 能力位必须实探（[AccessibilityServiceInfo.capabilities]）而不是只查实例：
      * 元数据在服务启用之后被改过（覆盖安装升级）时，实例活着但能力不在。
+     *
+     * 加固（修复 2026-10-20 实时监控回归）：部分国产 ROM 不会把 `canTakeScreenshot`
+     * 反映到 `serviceInfo.capabilities`（元数据读取时序问题），导致能力明明在却被判死，
+     * 实时看屏被迫退回投影/弹授权框。此时退而用「无障碍服务已在系统设置中启用」作为放行条件：
+     * 服务已启用即代表系统已按最新 XML 元数据（含 canTakeScreenshot）绑定，takeScreenshot 在
+     * API 30+ 上即可用，不应因能力位读取时序而判死。若 takeScreenshot 仍因真实能力缺失失败，
+     * 推流侧已有逐帧重试/放弃兜底，不会空转烧电。
      */
     fun isAvailable(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
         val service = serviceRef?.get() ?: return false
         val caps = runCatching { service.serviceInfo?.capabilities ?: 0 }.getOrDefault(0)
-        return caps and AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT != 0
+        if (caps and AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT != 0) return true
+        return isServiceEnabledInSettings()
     }
+
+    /**
+     * 兜底判定（能力位不可读时）：查系统设置里本服务是否处于启用态。
+     * 启用即代表系统已按最新 XML 元数据（含 canTakeScreenshot）绑定，takeScreenshot 可用。
+     */
+    private fun isServiceEnabledInSettings(): Boolean = runCatching {
+        val am = appContext.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
+            ?: return@runCatching false
+        val cn = ComponentName(appContext, OperationGuardAccessibilityService::class.java)
+        am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+            .any { ComponentName.unflattenFromString(it.id) == cn }
+    }.getOrDefault(false)
 
     /** 服务连接时注册实例（[com.padguard.child.guard.OperationGuardAccessibilityService] 调用）。 */
     fun attach(service: AccessibilityService) {

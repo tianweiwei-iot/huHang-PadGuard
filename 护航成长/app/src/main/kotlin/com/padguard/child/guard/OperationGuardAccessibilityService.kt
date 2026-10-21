@@ -18,6 +18,7 @@ import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.core.engine.guard.GuardMasterSwitch
 import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
@@ -104,6 +105,14 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     @Inject
     lateinit var keyguardBridge: SystemKeyguardBridge
 
+    /** 整机管控总开关：active=false 时本服务所有拦截全部解除，设备回到完全可用 */
+    @Inject
+    lateinit var guardMasterSwitch: GuardMasterSwitch
+
+    /** 卸载防御聚合（问题二·非 DO 加固）：设备管理员停用页拦截 + 卸载闸门告警升级 */
+    @Inject
+    lateinit var uninstallDefense: UninstallDefenseModule
+
     /**
      * 无障碍截屏通道：远程截屏优先走这里（授权持久、无 MediaProjection 弹窗）。
      * 实例在本服务连接期间有效，见 [AccessibilityScreenshot]。
@@ -133,6 +142,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Logger.i(TAG) { "operation guard accessibility service connected" }
+        // 写入存活心跳：供 GuardA11y.isAlive / TamperDetector 区分「进程被系统杀掉」与「用户手动关闭」，
+        // 避免误报「操作闸门被人为关闭」。
+        GuardA11y.markAlive(this)
         // 注册截屏通道：远程截屏优先走 takeScreenshot，避免每次进程重建都向孩子弹
         // "是否允许录制屏幕"（该通道的授权 = 启用本服务，系统持久记录）。
         accessibilityScreenshot.attach(this)
@@ -178,6 +190,8 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         scope.launch {
             while (isActive) {
                 delay(LOCK_WATCH_INTERVAL_MS)
+                // 整机管控暂停时不重拉锁屏、不续系统锁：设备应完全可用
+                if (!guardMasterSwitch.active.value) continue
                 // ---- 解锁自愈：App 侧已解锁，但系统锁还没撤成 ----
                 if (!lockController.state.value.locked && keyguardBridge.isUnlockPending()) {
                     // 过渡页不在前台才追：它活着的时候自己会完成撤锁，避免重复拉起。
@@ -211,9 +225,13 @@ class OperationGuardAccessibilityService : AccessibilityService() {
                         )
                     }.onFailure { Logger.w(TAG, it) { "lock watchdog re-show activity failed" } }
                 }
+                // 借系统级 lockNow() 重新唤起系统锁屏（keyguard）作为兜底，但必须经
+                // SystemKeyguardBridge 记账与守卫：安全锁（PIN/图案/密码）设备一律不压，
+                // 否则解锁会陷入「应用撤不掉系统锁」的永久死锁
+                // （见 SystemKeyguardBridge.systemLockAllowed 说明）。直接调 admin.lockNow()
+                // 会绕过守卫与记账，是此前死锁的旁路来源，必须收口到 bridge。
                 if (admin.can(Capability.LOCK_NOW)) {
-                    runCatching { admin.lockNow() }
-                        .onFailure { Logger.w(TAG, it) { "lock watchdog lockNow failed" } }
+                    keyguardBridge.pushSystemLock()
                 }
                 runCatching { lockScreenPresenter.reenforce() }
                     .onFailure { Logger.w(TAG, it) { "lock watchdog reenforce failed" } }
@@ -234,6 +252,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
 
     private fun handleAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        // 整机管控暂停：无障碍拦截全部解除，设备回到完全可用（家长/操作员可自由进设置）。
+        // 这是"取消应用管控后设备应可正常使用"的正确落点——释放设备由总开关驱动，
+        // 而非只清空应用黑白名单（名单与拦截是两套独立机制）。
+        if (!guardMasterSwitch.active.value) return
         // 只关心前台窗口切换（进入/退出某个 app 的设置、安装、卸载或受管控应用）
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
 
@@ -296,6 +318,25 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             return
         }
 
+        // ---- 设备管理员停用页拦截（非 DO 防卸载加固）----
+        // 即便应用详情页被挡，孩子仍可经「设置 → 安全/设备管理员」直接停用本应用，
+        // 而停用设备管理员后系统即可正常卸载——这正是"密码没生效"的根路径。
+        // 当家长要求「卸载需密码」且本地尚未设密码时，进入即顶回并升级为高危告警（节流）。
+        // 装机向导豁免期内放行，避免阻断家长的授权办理流程。
+        if (appGuard.uninstallNeedsPassword() && !manager.isEnabledNow() &&
+            isDeviceAdminSettingsPage(event)
+        ) {
+            if (gateSuspension.isActive()) return
+            val now = System.currentTimeMillis()
+            if (now - lastSelfProtectAt > SELF_PROTECT_DEBOUNCE_MS) {
+                lastSelfProtectAt = now
+                Logger.i(TAG) { "uninstall defense: blocking device-admin settings page (deactivation entry)" }
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                uninstallDefense.reportUninstallGateMissing()
+            }
+            return
+        }
+
         // 3a) 取消授权的应用：硬拦截（最严），与全局启动闸门、是否设了家长密码都无关。
         // 不再把人顶回桌面再在桌面上弹框——那样孩子能在桌面上再次点同一图标，
         // 而 1.5s 去抖会压制下一次拦截，等于"关掉框就能进应用"（绕过）。
@@ -341,6 +382,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             performGlobalAction(
                 if (reason == REASON_SETTINGS) GLOBAL_ACTION_BACK else GLOBAL_ACTION_HOME
             )
+            // 家长要求「卸载需密码」却尚未设密码时，把这条"仅顶回、不告警"的盲区升级为高危告警，
+            // 让"密码形同虚设"这一最危险状态在家长端可见（节流 1h，避免刷屏）。
+            if (appGuard.uninstallNeedsPassword()) uninstallDefense.reportUninstallGateMissing()
             reportPasswordNotSet()
             return
         }
@@ -428,6 +472,22 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             cls.contains("ApplicationDetails") ||
             cls.contains("ApplicationInfo") ||
             cls.endsWith("AppDetailsSettingsActivity")
+    }
+
+    /**
+     * 当前前台是否是「设置 → 设备管理员 / 安全 → 设备管理员」页。
+     *
+     * 这是停用本应用设备管理员、进而解除卸载防护的唯一切口。无障碍事件拿不到 intent data，
+     * 故按「设置包 + 设备管理员相关类名」匹配；仅命中设备管理员专属页，不误伤其它设置项
+     * （如 WiFi / 蓝牙），把对孩子正常使用的侵扰降到最低。
+     */
+    private fun isDeviceAdminSettingsPage(event: AccessibilityEvent): Boolean {
+        val pkg = event.packageName?.toString() ?: return false
+        if (pkg !in GUARDED_SETTINGS_PACKAGES) return false
+        val cls = event.className?.toString().orEmpty()
+        return cls.contains("DeviceAdmin") ||
+            cls.contains("ManageDeviceAdmin") ||
+            cls.contains("DeviceAdminSettings")
     }
 
     /**

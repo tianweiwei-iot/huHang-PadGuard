@@ -110,18 +110,19 @@ fun MessageDetailScreen(
                 // ---------- 媒体区 ----------
                 when (s.contentType) {
                     "IMAGE" -> if (s.mediaUrl.isNotBlank()) {
-                        RemoteImage(url = s.mediaUrl, modifier = Modifier.fillMaxWidth())
+                        RemoteImage(url = s.mediaUrl, modifier = Modifier.fillMaxWidth(), downloader = viewModel.downloader)
                     }
                     "VIDEO" -> if (s.mediaUrl.isNotBlank()) {
                         ResizableVideo(
                             url = s.mediaUrl,
                             modifier = Modifier.fillMaxWidth(),
                             defaultFullscreen = true,
-                            showControls = true
+                            showControls = true,
+                            downloader = viewModel.downloader
                         )
                     }
                     "AUDIO" -> if (s.mediaUrl.isNotBlank()) {
-                        RemoteAudio(url = s.mediaUrl, name = s.mediaName, autoPlay = true)
+                        RemoteAudio(url = s.mediaUrl, name = s.mediaName, autoPlay = true, downloader = viewModel.downloader)
                     }
                 }
 

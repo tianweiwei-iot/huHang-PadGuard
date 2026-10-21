@@ -107,6 +107,13 @@ interface RemoteDataSource {
 
     suspend fun uploadEvents(deviceId: String, events: List<RiskEvent>): ApiResult<LogUploadResponse>
 
+    /**
+     * 自愈成功后关闭对应类别的 ACTIVE 告警（恢复即关闭闭环）。
+     * 由 [com.padguard.child.guard.PermissionHealthChecker] 在权限自动恢复后调用，
+     * 避免家长端"已修复仍提示"。
+     */
+    suspend fun resolveActiveAlerts(categories: List<String>, reason: String? = null): ApiResult<Unit>
+
     suspend fun uploadLocations(deviceId: String, points: List<LocationInfo>): ApiResult<Unit>
 
     suspend fun uploadScreenshot(

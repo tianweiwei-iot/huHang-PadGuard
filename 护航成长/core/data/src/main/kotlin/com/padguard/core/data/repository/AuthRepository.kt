@@ -86,6 +86,18 @@ class AuthRepository @Inject constructor(
          * 置位本标记后不再强制，避免每次冷启动都卡在授权页；「我的」页仍保留手动开启入口与缺失提示。
          */
         val DEVICE_ADMIN_PROMPT_ACK = booleanPreferencesKey("device_admin_prompt_ack")
+
+        /**
+         * 授权回退自愈标记。
+         *
+         * 一次性授权完成后，若孩子在系统设置里关掉某项关键权限（或国产 ROM 切换权限时
+         * 强制重启 App 把无障碍/录屏授权清空），[com.padguard.child.permission.AuthorizationKeeper]
+         * 会置位本标记，入口分流据此**自动把家长带回一次性授权引导流程重新勾选**，
+         * 实现"授权不会自动丢失"——而不是像以前那样只在后台静默上报告警。
+         * 引导流程走完（[com.padguard.child.consent.OneTimeConsentViewModel.finish] /
+         * [com.padguard.child.consent.OneTimeConsentViewModel.finishAnyway]）即清掉。
+         */
+        val REAUTH_REQUIRED = booleanPreferencesKey("reauth_required")
     }
 
     /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
@@ -292,6 +304,22 @@ class AuthRepository @Inject constructor(
     suspend fun setDeviceAdminPromptAck() {
         runCatching { store.edit { it[Keys.DEVICE_ADMIN_PROMPT_ACK] = true } }
             .onFailure { Logger.w(TAG) { "set device admin prompt ack failed" } }
+    }
+
+    /** 授权回退自愈标记：是否有项在装机后被关掉、需家长重新勾选（见 [Keys.REAUTH_REQUIRED]）。 */
+    val reauthRequired: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.REAUTH_REQUIRED] == true }
+
+    /** 置位"需重新授权"标记，触发入口分流把家长带回引导流程。 */
+    suspend fun setReauthRequired() {
+        runCatching { store.edit { it[Keys.REAUTH_REQUIRED] = true } }
+            .onFailure { Logger.w(TAG) { "set reauth required failed" } }
+    }
+
+    /** 清除"需重新授权"标记（引导流程完成或所有项已就绪时调用）。 */
+    suspend fun clearReauthRequired() {
+        runCatching { store.edit { it[Keys.REAUTH_REQUIRED] = false } }
+            .onFailure { Logger.w(TAG) { "clear reauth required failed" } }
     }
 
     /** 标记权限引导已完成，后续登录不再重复申请。 */

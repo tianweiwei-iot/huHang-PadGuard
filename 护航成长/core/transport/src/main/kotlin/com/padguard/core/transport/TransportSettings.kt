@@ -65,6 +65,18 @@ class TransportSettings @Inject constructor(
     private val _logUploadIntervalSec = MutableStateFlow(DEFAULT_LOG_UPLOAD_SEC)
     val logUploadIntervalSec: StateFlow<Int> = _logUploadIntervalSec.asStateFlow()
 
+    /**
+     * 锁屏上滑逃逸后重新抢占前台的延迟（毫秒）。
+     *
+     * 用于"上滑返回桌面间隙"治理：值越小，孩子上滑后越快被拉回锁屏页，越接近"无感"；
+     * 设为 0 表示下一帧即抢占。默认 [DEFAULT_REARM_DELAY_MS]，经远程配置可调，
+     * 无需发版即可把间隙压到接近 0。仅 DO（设备所有者）模式下才能真正零间隙
+     * （无桌面可滑），非 DO 模式下此值越小越逼近但无法绝对为零。
+     */
+    private val _rearmDelayMs =
+        MutableStateFlow(prefs.getInt(KEY_REARM_DELAY_MS, DEFAULT_REARM_DELAY_MS))
+    val rearmDelayMs: StateFlow<Int> = _rearmDelayMs.asStateFlow()
+
     fun setBaseUrl(url: String) {
         if (url.isBlank()) return
         val normalized = normalizeBaseUrl(url)
@@ -95,18 +107,32 @@ class TransportSettings @Inject constructor(
         Logger.w(TAG) { "transport mode -> $mode" }
     }
 
+    /**
+     * 设置上滑逃逸后重新抢占的延迟（毫秒），持久化并按安全区间钳制。
+     * 允许调试页/远程配置把间隙压到接近 0。
+     */
+    fun setRearmDelayMs(ms: Int) {
+        val clamped = ms.coerceIn(MIN_REARM_DELAY_MS, MAX_REARM_DELAY_MS)
+        _rearmDelayMs.value = clamped
+        prefs.edit().putInt(KEY_REARM_DELAY_MS, clamped).apply()
+        Logger.i(TAG) { "rearmDelayMs -> $clamped" }
+    }
+
     /** 服务端 monitoring 策略或 UPDATE_CONFIG 指令下发的周期参数，均做区间钳制防止被恶意配置打爆 */
     fun applyRemoteConfig(
         heartbeatSec: Int? = null,
         pollingSec: Int? = null,
-        logUploadSec: Int? = null
+        logUploadSec: Int? = null,
+        rearmDelayMs: Int? = null
     ) {
         heartbeatSec?.let { _heartbeatIntervalSec.value = it.coerceIn(MIN_HEARTBEAT_SEC, MAX_HEARTBEAT_SEC) }
         pollingSec?.let { _pollingIntervalSec.value = it.coerceIn(MIN_POLLING_SEC, MAX_POLLING_SEC) }
         logUploadSec?.let { _logUploadIntervalSec.value = it.coerceIn(MIN_LOG_UPLOAD_SEC, MAX_LOG_UPLOAD_SEC) }
+        rearmDelayMs?.let { setRearmDelayMs(it) }
         Logger.i(TAG) {
             "remote config applied: heartbeat=${_heartbeatIntervalSec.value}s " +
-                "polling=${_pollingIntervalSec.value}s logUpload=${_logUploadIntervalSec.value}s"
+                "polling=${_pollingIntervalSec.value}s logUpload=${_logUploadIntervalSec.value}s " +
+                "rearmDelayMs=${_rearmDelayMs.value}"
         }
     }
 
@@ -116,6 +142,12 @@ class TransportSettings @Inject constructor(
         private const val TAG = "TransportSettings"
 
         private const val KEY_BASE_URL = "base_url"
+        private const val KEY_REARM_DELAY_MS = "rearm_delay_ms"
+
+        /** 上滑逃逸后重新抢占前台的默认延迟（毫秒）：接近 0，使孩子几乎无感 */
+        const val DEFAULT_REARM_DELAY_MS = 16
+        private const val MIN_REARM_DELAY_MS = 0
+        private const val MAX_REARM_DELAY_MS = 2000
 
         const val DEFAULT_HEARTBEAT_SEC = 30
         /**

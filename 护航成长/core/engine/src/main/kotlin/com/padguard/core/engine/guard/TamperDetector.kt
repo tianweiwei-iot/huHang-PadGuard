@@ -48,7 +48,12 @@ class TamperDetector @Inject constructor(
 
     private var lastWallClock: Long = 0L
     private var lastElapsed: Long = 0L
-    private var lastControlMode: ControlMode? = null
+    /** 控制权态迟滞基线：最近一次"未变弱"的态；降级需跨多次扫描确认，避免瞬时抖动误报 */
+    private var stableControlMode: ControlMode? = null
+    /** 连续"比基线弱"的扫描计数；达到阈值才确认降级 */
+    private var controlModeWeakStreak = 0
+    /** 控制权态"持续变弱"多少轮扫描才确认为真实降级（迟滞，防误报） */
+    private val permissionDowngradeConfirmScans = 2
     private var rootReported = false
 
     // 守护基建告警的一次性闩锁：只在「由好变坏」的那一刻报一次，
@@ -125,22 +130,45 @@ class TamperDetector @Inject constructor(
      * 降级后终端仍在运行、仍在上报心跳，但绝大多数策略已静默失效 ——
      * 这是整个系统最危险的失效模式，必须以 HIGH 级告警立刻上报。
      */
+    /**
+     * 控制权态降级检测（如设备管理员被用户在设置中关闭、DO 被摘除）。
+     *
+     * ## 迟滞（hysteresis）防误报
+     * [com.padguard.core.engine.admin.DeviceAdminBridge.refreshControlMode] 在设备管理员接收器尚未就绪、
+     * 或 `dpm` 查询瞬时失败时会偶发回落到 [ControlMode.LEGACY]；若每次抖动都上报 `PERMISSION_REVOKED`，
+     * 会引发家长端"权限被撤销"的**误报**，并触发 [com.padguard.core.engine.PolicyEngine] 在抖动态重放策略。
+     * 因此要求"持续变弱"跨 [permissionDowngradeConfirmScans] 次扫描才确认，单次毛刺（下一轮即恢复）不告警；
+     * 真正的降级（用户确实关闭了设备管理员）会持续成立，必然跨过阈值被捕获。
+     */
     private fun detectPermissionDowngrade(findings: MutableList<TamperFinding>) {
         val current = admin.refreshControlMode()
-        val previous = lastControlMode
-        lastControlMode = current
-
-        if (previous == null) return
-        if (current == previous) return
-
-        // 只有"变弱"才是风险；变强（如刚完成 DO 部署）是正常升级
-        if (current.ordinal > previous.ordinal) {
-            findings += TamperFinding(
-                type = RiskType.PERMISSION_REVOKED,
-                level = RiskLevel.HIGH,
-                detail = mapOf("from" to previous.name, "to" to current.name)
-            )
+        val base = stableControlMode
+        if (base == null) {
+            stableControlMode = current
+            return
         }
+        // 回到基线或更强：恢复稳定，重置计数（单次抖动到此为止）
+        if (current.ordinal <= base.ordinal) {
+            stableControlMode = current
+            controlModeWeakStreak = 0
+            return
+        }
+        // current 比基线弱
+        controlModeWeakStreak++
+        if (controlModeWeakStreak < permissionDowngradeConfirmScans) return
+
+        findings += TamperFinding(
+            type = RiskType.PERMISSION_REVOKED,
+            level = RiskLevel.HIGH,
+            detail = mapOf(
+                "from" to base.name,
+                "to" to current.name,
+                "streak" to controlModeWeakStreak.toString()
+            )
+        )
+        // 已确认降级：把弱态设为新基线，避免后续每轮重复告警；恢复时才重新计数
+        stableControlMode = current
+        controlModeWeakStreak = 0
     }
 
     /** 开发者选项 / USB 调试被打开：这是绕过管控的常见前置动作 */
@@ -266,20 +294,33 @@ class TamperDetector @Inject constructor(
      * 复位只会造成重启后同一条告警再刷一次）。
      */
     private fun detectGuardInfra(findings: MutableList<TamperFinding>) {
+        // 用「存活」而非「开关是否打开」判定：开关开着但服务进程被系统/省电策略杀掉时，
+        // isAccessibilityServiceEnabled() 仍返回 true，会漏报；而开关被关掉时，只对「用户真的关了」
+        // 报一次，绝不应把「进程被系统杀掉、看门狗会在 GRACE 窗口内自愈」误报成「人为关闭」。
+        val a11yAlive = runCatching { probe.isAccessibilityServiceAlive() }.getOrDefault(false)
         val a11yEnabled = runCatching { probe.isAccessibilityServiceEnabled() }.getOrDefault(false)
         val usageGranted = runCatching { probe.isUsageAccessGranted() }.getOrDefault(false)
 
-        if (a11yEnabled) {
-            accessibilityLostReported = false
-        } else if (!accessibilityLostReported) {
-            accessibilityLostReported = true
-            findings += TamperFinding(
-                type = RiskType.ACCESSIBILITY_DISABLED,
-                level = RiskLevel.HIGH,
-                detail = mapOf(
-                    "note" to "操作闸门的系统级拦截已失效，孩子可在设置中绕过密码闸门，请引导孩子重新开启"
+        when {
+            // 1) 开关开着且进程存活：一切正常，复位闩锁
+            a11yAlive -> accessibilityLostReported = false
+            // 2) 开关开着但进程瞬时死亡：可自愈，不打扰家长，也不冤枉用户「人为关闭」。
+            //    watchdog / 无障碍自杀活会在窗口内拉起进程，下一轮自检自然回到分支 1。
+            a11yEnabled -> {
+                accessibilityLostReported = false
+                Logger.i(TAG) { "a11y switch ON but process dead; watchdog should self-heal, skip report" }
+            }
+            // 3) 开关确实被关掉：这才需要家长介入，且仅在「由好变坏」那一刻报一次。
+            !accessibilityLostReported -> {
+                accessibilityLostReported = true
+                findings += TamperFinding(
+                    type = RiskType.ACCESSIBILITY_DISABLED,
+                    level = RiskLevel.HIGH,
+                    detail = mapOf(
+                        "note" to "操作闸门的系统级拦截已关闭，孩子可在设置中绕过密码闸门，请引导孩子重新开启"
+                    )
                 )
-            )
+            }
         }
 
         if (usageGranted) {

@@ -40,7 +40,11 @@ class TamperDetectorTest {
         var a11y: Boolean = true,
         var usage: Boolean = true
     ) : GuardInfraProbe {
+        // 默认「存活」与「开关打开」一致；测试「开关开着但进程被杀」的瞬时死亡场景时，
+        // 用 [aliveOverride] 单独打破，模拟看门狗拉起前的空窗。
+        var aliveOverride: Boolean? = null
         override fun isAccessibilityServiceEnabled(): Boolean = a11y
+        override fun isAccessibilityServiceAlive(): Boolean = aliveOverride ?: a11y
         override fun isUsageAccessGranted(): Boolean = usage
     }
 
@@ -128,5 +132,102 @@ class TamperDetectorTest {
         val det = detector(FakeProbe(a11y = true, usage = true))
         val findings = det.detect(policy(), SystemLockPolicy())
         assertTrue("基建健康时不应有任何发现（含其它检测面的 mock 噪音）: ${findings.map { it.type }}", findings.isEmpty())
+    }
+
+    /**
+     * 开关开着但进程被系统杀掉（看门狗拉起前的瞬时空窗）不应报「人为关闭」，也不应刷屏。
+     * 这正是 Bug ⑤ 误报「可能被人为关闭」的根因：把一次可自愈的进程死亡当成了用户手动关闭。
+     */
+    @Test
+    fun `switch ON but process transiently dead must NOT report as human-closed`() {
+        val probe = FakeProbe(a11y = true, usage = true).apply { aliveOverride = false }
+        val det = detector(probe)
+
+        repeat(3) {
+            assertTrue(
+                "开关开着、进程被杀属于可自愈空窗，不应误报 ACCESSIBILITY_DISABLED（第 ${it + 1} 轮）",
+                det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.ACCESSIBILITY_DISABLED }
+            )
+        }
+
+        // 进程自愈（看门狗拉起，心跳恢复）→ 更应无告警
+        probe.aliveOverride = true
+        assertTrue(
+            "进程恢复后不应残留告警",
+            det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.ACCESSIBILITY_DISABLED }
+        )
+    }
+
+    /**
+     * 开关确实被关闭（用户手动关闭 / 系统重置权限）才报 ACCESSIBILITY_DISABLED，
+     * 且只在「由好变坏」那一刻报一次（闩锁语义），避免冤枉未手动关闭的用户。
+     */
+    @Test
+    fun `genuinely disabled switch reports once with latch`() {
+        val probe = FakeProbe(a11y = false, usage = true).apply { aliveOverride = false }
+        val det = detector(probe)
+
+        assertTrue(
+            "开关已关闭应报一次 ACCESSIBILITY_DISABLED",
+            det.detect(policy(), SystemLockPolicy()).any { it.type == RiskType.ACCESSIBILITY_DISABLED }
+        )
+        assertTrue(
+            "闩锁期内不应重复报告",
+            det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.ACCESSIBILITY_DISABLED }
+        )
+        // 恢复 → 复位，再关 → 重新报
+        probe.a11y = true; probe.aliveOverride = true
+        assertTrue(
+            "恢复后不应残留告警",
+            det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.ACCESSIBILITY_DISABLED }
+        )
+        probe.a11y = false; probe.aliveOverride = false
+        assertTrue(
+            "复位后再次关闭应重新报告",
+            det.detect(policy(), SystemLockPolicy()).any { it.type == RiskType.ACCESSIBILITY_DISABLED }
+        )
+    }
+
+    /**
+     * 控制权态"变弱"需跨多次扫描确认，单次瞬时抖动（下一轮即恢复）**不应**误报 PERMISSION_REVOKED。
+     * 这正是家长端"权限被撤销"误报的根因：refreshControlMode 在接收器未就绪时会偶发回落到 LEGACY。
+     */
+    @Test
+    fun `transient control-mode flicker must NOT report PERMISSION_REVOKED`() {
+        val context = Mockito.mock(Context::class.java)
+        val admin = Mockito.mock(DeviceAdminBridge::class.java)
+        // 序列：DEVICE_ADMIN → LEGACY(抖动) → DEVICE_ADMIN(恢复)
+        Mockito.`when`(admin.refreshControlMode())
+            .thenReturn(ControlMode.DEVICE_ADMIN, ControlMode.LEGACY, ControlMode.DEVICE_ADMIN)
+        Mockito.`when`(admin.controlMode).thenReturn(MutableStateFlow(ControlMode.DEVICE_ADMIN))
+        val det = TamperDetector(context, admin, FakeProbe(a11y = true, usage = true), TimeProvider())
+
+        repeat(3) { i ->
+            assertTrue(
+                "瞬时抖动（第 ${i + 1} 轮）不应误报 PERMISSION_REVOKED",
+                det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.PERMISSION_REVOKED }
+            )
+        }
+    }
+
+    /**
+     * 控制权态"持续变弱"（用户确实关闭了设备管理员）跨过确认阈值后必须报一次 PERMISSION_REVOKED。
+     */
+    @Test
+    fun `persistent control-mode downgrade reports PERMISSION_REVOKED after confirm scans`() {
+        val context = Mockito.mock(Context::class.java)
+        val admin = Mockito.mock(DeviceAdminBridge::class.java)
+        // 序列：DEVICE_ADMIN → LEGACY → LEGACY（持续）
+        Mockito.`when`(admin.refreshControlMode())
+            .thenReturn(ControlMode.DEVICE_ADMIN, ControlMode.LEGACY, ControlMode.LEGACY)
+        Mockito.`when`(admin.controlMode).thenReturn(MutableStateFlow(ControlMode.DEVICE_ADMIN))
+        val det = TamperDetector(context, admin, FakeProbe(a11y = true, usage = true), TimeProvider())
+
+        assertTrue("第 1 轮仅建立基线，不应报告",
+            det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.PERMISSION_REVOKED })
+        assertTrue("第 2 轮抖动未确认，不应报告",
+            det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.PERMISSION_REVOKED })
+        assertTrue("第 3 轮持续降级应报告 PERMISSION_REVOKED",
+            det.detect(policy(), SystemLockPolicy()).any { it.type == RiskType.PERMISSION_REVOKED })
     }
 }

@@ -41,17 +41,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material3.Button
 import androidx.compose.ui.viewinterop.AndroidView
-import com.padguard.core.common.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-
-private const val MEDIA_TAG = "MessageMedia"
 
 /**
  * 判断标题是否只是"来源标识"而非真正的消息标题。
@@ -67,52 +62,6 @@ internal fun isSourceLabel(title: String): Boolean {
         t.equals("来自家长的消息", ignoreCase = true)
 }
 
-/**
- * 相对路径（以 `/` 开头）按 baseUrl 的 origin 拼成绝对地址；已是绝对地址则原样返回。
- *
- * 服务端 [com.padguard.server.service.FileStorageService] 默认返回相对路径
- * （如 `/v1/files/{id}`，单机部署下 `padguard.base-url` 留空），
- * 直接 `URL("/v1/files/...")` 会抛 `MalformedURLException`、素材静默加载失败。
- */
-internal fun resolveAbsoluteUrl(raw: String, baseUrl: String): String {
-    if (!raw.startsWith("/")) return raw
-    val schemeSlash = baseUrl.indexOf("://")
-    val start = if (schemeSlash >= 0) schemeSlash + 3 else 0
-    val slash = baseUrl.indexOf('/', start)
-    val origin = if (slash >= 0) baseUrl.substring(0, slash) else baseUrl
-    return origin + raw
-}
-
-/**
- * 把远端素材下载到缓存目录；返回本地文件。
- *
- * 注意：传入的 [rawUrl] 应当是**已解析的绝对地址**（popup 在 onCreate 里拼过、
- * 详情页在 ViewModel 里用 baseUrl 拼过）。本函数内部再跑一次 [resolveAbsoluteUrl]
- * 仅作兜底（已是绝对地址会原样返回）。HTTP 非 2xx 一律抛异常，交由上层置"加载失败"，
- * 而不是写入一个空文件让孩子端看到一张空白。
- */
-internal fun downloadToCache(context: Context, rawUrl: String): File {
-    val url = resolveAbsoluteUrl(rawUrl, "")
-    val out = File(context.cacheDir, "msg_" + url.hashCode().toString().replace("-", "n"))
-    if (out.exists() && out.length() > 0) return out
-    val conn = URL(url).openConnection() as HttpURLConnection
-    try {
-        conn.connectTimeout = 10_000
-        conn.readTimeout = 30_000
-        conn.instanceFollowRedirects = true
-        val code = conn.responseCode
-        if (code !in 200..299) {
-            Logger.w(MEDIA_TAG) { "素材下载失败 HTTP $code: $url" }
-            throw java.io.IOException("HTTP $code")
-        }
-        conn.inputStream.use { input ->
-            out.outputStream().use { output -> input.copyTo(output) }
-        }
-    } finally {
-        conn.disconnect()
-    }
-    return out
-}
 
 /**
  * 可缩放 / 可全屏的视频播放组件。
@@ -132,19 +81,21 @@ internal fun ResizableVideo(
     modifier: Modifier = Modifier,
     defaultFullscreen: Boolean = true,
     showControls: Boolean = true,
+    downloader: MediaDownloader,
     onDuration: (Int) -> Unit = {}
 ) {
     val context = LocalContext.current
     var localPath by remember(url) { mutableStateOf<String?>(null) }
     var error by remember(url) { mutableStateOf(false) }
+    var reloadToken by remember { mutableStateOf(0) }
 
     var fullscreen by remember { mutableStateOf(defaultFullscreen) }
     var boxW by remember { mutableStateOf(360.dp) }
     var boxH by remember { mutableStateOf(240.dp) }
 
-    DisposableEffect(url) {
+    DisposableEffect(url, reloadToken) {
         val job = CoroutineScope(Dispatchers.IO).launch {
-            val file = runCatching { downloadToCache(context, url) }.getOrNull()
+            val file = runCatching { downloader.download(context, url) }.getOrNull()
             withContext(Dispatchers.Main) {
                 if (file != null) localPath = file.absolutePath else error = true
             }
@@ -153,19 +104,30 @@ internal fun ResizableVideo(
     }
 
     when {
-        localPath == null -> Box(
+        localPath == null && !error -> Box(
             modifier = modifier.fillMaxWidth().height(200.dp),
             contentAlignment = Alignment.Center
         ) {
             androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(32.dp))
         }
 
-        error -> Text(
-            text = "视频加载失败",
-            color = MaterialTheme.colorScheme.error,
-            textAlign = TextAlign.Center,
-            modifier = modifier.fillMaxWidth()
-        )
+        error -> Column(
+            modifier = modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "视频加载失败",
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = {
+                error = false
+                localPath = null
+                // 触发 DisposableEffect 重新拉取：通过把 url 关联到 key 触发重组
+                reloadToken++
+            }) { Text("重试") }
+        }
 
         else -> {
             if (fullscreen) {
@@ -257,17 +219,18 @@ internal fun ResizableVideo(
 
 /**
  * 远端图片渲染（下载后解码为 Bitmap）。
- * 与弹窗共用 [downloadToCache]，避免重复实现；详情页也走同一套加载逻辑。
+ * 与弹窗共用 [MediaDownloader]（OkHttp + 鉴权透传 + 重试），避免重复实现；
+ * 详情页也走同一套加载逻辑。
  */
 @Composable
-internal fun RemoteImage(url: String, modifier: Modifier = Modifier) {
+internal fun RemoteImage(url: String, modifier: Modifier = Modifier, downloader: MediaDownloader) {
     val context = LocalContext.current
     var bitmap by remember(url) { mutableStateOf<android.graphics.Bitmap?>(null) }
     var failed by remember(url) { mutableStateOf(false) }
 
     DisposableEffect(url) {
         val job = CoroutineScope(Dispatchers.IO).launch {
-            val file = runCatching { downloadToCache(context, url) }.getOrNull()
+            val file = runCatching { downloader.download(context, url) }.getOrNull()
             val bmp = file?.let { runCatching { android.graphics.BitmapFactory.decodeFile(it.absolutePath) }.getOrNull() }
             withContext(Dispatchers.Main) {
                 if (bmp != null) bitmap = bmp else failed = true
@@ -295,14 +258,20 @@ internal fun RemoteImage(url: String, modifier: Modifier = Modifier) {
  * 详情页与弹窗共用，保证"孩子随时回看语音通知"也能正常播放。
  */
 @Composable
-internal fun RemoteAudio(url: String, name: String, autoPlay: Boolean, onDuration: (Int) -> Unit = {}) {
+internal fun RemoteAudio(
+    url: String,
+    name: String,
+    autoPlay: Boolean,
+    downloader: MediaDownloader,
+    onDuration: (Int) -> Unit = {}
+) {
     val context = LocalContext.current
     var state by remember(url) { mutableStateOf(if (autoPlay) "播放中…" else "音频素材") }
 
     DisposableEffect(url) {
         val player = MediaPlayer()
         val job = CoroutineScope(Dispatchers.IO).launch {
-            val file = runCatching { downloadToCache(context, url) }.getOrNull()
+            val file = runCatching { downloader.download(context, url) }.getOrNull()
             withContext(Dispatchers.Main) {
                 if (file == null) {
                     state = "音频加载失败"

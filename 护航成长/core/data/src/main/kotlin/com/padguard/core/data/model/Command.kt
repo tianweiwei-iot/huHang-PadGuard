@@ -133,6 +133,14 @@ enum class CommandType {
     /** 运行参数调整：payload { heartbeatIntervalSec, transportMode, ... } */
     UPDATE_CONFIG,
 
+    /**
+     * 整机管控总开关：暂停 / 恢复设备管控。payload { active }（"true"/"false"）。
+     * 暂停后孩子端释放设备——锁屏浮层不铺、无障碍拦截解除、DO 不回收权限、不钉 Kiosk，
+     * 家长/操作员可自由进入系统设置。用于"取消应用管控后设备应可正常使用"的正确落地：
+     * 释放设备必须由这个总开关驱动，而非只清空应用黑白名单。
+     */
+    SET_MANAGEMENT_ACTIVE,
+
     /** 立即上报本地缓存日志 */
     FLUSH_LOGS,
 

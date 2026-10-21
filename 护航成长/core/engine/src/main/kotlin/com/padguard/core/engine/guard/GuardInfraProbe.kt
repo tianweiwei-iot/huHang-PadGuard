@@ -15,8 +15,18 @@ package com.padguard.core.engine.guard
  */
 interface GuardInfraProbe {
 
-    /** 我方的无障碍服务当前是否处于启用状态 */
+    /** 我方的无障碍服务当前是否处于启用状态（设置开关是否打开） */
     fun isAccessibilityServiceEnabled(): Boolean
+
+    /**
+     * 我方的无障碍服务是否**真正在运行**。
+     *
+     * 与 [isAccessibilityServiceEnabled] 的区别：后者只查「系统设置里开关是否打开」，
+     * 开关开着、但服务进程被系统/省电策略杀死时它仍返回 true。本方法额外结合服务自身
+     * 上报的「最近存活心跳」，区分「用户手动关闭」与「进程被系统杀掉」两种本质不同的失效，
+     * 避免把一次可自愈的进程死亡误报成「操作闸门被人为关闭」。
+     */
+    fun isAccessibilityServiceAlive(): Boolean
 
     /** 使用情况访问权限（Usage Access）当前是否已授予 */
     fun isUsageAccessGranted(): Boolean

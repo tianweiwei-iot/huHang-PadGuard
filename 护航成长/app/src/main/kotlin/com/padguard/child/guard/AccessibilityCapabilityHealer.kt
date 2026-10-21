@@ -46,6 +46,9 @@ class AccessibilityCapabilityHealer @Inject constructor(
     /** 本进程是否已尝试过自愈（成功与失败都算：失败留待下次进程重启再试，防抖动循环） */
     @Volatile private var attemptedThisProcess = false
 
+    private val component = ComponentName(context, OperationGuardAccessibilityService::class.java)
+    private val flat = component.flattenToString()
+
     /**
      * 检测并在需要时执行自愈。非阻塞：内部切到 IO 线程执行禁用→延迟→启用序列。
      * 可安全重复调用（自带 once-per-process 守卫）。
@@ -64,8 +67,6 @@ class AccessibilityCapabilityHealer @Inject constructor(
             return@withContext
         }
 
-        val component = ComponentName(context, OperationGuardAccessibilityService::class.java)
-        val flat = component.flattenToString()
         val key = Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         val current = Settings.Secure.getString(context.contentResolver, key).orEmpty()
         val entries = current.split(':').filter { it.isNotBlank() }
@@ -97,6 +98,31 @@ class AccessibilityCapabilityHealer @Inject constructor(
             Logger.w(TAG) {
                 "a11y capability still missing after re-toggle; will retry on next process start"
             }
+        }
+    }
+
+    /**
+     * 确保无障碍服务处于启用态（仅 Device Owner 可静默写系统设置）。
+     *
+     * 与 [healIfNeeded] 的区别：无论截图能力是否就绪，只要服务没在启用名单里就启用它。
+     * 用于权限掉失自检：国产 ROM 在系统设置里切换"后台弹出界面 / 悬浮窗"等权限时会强制重启
+     * 本应用，重启后无障碍服务绑定被解除（设置里"无障碍"项被系统自动关闭），DO 设备上这里
+     * 静默重启用即可治愈，非 DO 设备则由 [com.padguard.child.guard.PermissionHealthChecker]
+     * 诚实告警并引导家长去设置重新启用。
+     */
+    suspend fun ensureEnabled() = withContext(Dispatchers.Default) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext
+        if (!admin.isDeviceOwner()) {
+            Logger.w(TAG) { "cannot auto-enable a11y without Device Owner; ask guardian to enable in Settings" }
+            return@withContext
+        }
+        val key = Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        val current = Settings.Secure.getString(context.contentResolver, key).orEmpty()
+        val entries = current.split(':').filter { it.isNotBlank() }
+        val ours = entries.any { it.equals(flat, ignoreCase = true) }
+        if (!ours) {
+            admin.setSecureSetting(key, (entries + flat).joinToString(":"))
+            Logger.i(TAG) { "a11y service force-enabled via Device Owner (permission self-heal)" }
         }
     }
 

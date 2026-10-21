@@ -67,7 +67,7 @@ fun PadGuardApp() {
                 )
             }
             composable(Route.UnlockRequest.path) {
-                UnlockRequestScreen(onBack = { navController.popBackStack() })
+                UnlockRequestScreen(onBack = { navController.safePopBackStack() })
             }
             composable(Route.MessageList.path) {
                 MessageListScreen(
@@ -81,7 +81,7 @@ fun PadGuardApp() {
                 val id = entry.arguments?.getString(Route.MessageDetail.ARG).orEmpty()
                 MessageDetailScreen(
                     messageId = id,
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.safePopBackStack() }
                 )
             }
             composable(Route.Profile.path) {
@@ -93,7 +93,7 @@ fun PadGuardApp() {
                 )
             }
             composable(Route.AppInventory.path) {
-                AppInventoryScreen(onBack = { navController.popBackStack() })
+                AppInventoryScreen(onBack = { navController.safePopBackStack() })
             }
             composable(
                 route = Route.PermissionGuide.path,
@@ -102,7 +102,7 @@ fun PadGuardApp() {
                 val kind = entry.arguments?.getString(Route.PermissionGuide.ARG).orEmpty()
                 PermissionGuideScreen(
                     kind = kind,
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.safePopBackStack() }
                 )
             }
         }

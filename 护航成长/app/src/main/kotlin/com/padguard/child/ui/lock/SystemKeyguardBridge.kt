@@ -79,6 +79,18 @@ class SystemKeyguardBridge @Inject constructor(
      */
     fun isUnlockPending(): Boolean = prefs.getLong(KEY_PENDING_UNLOCK_AT, 0L) > 0L
 
+    /**
+     * 是否允许压系统级锁屏（lockNow）。
+     *
+     * 仅在设备「无安全凭据」（滑动锁/无锁）时为 true。设了 PIN/图案/密码的设备返回 false：
+     * 此时 lockNow() 压下的是安全锁，解锁时 [requestDismiss] 只能弹出设备自身的凭据界面 ——
+     * 应用无权代输，孩子不知道 PIN 即陷入「App 解锁了、系统锁屏永远撤不掉、回不去桌面」的
+     * 永久死锁。这是非 DO 形态下的平台硬边界，代码无法绕过。
+     * 安全锁设备一律改由应用自身锁屏页（[LockScreenActivity]）做主锁面：
+     * 它可被程序化撤掉、IME 也能正常弹出，解锁必能回到桌面。
+     */
+    fun systemLockAllowed(): Boolean = !isKeyguardSecure()
+
     // ==================== 压锁 / 撤锁 ====================
 
     /**
@@ -90,6 +102,45 @@ class SystemKeyguardBridge @Inject constructor(
      * @return true 表示确实压了锁（设备管理员可用）；false 表示无能力，由调用方降级
      */
     fun pushSystemLock(): Boolean {
+        // ⚠️ 根因修复开关：彻底解除锁屏对「系统 keyguard（系统锁屏）」的依赖。
+        //
+        // 历史实现在非 DO / 非安全锁设备上靠 lockNow() 压一次系统 keyguard 来封堵手势逃逸，
+        // 这正是用户认可的「锁屏并熄屏」观感。但它同时带来两个应用层无法根治的硬伤：
+        //   1) 系统 keyguard 锁定态下 IME 被全局压制，锁屏/申请的输入框永远弹不出键盘
+        //      （即「输入框不弹出键盘，无法输入」）；
+        //   2) 解锁必须由我们对称地 requestDismissKeyguard 撤掉它，而撤锁依赖一个已 resumed 的
+        //      Activity + 系统回调。在非 DO 平板上后台启动 Activity 常被 ROM 静默吞掉、FSI 也可能
+        //      被吞，撤锁一旦失败即表现为「家长已放行、孩子端仍然黑屏/锁死」（即「无法解锁」）。
+        //
+        // 这两点都是 Android 平台约束，无法在非 DO 形态下 100% 兜底。因此改为：
+        //   锁屏统一以锁屏页（LockScreenActivity）为唯一可靠层面，解锁永远走「finish()」这条不依赖
+        //   撤系统锁的可靠路径（系统 keyguard 已按产品决策取消）。需要「真物理锁屏/自动熄屏」应走
+        //   Device Owner 基线化（项目 P0 项）。
+        //
+        // 开关保留以便极端 ROM 上做可控回退；默认关闭。
+        if (!ENABLE_SYSTEM_KEYGUARD) {
+            // 本产品已决定取消系统 keyguard。任何遗留的"由我们压锁"记账都在此时清空，
+            // 避免旧版本构建残留的 KEY_PUSHED_AT 让 wasPushedByUs() 误判为真，
+            // 进而在解锁时走 requestDismissKeyguard 的死路（"家长已解锁、孩子端仍黑屏/锁死"）。
+            clearPushed()
+            return false
+        }
+        // 关键闸门：绝不压「带凭据的安全锁」。
+        // 设备若设置了 PIN/图案/密码（isKeyguardSecure()），lockNow() 压下的就是安全锁。
+        // 解锁时 requestDismissKeyguard 只能弹出设备自身的凭据界面 —— 应用无权代输，
+        // 孩子不知道 PIN 时系统锁永远撤不掉，表现为「家长解锁了、孩子端却永久黑屏/锁屏、
+        // 回不去桌面」的死锁。这是非 DO 形态下的平台硬边界，代码无法绕过。
+        // 因此安全锁设备一律不压系统锁，改由应用自身锁屏页（LockScreenActivity）做主锁面：
+        // 它可被程序化 finish、IME 也能正常弹出，解锁必能回到桌面。
+        // 仅在「无凭据（滑动/无锁）」设备上保留 lockNow —— 此时撤锁无需凭据，无死锁风险。
+        if (!systemLockAllowed()) {
+            Logger.w(TAG) {
+                "pushSystemLock skipped: device has a secure keyguard (PIN/pattern/password); " +
+                    "pressing it would create an unrecoverable unlock deadlock (app cannot supply " +
+                    "the device credential). Falling back to app lock screen activity."
+            }
+            return false
+        }
         if (!admin.can(com.padguard.core.engine.admin.Capability.LOCK_NOW)) {
             Logger.w(TAG) { "pushSystemLock skipped: no device admin (LOCK_NOW unavailable)" }
             return false
@@ -214,6 +265,20 @@ class SystemKeyguardBridge @Inject constructor(
             onResult(true)
             return
         }
+        // 安全锁（PIN/图案/密码）设备：我们压下的系统锁需要设备自身凭据才能撤掉，
+        // 应用无权代输，继续追逐只会反复弹凭据界面且永远解不开（"解不开锁、回不去桌面"
+        // 的死局即源于此）。直接清记账、把设备交还其自身凭据界面——由知道 PIN 的人输入后
+        // 回到桌面，这是唯一不靠应用越权的解法。新版本已不在安全锁设备下压系统锁，此分支
+        // 主要清理旧版本/旧会话遗留的按下状态，使已死锁设备也能脱离。
+        if (isKeyguardSecure()) {
+            Logger.w(TAG) {
+                "ensureUnlocked: pushed keyguard is secure; cannot dismiss without device " +
+                    "credential, handing back to system keyguard"
+            }
+            clearPushed()
+            onResult(true)
+            return
+        }
         if (!isKeyguardLocked()) {
             Logger.i(TAG) { "ensureUnlocked: keyguard already gone, clearing record" }
             clearPushed()
@@ -269,6 +334,21 @@ class SystemKeyguardBridge @Inject constructor(
     companion object {
         private const val TAG = "SystemKeyguardBridge"
         private const val PREFS_NAME = "padguard_system_lock"
+
+        /**
+         * 是否允许锁屏时压「系统 keyguard（系统锁屏）」。
+         *
+         * 默认 **false**：非 DO 设备上，`lockNow()` 压下的系统 keyguard 会
+         * ① 全局阻断 IME（锁屏/申请输入框弹不出键盘）、② 让解锁强依赖"已 resumed 的 Activity
+         * + 系统撤锁回调"，在后台启动被 ROM 静默吞掉时必然失败（"家长放行仍无法解锁"）。
+         * 这两点是 Android 平台硬约束，应用层无法兜底，故默认关闭，改由悬浮窗 + 锁屏页作为
+         * 唯一可靠锁屏层面。需要"自动熄屏/物理封手势"的真硬锁应走 Device Owner 基线化。
+         *
+         * 仅在确知目标 ROM 对后台启动/FSI/撤锁回调全部可靠、且明确接受"放弃键盘与解锁的鲁棒性"
+         * 时才可临时开启；正常发布应为 false。
+         */
+        private const val ENABLE_SYSTEM_KEYGUARD = false
+
         private const val KEY_PUSHED_AT = "pushed_at"
 
         /**
@@ -334,5 +414,11 @@ class SystemKeyguardBridge @Inject constructor(
             prefs.edit().remove(KEY_PENDING_UNLOCK_AT).remove(KEY_PUSHED_AT).apply()
             Logger.i(TAG) { "keyguard gone by user, unlock pending + record cleared" }
         }
+
+        /**
+         * 纯函数版「是否允许压系统锁」决策，与 Android 运行时无关，便于单元测试。
+         * 设备带安全凭据（PIN/图案/密码）时必须禁止，否则解锁会陷入永久死锁。
+         */
+        fun isSystemLockAllowed(keyguardSecure: Boolean): Boolean = !keyguardSecure
     }
 }
