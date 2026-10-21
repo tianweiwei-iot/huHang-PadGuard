@@ -69,6 +69,8 @@ data class HomeUiState(
     val pendingUnlockTicket: UnlockTicket? = null,
     val unlockActionMessage: String? = null,
     val isRefreshing: Boolean = false,
+    /** 当前选中设备的整机管控是否生效：true=管控中，false=已释放（设备完全可用）。默认 true */
+    val managementActive: Boolean = true,
     val error: String? = null
 )
 
@@ -97,6 +99,15 @@ class HomeViewModel @Inject constructor(
         parentPushClient.start()
         observeUsagePush()
         startUsageRefreshLoop()
+        // 订阅整机管控开关态（跨页面共享）：详情页与首页卡片读同一份，保证两处一致。
+        viewModelScope.launch {
+            policyRepository.managementActiveFlow.collect { map ->
+                val sel = _uiState.value.selectedDeviceId
+                _uiState.value = _uiState.value.copy(
+                    managementActive = if (sel.isNullOrEmpty()) true else (map[sel] ?: true)
+                )
+            }
+        }
     }
 
     /**
@@ -123,11 +134,26 @@ class HomeViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(
             selectedDeviceId = deviceId,
             selectedDevice = device,
-            pendingUnlockTicket = null
+            pendingUnlockTicket = null,
+            managementActive = policyRepository.managementActiveFlow.value[deviceId] ?: true
         )
         loadTodayUsage(deviceId)
         loadDailyLimit(deviceId)
         loadUnlockTickets(deviceId)
+    }
+
+    /**
+     * 整机管控 暂停 / 恢复（首页卡片主开关）。
+     *
+     * 本地开关态由 repository 乐观更新（首页与详情页共享同一份，自动同步）；
+     * 指令下发失败时 repository 回滚共享态，开关会自动复位，作为失败反馈。
+     * 结果追踪与可读提示由设备详情页（带 Snackbar）负责，首页以开关态变化为主要反馈。
+     */
+    fun setManagementActive(active: Boolean) {
+        val deviceId = _uiState.value.selectedDeviceId ?: return
+        viewModelScope.launch {
+            policyRepository.setManagementActive(deviceId, active)
+        }
     }
 
     /** 忽略某条解锁申请：关闭工单，不下发任何消息给孩子 */

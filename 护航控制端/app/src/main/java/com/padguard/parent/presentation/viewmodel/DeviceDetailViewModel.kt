@@ -84,7 +84,12 @@ data class DeviceDetailUiState(
     val guardPasswordSet: Boolean = false,
     val guardPasswordBusy: Boolean = false,
     /** 正在执行「立即定位」指令链（防连点） */
-    val locating: Boolean = false
+    val locating: Boolean = false,
+    // === 整机管控 暂停/恢复（跨页面共享开关态） ===
+    /** 当前设备整机管控是否生效：true=管控中，false=已释放（设备完全可用）。默认 true */
+    val managementActive: Boolean = true,
+    /** 切换整机管控开关时的防连点 / 加载态 */
+    val managementBusy: Boolean = false
 ) {
     /**
      * 当前档位下实际会生效的每日时长。
@@ -122,6 +127,13 @@ class DeviceDetailViewModel @Inject constructor(
     init {
         loadDeviceDetail()
         loadMinorMode()
+        // 订阅整机管控开关态（跨页面共享）：详情页与首页卡片读同一份，保证两处一致。
+        // deviceId 来自 SavedStateHandle 固定不变，流默认 true（与孩子端默认行为一致）。
+        viewModelScope.launch {
+            policyRepository.observeManagementActive(deviceId).collect { active ->
+                _uiState.value = _uiState.value.copy(managementActive = active)
+            }
+        }
     }
 
     fun loadDeviceDetail() {
@@ -165,6 +177,22 @@ class DeviceDetailViewModel @Inject constructor(
     /** 与 [lockScreen] 对称，同样追踪执行结果 */
     fun unlockScreen() {
         issueTracked("解锁", "解除锁定") { policyRepository.unlockScreen(deviceId) }
+    }
+
+    /**
+     * 整机管控 暂停 / 恢复（家长端「释放 / 恢复对平板的全部管控」主开关）。
+     *
+     * 家长一键把平板整体交还（active=false）或收回（active=true）。
+     * 走真实指令链路：POST /v1/policies/{id}/management-active → SET_MANAGEMENT_ACTIVE 指令 →
+     * 孩子端 [com.padguard.core.engine.guard.GuardMasterSwitch] 统一释放 / 重铺锁屏浮层、
+     * 设置 / 应用拦截、DO 权限与 Kiosk。本地开关态由 repository 乐观更新（两处 UI 同步），
+     * 这里复用 [issueTracked] 追踪设备执行结果并给出可读提示。
+     */
+    fun setManagementActive(active: Boolean) {
+        issueTracked(
+            actionName = if (active) "恢复管控" else "暂停管控",
+            doneWord = if (active) "恢复管控" else "释放整机"
+        ) { policyRepository.setManagementActive(deviceId, active) }
     }
 
     /**

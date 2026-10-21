@@ -73,7 +73,9 @@ fun HomeScreen(
     onNavigateToUsageSettings: (String) -> Unit = {},
     onIgnoreUnlockTicket: (String) -> Unit = {},
     onRefresh: () -> Unit = {},
-    onAddDevice: () -> Unit = {}
+    onAddDevice: () -> Unit = {},
+    /** 整机管控 暂停/恢复 主开关（跨页面共享态，详情页与首页读同一份，homeVm 负责下发指令） */
+    onSetManagementActive: (Boolean) -> Unit = {}
 ) {
     val devices = uiState.devices
     val selectedDevice = uiState.selectedDevice
@@ -124,6 +126,16 @@ fun HomeScreen(
                 // === 4. 离线告警置顶 ===
                 if (selectedDevice?.onlineStatus == DeviceOnlineStatus.OFFLINE) {
                     item { OfflineAlertBanner(deviceName = selectedDevice.name) }
+                }
+
+                // === 4.5 整机管控 暂停/恢复 主开关（跨页面共享态，详情页与首页读同一份；
+                // 下发 SET_MANAGEMENT_ACTIVE 指令，孩子端 GuardMasterSwitch 统一决策）。
+                item {
+                    ManagementActiveHomeCard(
+                        active = uiState.managementActive,
+                        onToggle = onSetManagementActive,
+                        modifier = Modifier.padding(horizontal = 16.dp)
+                    )
                 }
 
                 // 解锁申请已提升为根层的全局弹窗（见 PadGuardNavHost），
@@ -733,6 +745,58 @@ private fun RealtimeControlCard(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+    }
+}
+
+// ==================== 整机管控主开关（首页紧凑版） ====================
+
+/**
+ * 首页「整机管控 暂停/恢复」主开关（紧凑单行版，与设备详情页 [com.padguard.parent.presentation.ui.device.ManagementActiveCard] 同源）。
+ *
+ * 首页仅承担切换动作：开关态由 [HomeViewModel] 订阅的共享流驱动，与详情页读同一份，
+ * 两处始终一致；详细的「暂停后会怎样」说明放在详情页卡片，避免首页看板被长文案挤占。
+ * 下发链路：[HomeViewModel.setManagementActive] → SET_MANAGEMENT_ACTIVE 指令 → 孩子端 GuardMasterSwitch。
+ */
+@Composable
+private fun ManagementActiveHomeCard(
+    active: Boolean,
+    onToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    SoftCard(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                SoftIconBadge(
+                    icon = Icons.Filled.Shield,
+                    tintIndex = 0,
+                    size = 38.dp,
+                    iconSize = 20.dp
+                )
+                Column {
+                    Text(
+                        text = "整机管控",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = PadGuardColors.TextPrimary
+                    )
+                    Text(
+                        text = if (active) "管控生效中" else "已暂停 · 设备完全可用",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = PadGuardColors.TextSecondary
+                    )
+                }
+            }
+            Switch(checked = active, onCheckedChange = onToggle)
         }
     }
 }

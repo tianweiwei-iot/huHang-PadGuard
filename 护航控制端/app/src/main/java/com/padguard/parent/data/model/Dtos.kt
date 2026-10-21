@@ -108,7 +108,14 @@ data class DeviceDto(
      * 设备操作密码是否已设置（由服务端 [guardPasswordSet] 派生下发）。
      * 应用管理页据此决定是否置灰「打开应用也要密码」开关；缺省 false 以兼容旧服务端。
      */
-    val guardPasswordSet: Boolean? = null
+    val guardPasswordSet: Boolean? = null,
+    // P3 守护健康度快照（服务端 devices 守护快照下发）
+    val daemonAlive: Boolean? = null,
+    val a11yAlive: Boolean? = null,
+    val daemonOnlineState: String? = null,
+    val lastRestartReason: String? = null,
+    val permissionVersion: Int? = null,
+    val daemonLost: Boolean? = null
 )
 
 /**
@@ -584,6 +591,10 @@ data class UsageSessionDto(
 /** 锁屏 / 解锁时附带的说明，会展示在孩子端锁屏页上 */
 @JsonClass(generateAdapter = true)
 data class LockReasonRequest(val reason: String? = null)
+
+/** 整机管控 暂停/恢复：active=true 恢复管控，false 释放整机（payload 字段名与孩子端 KEY_ACTIVE 一致） */
+@JsonClass(generateAdapter = true)
+data class ManagementActiveRequest(val active: Boolean = true)
 
 /** 水印开关请求；content 留空时孩子端用默认文案 */
 @JsonClass(generateAdapter = true)

@@ -15,6 +15,8 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
@@ -857,6 +859,26 @@ class LocalDataSource @Inject constructor(
         password: String?,
         clear: Boolean
     ): Result<Unit> = Result.success(Unit)
+
+    // ---- 整机管控 暂停/恢复（Mock） ----
+    // 本地演示模式：记住开关态即可，无需真正下发；返回 mock 指令回执，与 lock/unlock 同口径。
+    private val _managementActiveLocal = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
+    override val managementActiveFlow: StateFlow<Map<String, Boolean>> = _managementActiveLocal.asStateFlow()
+
+    override fun observeManagementActive(deviceId: String): Flow<Boolean> =
+        managementActiveFlow.map { it[deviceId] ?: true }
+
+    override suspend fun setManagementActive(deviceId: String, active: Boolean): Result<CommandResult> {
+        _managementActiveLocal.value = _managementActiveLocal.value + (deviceId to active)
+        return Result.success(
+            CommandResult(
+                msgId = "mock_mgmt_${System.currentTimeMillis()}",
+                type = "SET_MANAGEMENT_ACTIVE",
+                status = "PENDING"
+            )
+        )
+    }
 
     // ==================== TabletUsageSettingsRepository 实现 (Mock) ====================
 

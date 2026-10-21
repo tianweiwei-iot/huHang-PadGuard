@@ -2,6 +2,7 @@ package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.padguard.parent.BuildConfig
 import com.padguard.parent.data.model.OrderDto
 import com.padguard.parent.data.model.PayChannelDto
 import com.padguard.parent.data.model.PlanDto
@@ -101,12 +102,21 @@ class SubscriptionViewModel @Inject constructor(
         // 已经有一个收银台时直接返回，防止重复叠加
         if (_uiState.value.checkout != null) return
         viewModelScope.launch {
-            val channels = billingRepository.getChannels()
-                .getOrDefault(fallbackChannels())
-                .filter { it.enabled }
-            val safeChannels = if (channels.isEmpty()) fallbackChannels() else channels
+            val remote = billingRepository.getChannels().getOrNull()?.filter { it.enabled }.orEmpty()
+
+            // 正式包不伪造渠道：兜底清单里四个渠道全是 mock=true 的假象，
+            // 服务端一不可达就摆出"支付宝/微信都能付"的界面，家长点了才知道付不了。
+            // 调试包保留兜底，是为了联调时不被服务端进度卡住 —— 两边语义不同，必须分开。
+            val channels = if (remote.isEmpty() && localFallbackAllowed) fallbackChannels() else remote
+
+            if (channels.isEmpty()) {
+                _uiState.value = _uiState.value.copy(
+                    error = "当前没有可用的支付方式，请稍后再试或联系客服"
+                )
+                return@launch
+            }
             _uiState.value = _uiState.value.copy(
-                checkout = CheckoutState(plan = plan, channels = safeChannels)
+                checkout = CheckoutState(plan = plan, channels = channels)
             )
         }
     }
@@ -149,6 +159,21 @@ class SubscriptionViewModel @Inject constructor(
                 return@launch
             }
             // 2) 示例支付（真实渠道接入后这里换成"拉起收银台 SDK + 等回调"）
+            //
+            // 护栏：只有服务端明确标记 mock=true 的渠道才允许走示例支付。
+            // 少了这一步，等真实渠道上线后，一次接口字段变更就可能让真实渠道静默走成
+            // 示例支付 —— 结果是订阅被真实开通、钱却一分没收到，且没有任何报错。
+            val selected = c.channels.firstOrNull { it.key == channel }
+            if (selected != null && !selected.mock) {
+                _uiState.value = _uiState.value.copy(
+                    checkout = c.copy(
+                        paying = false,
+                        error = "该渠道尚未接入支付方式，请选择其他渠道或联系客服"
+                    ),
+                    orderingPlan = null
+                )
+                return@launch
+            }
             val paid = billingRepository.mockPay(order.getOrThrow().orderNo)
             if (paid.isFailure) {
                 _uiState.value = _uiState.value.copy(
@@ -175,9 +200,19 @@ class SubscriptionViewModel @Inject constructor(
     }
 
     /**
-     * 服务端未返回渠道，或网络失败时的兜底。
-     * 保证"买不到"不再是死路 —— 至少能走示例支付把全链路验证完。
-     * 注意：这是本地写死的四渠道，仅在服务端不可达时启用；接入真实渠道后应以服务端为准。
+     * 是否允许使用本地兜底渠道清单 —— **仅调试包**。
+     *
+     * 正式包必须禁用：服务端一不可达就摆出四个"示例支付"渠道，
+     * 是典型的"看起来能付、其实付不了"，比直接说"暂无支付方式"更伤信任。
+     */
+    private val localFallbackAllowed: Boolean get() = BuildConfig.DEBUG
+
+    /**
+     * 服务端未返回渠道时的兜底清单，**仅供调试包联调使用**。
+     *
+     * 保留它的理由：开发阶段服务端还没实现渠道接口时，不至于让整条购买链路卡死。
+     * 但它是本地写死的四渠道，与服务端真实配置无关，因此正式包一律不走这里
+     * （闸门见 [localFallbackAllowed]）；接入真实渠道后应以服务端返回为准。
      */
     private fun fallbackChannels(): List<PayChannelDto> = listOf(
         PayChannelDto("ALIPAY", "支付宝", enabled = true, mock = true, note = "示例支付"),

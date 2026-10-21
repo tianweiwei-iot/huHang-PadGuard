@@ -94,6 +94,7 @@ import com.padguard.parent.data.model.MinorModeRequestDto
 import com.padguard.parent.data.model.AgeBandDefaultDto
 import com.padguard.parent.data.model.CommandResultDto
 import com.padguard.parent.data.model.WatermarkRequestDto
+import com.padguard.parent.data.model.ManagementActiveRequest
 import com.padguard.parent.data.model.GuardPasswordRequestDto
 import com.padguard.parent.domain.model.Alert
 import com.padguard.parent.domain.model.AlertCategory
@@ -150,6 +151,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.conflate
@@ -209,6 +211,21 @@ class ApiDataSource @Inject constructor(
     BillingRepository {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 整机管控开关态（跨页面共享的唯一可信源）。
+     *
+     * 详情页与首页卡片的「暂停 / 恢复管控」开关都从这里读、写，
+     * 保证同一台设备在两处显示一致；以 deviceId 为键，缺省 true
+     * （与孩子的 [com.padguard.core.engine.guard.GuardMasterSwitch] 默认行为一致）。
+     * 切换为乐观更新：先落本地再下发指令，下发失败回滚到旧值。
+     */
+    private val _managementActive = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    override val managementActiveFlow: StateFlow<Map<String, Boolean>> = _managementActive.asStateFlow()
+
+    /** 观察某设备整机管控开关态，缺省 true */
+    override fun observeManagementActive(deviceId: String): Flow<Boolean> =
+        managementActiveFlow.map { it[deviceId] ?: true }
 
     /**
      * 设备台账变化必须驱动内存列表流刷新。
@@ -950,6 +967,21 @@ class ApiDataSource @Inject constructor(
         exec { policyApi.unlockScreen(deviceId) }
             .map { it.data?.toDomain() ?: throw Exception("解锁指令未返回指令号，无法追踪执行结果") }
 
+    /**
+     * 整机管控 暂停 / 恢复（家长端「释放 / 恢复对平板的全部管控」主开关）。
+     *
+     * 乐观更新共享开关态：两处 UI 立即同步切到新态；指令下发失败则回滚到旧值。
+     * 指令执行结果（设备是否真的生效）由调用方按 msgId 轮询，不影响本地的乐观态。
+     */
+    override suspend fun setManagementActive(deviceId: String, active: Boolean): Result<CommandResult> {
+        val prev = _managementActive.value
+        _managementActive.value = prev + (deviceId to active)
+        val result = exec { policyApi.setManagementActive(deviceId, ManagementActiveRequest(active)) }
+            .map { it.data?.toDomain() ?: throw Exception("管控指令未返回指令号，无法追踪执行结果") }
+        if (result.isFailure) _managementActive.value = prev
+        return result
+    }
+
     override suspend fun getCommand(msgId: String): Result<CommandResult> =
         exec { policyApi.getCommand(msgId) }
             .map { it.data?.toDomain() ?: throw Exception("查询指令结果失败") }
@@ -1279,7 +1311,13 @@ private fun DeviceDto.toDomain(): Device = Device(
     childName = childName,
     childNickname = childNickname,
     childAvatar = childAvatar,
-    guardPasswordSet = guardPasswordSet ?: false
+    guardPasswordSet = guardPasswordSet ?: false,
+    daemonAlive = daemonAlive,
+    a11yAlive = a11yAlive,
+    daemonOnlineState = daemonOnlineState,
+    lastRestartReason = lastRestartReason,
+    permissionVersion = permissionVersion,
+    daemonLost = daemonLost
 )
 
 private fun DeviceGroupDto.toDomain(): DeviceGroup = DeviceGroup(

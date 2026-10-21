@@ -96,10 +96,16 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(48.dp))
 
-            // 登录方式切换（注册模式下隐藏：注册只有一种流程，
-            // 短信登录为死 tab（服务端 sms-login-enabled=false 且无短信服务商，发码/校验均为假），
-            // 故不再暴露切换入口，避免用户点到"获取验证码"却永远收不到、或误以为有短信通道。
-            // （LoginModeToggle / toggleLoginMode / SmsLoginForm 暂留作未开通占位，不影响编译。）
+            // 登录方式切换入口：**有意不提供**。
+            // 短信登录在服务端未开通（sms-login-enabled=false，且无短信服务商），
+            // 发码与校验都不成立。若摆出一个"短信登录"tab，用户点进去只会发现
+            // 验证码永远收不到 —— 那比不给这个选项更糟。
+            //
+            // 下方 `uiState.isSmsMode -> SmsLoginForm(...)` 分支因此当前不可达
+            // （isSmsMode 恒为 false，且切换方法已随 LoginModeToggle 一并删除）。
+            // 它不是空壳：数据层 `AuthRepository.sendSmsCode / loginWithSmsCode` 与
+            // SmsLoginForm 本身均已实现，服务端开通后补一个切换入口即可启用，
+            // 保留分支是为了让那次改动只需加一个入口，不必重写整条链路。
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -257,40 +263,17 @@ fun LoginScreen(
     }
 }
 
-@Composable
-private fun LoginModeToggle(
-    isSmsMode: Boolean,
-    onToggle: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(44.dp)
-            .background(
-                color = PadGuardColors.SectionBg,
-                shape = RoundedCornerShape(22.dp)
-            ),
-        horizontalArrangement = Arrangement.Center
-    ) {
-        val selectedIndex = if (isSmsMode) 1 else 0
-        listOf("密码登录", "短信登录").forEachIndexed { index, label ->
-            val isSelected = index == selectedIndex
-            TextButton(
-                onClick = { if (!isSelected) onToggle() },
-                modifier = Modifier
-                    .weight(1f)
-                    .height(40.dp)
-            ) {
-                Text(
-                    text = label,
-                    color = if (isSelected) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
-                    style = MaterialTheme.typography.titleSmall
-                )
-            }
-        }
-    }
-}
+/**
+ * 「密码登录 / 短信登录」切换器 —— **已删除**。
+ *
+ * 短信登录当前在服务端未开通（`sms-login-enabled=false`，且未接入短信服务商），
+ * 发码与校验都不成立。此前这个组件连同 `LoginViewModel.toggleLoginMode()` 一并保留但**零调用**，
+ * 属于典型死代码：看起来是一套可选登录方式，实际点了也不会出现。现已删除。
+ *
+ * 若后续开通短信登录，恢复路径是：在此处补回一个切换入口，调用
+ * `viewModel.setLoginMode(sms = true)`（若无该方法则新增），
+ * 数据层 `AuthRepository.sendSmsCode / loginWithSmsCode` 与 [SmsLoginForm] 均已实现，无需重写。
+ */
 
 /**
  * 注册表单：手机号 + 密码 + 确认密码 + 可选昵称。

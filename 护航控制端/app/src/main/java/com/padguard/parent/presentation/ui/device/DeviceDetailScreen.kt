@@ -102,6 +102,7 @@ fun DeviceDetailScreen(
             uiState.device?.let { device ->
                 DeviceHeaderCard(device)
                 ChildProfileCard(device)
+                GuardianHealthCard(device)
             }
 
             // 原网格中「重启」「授权」与「定位」一样只弹假 toast（一个请求都不发），
@@ -118,6 +119,13 @@ fun DeviceDetailScreen(
                         "看屏" -> onViewScreen(deviceId)
                     }
                 }
+            )
+
+            // 整机管控 暂停/恢复 主开关：真正释放 / 恢复对平板的全部管控（跨页面共享开关态）。
+            ManagementActiveCard(
+                active = uiState.managementActive,
+                busy = uiState.managementBusy,
+                onToggle = viewModel::setManagementActive
             )
 
             // 未成年人模式（分龄合规底座）：一键开启即套用分龄时长 / 护眼 / 宵禁基线
@@ -337,6 +345,56 @@ private fun ChildProfileCard(device: Device) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
                 )
+            }
+        }
+    }
+}
+
+/**
+ * 守护健康度卡（P3 可观测性）：展示孩子端守护进程 / 无障碍服务存活与链路状态。
+ * 数据来自服务端 devices 守护快照（孩子端随心跳上报）。守护失联（多为被强制停止）时给出醒目告警，
+ * 引导家长重新打开孩子端。设备尚未上报（旧孩子端）时温和提示，不报错。
+ */
+@Composable
+private fun GuardianHealthCard(device: Device) {
+    val daemonAlive = device.daemonAlive
+    val a11yAlive = device.a11yAlive
+    val lost = device.daemonLost == true || daemonAlive == false
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.VerifiedUser, contentDescription = null, tint = PadGuardColors.PrimaryBlue, modifier = Modifier.size(20.dp))
+                Text("守护健康度", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            }
+            if (daemonAlive == null && a11yAlive == null) {
+                Text(
+                    "设备尚未上报守护状态（请将孩子端升级到最新版本）",
+                    fontSize = 12.sp,
+                    color = PadGuardColors.TextSecondary
+                )
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusChip(label = "守护进程", isActive = daemonAlive == true)
+                    StatusChip(label = "无障碍服务", isActive = a11yAlive == true)
+                    device.daemonOnlineState?.let { state ->
+                        val text = when (state) {
+                            "ONLINE" -> "链路在线"
+                            "MQTT_DOWN" -> "链路断开"
+                            else -> state
+                        }
+                        StatusChip(label = text, isActive = state == "ONLINE")
+                    }
+                }
+                if (lost) {
+                    Text(
+                        "⚠ 守护进程疑似失联（多为被强制停止）。管控可能在停止后被解除，请重新打开孩子端或重启设备。",
+                        fontSize = 12.sp,
+                        color = PadGuardColors.WarningRed
+                    )
+                }
             }
         }
     }

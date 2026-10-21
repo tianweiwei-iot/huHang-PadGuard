@@ -61,7 +61,14 @@ import java.net.URLEncoder
  * - tablet_usage_detail/{deviceId} -> 平板使用详情（按天/周/月切换）
  * - tablet_usage_settings/{deviceId} -> 平板使用时间设置
  * - app_usage_history/{deviceId}/{packageName}/{period} -> 应用使用记录子页
- * - 其余路由（device_list / statistics / alert_list / profile）预留
+ * - alert_list / about / subscription -> 独立页面
+ *
+ * **两张导航图的分工（重要）**：
+ * 本文件是**根导航图**；首页 / 设备 / 统计 / 我的 四个底部 Tab 由 [MainScreen]
+ * 内部的嵌套 NavHost 管理（见 `MainTab` 常量），**不属于**根图。
+ * 早期这里同时声明了 `home` / `device_list` / `statistics` / `profile` 四条根路由却从不注册，
+ * 而 Tab 切换又各写各的裸字符串 —— 两套并存之下一旦有人调用 `navigate(Screen.Home.route)`，
+ * 得到的不是跳转而是 `IllegalArgumentException` 崩溃。现已删除这组死声明。
  *
  * 约定：带 `{deviceId}` 的路由，其参数由 NavBackStackEntry 自动注入
  * ViewModel 的 SavedStateHandle，因此页面 Composable 无需再接收 deviceId。
@@ -69,9 +76,7 @@ import java.net.URLEncoder
 sealed class Screen(val route: String) {
     object Login : Screen("login")
     object Subscription : Screen("subscription")
-    object Home : Screen("home")
     object Main : Screen("main")
-    object DeviceList : Screen("device_list")
     object DeviceDetail : Screen("device_detail/{deviceId}") {
         fun create(deviceId: String) = "device_detail/$deviceId"
     }
@@ -86,9 +91,6 @@ sealed class Screen(val route: String) {
     }
     object Location : Screen("location/{deviceId}") {
         fun create(deviceId: String) = "location/$deviceId"
-    }
-    object Statistics : Screen("statistics/{deviceId}") {
-        fun create(deviceId: String) = "statistics/$deviceId"
     }
     object TabletUsageDetail : Screen("tablet_usage_detail/{deviceId}") {
         fun create(deviceId: String) = "tablet_usage_detail/$deviceId"
@@ -106,9 +108,32 @@ sealed class Screen(val route: String) {
         fun create(deviceId: String) = "app_manage/$deviceId"
     }
     object AlertList : Screen("alert_list")
-    object Profile : Screen("profile")
     // 关于页
     object About : Screen("about")
+}
+
+/**
+ * 底部 Tab 的路由常量（**属于 [MainScreen] 的嵌套导航图，不是根图**）。
+ *
+ * 单独定义在这里而非 MainScreen 内部，是为了让「Tab 路由」与「根路由 [Screen]」
+ * 两套体系在同一处对照可见 —— 早期两者混用裸字符串，改一处漏一处，
+ * 且根图里那几条同名声明从未注册，调用即崩。
+ */
+object MainTab {
+    const val HOME = "home"
+    const val DEVICES = "devices"
+    const val STATISTICS = "statistics"
+    const val PROFILE = "profile"
+
+    /** 设备 Tab 的可选参数：进入即展开「接入新设备」浮层（首页空状态直达用） */
+    const val OPEN_ACCESS = "openAccess"
+
+    /** 带可选参数的完整路由模式，供 `composable(route = ...)` 使用 */
+    const val DEVICES_PATTERN = "$DEVICES?$OPEN_ACCESS={$OPEN_ACCESS}"
+
+    /** 构造设备 Tab 的跳转目标；openAccess=true 时落地即拉起接入浮层 */
+    fun devices(openAccess: Boolean = false): String =
+        if (openAccess) "$DEVICES?$OPEN_ACCESS=true" else DEVICES
 }
 
 @Composable
@@ -249,12 +274,12 @@ fun PadGuardNavHost(
             )
         }
         composable(Screen.Subscription.route) {
-            SubscriptionScreen(onBack = { navController.popBackStack() })
+            SubscriptionScreen(onBack = { navController.safePopBackStack() })
         }
         composable(Screen.AlertList.route) {
             AlertCenterScreen(
                 state = unlockState,
-                onBack = { navController.popBackStack() },
+                onBack = { navController.safePopBackStack() },
                 onApprove = { entry, minutes -> unlockVm.approve(entry.ticket, minutes) },
                 onReject = { entry -> unlockVm.reject(entry.ticket) },
                 onRefresh = unlockVm::refresh,
@@ -272,13 +297,13 @@ fun PadGuardNavHost(
         }
         // 关于页落地为真实路由
         composable(Screen.About.route) {
-            AboutScreen(onBack = { navController.popBackStack() })
+            AboutScreen(onBack = { navController.safePopBackStack() })
         }
         composable(Screen.DeviceDetail.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
             DeviceDetailScreen(
                 deviceId = deviceId,
-                onBack = { navController.popBackStack() },
+                onBack = { navController.safePopBackStack() },
                 onNavigateToControl = { id -> navController.navigate(Screen.Control.create(id)) },
                 onViewScreen = { id -> navController.navigate(Screen.ScreenMonitor.create(id)) },
                 onNavigateToAppManage = { id -> navController.navigate(Screen.AppManage.create(id)) }
@@ -288,23 +313,23 @@ fun PadGuardNavHost(
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
             ControlPolicyScreen(
                 deviceId = deviceId,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.safePopBackStack() }
             )
         }
         composable(Screen.ScreenMonitor.route) {
-            ScreenMonitorScreen(onBack = { navController.popBackStack() })
+            ScreenMonitorScreen(onBack = { navController.safePopBackStack() })
         }
         composable(Screen.MessagePublish.route) {
-            MessagePublishScreen(onBack = { navController.popBackStack() })
+            MessagePublishScreen(onBack = { navController.safePopBackStack() })
         }
         composable(Screen.Location.route) {
-            LocationScreen(onBack = { navController.popBackStack() })
+            LocationScreen(onBack = { navController.safePopBackStack() })
         }
         composable(Screen.TabletUsageDetail.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
             com.padguard.parent.presentation.ui.usage.TabletUsageDetailScreen(
                 deviceId = deviceId,
-                onBack = { navController.popBackStack() },
+                onBack = { navController.safePopBackStack() },
                 onAppClick = { pkg, _, period ->
                     navController.navigate(Screen.AppUsageHistory.create(deviceId, pkg, period))
                 }
@@ -314,14 +339,14 @@ fun PadGuardNavHost(
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
             com.padguard.parent.presentation.ui.usage.TabletUsageSettingsScreen(
                 deviceId = deviceId,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.safePopBackStack() }
             )
         }
         composable(Screen.AppManage.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
             com.padguard.parent.presentation.ui.apps.AppManageScreen(
                 deviceId = deviceId,
-                onBack = { navController.popBackStack() },
+                onBack = { navController.safePopBackStack() },
                 onNavigateToDeviceDetail = { navController.navigate(Screen.DeviceDetail.create(deviceId)) }
             )
         }
@@ -336,7 +361,7 @@ fun PadGuardNavHost(
                 packageName = packageName,
                 appName = "",
                 period = period,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.safePopBackStack() }
             )
         }
         }

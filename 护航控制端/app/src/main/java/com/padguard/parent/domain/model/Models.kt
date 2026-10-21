@@ -122,7 +122,15 @@ data class Device(
      * 「应用管理」页据此决定是否置灰「打开应用也要密码」开关，
      * 「设备详情」页据此决定是否展示「去开启启动密码」引导。
      */
-    val guardPasswordSet: Boolean = false
+    val guardPasswordSet: Boolean = false,
+    // ===== P3 守护健康度（来自服务端 devices 守护快照，孩子端随心跳上报）=====
+    val daemonAlive: Boolean? = null,
+    val a11yAlive: Boolean? = null,
+    val daemonOnlineState: String? = null,
+    val lastRestartReason: String? = null,
+    val permissionVersion: Int? = null,
+    /** 服务端据 daemonAlive=false 持续上报判定为守护失联（多为被强制停止） */
+    val daemonLost: Boolean? = null
 )
 
 /**

@@ -172,19 +172,20 @@ class DeviceManageViewModel @Inject constructor(
     /** 孩子端完成接入：关页、提示、刷新台账、按需引导设置操作密码 */
     private suspend fun onEnrolled(deviceId: String) {
         if (_uiState.value.enrollment !is EnrollmentUi.Active) return
-        deviceRepository.getDeviceList()
-            .onSuccess { list ->
-                val device = list.firstOrNull { it.id == deviceId }
-                enrollmentJob?.cancel()
-                enrollmentJob = null
-                _uiState.value = _uiState.value.copy(
-                    accessSheetVisible = false,
-                    enrollment = EnrollmentUi.Idle,
-                    toast = device?.let { "已接入：${it.name}" } ?: "设备已接入"
-                )
-                if (device != null) maybePromptPostBindPassword(device)
-            }
-            .onFailure { e -> showToast(e.message ?: "设备已接入，但刷新设备列表失败") }
+        // 刚绑定的设备可能还没刷进设备列表（时序问题），若列表里找不到就按 id 兜底拉一次，
+        // 否则「绑定成功即引导设置操作密码」会被静默吞掉，家长永远收不到密码引导（Bug ⑦）。
+        val device = deviceRepository.getDeviceList()
+            .getOrNull()
+            ?.firstOrNull { it.id == deviceId }
+            ?: deviceRepository.getDeviceDetail(deviceId).getOrNull()
+        enrollmentJob?.cancel()
+        enrollmentJob = null
+        _uiState.value = _uiState.value.copy(
+            accessSheetVisible = false,
+            enrollment = EnrollmentUi.Idle,
+            toast = device?.let { "已接入：${it.name}" } ?: "设备已接入"
+        )
+        if (device != null) maybePromptPostBindPassword(device)
     }
 
     fun scanLanDevices() {

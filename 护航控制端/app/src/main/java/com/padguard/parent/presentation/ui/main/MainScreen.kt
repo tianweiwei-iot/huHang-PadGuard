@@ -17,6 +17,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.padguard.parent.presentation.ui.MainTab
 import com.padguard.parent.presentation.ui.Screen
 import com.padguard.parent.presentation.ui.device.DeviceManageScreen
 import com.padguard.parent.presentation.ui.home.HomeScreen
@@ -46,10 +47,10 @@ fun MainScreen(
     val navController = rememberNavController()
 
     val items = listOf(
-        BottomNavItem("home", "首页", Icons.Default.Home),
-        BottomNavItem("devices", "设备", Icons.Default.Devices),
-        BottomNavItem("statistics", "统计", Icons.Default.BarChart),
-        BottomNavItem("profile", "我的", Icons.Default.Person)
+        BottomNavItem(MainTab.HOME, "首页", Icons.Default.Home),
+        BottomNavItem(MainTab.DEVICES, "设备", Icons.Default.Devices),
+        BottomNavItem(MainTab.STATISTICS, "统计", Icons.Default.BarChart),
+        BottomNavItem(MainTab.PROFILE, "我的", Icons.Default.Person)
     )
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
@@ -94,10 +95,10 @@ fun MainScreen(
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = "home",
+            startDestination = MainTab.HOME,
             modifier = Modifier.padding(innerPadding)
         ) {
-            composable("home") {
+            composable(MainTab.HOME) {
                 HomeScreen(
                     uiState = homeUiState,
                     unreadAlertCount = unreadAlertCount,
@@ -113,15 +114,16 @@ fun MainScreen(
                     onNavigateToUsageSettings = { rootNavController.navigate(Screen.TabletUsageSettings.create(it)) },
                     onIgnoreUnlockTicket = homeVm::ignoreUnlockTicket,
                     onRefresh = homeVm::refreshData,
+                    onSetManagementActive = homeVm::setManagementActive,
                     // 首页空状态「还没有绑定的孩子设备」：直接进入接入新设备流程，
                     // 跳过设备管理主页面。openAccess=true 让 DeviceManageScreen 落地即拉起接入浮层。
-                    onAddDevice = { navController.navigate("devices?openAccess=true") { launchSingleTop = true } }
+                    onAddDevice = { navController.navigate(MainTab.devices(openAccess = true)) { launchSingleTop = true } }
                 )
             }
             composable(
-                route = "devices?openAccess={openAccess}",
+                route = MainTab.DEVICES_PATTERN,
                 arguments = listOf(
-                    navArgument("openAccess") {
+                    navArgument(MainTab.OPEN_ACCESS) {
                         type = NavType.BoolType
                         defaultValue = false
                     }
@@ -133,12 +135,12 @@ fun MainScreen(
                     autoOpenAccess = openAccess
                 )
             }
-            composable("statistics") {
+            composable(MainTab.STATISTICS) {
                 val deviceId = homeUiState.selectedDevice?.id
                     ?: homeUiState.devices.firstOrNull()?.id.orEmpty()
                 StatisticsScreen(deviceId = deviceId, rootNavController = rootNavController)
             }
-            composable("profile") {
+            composable(MainTab.PROFILE) {
                 val profileVm: ProfileViewModel = hiltViewModel()
                 val profileState by profileVm.uiState.collectAsState()
                 val serverUrl by profileVm.serverUrl.collectAsState()
@@ -157,7 +159,7 @@ fun MainScreen(
                         when (action) {
                             ProfileAction.Subscription ->
                                 rootNavController.navigate(Screen.Subscription.route)
-                            ProfileAction.Children -> navController.navigate("devices") {
+                            ProfileAction.Children -> navController.navigate(MainTab.DEVICES) {
                                 popUpTo(navController.graph.findStartDestination().id) {
                                     saveState = true
                                 }

@@ -157,6 +157,19 @@ interface PolicyApi {
     ): Response<ApiResponse<CommandResultDto>>
 
     /**
+     * 整机管控 暂停 / 恢复（家长端「释放 / 恢复对平板的全部管控」主开关）。
+     *
+     * 服务端按 [com.padguard.server.service.CommandType.SET_MANAGEMENT_ACTIVE] 下发指令，
+     * 孩子端 [com.padguard.core.engine.guard.GuardMasterSwitch] 收到后统一释放 / 重铺
+     * 锁屏浮层、设置 / 应用拦截、DO 权限与 Kiosk。返回指令回执（含 msgId）以便追踪执行结果。
+     */
+    @POST("policies/{deviceId}/management-active")
+    suspend fun setManagementActive(
+        @Path("deviceId") deviceId: String,
+        @Body request: ManagementActiveRequest
+    ): Response<ApiResponse<CommandResultDto>>
+
+    /**
      * 查询指令执行结果，供家长端把"已下发"推进到"已执行 / 执行失败 / 设备未响应"。
      *
      * 轮询终止条件由调用方决定（见 DeviceDetailViewModel）：

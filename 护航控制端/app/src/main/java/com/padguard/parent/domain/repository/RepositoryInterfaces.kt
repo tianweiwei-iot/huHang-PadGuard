@@ -9,6 +9,7 @@ import com.padguard.parent.data.model.AppListPolicyDto
 import android.graphics.Bitmap
 import com.padguard.parent.domain.model.*
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * 认证仓库接口
@@ -467,6 +468,25 @@ interface PolicyRepository {
 
     /** 查询指令执行结果；调用方据此把界面推进到"已执行 / 未响应 / 失败" */
     suspend fun getCommand(msgId: String): Result<CommandResult>
+
+    /**
+     * 整机管控 暂停 / 恢复（家长端「释放 / 恢复对平板的全部管控」主开关）。
+     *
+     * @param active true=恢复管控，false=释放整机（孩子端回到完全可用、可进设置）
+     * @return 指令回执，调用方据此追踪设备执行结果
+     */
+    suspend fun setManagementActive(deviceId: String, active: Boolean): Result<CommandResult>
+
+    /**
+     * 观察某设备的整机管控开关态（跨页面共享的唯一可信源）。
+     *
+     * 详情页与首页卡片都从这里读取，保证两处开关始终一致；
+     * 默认 true（与孩子的 [GuardMasterSwitch] 默认行为一致）。
+     */
+    fun observeManagementActive(deviceId: String): Flow<Boolean>
+
+    /** 整机管控开关态原始映射（deviceId -> active），供需要按当前选中设备派生状态的页面直接读取 */
+    val managementActiveFlow: StateFlow<Map<String, Boolean>>
 
     /**
      * 受管控水印开关。

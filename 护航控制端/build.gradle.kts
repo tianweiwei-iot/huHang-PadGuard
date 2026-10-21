@@ -8,6 +8,47 @@ plugins {
 }
 
 // ---------------------------------------------------------------------------
+// 构建产物输出目录：重定向到与项目「同盘符」的纯 ASCII 路径
+//
+// 硬约束（与孩子端同一处处理，已实测）：
+//  ① 项目路径含中文（…\项目\护航控制端）。Windows 上 Gradle 的 JVM test worker
+//     无法从含非 ASCII 字符的 classpath 条目加载类，会让所有 src/test 单元测试统一报
+//     ClassNotFoundException（与测试代码无关，纯粹是路径编码问题）。
+//     → 输出路径必须纯 ASCII。这也是此前家长端 SafeNavTest 始终 initializationError /
+//     ClassNotFoundException 的根因：构建产物落在中文路径下，测试 worker 的
+//     URLClassLoader 因中文 URL 未被正确编码而找不到测试类。
+//  ② KSP 生成代码时会对「生成目录」与「模块源码目录」调用 Path.relativize；两者不在同一
+//     盘符时，Windows 上会直接抛 IllegalArgumentException: this and base files have
+//     different roots。→ 输出路径必须与项目位于同一盘符。
+//
+// 因此：输出根目录 = <项目所在盘符>:/builds/padguard-parent（与家长端区分，避免产物目录冲突），
+//       可用 gradle.properties 的 padguard.build.root 覆盖（不同盘符会快速失败并给出提示）。
+//       若项目本身已位于纯 ASCII 路径，则不做任何重定向，保持 Gradle 默认 build/ 行为。
+// ---------------------------------------------------------------------------
+val projectPath = rootProject.projectDir.absolutePath
+val projectDrive = projectPath.substringBefore(':')
+
+if (projectPath.all { it.code < 0x80 }) {
+    logger.lifecycle("PadGuard: 项目路径为纯 ASCII，使用 Gradle 默认构建目录。")
+} else {
+    val buildRoot = rootProject.file(
+        providers.gradleProperty("padguard.build.root").orNull ?: "$projectDrive:/builds/padguard-parent"
+    )
+    val buildRootDrive = buildRoot.absolutePath.substringBefore(':')
+    require(buildRootDrive.equals(projectDrive, ignoreCase = true)) {
+        "padguard.build.root 必须与项目位于同一盘符。" +
+            "KSP 会对生成目录与模块源码目录做 Path.relativize，跨盘符会抛 " +
+            "IllegalArgumentException。项目在 $projectDrive:，当前配置为 ${buildRoot.absolutePath}。"
+    }
+    logger.lifecycle("PadGuard: 构建产物将输出到 ${buildRoot.absolutePath}")
+    allprojects {
+        // 以项目路径而非项目名作目录键，避免同名模块互相覆盖构建产物
+        val moduleKey = path.removePrefix(":").replace(':', '-').ifEmpty { "root" }
+        layout.buildDirectory.set(File(buildRoot, moduleKey))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 构建互斥：禁止同一项目被并发构建（2026-10-14 加，针对实际发生的构建故障）
 //
 // 已实测的故障链：

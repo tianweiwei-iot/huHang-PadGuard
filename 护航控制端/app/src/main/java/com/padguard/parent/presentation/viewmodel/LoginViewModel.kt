@@ -131,13 +131,6 @@ class LoginViewModel @Inject constructor(
         serverPrefs.resetToDefault()
     }
 
-    fun toggleLoginMode() {
-        _uiState.value = _uiState.value.copy(
-            isSmsMode = !_uiState.value.isSmsMode,
-            error = null
-        )
-    }
-
     fun updatePhone(phone: String) {
         // 输入/选择到已保存过的账号时，自动带出其密码并同步"记住密码"勾选状态
         // 敲到（或选到）保存过的账号就自动带出密码；新账号保留用户正在输入的内容
