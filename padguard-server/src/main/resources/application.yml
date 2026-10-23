@@ -94,7 +94,20 @@ padguard:
   # 例如： http://localhost:8080
   # 键名必须与代码 FileStorageService 读取的 ${padguard.base-url} 完全一致，
   # 原先写成 padguard.storage.base-url 永不匹配、baseUrl 恒为空、"设了没用"。
-  base-url: "http://8.148.68.183:8090"
+  #
+  # 【默认留空 —— 三端一致的设计口径】
+  # 留空时下发相对路径 /v1/files/{id}，由客户端各自用"自己连的那个服务端"拼 origin：
+  #   - 孩子端 MediaUrlResolver 用 TransportSettings.baseUrl 的 origin 拼接；
+  #   - 家长端 retrofit.baseUrl().resolve() 同样按自身 base 解析。
+  # 这样服务端换 IP / 换部署环境都不会让历史文件地址失效。
+  #
+  # 反例（已修复的真实故障）：曾硬编码为 http://8.148.68.183:8090（另一台服务器），
+  # 而文件实际落在当前服务端的 uploads 下 → 下发的绝对地址指向没有该文件的机器，
+  # 客户端下载拿到 404，孩子端表现为「视频加载失败」。
+  #
+  # 确需固定对外地址时（如对象存储/CDN 域名），用环境变量注入，不要写死在仓库里：
+  #   PADGUARD_BASE_URL=https://files.example.com
+  base-url: ${PADGUARD_BASE_URL:}
   dev:
     # 无真实被管控端时，开启内置"孩子端模拟器"自动回执指令，便于演示主链路闭环
     child-simulator: false

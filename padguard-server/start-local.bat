@@ -19,8 +19,12 @@ REM  1. 必须显式传 --server.port。某些终端/IDE 会注入 SERVER__PORT 
 REM     Spring Boot 的宽松绑定会把它解析成 server.port，导致服务监听到意外端口
 REM     （曾表现为 "Port 64269 was already in use" 启动失败）。
 REM     命令行参数优先级最高，可覆盖环境变量。
-REM  2. base-url 必须指向本机。application.yml 默认写的是部署环境地址，
-REM     不覆盖的话家长端拿到的截图/文件 URL 会指向那台机器，本地打开全是坏链。
+REM  2. base-url 保持留空。**不要**写成 localhost，也不要沿用 application.yml 里的部署地址：
+REM     - 沿用部署地址（如 http://8.148.68.183:8090）：文件实际存在本机 uploads 下，
+REM       客户端拿这个地址去那台机器下载必然 404 —— 孩子端表现为「视频加载失败」。
+REM     - 写成 http://localhost:PORT：平板上的 localhost 是平板自己，同样是坏链。
+REM     留空后服务端下发相对路径 /v1/files/{id}，由客户端用自己连的那个服务端补齐 origin，
+REM     服务端换 IP / 换环境都不会失效。
 REM ===========================================================================
 
 set "SCRIPT_DIR=%~dp0"
@@ -93,10 +97,17 @@ echo [访问日志] tomcat-work\logs\padguard-access*.log
 echo            （排查"请求到底有没有到达服务端"时先看它）
 echo ---------------------------------------------------------------------------
 
+REM base-url 保持留空（不再写死 localhost）：
+REM   写死 localhost 时，平板拿到的文件地址是 http://localhost:PORT/...，
+REM   而平板上的 localhost 是平板自己 → 同样全是坏链。
+REM   留空后服务端下发相对路径 /v1/files/{id}，由孩子端 MediaUrlResolver /
+REM   家长端 retrofit.baseUrl().resolve() 各自用"自己连的那个服务端"拼 origin，
+REM   服务端换 IP、换部署环境都不会失效。
+REM 确需固定对外地址时用环境变量注入：set PADGUARD_BASE_URL=https://files.example.com
 java -jar "%JAR%" ^
     --spring.profiles.active=%PROFILE% ^
     --server.port=%PORT% ^
-    --padguard.base-url=http://localhost:%PORT% ^
+    --padguard.base-url= ^
     %MQTT_FLAG%
 
 echo.

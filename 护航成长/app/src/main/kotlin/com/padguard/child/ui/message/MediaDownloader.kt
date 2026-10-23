@@ -45,6 +45,12 @@ class MediaDownloader @Inject constructor(
         val out = File(dir, "msg_" + url.hashCode().toString().replace("-", "n"))
         if (out.exists() && out.length() > 0) return@withContext out
 
+        // 先写 .part 临时文件、成功后才原子改名：
+        // 直接写目标文件的话，进程被杀 / 网络中断会留下半截文件，而上面的缓存命中只判断
+        // "存在且非空"，会把损坏文件永久复用 → 视频每次都走到播放失败。原子落盘杜绝该隐患。
+        val tmp = File(dir, out.name + ".part")
+        runCatching { if (tmp.exists()) tmp.delete() }
+
         val callHolder = arrayOfNulls<okhttp3.Call>(1)
         coroutineContext[Job]?.invokeOnCompletion { callHolder[0]?.cancel() }
 
@@ -57,13 +63,20 @@ class MediaDownloader @Inject constructor(
                 call.execute().use { resp ->
                     if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}")
                     resp.body?.byteStream()?.use { input ->
-                        out.outputStream().use { input.copyTo(it) }
+                        tmp.outputStream().use { input.copyTo(it) }
                     } ?: throw IOException("响应体为空")
+                }
+                if (tmp.length() <= 0) throw IOException("下载内容为空")
+                if (!tmp.renameTo(out)) {
+                    // 极少数文件系统 rename 失败（跨挂载点等）：退化为拷贝写入
+                    tmp.inputStream().use { input -> out.outputStream().use { input.copyTo(it) } }
+                    runCatching { tmp.delete() }
                 }
                 MediaUrlResolver.noteSuccess(url)
                 return@withContext out
             } catch (e: Exception) {
                 lastErr = e
+                runCatching { if (tmp.exists()) tmp.delete() }
                 if (coroutineContext.isActive && attempt < MAX_ATTEMPTS - 1) {
                     delay((attempt + 1) * BACKOFF_MS)
                 }
