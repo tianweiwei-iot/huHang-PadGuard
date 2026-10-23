@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import com.padguard.child.capture.AccessibilityScreenshot
+import com.padguard.child.capture.CaptureConsentStore
 import com.padguard.child.di.ApplicationScope
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.ui.lock.LockScreenPresenter
@@ -120,6 +121,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     @Inject
     lateinit var accessibilityScreenshot: AccessibilityScreenshot
 
+    /** 授权闩锁存储：无障碍通道授权持久化（见 [CaptureConsentStore]）。 */
+    @Inject
+    lateinit var captureConsentStore: CaptureConsentStore
+
     /** 去抖：同一受保护窗口 1.5s 内只拦截一次，避免 performGlobalAction 导致事件风暴。 */
     private var lastTriggerAt = 0L
     private var lastTriggerPkg = ""
@@ -148,6 +153,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 注册截屏通道：远程截屏优先走 takeScreenshot，避免每次进程重建都向孩子弹
         // "是否允许录制屏幕"（该通道的授权 = 启用本服务，系统持久记录）。
         accessibilityScreenshot.attach(this)
+        // 服务已连接即代表无障碍采集能力已授权（系统级持久授权）：钉死标记，
+        // 供启动/亮屏时主动静默重绑，落实"授权一次、除解绑外永不失效"。
+        runCatching { captureConsentStore.markA11yGranted() }
         // 能力缺失的唯一常见原因：用户在服务已启用之后才升级到带 canTakeScreenshot 的版本，
         // 系统不会重读元数据。此时如实留痕，便于排查"为什么截屏还在走投影弹窗"。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

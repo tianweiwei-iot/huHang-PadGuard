@@ -10,6 +10,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.projection.MediaProjectionManager
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
@@ -24,6 +25,7 @@ import androidx.core.content.ContextCompat
 import com.padguard.child.MainActivity
 import com.padguard.child.R
 import com.padguard.child.capture.CaptureConsentPrompter
+import com.padguard.child.capture.CaptureConsentStore
 import com.padguard.child.capture.CaptureConsent
 import com.padguard.child.capture.AccessibilityScreenshot
 import com.padguard.child.capture.MediaUploadRetry
@@ -223,6 +225,9 @@ class GuardService : Service() {
      */
     @Inject lateinit var uninstallDefense: UninstallDefenseModule
 
+    /** 授权闩锁存储：采集权限持久化（见 [CaptureConsentStore]）。 */
+    @Inject lateinit var captureConsentStore: CaptureConsentStore
+
     /**
      * 当前是否"已绑定"（由 [observeBinding] 维护）。
      *
@@ -345,12 +350,12 @@ class GuardService : Service() {
             }
             when (action) {
                 Intent.ACTION_SCREEN_OFF -> {
-                    // 锁屏 / 息屏：MediaProjection 会被系统强制断开，令牌随之失效。
-                    // 主动清掉进程内凭据，避免 hasToken() 基于陈旧 resultIntent 误判"仍可用"——
-                    // 否则看屏恢复链路会复用已死的投影（黑屏），或 consent 页跳过系统确认框，
-                    // 造成"点了授权通知却无确认弹窗、无法确认授权"（2026-10-21 现场复发）。
-                    runCatching { ScreenCaptureSession.release() }
-                        .onFailure { Logger.w(TAG) { "release projection on screen-off failed: ${it.message}" } }
+                    // 锁屏 / 息屏：MediaProjection 会被系统强制断开。改用 suspendProjection：
+                    // 停止活动投影实例但**保留**原始凭据（resultIntent）。若 IBinder 已失效，
+                    // 下次复用由 obtainProjection 的 try/catch 安全判定并清理，退回无障碍主路，
+                    // 不再误清凭据导致"返回主页再进入被迫重弹授权框"。
+                    runCatching { ScreenCaptureSession.suspendProjection() }
+                        .onFailure { Logger.w(TAG) { "suspend projection on screen-off failed: ${it.message}" } }
                 }
                 Intent.ACTION_SCREEN_ON -> {
                     // 屏幕刚点亮：锁定覆盖最容易被撕开的时刻，立即对账一次（见原注释）。
@@ -359,11 +364,16 @@ class GuardService : Service() {
                         runCatching { lockScreenPresenter.reenforce() }
                             .onFailure { Logger.w(TAG, it) { "lock coverage recheck on screen-on failed" } }
                     }, SCREEN_ON_RECHECK_DELAY_MS)
+                    // 亮屏即静默重绑无障碍服务：EMUI 常在息屏/锁屏时把服务杀掉，此刻补一次
+                    // ensureEnabled（DO 无弹窗），把"授权钉死"在亮屏瞬间自愈，避免下次看屏
+                    // 落到投影授权框（权限丢失根因的主动防御，而非丢失后补救）。
+                    scope.launch { runCatching { a11yCapabilityHealer.ensureEnabled() } }
                     // 解锁后抢恢复看屏（见 maybeResumeLiveViewOnUnlock）
                     maybeResumeLiveViewOnUnlock()
                 }
                 Intent.ACTION_USER_PRESENT -> {
-                    // 用户已解锁（亮屏且过了锁屏页）：同样触发一次看屏恢复
+                    // 用户已解锁（亮屏且过了锁屏页）：同样抢一次无障碍静默重绑 + 看屏恢复
+                    scope.launch { runCatching { a11yCapabilityHealer.ensureEnabled() } }
                     maybeResumeLiveViewOnUnlock()
                 }
             }
@@ -553,6 +563,22 @@ class GuardService : Service() {
             if (healed > 0) permissionVersion.incrementAndGet()
         } }
         scope.launch { runSafely("capHealNow") { permissionHealthChecker.recheckSpecialCapabilities() } }
+        // 权限钉死恢复：已确立无障碍采集授权（系统级持久授权镜像）则开机即静默重绑服务，
+        // 落实"授权一次、除解绑外永不失效"；best-effort 恢复持久化投影凭据，进程内复用零弹窗
+        // （IBinder 失效由 obtainProjection 的 try/catch 安全兜底，退回无障碍主路）。
+        scope.launch { runSafely("consentStoreRestore") {
+            if (captureConsentStore.isA11yGranted() && admin.isDeviceOwner()) {
+                a11yCapabilityHealer.ensureEnabled()
+            }
+            captureConsentStore.loadProjectionConsent()?.let { (code, data) ->
+                val mgr = getSystemService(MediaProjectionManager::class.java)
+                if (mgr != null) ScreenCaptureSession.storeToken(mgr, code, data)
+            }
+        } }
+        // 卸载封锁前置到启动即应用：不依赖策略下发/服务端连通。DO/PO 形态下系统级封死自身卸载，
+        // 杜绝"长按图标即可直接卸载、管控系统当场失效"——这是治本手段，先于任何密码门生效。
+        // 非 DO 设备 can(BLOCK_UNINSTALL)=false，此处为 no-op，无副作用；幂等，重复调用安全。
+        scope.launch { runSafely("uninstallBlock") { uninstallDefense.applyUninstallBlockIfSupported() } }
         // 周期自检：服务长期存活但 App 未打开时，也能周期性发现授权掉失并拉回引导。
         scope.launch { runSafely("authReconcileLoop") { authReconcileLoop() } }
         // 周期性位置上报：策略里 locationIntervalSec 的落地执行者（策略为 0 时自动不采）。
@@ -780,6 +806,9 @@ class GuardService : Service() {
             var nextSelfCheck = SystemClock.elapsedRealtime() + SELF_CHECK_INTERVAL_MS
             var nextTamperScan = SystemClock.elapsedRealtime() + TAMPER_SCAN_INTERVAL_MS
             var nextPermHeal = 0L
+            // 看屏中无障碍主路看门狗：会话活跃时高频静默核验，EMUI 杀服务即秒级自愈，
+            // 从源头阻止"权限丢失 → 落回投影授权框"。无看屏会话时不触发，零额外开销。
+            var nextA11yLiveHeal = 0L
             var nextLogUpload = SystemClock.elapsedRealtime() + LOG_UPLOAD_MIN_INTERVAL_MS
             // 首次台账同步刻意提前：设备刚绑定/服务刚启动时家长往往正盯着应用列表，
             // 等 30 分钟会让「应用」Tab 一直空白；首报完成后回到正常周期。
@@ -869,6 +898,22 @@ class GuardService : Service() {
                     }
                     runSafely("capHeal") { permissionHealthChecker.recheckSpecialCapabilities() }
                     nextPermHeal = now + PERM_HEAL_INTERVAL_MS
+                }
+
+                // ---------- 看屏中无障碍主路看门狗（权限钉死的根因预防） ----------
+                // 仅当存在活跃看屏会话时高频核验：EMUI 杀掉无障碍服务会令 isAvailable() 翻否，
+                // 若不抢先静默重绑，下一次取帧/再进入就会落回投影授权框。兜底式自愈，无会话零开销。
+                if (now >= nextA11yLiveHeal) {
+                    nextA11yLiveHeal = now + A11Y_LIVE_HEAL_INTERVAL_MS
+                    runSafely("a11yLiveHeal") {
+                        val live = runCatching { GuardHeartbeat.readLiveView(applicationContext) }.getOrNull()
+                        if (live != null && System.currentTimeMillis() <= live.deadlineWallMs) {
+                            if (!accessibilityScreenshot.isAvailable()) {
+                                a11yCapabilityHealer.ensureEnabled()
+                                a11yCapabilityHealer.healIfNeeded()
+                            }
+                        }
+                    }
                 }
 
                 // ---------- 日志批量上报 ----------
@@ -1662,8 +1707,11 @@ class GuardService : Service() {
                         )
                     )
                 }
-                // 统一走系统级置顶渲染：有悬浮窗权限时置于所有应用（含锁屏）之上；
-                // 无权限时 MessageOverlayController 内部自动回退到 MessageActivity（方案 A）。
+                // 统一走系统级置顶渲染：MessageOverlayController 现已彻底改为只委托
+                // MessageActivity（不再自绘悬浮窗 ComposeView，避免 ViewTreeLifecycleOwner
+                // not found 的 FATAL 崩溃）。MessageActivity 内部用 setShowWhenLocked +
+                // 全屏高优先级通知(fullScreenIntent) 实现锁屏/后台也能霸屏；在设备所有者(DO)
+                // 且持有 SYSTEM_ALERT_WINDOW 时后台自动拉起，非 DO 退化为置顶横幅供孩子点击。
                 messageOverlay.show(
                     context = this,
                     title = effect.title,
@@ -1762,17 +1810,19 @@ class GuardService : Service() {
                 )
                 // 画质档位随指令一路带到推流侧：家长改了「高清画面」后，
                 // 下一次续期（或重新开流）就按新档位出帧，不必退出看屏页重进。
-                // 看屏通道派发（修复 2026-10-21「返回主页面再进入监控权限掉」）：
-                // 主路 = 无障碍零弹窗通道（授权持久、本机已启用且已 attach，约 2fps）。
-                // 投影令牌是一次性进程内存存根，锁屏/返回主页面/进程重启后必然失效，且 StopLiveView
-                // 已清存根——绝不可作为主路复用：否则会复用死投影→黑屏/不上传（服务端 child not
-                // uploading），或令牌被系统回收后落回投影授权引导（"权限掉，需重新确认"）。
+                // 看屏通道派发（权限钉死架构：一次性授权后除解绑外永不失效）：
+                // 主路 = 无障碍零弹窗通道（系统级持久授权，约 2fps）。已通过 [CaptureConsentStore]
+                // 钉死标记，启动/亮屏/看屏中看门狗会 DO 静默重绑，从源头阻止"权限丢失"。
+                // 投影仅作兜底：StopLiveView 改走 suspendProjection() 保留凭据，同进程内再进入直接复用、
+                // 零弹窗；仅当凭据确已失效（IBinder 死亡，由 obtainProjection 安全判定）才退回授权引导。
                 // 优先级：① a11y 可用 → 直接 a11y 零弹窗；② a11y 不可用但有令牌 → 投影零弹窗复用；
                 // ③ a11y 不可用且无令牌 → 投影授权引导（并行触发 DO 静默重生无障碍服务，自愈）。
                 val captureIntent = ScreenCaptureService.liveStreamIntent(this, effect.highDefinition)
                 val silent = if (accessibilityScreenshot.isAvailable()) {
                     scope.launch { runCatching { a11yCapabilityHealer.ensureEnabled() } }
                     a11yLiveStreamer.start(effect.highDefinition)
+                    // 无障碍主路命中即钉死授权：标记后启动/亮屏会主动静默重绑，落实"授权一次、永不丢失"。
+                    runCatching { captureConsentStore.markA11yGranted() }
                     Logger.i(TAG) { "live view via a11y channel (primary, no dialog)" }
                     true
                 } else if (ScreenCaptureSession.hasToken()) {
@@ -1792,12 +1842,10 @@ class GuardService : Service() {
                 GuardHeartbeat.clearLiveView(this)
                 a11yLiveStreamer.stop()
                 ScreenCaptureService.stopLiveStream(this)
-                // 关键修复：停推流同时清掉投影令牌存根（resultIntent/mediaProjection）。
-                // 否则 hasToken() 会继续误报 true，"返回主页面再进入监控"时复用已失效的死投影
-                // → 黑屏/服务端 child not uploading，或令牌被系统回收后落回投影授权引导
-                // （"权限掉，需重新确认"）。清存根后下一次进入统一走无障碍零弹窗主路；
-                // 若 a11y 恰在重绑窗口不可用，才退化一次投影授权（可自愈，零风险）。
-                ScreenCaptureSession.release()
+                // 停推流但**保留**投影凭据（suspendProjection 不清 resultIntent）：
+                // "返回主页面再进入监控"时同一进程内直接复用凭据，全程零弹窗、不掉线。
+                // 仅在设备解绑（handleRemoteUnbind）才调用 revoke() 真正销毁凭据。
+                ScreenCaptureSession.suspendProjection()
             }
 
             is EngineEffect.StartAudioRecord -> {
@@ -2111,6 +2159,14 @@ class GuardService : Service() {
             .onFailure { t -> Logger.e(TAG, t) { "capture cache wipe failed on unbind" } }
         runCatching { mediaRetry.clearAll() }
             .onFailure { t -> Logger.e(TAG, t) { "media retry queue clear failed on unbind" } }
+        // 解绑即撤销全部采集授权（权限钉死架构的唯一撤权出口）：
+        // 清掉进程内投影令牌、持久化存储标记与无障碍服务（DO 静默禁用），
+        // 确保转手后旧家庭既看不到实时画面、也无需再次向孩子弹系统授权框。
+        runCatching { ScreenCaptureSession.revoke() }
+            .onFailure { t -> Logger.e(TAG, t) { "screen capture revoke failed on unbind" } }
+        runCatching { captureConsentStore.revoke() }
+            .onFailure { t -> Logger.e(TAG, t) { "capture consent store revoke failed on unbind" } }
+        scope.launch { runCatching { a11yCapabilityHealer.disable() } }
         withContext(Dispatchers.Main) {
             runCatching {
                 startActivity(
@@ -2238,6 +2294,8 @@ class GuardService : Service() {
         private const val TAMPER_SCAN_INTERVAL_MS = 60_000L
         /** 运行期权限自愈周期：5 分钟一轮，足够及时收复被系统自动回收的权限，又不至于刷屏 */
         private const val PERM_HEAL_INTERVAL_MS = 5 * 60_000L
+        /** 看屏中无障碍主路看门狗节拍：会话活跃时每 10s 静默核验并自愈一次 */
+        private const val A11Y_LIVE_HEAL_INTERVAL_MS = 10_000L
 
         /**
          * 服务端判定"这台设备确实已不在绑定关系里"的错误码。

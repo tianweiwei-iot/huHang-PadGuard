@@ -62,7 +62,7 @@ object ScreenCaptureSession {
      */
     fun storeToken(mgr: MediaProjectionManager, code: Int, data: Intent) {
         if (code != Activity.RESULT_OK || data.extras == null) {
-            release()
+            revoke()
             return
         }
         manager = mgr
@@ -85,10 +85,12 @@ object ScreenCaptureSession {
             projection.registerCallback(
                 object : MediaProjection.Callback() {
                     override fun onStop() {
-                        Logger.w(TAG) { "projection onStop fired, clearing cached projection" }
+                        Logger.w(TAG) { "projection onStop fired, live projection cleared (consent retained)" }
                         if (mediaProjection === projection) {
                             mediaProjection = null
-                            resultIntent = null
+                            // 关键：保留原始授权凭据 resultIntent。系统强杀投影后 IBinder 可能失效，
+                            // 但下次复用由 obtainProjection 的 try/catch 安全判定并清理；此处若误清，
+                            // 会导致"返回主页再进入看屏"被迫重新弹系统授权框（权限丢失根因之一）。
                             onLost?.invoke()
                         }
                     }
@@ -106,8 +108,26 @@ object ScreenCaptureSession {
     /** 取当前投影；未授权或尚未在服务内换取时为 null */
     fun projection(): MediaProjection? = mediaProjection
 
-    /** 释放投影（采集会话结束时调用，避免长期占用编解码资源） */
-    fun release() {
+    /**
+     * 暂停投影（退出看屏/录屏时调用）：停止活动投影实例、释放编解码资源，
+     * **但保留原始授权凭据（resultIntent）**。
+     *
+     * ## 与 [revoke] 的区别（权限钉死架构核心）
+     * 旧实现在此把 resultIntent 一并清空，导致"返回主页再进入看屏"必须重新向孩子弹
+     * 系统录屏授权框。保留凭据后，同一进程内再次看屏可直接复用，全程零弹窗。
+     * 仅当系统真正回收投影（[onStop] 触发）时活动实例被置空，凭据仍保留供复用；
+     * 若凭据已失效（IBinder 死亡），[obtainProjection] 会安全失败并清除凭据。
+     */
+    fun suspendProjection() {
+        runCatching { mediaProjection?.stop() }
+        mediaProjection = null
+    }
+
+    /**
+     * 撤销授权（仅设备解绑时调用）：彻底清空投影实例与原始凭据。
+     * 与 [suspendProjection] 相对——后者保活凭据，本方法销毁凭据。
+     */
+    fun revoke() {
         runCatching { mediaProjection?.stop() }
         mediaProjection = null
         resultIntent = null

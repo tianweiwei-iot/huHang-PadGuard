@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import com.padguard.core.common.Logger
+import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -32,6 +33,16 @@ class ExitController @Inject constructor(
     private val admin: DeviceAdminBridge
 ) {
     fun requestUninstall(activity: Activity) {
+        // DO/PO 形态下自身卸载被系统级封死（setUninstallBlocked(true)），
+        // 必须先解封，否则即便家长密码门已通过，系统仍会驳回卸载，卸载流程卡死。
+        // 非 DO 设备 can(BLOCK_UNINSTALL)=false，此处为 no-op，幂等安全。
+        runCatching {
+            if (admin.can(Capability.BLOCK_UNINSTALL)) {
+                admin.setUninstallBlocked(admin.selfPackageName, false)
+                Logger.i(TAG) { "uninstall block released before uninstall" }
+            }
+        }.onFailure { Logger.e(TAG, it) { "release uninstall block failed" } }
+
         runCatching {
             admin.adminComponent?.let { comp ->
                 val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager

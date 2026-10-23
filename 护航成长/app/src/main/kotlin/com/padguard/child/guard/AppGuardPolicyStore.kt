@@ -249,13 +249,22 @@ class AppGuardPolicyStore @Inject constructor(
     /**
      * 非 DO 设备的「防卸载兜底」是否应启用。
      *
-     * ## 行业做法对齐
-     * 普通设备管理员(DEVICE_ADMIN)无法调用 `setUninstallBlocked`(那需要 DO/PO)，
-     * 但 Android 在卸载本应用前必须先「取消设备管理员」——而
-     * [com.padguard.child.receiver.PadGuardDeviceAdminReceiver.onDisableRequested] 返回警告
-     * 会**实际阻止**该取消步骤(系统不显示确认按钮)，形成系统级双保险。
-     * 本方法就是这层双保险的「启用判定」：仅在「非 Device Owner(否则 DISALLOW_APPS_CONTROL 已封)
-     * + 设备管理器已激活(否则 onDisableRequested 不被调用)」时为 true。
+     * ## 能力边界（务必如实理解，别高估）
+     * 普通设备管理员(DEVICE_ADMIN)无法调用 `setUninstallBlocked`(那是 DO/PO 专属 API)，
+     * 非 DO 形态下**没有任何系统级手段能真正封死卸载**。
+     *
+     * 真正能依赖的只有两点：
+     * 1. 设备管理员激活期间，系统要求「先取消激活才能卸载」，把一步操作变成两步，
+     *    从而为无障碍拦截创造窗口（此期间 adb 卸载也会直接失败）；
+     * 2. [com.padguard.child.receiver.PadGuardDeviceAdminReceiver.onDisableRequested] 的返回值
+     *    只是**警告文案**：AOSP 会照常显示「取消激活」按钮，用户点下去照样停用。
+     *
+     * 网传「返回警告即可阻止停用」依赖 5 秒 Activity 切换窗口期的漏洞
+     * (连续锁屏 / 透明窗口劫持 / 阻塞返回)，Android 5.0+ 的 stopAppSwitch 已封堵，
+     * 且属滥用行为、上架会被拒——**不要照抄**。
+     *
+     * 所以本方法只是这层兜底的「启用判定」：仅在「非 Device Owner + 设备管理器已激活」时为 true，
+     * 真正起作用的是下面无障碍层的顶回与密码闸门，而不是某个"系统级双保险"。
      *
      * 无障碍服务据此再补一层「拦截设置 → 应用信息/卸载页」，让孩子即使没开操作密码也进不去卸载入口。
      * 未激活设备管理器(LEGACY)时返回 false —— 此时只能靠操作密码开启后的 [decide] 的 REASON_SETTINGS 兜底，

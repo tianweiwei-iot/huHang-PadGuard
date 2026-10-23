@@ -1370,10 +1370,10 @@ class ScreenCaptureService : Service() {
         // 推流中不能退出：服务一死投影就废，画面会断在最后一帧
         if (streaming.get()) return
         // 主动释放投影：注意暖令牌路径（ACTION_WARMUP）只有令牌、尚未取投影，
-        // release() 会把刚存的令牌一并清掉导致装机向导的授权白做 —— 必须仅在有
-        // 活投影时才释放。
+        // suspendProjection() 只停活动实例、保留原始凭据（避免装机向导的授权白做、
+        // 也避免"返回主页再进入看屏"被迫重新弹系统授权框）。仅在有活投影时才释放。
         if (ScreenCaptureSession.projection() != null) {
-            ScreenCaptureSession.release()
+            ScreenCaptureSession.suspendProjection()
         }
         stopSelf()
     }

@@ -12,6 +12,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import com.padguard.core.common.Logger
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 
 /**
  * 屏幕采集授权页（无界面），同时是**采集请求的必经入口**。
@@ -35,6 +36,9 @@ class CapturePermissionActivity : ComponentActivity() {
     /** 待执行的采集请求（screenshot / screen_record / audio_record …） */
     private var captureIntent: Intent? = null
 
+    /** 授权闩锁存储：投影凭据持久化（见 [CaptureConsentStore]）。 */
+    @Inject lateinit var captureConsentStore: CaptureConsentStore
+
     private val requestCapture = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -44,6 +48,9 @@ class CapturePermissionActivity : ComponentActivity() {
             // 只存令牌不取投影：此刻还没有 mediaProjection 前台服务，
             // 在这里 getMediaProjection 会被系统直接拒绝（Android 14+）
             ScreenCaptureSession.storeToken(manager, result.resultCode, data)
+            // 持久化投影凭据：进程死/重启后 best-effort 复用，避免反复向孩子弹系统授权框；
+            // 仅设备解绑（CaptureConsentStore.revoke）可清除。
+            captureConsentStore.saveProjectionConsent(result.resultCode, data)
             // 记住"用户同意过"：进程重启（含设备重启）后令牌必然失效，
             // 届时据此静默重启一次授权，而不是从此再也不采集（历史 bug）。
             CaptureConsent.markGranted(this)

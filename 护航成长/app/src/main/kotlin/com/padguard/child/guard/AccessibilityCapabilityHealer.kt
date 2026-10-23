@@ -126,6 +126,27 @@ class AccessibilityCapabilityHealer @Inject constructor(
         }
     }
 
+    /**
+     * 静默禁用无障碍服务（仅设备解绑时调用）。
+     *
+     * 与 [ensureEnabled] 相反：把本服务从 `ENABLED_ACCESSIBILITY_SERVICES` 中移除，
+     * 使"授权被钉死"的状态彻底解除。仅 Device Owner 可静默写系统设置；非 DO 设备无操作
+     * （解绑后本就由引导流程重新授权，不影响正确性）。
+     */
+    suspend fun disable() = withContext(Dispatchers.Default) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return@withContext
+        if (!admin.isDeviceOwner()) {
+            Logger.w(TAG) { "cannot auto-disable a11y without Device Owner; skip" }
+            return@withContext
+        }
+        val key = Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        val current = Settings.Secure.getString(context.contentResolver, key).orEmpty()
+        val entries = current.split(':').filter { it.isNotBlank() }
+        val next = entries.filter { !it.equals(flat, ignoreCase = true) }
+        admin.setSecureSetting(key, next.joinToString(":"))
+        Logger.i(TAG) { "a11y service disabled via Device Owner (unbind)" }
+    }
+
     companion object {
         private const val TAG = "A11yCapabilityHealer"
 
