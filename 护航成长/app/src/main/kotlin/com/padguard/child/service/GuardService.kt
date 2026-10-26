@@ -59,6 +59,7 @@ import com.padguard.child.guard.PermissionHealthChecker
 import com.padguard.child.ui.lock.SystemKeyguardBridge
 import com.padguard.child.ui.message.MessageActivity
 import com.padguard.child.ui.message.MessageOverlayController
+import com.padguard.child.guard.SelfProtectionModule
 import com.padguard.child.guard.UninstallDefenseModule
 import com.padguard.child.ui.overlay.WatermarkOverlay
 import com.padguard.core.common.Logger
@@ -224,6 +225,12 @@ class GuardService : Service() {
      * 在 [refreshPolicy] 中周期性触发，确保「管控悄然失效」能被家长端及时看到。
      */
     @Inject lateinit var uninstallDefense: UninstallDefenseModule
+
+    /**
+     * 自身常驻加固基线（永驻后台 / 进程不可被杀 / 关闭卸载需家长密码）。
+     * 离线即生效、周期自愈，不依赖服务端策略（见 [SelfProtectionModule]）。
+     */
+    @Inject lateinit var selfProtection: SelfProtectionModule
 
     /** 授权闩锁存储：采集权限持久化（见 [CaptureConsentStore]）。 */
     @Inject lateinit var captureConsentStore: CaptureConsentStore
@@ -451,6 +458,13 @@ class GuardService : Service() {
         // 必须在任何可能拖延的启动流程之前落盘，否则进程若在 bootstrap 中途被杀，
         // 心跳文件还是旧的，外部通道会误判"刚写过"而延迟拉起。
         GuardHeartbeat.writeGuardAlive(this)
+        // 自身常驻加固基线（永驻后台 / 进程不可被杀 / 关闭卸载需家长密码 的治本落地）：
+        // 只要持 DO/PO 即刻系统级封死自身卸载、置灰"强行停止/清除数据"、封住恢复出厂/安全模式，
+        // 离线开机也立即生效，不依赖服务端策略。非 DO/PO 自动降级（靠看门狗+无障碍兜底）。
+        // 放在 onCreate（每次服务实例创建都会跑），即便进程被杀后被守护/看门狗拉回，也会重新钉死。
+        if (selfProtection.applyBaseline()) {
+            Logger.i(TAG) { "self-protection baseline applied (anti-force-stop / anti-uninstall / anti-reset)" }
+        }
         // 注册看门狗：进程被系统/清理工具杀掉后由系统侧周期拉起（START_STICKY 并不保证重建）。
         // 放在 onCreate 而不是绑定流程里：即便这台设备还没绑定，守护也要在，
         // 否则"家长扫码绑定后立刻下发指令"会因为没有宿主而丢失。
@@ -805,6 +819,9 @@ class GuardService : Service() {
             var nextSelfCheck = SystemClock.elapsedRealtime() + SELF_CHECK_INTERVAL_MS
             var nextTamperScan = SystemClock.elapsedRealtime() + TAMPER_SCAN_INTERVAL_MS
             var nextPermHeal = 0L
+            // 自身常驻加固周期自愈：已绑定时把 DO/PO 下的系统级限制重新压回，
+            // 对抗部分 ROM 在重启/省电策略下悄悄重置用户限制。
+            var nextSelfProtect = 0L
             // 看屏中无障碍主路看门狗：会话活跃时高频静默核验，EMUI 杀服务即秒级自愈，
             // 从源头阻止"权限丢失 → 落回投影授权框"。无看屏会话时不触发，零额外开销。
             var nextA11yLiveHeal = 0L
@@ -892,6 +909,15 @@ class GuardService : Service() {
                     }
                     runSafely("capHeal") { permissionHealthChecker.recheckSpecialCapabilities() }
                     nextPermHeal = now + PERM_HEAL_INTERVAL_MS
+                }
+
+                // ---------- 自身常驻加固周期自愈 ----------
+                // 仅已绑定时重压：把 DO/PO 下"强行停止置灰 / 卸载封锁 / 防恢复出厂"等系统级限制
+                // 重新落地，对抗部分 ROM 在重启 / 省电策略下悄悄重置用户限制。
+                // 未绑定时不重压——releaseControl() 已将这些限制解除，设备需恢复普通可用状态。
+                if (boundNow.get() && now >= nextSelfProtect) {
+                    runSafely("selfProtect") { selfProtection.applyBaseline() }
+                    nextSelfProtect = now + SELF_PROTECT_INTERVAL_MS
                 }
 
                 // ---------- 看屏中无障碍主路看门狗（权限钉死的根因预防） ----------
@@ -2291,6 +2317,12 @@ class GuardService : Service() {
         private const val TAMPER_SCAN_INTERVAL_MS = 60_000L
         /** 运行期权限自愈周期：5 分钟一轮，足够及时收复被系统自动回收的权限，又不至于刷屏 */
         private const val PERM_HEAL_INTERVAL_MS = 5 * 60_000L
+        /**
+         * 自身常驻加固周期自愈间隔：5 分钟一轮，与策略自检同量级。
+         * 把 DO/PO 下的"强行停止置灰 / 卸载封锁 / 防恢复出厂"等系统级限制重新压回，
+         * 对抗部分 ROM 在重启 / 省电策略下悄悄重置用户限制；操作均为幂等 no-op，开销可忽略。
+         */
+        private const val SELF_PROTECT_INTERVAL_MS = 5 * 60_000L
         /** 看屏中无障碍主路看门狗节拍：会话活跃时每 10s 静默核验并自愈一次 */
         private const val A11Y_LIVE_HEAL_INTERVAL_MS = 10_000L
 

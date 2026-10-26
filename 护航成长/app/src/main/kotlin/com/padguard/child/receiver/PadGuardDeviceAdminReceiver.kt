@@ -12,6 +12,7 @@ import com.padguard.core.data.model.RiskType
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.child.guard.SelfProtectionModule
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -50,10 +51,14 @@ class PadGuardDeviceAdminReceiver : DeviceAdminReceiver() {
     @ApplicationScope
     lateinit var scope: CoroutineScope
 
+    @Inject lateinit var selfProtection: SelfProtectionModule
+
     override fun onEnabled(context: Context, intent: Intent) {
         super.onEnabled(context, intent)
         val mode = admin.refreshControlMode()
         Logger.i(TAG) { "device admin enabled, controlMode=$mode" }
+        // 权限刚拿到，立刻把自身常驻加固基线钉死（离线即生效，不依赖策略下发）
+        selfProtection.applyBaseline()
         // 权限刚拿到，立刻拉起守护服务并重新下发一次策略
         GuardService.start(context, reason = "adminEnabled")
     }
@@ -119,6 +124,8 @@ class PadGuardDeviceAdminReceiver : DeviceAdminReceiver() {
         super.onProfileProvisioningComplete(context, intent)
         val mode = admin.refreshControlMode()
         Logger.i(TAG) { "provisioning complete, controlMode=$mode" }
+        // 已是 Device Owner，能力最完整：立刻把自身常驻加固基线钉死（离线即生效）
+        selfProtection.applyBaseline()
         GuardService.start(context, reason = "provisioningComplete")
     }
 

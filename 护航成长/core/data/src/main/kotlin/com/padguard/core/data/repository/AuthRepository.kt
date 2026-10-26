@@ -98,7 +98,7 @@ class AuthRepository @Inject constructor(
          * [com.padguard.child.consent.OneTimeConsentViewModel.finishAnyway]）即清掉。
          */
         val REAUTH_REQUIRED = booleanPreferencesKey("reauth_required")
-         * 家长已在引导页**显式确认已知风险仍要继续**、跳过「设备所有者(DO)」预置的标记（发布包强制首步用）。
+        /** 家长已在引导页**显式确认已知风险仍要继续**、跳过「设备所有者(DO)」预置的标记（发布包强制首步用）。
          *
          * 见 [com.padguard.child.MainActivity]：发布包把 DO 预置设为装机第一道门，
          * 未开 DO 时防卸载 / 静默安装 / 禁止恢复出厂等核心承诺在系统层面全部不可用，
@@ -328,6 +328,8 @@ class AuthRepository @Inject constructor(
     suspend fun clearReauthRequired() {
         runCatching { store.edit { it[Keys.REAUTH_REQUIRED] = false } }
             .onFailure { Logger.w(TAG) { "clear reauth required failed" } }
+    }
+
     /**
      * 家长是否已显式跳过「设备所有者(DO)」预置引导（发布包强制首步）。
      * 入口分流据此决定是否仍因「未成为 DO」强制停在预置引导页。
