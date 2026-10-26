@@ -35,6 +35,13 @@ class AdminDataInitializer(
     private val adminRepository: AdminRepository,
     private val env: Environment,
     /**
+     * 演示/测试账号开关（与家长端 DataInitializer 同口径）。
+     * 默认关闭（false）。仅「local profile + 显式开启」时播种出厂弱口令管理员（admin/admin123）便于联调；
+     * 正式部署走安全分支：无账号时随机生成强口令并落盘、存量弱口令管理员每次启动强制重置。
+     */
+    @Value("\${padguard.demo-accounts-enabled:false}")
+    private val demoAccountsEnabled: Boolean,
+    /**
      * 初始/重置口令文件的落盘路径。
      *
      * 早期实现写死相对路径（容器工作目录）——docker-compose 只挂了 `./uploads:/app/uploads`，
@@ -49,17 +56,13 @@ class AdminDataInitializer(
     private val log = LoggerFactory.getLogger(AdminDataInitializer::class.java)
 
     override fun run(args: ApplicationArguments?) {
+        // 仅在「local profile 且显式开启 demo-accounts」时播种出厂弱口令管理员，
+        // 否则走安全分支：无账号时随机生成强口令并落盘，存量弱口令账号每次启动强制重置。
+        val devDemo = demoAccountsEnabled && env.activeProfiles.contains(PROFILE_LOCAL)
         if (adminRepository.count() == 0L) {
-            if (env.activeProfiles.contains(PROFILE_LOCAL)) {
-                seedFactoryAdmin()
-            } else {
-                seedInitialAdmin()
-            }
-            return
+            if (devDemo) seedFactoryAdmin() else seedInitialAdmin()
         }
-        if (!env.activeProfiles.contains(PROFILE_LOCAL)) {
-            forceResetFactoryPassword()
-        }
+        if (!devDemo) forceResetFactoryPassword()
     }
 
     private fun seedFactoryAdmin() {

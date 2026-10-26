@@ -14,6 +14,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentCaptor
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.verify
@@ -84,10 +85,12 @@ class UsageDelayServiceTest {
         assertThat(tickets[0].status).isEqualTo("PENDING")
         assertThat(tickets[0].minutes).isEqualTo(30)
         // 家长端应实时收到"新申请"事件
+        val reqCaptor = ArgumentCaptor.forClass(java.util.Map::class.java) as ArgumentCaptor<Map<String, Any?>>
         verify(webSocketPush).pushToUser(
             org.mockito.ArgumentMatchers.eq("user-1"),
-            org.mockito.ArgumentMatchers.any()
+            reqCaptor.capture() ?: emptyMap()
         )
+        assertThat(reqCaptor.value.get("type")).isEqualTo("usage.delay.requested")
     }
 
     @Test
@@ -142,8 +145,15 @@ class UsageDelayServiceTest {
 
         assertThat(sessionRepo.table["device-1"]!!.extendedMinutes).isEqualTo(before + 30)
         assertThat(delayRepo.table[ticket.id]!!.status).isEqualTo("APPROVED")
-        org.mockito.Mockito.verify(webSocketPush)
-            .pushToUser(org.mockito.ArgumentMatchers.eq("user-1"), org.mockito.ArgumentMatchers.any())
+        // request 与 approve 各推送一次（共 2 次）；用 captor + elvis 规避 Kotlin 对非空 Map 参数的空值守卫
+        val payloadCaptor = ArgumentCaptor.forClass(java.util.Map::class.java) as ArgumentCaptor<Map<String, Any?>>
+        verify(webSocketPush, org.mockito.Mockito.times(2)).pushToUser(
+            org.mockito.ArgumentMatchers.eq("user-1"),
+            payloadCaptor.capture() ?: emptyMap()
+        )
+        val approved = payloadCaptor.allValues.last()
+        assertThat(approved.get("type")).isEqualTo("usage.delay.updated")
+        assertThat(approved.get("status")).isEqualTo("APPROVED")
     }
 
     @Test
@@ -166,11 +176,12 @@ class UsageDelayServiceTest {
         service.reject("user-1", "device-1", ticket.id, UsageDelayRejectRequest(reason = "作业没写完"))
 
         assertThat(delayRepo.table[ticket.id]!!.status).isEqualTo("REJECTED")
+        // 非空参数上的 eq/any 需以 elvis 兜底，规避 Kotlin 对空值守卫在 matcher 返回值上抛 NPE
         verify(commandService).issueCommand(
-            org.mockito.ArgumentMatchers.eq("device-1"),
-            org.mockito.ArgumentMatchers.eq("SHOW_MESSAGE"),
-            org.mockito.ArgumentMatchers.any(),
-            org.mockito.ArgumentMatchers.any()
+            org.mockito.ArgumentMatchers.eq("device-1") ?: "",
+            org.mockito.ArgumentMatchers.eq("SHOW_MESSAGE") ?: "",
+            org.mockito.ArgumentMatchers.any() ?: emptyMap(),
+            org.mockito.ArgumentMatchers.eq("NORMAL") ?: ""
         )
     }
 

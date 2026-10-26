@@ -9,6 +9,21 @@
   PG.views = PG.views || {};
   PG.registerView = function (key, def) { def.key = key; PG.views[key] = def; };
 
+  /**
+   * 前端权限判断（与服务端 RBAC 闸门一致，仅作 UI 隐藏；越权请求到后端必被 FORBIDDEN 拒绝）。
+   * 当前管理员的有效权限由登录响应的 [AdminDto.privileges] 提供（area -> 动作列表）。
+   */
+  PG.can = function (area, action) {
+    const a = (PG.state && PG.state.admin) || null;
+    if (!a) return false;
+    const acts = (a.privileges && a.privileges[area]) || null;
+    if (!acts) return false;
+    return acts.indexOf(action) >= 0;
+  };
+  PG.canRead = function (area) { return PG.can(area, "read"); };
+  /** 仅当拥有 area:action 权限时返回 html，否则返回空串（用于按权限隐藏按钮） */
+  PG.guard = function (area, action, html) { return PG.can(area, action) ? html : ""; };
+
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const money = (fen) => "¥" + ((fen || 0) / 100).toFixed(2);
   const moneyK = (fen) => { const y = (fen || 0) / 100; return y >= 10000 ? "¥" + (y / 10000).toFixed(1) + "万" : "¥" + y.toFixed(0); };
@@ -133,9 +148,41 @@
     return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '"><polyline points="' + pts + '" fill="none" stroke="' + (color || "var(--accent)") + '" stroke-width="2"/></svg>';
   }
 
+  /**
+   * 分页器（B3/B4）：根据当前页与总页数渲染上/下一页与页码（含省略号）。
+   * 仅返回 HTML，页码按钮带 data-pg="<n>"，视图自行绑定点击后调用翻页回调。
+   * totalPages <= 1 时返回空串（单页无需分页器）。
+   */
+  function pager(page, totalPages) {
+    if (!totalPages || totalPages <= 1) return "";
+    const btn = (n, label, opts) => {
+      opts = opts || {};
+      const dis = opts.disabled ? " disabled" : "";
+      const cur = (!opts.ellipsis && n === page) ? " pg-cur" : "";
+      const ell = opts.ellipsis ? " pg-ell" : "";
+      const attr = opts.ellipsis ? "" : ' data-pg="' + n + '"';
+      return '<button class="btn btn-xs' + cur + ell + '"' + attr + dis + '>' + (label != null ? label : n) + '</button>';
+    };
+    const nums = [];
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i++) nums.push(i);
+    } else {
+      nums.push(1);
+      if (page > 3) nums.push("…");
+      const s = Math.max(2, page - 1), e = Math.min(totalPages - 1, page + 1);
+      for (let i = s; i <= e; i++) nums.push(i);
+      if (page < totalPages - 2) nums.push("…");
+      nums.push(totalPages);
+    }
+    const parts = [btn(page - 1, "‹ 上一页", { disabled: page <= 1 })];
+    nums.forEach(n => parts.push(n === "…" ? btn(null, "…", { ellipsis: true }) : btn(n)));
+    parts.push(btn(page + 1, "下一页 ›", { disabled: page >= totalPages }));
+    return '<div class="pager">' + parts.join("") + '<span class="pg-info">第 ' + page + ' / ' + totalPages + ' 页</span></div>';
+  }
+
   PG.ui = {
     esc, money, moneyK, pct, fmtMinutes, toast, modal, drawer, confirm,
     badge, PARENT_STATUS, SUB_STATUS, ORDER_STATUS,
-    donut, line, bar, sparkline,
+    donut, line, bar, sparkline, pager,
   };
 })(window);

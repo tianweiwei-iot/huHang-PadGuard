@@ -5,7 +5,7 @@
     title: "系统设置", icon: "⚙️", group: "系统",
     render: () => `
       <div class="page-head"><div><h2>系统设置</h2><p>品牌、计费策略、安全策略与套餐定价（运营可调，无需改代码）</p></div>
-      <div class="page-actions"><button class="btn btn-primary" id="st-save">保存设置</button></div></div>
+      <div class="page-actions">${PG.guard("settings", "write", '<button class="btn btn-primary" id="st-save">保存设置</button>')}</div></div>
       <div id="st-body"><div class="empty">加载中…</div></div>`,
     mount: async (root) => {
       const s = await PG.api.settings();

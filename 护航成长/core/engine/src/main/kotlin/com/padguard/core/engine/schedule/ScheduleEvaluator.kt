@@ -158,9 +158,101 @@ interface HolidayProvider {
     fun isWorkdayOverride(date: LocalDate): Boolean
 }
 
-/** 默认实现：不识别法定节假日，仅按自然周末判断 */
+/**
+ * 默认实现：内置中国法定节假日表（2024-2026，依据国务院办公厅公开发文）。
+ *
+ * - 每年由国务院于前一年 11 月左右公布；新年份公布后在此 [BUILTIN] 追加即可。
+ * - 未收录的年份按"非节假日"处理（返回 false）。[ScheduleEvaluator.dayTypeOf] 仍会按
+ *   自然周末判周末，因此不会误把孩子锁在正常工作日，只是该年份的法定调休不生效。
+ * - 服务端日历接口就绪后，用 [loadServerCalendar] 整体覆盖某一年的内置数据，
+ *   无需改动业务代码（接口契约不变）。
+ */
 @Singleton
 class DefaultHolidayProvider @Inject constructor() : HolidayProvider {
-    override fun isHoliday(date: LocalDate): Boolean = false
-    override fun isWorkdayOverride(date: LocalDate): Boolean = false
+
+    override fun isHoliday(date: LocalDate): Boolean {
+        val y = date.year
+        // 该年有服务端日历则整体采用它（替换而非合并），否则回退内置表。
+        overrides[y]?.let { return it.holidays.contains(date) }
+        return BUILTIN[y]?.holidays?.contains(date) ?: false
+    }
+
+    override fun isWorkdayOverride(date: LocalDate): Boolean {
+        val y = date.year
+        overrides[y]?.let { return it.workdays.contains(date) }
+        return BUILTIN[y]?.workdays?.contains(date) ?: false
+    }
+
+    /** 服务端下发年度日历后调用：整体替换该年的内置数据。 */
+    fun loadServerCalendar(year: Int, holidays: Set<LocalDate>, workdays: Set<LocalDate>) {
+        val merged = overrides.toMutableMap()
+        merged[year] = YearCalendar(holidays, workdays)
+        overrides = merged
+    }
+
+    private data class YearCalendar(val holidays: Set<LocalDate>, val workdays: Set<LocalDate>)
+
+    @Volatile
+    private var overrides: Map<Int, YearCalendar> = emptyMap()
+
+    companion object {
+        private val BUILTIN: Map<Int, YearCalendar> = mapOf(
+            2024 to YearCalendar(
+                holidays = setOf(
+                    LocalDate.of(2024, 1, 1), // 元旦
+                    *dateRange(2024, 2, 10, 17), // 春节 2/10-2/17
+                    *dateRange(2024, 4, 4, 6),   // 清明 4/4-4/6
+                    *dateRange(2024, 5, 1, 5),   // 劳动节 5/1-5/5
+                    LocalDate.of(2024, 6, 10),   // 端午
+                    *dateRange(2024, 9, 15, 17), // 中秋 9/15-9/17
+                    *dateRange(2024, 10, 1, 7)   // 国庆 10/1-10/7
+                ),
+                workdays = setOf(
+                    LocalDate.of(2024, 2, 4), LocalDate.of(2024, 2, 18),
+                    LocalDate.of(2024, 4, 7),
+                    LocalDate.of(2024, 4, 28), LocalDate.of(2024, 5, 11),
+                    LocalDate.of(2024, 9, 14),
+                    LocalDate.of(2024, 9, 29), LocalDate.of(2024, 10, 12)
+                )
+            ),
+            2025 to YearCalendar(
+                holidays = setOf(
+                    LocalDate.of(2025, 1, 1),    // 元旦
+                    *dateRange(2025, 1, 28, 31), // 春节 1/28-1/31
+                    *dateRange(2025, 2, 1, 4),   // 春节 2/1-2/4
+                    *dateRange(2025, 4, 4, 6),   // 清明 4/4-4/6
+                    *dateRange(2025, 5, 1, 5),   // 劳动节 5/1-5/5
+                    LocalDate.of(2025, 5, 31),   // 端午 5/31（连周末 6/1-6/2）
+                    LocalDate.of(2025, 6, 1), LocalDate.of(2025, 6, 2),
+                    *dateRange(2025, 10, 1, 8)   // 国庆中秋 10/1-10/8
+                ),
+                workdays = setOf(
+                    LocalDate.of(2025, 1, 26), LocalDate.of(2025, 2, 8),
+                    LocalDate.of(2025, 4, 27),
+                    LocalDate.of(2025, 9, 28), LocalDate.of(2025, 10, 11)
+                )
+            ),
+            2026 to YearCalendar(
+                holidays = setOf(
+                    *dateRange(2026, 1, 1, 3),   // 元旦 1/1-1/3
+                    *dateRange(2026, 2, 15, 23), // 春节 2/15-2/23
+                    *dateRange(2026, 4, 4, 6),   // 清明 4/4-4/6
+                    *dateRange(2026, 5, 1, 5),   // 劳动节 5/1-5/5
+                    *dateRange(2026, 6, 19, 21), // 端午 6/19-6/21
+                    *dateRange(2026, 9, 25, 27), // 中秋 9/25-9/27
+                    *dateRange(2026, 10, 1, 7)   // 国庆 10/1-10/7
+                ),
+                workdays = setOf(
+                    LocalDate.of(2026, 1, 4),
+                    LocalDate.of(2026, 2, 14), LocalDate.of(2026, 2, 28),
+                    LocalDate.of(2026, 5, 9),
+                    LocalDate.of(2026, 9, 20), LocalDate.of(2026, 10, 10)
+                )
+            )
+        )
+
+        /** 生成 [year]-[month]-[from] 到 [to] 的连续日期数组（含端点），供 spread 展开进 setOf。 */
+        private fun dateRange(year: Int, month: Int, from: Int, to: Int): Array<LocalDate> =
+            (from..to).map { LocalDate.of(year, month, it) }.toTypedArray()
+    }
 }

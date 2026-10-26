@@ -189,6 +189,67 @@ class ScheduleEvaluatorTest {
         assertEquals(at(tuesday, 6, 30), (verdict as ScheduleVerdict.Locked).untilMillis)
     }
 
+    // ---------------------- 内置真实节假日表（DefaultHolidayProvider） ----------------------
+
+    @Test
+    fun defaultProviderRecognizes2024HolidaysAndMakeup() {
+        val p = DefaultHolidayProvider()
+        // 春节假期
+        assertTrue(p.isHoliday(LocalDate.of(2024, 2, 10)))
+        assertTrue(p.isHoliday(LocalDate.of(2024, 2, 17)))
+        // 春节调休补班日（2/4 周日）按工作日处理
+        assertTrue(p.isWorkdayOverride(LocalDate.of(2024, 2, 4)))
+        // 普通工作日不是节假日
+        assertEquals(false, p.isHoliday(LocalDate.of(2024, 2, 5)))
+        assertEquals(false, p.isWorkdayOverride(LocalDate.of(2024, 2, 5)))
+    }
+
+    @Test
+    fun defaultProviderRecognizes2025NationalDayMidAutumn() {
+        val p = DefaultHolidayProvider()
+        // 国庆中秋合并 10/1-10/8
+        assertTrue(p.isHoliday(LocalDate.of(2025, 10, 1)))
+        assertTrue(p.isHoliday(LocalDate.of(2025, 10, 8)))
+        // 调休补班 9/28 周日
+        assertTrue(p.isWorkdayOverride(LocalDate.of(2025, 9, 28)))
+    }
+
+    @Test
+    fun defaultProviderRecognizes2026SpringFestival() {
+        val p = DefaultHolidayProvider()
+        // 春节 2/15-2/23（9 天）
+        assertTrue(p.isHoliday(LocalDate.of(2026, 2, 15)))
+        assertTrue(p.isHoliday(LocalDate.of(2026, 2, 23)))
+        // 调休补班 2/14 周六
+        assertTrue(p.isWorkdayOverride(LocalDate.of(2026, 2, 14)))
+    }
+
+    @Test
+    fun defaultProviderFallsBackForUnlistedYears() {
+        val p = DefaultHolidayProvider()
+        // 2030 未收录：不谎报节假日/补班日（dayTypeOf 仍按自然周末判定）
+        assertEquals(false, p.isHoliday(LocalDate.of(2030, 1, 1)))
+        assertEquals(false, p.isWorkdayOverride(LocalDate.of(2030, 1, 5)))
+    }
+
+    @Test
+    fun serverCalendarOverridesBuiltin() {
+        val p = DefaultHolidayProvider()
+        // 服务端下发 2024 全年日历（极简，仅 1/1 放假、2/10 补班）：整体替换内置表
+        p.loadServerCalendar(
+            2024,
+            holidays = setOf(LocalDate.of(2024, 1, 1)),
+            workdays = setOf(LocalDate.of(2024, 2, 10))
+        )
+        // 被服务端日历显式设为普通日的原内置假期，不再判为假期
+        assertEquals(false, p.isHoliday(LocalDate.of(2024, 2, 10)))
+        assertTrue(p.isWorkdayOverride(LocalDate.of(2024, 2, 10)))
+        // 服务端日历整体替换了该年：内置的国庆 10/1 在覆盖后不再生效
+        assertEquals(false, p.isHoliday(LocalDate.of(2024, 10, 1)))
+        // 未被服务端覆盖的年份仍用内置表
+        assertTrue(p.isHoliday(LocalDate.of(2025, 10, 1)))
+    }
+
     /** 可控的节假日/调休实现，供测试注入特定日期 */
     private class FakeHolidayProvider(
         private val holidays: Set<LocalDate> = emptySet(),

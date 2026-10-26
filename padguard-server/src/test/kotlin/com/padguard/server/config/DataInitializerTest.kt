@@ -137,6 +137,8 @@ class DataInitializerTest {
         )
         return DataInitializer(
             users, FakePolicyTemplateRepo(), FakeSubscriptionRepo(), contentFilter, MockEnvironment(),
+            // 正式部署口径：演示账号开关关闭（padguard.demo-accounts-enabled 默认值）。
+            false,
             // E7 新增构造参数：口令文件路径。传与默认键同值的相对路径，
             // 让既有断言（文件落在模块目录、tearDown 清理）继续成立。
             passwordFile.name

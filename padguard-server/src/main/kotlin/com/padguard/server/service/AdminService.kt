@@ -37,12 +37,15 @@ class AdminService(
     // ============================ 登录 ============================
     fun login(username: String, password: String) = authService.login(username, password)
 
+    /** 登出吊销：自增令牌版本，使所有历史令牌失效 */
+    fun logout(adminId: String) = authService.logout(adminId)
+
     // ============================ 仪表盘 ============================
     fun dashboard(adminId: String) = dashboardService.dashboard(adminId)
 
     // ============================ 家长账号 ============================
-    fun listParents(adminId: String, keyword: String?, status: String?, plan: String?) =
-        parentService.listParents(adminId, keyword, status, plan)
+    fun listParents(adminId: String, keyword: String?, status: String?, plan: String?, page: Int = 1, size: Int = 20) =
+        parentService.listParents(adminId, keyword, status, plan, page, size)
 
     fun parentDetail(adminId: String, id: String) = parentService.parentDetail(adminId, id)
 
@@ -60,19 +63,21 @@ class AdminService(
     fun deleteParent(adminId: String, id: String) = parentService.deleteParent(adminId, id)
 
     // ============================ 设备 ============================
-    fun listDevices(adminId: String, keyword: String?, online: String?) =
-        deviceService.listDevices(adminId, keyword, online)
+    fun listDevices(adminId: String, keyword: String?, online: String?, page: Int = 1, size: Int = 20) =
+        deviceService.listDevices(adminId, keyword, online, page, size)
 
     fun lockDevice(adminId: String, deviceId: String) = deviceService.lockDevice(adminId, deviceId)
 
     fun unlockDevice(adminId: String, deviceId: String) = deviceService.unlockDevice(adminId, deviceId)
 
+    fun unbindDevice(adminId: String, deviceId: String) = deviceService.unbindDevice(adminId, deviceId)
+
     // ============================ 订阅计费 ============================
     fun listPlans(adminId: String) = billingService.listPlans(adminId)
 
-    fun listSubscriptions(adminId: String, status: String?) = billingService.listSubscriptions(adminId, status)
+    fun listSubscriptions(adminId: String, status: String?, page: Int = 1, size: Int = 20) = billingService.listSubscriptions(adminId, status, page, size)
 
-    fun listOrders(adminId: String, status: String?) = billingService.listOrders(adminId, status)
+    fun listOrders(adminId: String, status: String?, page: Int = 1, size: Int = 20) = billingService.listOrders(adminId, status, page, size)
 
     fun manualActivate(adminId: String, req: AdminManualSubscriptionRequest) =
         billingService.manualActivate(adminId, req)

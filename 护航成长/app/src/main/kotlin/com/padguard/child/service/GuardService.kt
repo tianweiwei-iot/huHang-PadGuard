@@ -479,14 +479,14 @@ class GuardService : Service() {
             bootstrap(reason)
         } else if (reason == REASON_BOOT) {
             // 极少见：进程未死但收到开机广播，仍需走一次开机复位
-            scope.launch { runSafely("onDeviceBoot") { policyEngine.onDeviceBoot() } }
+            scope.launch { runSafely("onDeviceBoot") { policyEngine.onDeviceBoot(); reconcileWatermark() } }
         } else if (reason == REASON_FLUSH) {
             // 锁屏页刚提交了解锁申请：这类交互有时效，等下一个 60s 上报窗口太慢，
             // 家长可能要一分多钟后才看到，孩子会以为申请没发出去而反复提交。
             scope.launch { runSafely("flushNow") { uploadPending() } }
         } else {
             // 已在运行，外部只是想催一次策略对齐（如管理器刚激活、Kiosk 被意外退出）
-            scope.launch { runSafely("applyOnKick") { policyEngine.applyCurrent(force = true) } }
+            scope.launch { runSafely("applyOnKick") { policyEngine.applyCurrent(force = true); reconcileWatermark() } }
         }
 
         // START_STICKY：被系统回收后自动重建。
@@ -602,8 +602,7 @@ class GuardService : Service() {
                 } else {
                     policyEngine.applyCurrent(force = true)
                 }
-                // 服务（重）启动时按本地缓存策略恢复水印 —— 这正是"重启后水印消失"的修复点
-                syncWatermarkFromPolicy()
+                reconcileWatermark()
             }
         }
 
@@ -874,12 +873,7 @@ class GuardService : Service() {
                     // force = true：这里的目的就是把"被用户绕过去的限制"重新压回来，
                     // 版本没变也必须重下，否则自检等于空转。
                     if (boundNow.get()) {
-                        runSafely("selfCheck") {
-                            policyEngine.applyCurrent(force = true)
-                            // 兜底对齐：水印被用户手动关掉悬浮窗权限后恢复权限时，
-                            // 由这里重新贴回，不必等设备重启
-                            syncWatermarkFromPolicy()
-                        }
+                        runSafely("selfCheck") { policyEngine.applyCurrent(force = true); reconcileWatermark() }
                     }
                     nextSelfCheck = now + SELF_CHECK_INTERVAL_MS
                 }
@@ -1129,7 +1123,7 @@ class GuardService : Service() {
             reason = tick.blockedReason.ifBlank {
                 (tick.limit as? LimitVerdict.Blocked)?.message().orEmpty()
             },
-            action = tick.blockedAction
+            silentClose = tick.silentClose
         )
     }
 
@@ -1147,20 +1141,17 @@ class GuardService : Service() {
     /**
      * 单应用拦截（限额超额 / 命中黑名单）。
      *
-     * 只在"被拦的那个应用正处于前台"时才处置 —— 后台被拦没有打扰用户的必要。
-     * 同一个包不重复处置，切到别的应用再切回来才会再触发一次。
+     * 只在"超额的那个应用正处于前台"时才弹拦截页 —— 后台超额没有打扰用户的必要。
+     * 同一个包不重复弹，切到别的应用再切回来才会再弹一次。
      *
-     * 两种处置方式由 `app.blacklistAction` 决定（见 [EngineTick.blockedAction]）：
-     * - [BlacklistAction.BLOCK_DIALOG]：弹出拦截页说明理由；
-     * - [BlacklistAction.SILENT_CLOSE]：不弹页，把孩子送回桌面。
-     *   此前该字段只有 Mock 引用，无论家长选哪种都一律弹页 ——
-     *   选了"静默关闭"的家长以为孩子会直接被送回桌面，实际看到的仍是拦截页。
+     * [silentClose] 为真（黑名单 [BlacklistAction.SILENT_CLOSE]）时**不弹拦截页**，
+     * 而是静默退回桌面——孩子无感知地被关掉被管控应用，避免"弹个框反而教会孩子怎么绕"。
      */
     private fun reconcileAppBlock(
         blockedPackage: String?,
         foreground: String?,
         reason: String,
-        action: BlacklistAction
+        silentClose: Boolean = false
     ) {
         if (blockedPackage == null) {
             // 家长放行（或额度跨日重置）后必须主动收掉拦截页：
@@ -1173,35 +1164,43 @@ class GuardService : Service() {
         if (blockedPackage != foreground) return
         if (blockedPackage == lastBlockedPackage) return
         lastBlockedPackage = blockedPackage
-        when (action) {
-            BlacklistAction.SILENT_CLOSE -> goHomeSilently(blockedPackage)
-            BlacklistAction.BLOCK_DIALOG -> AppBlockActivity.show(this, blockedPackage, reason)
+        if (silentClose) {
+            sendToHome()
+        } else {
+            AppBlockActivity.show(this, blockedPackage, reason)
         }
     }
 
-    /**
-     * 静默关闭（[BlacklistAction.SILENT_CLOSE]）：把孩子送回桌面，不弹任何页面。
-     *
-     * 用 `ACTION_MAIN + CATEGORY_HOME` 而不是杀进程：
-     * 普通应用无权结束其他应用的进程，能做的只有"把桌面切到前台" ——
-     * 效果等同于孩子自己按了 Home 键，被拦应用留在后台由系统自行回收。
-     * 这是 Android 的权限边界，不是实现偷懒；若需真正阻止启动，要靠 Device Owner
-     * 的 `setApplicationHidden`，那条路径由 DO 通道负责，与本开关互不干扰。
-     */
-    private fun goHomeSilently(packageName: String) {
+    /** 静默退回桌面（SILENT_CLOSE 路径用），不拉起任何 UI */
+    private fun sendToHome() {
         runCatching {
-            startActivity(
-                Intent(Intent.ACTION_MAIN).apply {
-                    addCategory(Intent.CATEGORY_HOME)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-            )
-            Logger.i(TAG) { "blacklist silent close: $packageName -> home" }
-        }.onFailure {
-            // 极端情况（无桌面应用 / ROM 限制）下退回拦截页：宁可多一个解释页面，
-            // 也不能让孩子留在被禁应用里 —— 那才是真正的管控失效。
-            Logger.w(TAG) { "silent close failed, fallback to block dialog: ${it.message}" }
-            AppBlockActivity.show(this, packageName, "该应用已被家长管控，无法使用")
+            val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
+                .addCategory(android.content.Intent.CATEGORY_HOME)
+                .setFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        }.onFailure { Logger.w(TAG) { "sendToHome failed: $it" } }
+    }
+
+    /**
+     * 策略水印桥接（E2 修复）。
+     *
+     * KioskEnforcer 在 apply 时已把策略包里的 `kiosk.watermark` 写入 [com.padguard.core.engine.enforcer.KioskRuntime]，
+     * 但此前没有任何消费点把它推到 [WatermarkOverlay] —— 家长端配了水印、孩子端恒不显示。
+     * 这里在每次策略落地后读取 `policyEngine.kioskRuntime().watermark`，渲染占位符并 show/hide 悬浮窗。
+     *
+     * 占位符渲染需要本端设备信息：deviceId / deviceSn / studentName 来自 [AuthRepository]；
+     * className 本端暂无数据源，留空（占位符原样保留，不影响其他占位符替换）。
+     */
+    private suspend fun reconcileWatermark() {
+        val wm = runSafely("readWatermark") { policyEngine.kioskRuntime().watermark } ?: return
+        if (wm.enabled && wm.content.isNotBlank()) {
+            val deviceId = runSafely("wmDeviceId") { authRepository.getDeviceId() }.orEmpty()
+            val deviceSn = runSafely("wmDeviceSn") { authRepository.deviceSn.first() }.orEmpty()
+            val studentName = runSafely("wmStudent") { authRepository.studentName.first() }.orEmpty()
+            // className 暂无数据源，留空
+            watermark.show(wm.render(deviceSn, studentName, "", deviceId))
+        } else {
+            watermark.hide()
         }
     }
 
@@ -1458,9 +1457,7 @@ class GuardService : Service() {
                     val saved = policyRepository.save(body.policy, body.rawJson)
                     val report = policyEngine.applyAll(saved, force = true)
                     Logger.i(TAG) { "policy v${saved.version} applied: ${report.summary()}" }
-                    // 策略落地后对齐一次水印：家长在后台改水印内容/位置/透明度即刻生效，
-                    // 不必等下一次重启，也不依赖指令通道。
-                    syncWatermarkFromPolicy()
+                    reconcileWatermark()
                     // 操作密码闸门：把服务端下发的密码哈希落到本地（明文永不出网）。
                     // 约定：clear 为真 → 清密码；passwordHash 非空 → 启用并落库；
                     // 两者皆空 → 不改动（避免策略合并时误清空）。

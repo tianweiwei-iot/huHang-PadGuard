@@ -173,17 +173,26 @@
       );
     },
 
-    // 家长账号
+    // 家长账号（B3/B4：支持 page/size 分页，返回 PageResult 信封）
     async listParents(q) {
-      return liveOrMock(() => http("GET", "/v1/admin/parents?" + new URLSearchParams(q || {})), () => {
-        let arr = clone(M.parents);
-        if (q) {
-          if (q.keyword) { const k = q.keyword.toLowerCase(); arr = arr.filter(p => p.phone.includes(k) || p.name.includes(k) || p.id.toLowerCase().includes(k)); }
-          if (q.status) arr = arr.filter(p => p.status === q.status);
-          if (q.plan) arr = arr.filter(p => p.plan === q.plan);
+      const opt = q || {};
+      const params = Object.assign({ page: 1, size: 20 }, opt);
+      return liveOrMock(
+        () => http("GET", "/v1/admin/parents?" + new URLSearchParams(params)),
+        () => {
+          let arr = clone(M.parents);
+          if (q) {
+            if (q.keyword) { const k = q.keyword.toLowerCase(); arr = arr.filter(p => p.phone.includes(k) || p.name.includes(k) || p.id.toLowerCase().includes(k)); }
+            if (q.status) arr = arr.filter(p => p.status === q.status);
+            if (q.plan) arr = arr.filter(p => p.plan === q.plan);
+          }
+          const size = params.size, page = params.page;
+          const total = arr.length;
+          const totalPages = total === 0 ? 1 : Math.ceil(total / size);
+          const from = (page - 1) * size;
+          return { items: arr.slice(from, from + size), page, size, total, totalPages };
         }
-        return arr;
-      });
+      );
     },
     async getParent(id) {
       return liveOrMock(() => http("GET", "/v1/admin/parents/" + id), () => {
@@ -226,36 +235,65 @@
       });
     },
 
-    // 设备
+    // 设备（B3/B4：支持 page/size 分页，返回 PageResult 信封）
     async listDevices(q) {
-      return liveOrMock(() => http("GET", "/v1/admin/devices?" + new URLSearchParams(q || {})), () => {
-        let arr = clone(M.devices);
-        if (q) {
-          if (q.keyword) { const k = q.keyword.toLowerCase(); arr = arr.filter(d => d.deviceId.toLowerCase().includes(k) || d.parentPhone.includes(k) || (d.parentName || "").includes(k)); }
-          if (q.online === "1") arr = arr.filter(d => d.online);
-          if (q.online === "0") arr = arr.filter(d => !d.online);
+      const opt = q || {};
+      const params = Object.assign({ page: 1, size: 20 }, opt);
+      return liveOrMock(
+        () => http("GET", "/v1/admin/devices?" + new URLSearchParams(params)),
+        () => {
+          let arr = clone(M.devices);
+          if (q) {
+            if (q.keyword) { const k = q.keyword.toLowerCase(); arr = arr.filter(d => d.deviceId.toLowerCase().includes(k) || d.parentPhone.includes(k) || (d.parentName || "").includes(k)); }
+            if (q.online === "1") arr = arr.filter(d => d.online);
+            if (q.online === "0") arr = arr.filter(d => !d.online);
+          }
+          const size = params.size, page = params.page;
+          const total = arr.length;
+          const totalPages = total === 0 ? 1 : Math.ceil(total / size);
+          const from = (page - 1) * size;
+          return { items: arr.slice(from, from + size), page, size, total, totalPages };
         }
-        return arr;
-      });
+      );
     },
     async lockDevice(id) { return liveOrMock(() => http("POST", "/v1/admin/devices/" + id + "/lock"), () => { const d = M.devices.find(x => x.deviceId === id); if (d) d.remoteLocked = true; return { ok: true }; }); },
     async unlockDevice(id) { return liveOrMock(() => http("POST", "/v1/admin/devices/" + id + "/unlock"), () => { const d = M.devices.find(x => x.deviceId === id); if (d) d.remoteLocked = false; return { ok: true }; }); },
+    // 设备解绑（B7）：清除归属 + 作废设备令牌，孩子端失去管控。危险操作，前端按 devices:unbind 隐藏。
+    async unbindDevice(id) { return liveOrMock(() => http("POST", "/v1/admin/devices/" + id + "/unbind"), () => { const d = M.devices.find(x => x.deviceId === id); if (d) { d.userId = null; d.parentName = ""; d.parentPhone = ""; } return { ok: true }; }); },
 
     // 计费
     async listPlans() { return liveOrMock(() => http("GET", "/v1/admin/billing/plans"), () => clone(M.PLANS)); },
     async listSubscriptions(q) {
-      return liveOrMock(() => http("GET", "/v1/admin/billing/subscriptions?" + new URLSearchParams(q || {})), () => {
-        let arr = clone(M.subscriptions);
-        if (q && q.status) arr = arr.filter(s => s.status === q.status);
-        return arr;
-      });
+      const opt = q || {};
+      const params = Object.assign({ page: 1, size: 20 }, opt);
+      return liveOrMock(
+        () => http("GET", "/v1/admin/billing/subscriptions?" + new URLSearchParams(params)),
+        () => {
+          let arr = clone(M.subscriptions);
+          if (q && q.status) arr = arr.filter(s => s.status === q.status);
+          const size = params.size, page = params.page;
+          const total = arr.length;
+          const totalPages = total === 0 ? 1 : Math.ceil(total / size);
+          const from = (page - 1) * size;
+          return { items: arr.slice(from, from + size), page, size, total, totalPages };
+        }
+      );
     },
     async listOrders(q) {
-      return liveOrMock(() => http("GET", "/v1/admin/billing/orders?" + new URLSearchParams(q || {})), () => {
-        let arr = clone(M.orders);
-        if (q && q.status) arr = arr.filter(o => o.status === q.status);
-        return arr;
-      });
+      const opt = q || {};
+      const params = Object.assign({ page: 1, size: 20 }, opt);
+      return liveOrMock(
+        () => http("GET", "/v1/admin/billing/orders?" + new URLSearchParams(params)),
+        () => {
+          let arr = clone(M.orders);
+          if (q && q.status) arr = arr.filter(o => o.status === q.status);
+          const size = params.size, page = params.page;
+          const total = arr.length;
+          const totalPages = total === 0 ? 1 : Math.ceil(total / size);
+          const from = (page - 1) * size;
+          return { items: arr.slice(from, from + size), page, size, total, totalPages };
+        }
+      );
     },
     async manualActivate(parentPhone, plan, days) {
       return liveOrMock(() => http("POST", "/v1/admin/billing/subscriptions/manual", { parentPhone, plan, days }), () => {

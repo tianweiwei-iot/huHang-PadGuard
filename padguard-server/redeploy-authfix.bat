@@ -38,7 +38,7 @@ curl -s -o nul -w "  /health  HTTP %{http_code}\n" http://127.0.0.1:8090/health
 
 echo.
 echo 完成。请在浏览器对后台地址执行 Ctrl+F5 强制刷新。
-echo 用 admin / 当前口令 登录（当前口令仍是 admin123，请登录后立刻用右上角“修改密码”改成强口令）。
+echo 用 admin 登录：首次部署或检测到仍在使用出厂弱口令时，口令会被强制重置为随机强口令并写入 uploads/ 下的明文口令文件（如"管理员初始密码-请登录后修改.txt"），请读取该文件后登录，并立刻用右上角"修改密码"改成自己的强口令。
 echo.
 echo 如需回滚：先停止服务端，再把 deploy/app.jar.bak-20261009-preauthfix 复制回 deploy/app.jar 后重启。
 echo.

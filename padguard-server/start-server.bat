@@ -126,4 +126,11 @@ REM     导致逆地理编码静默失效。Key 仍不写死在脚本里，只�
 if not defined PADGUARD_AMAP_WEB_KEY (
     for /f "usebackq delims=" %%k in (`powershell -NoProfile -Command "(Get-ItemProperty -Path 'HKCU:\Environment' -Name PADGUARD_AMAP_WEB_KEY -ErrorAction SilentlyContinue).PADGUARD_AMAP_WEB_KEY"`) do set "PADGUARD_AMAP_WEB_KEY=%%k"
 )
+REM ---------------------------------------------------------------------
+REM 安全基线：本启动器用于「家庭/私域发布包」，刻意不开启演示账号开关
+REM (padguard.demo-accounts-enabled 默认 false)。因此启动后不会播种任何弱口令账号
+REM （admin/admin123、演示家长、测试账号），而是：库里无账号时随机生成强口令并写入
+REM uploads/ 下的明文口令文件，存量弱口令账号每次启动强制重置。切勿在此处添加该开关，
+REM 否则等于把后门账号重新打回安装包。开发联调请用 start-local.bat（已开启该开关）。
+REM ---------------------------------------------------------------------
 "%JAVA_EXE%" -Xmx512m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -Dlogging.register-bridge-handler=false -Duser.timezone=Asia/Shanghai -jar deploy/app.jar --spring.profiles.active=local --server.port=8090 --spring.datasource.url="jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE" --spring.mvc.async.request-timeout=600000 --padguard.amap.web-key=%PADGUARD_AMAP_WEB_KEY% > server_restart.log 2>&1

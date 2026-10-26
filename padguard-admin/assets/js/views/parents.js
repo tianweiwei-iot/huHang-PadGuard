@@ -5,7 +5,7 @@
     title: "家长账号", icon: "👨‍👩‍👧", group: "运营",
     render: () => `
       <div class="page-head"><div><h2>家长账号管理</h2><p>开通、授权、冻结与重置家长账号；绑定设备与订阅状态一目了然</p></div>
-      <div class="page-actions"><button class="btn btn-primary" id="p-create">＋ 新建账号</button></div></div>
+      <div class="page-actions">${PG.guard("parents", "create", '<button class="btn btn-primary" id="p-create">＋ 新建账号</button>')}</div></div>
       <div class="card">
         <div class="row wrap" style="margin-bottom:14px">
           <div class="search-box" style="flex:1;min-width:220px"><input id="p-kw" placeholder="手机号 / 姓名 / 账号ID" style="width:100%"></div>
@@ -17,28 +17,35 @@
           <th>账号ID</th><th>家长</th><th>手机号</th><th>状态</th><th>套餐</th><th>设备/孩子</th><th>区域</th><th>注册时间</th><th>最近登录</th><th>操作</th>
         </tr></thead><tbody id="p-body"></tbody></table></div>
         <div id="p-empty"></div>
+        <div id="p-pager"></div>
       </div>`,
     mount: async (root) => {
       root.querySelector("#p-create").onclick = openCreate;
-      const reload = () => load(root);
+      // 筛选条件变化（或顶栏搜索回填）应回到第 1 页，否则可能在已无数据的页码上停留
+      const reloadReset = () => { curPage = 1; load(root); };
       // 顶栏全局搜索跳转过来时回填关键字（消费后立即清空，避免下次进页面误命中）
       if (PG.state && PG.state.search) {
         root.querySelector("#p-kw").value = PG.state.search;
         PG.state.search = "";
+        curPage = 1;
       }
-      root.querySelector("#p-reset").onclick = () => { root.querySelector("#p-kw").value = ""; root.querySelector("#p-status").value = ""; root.querySelector("#p-plan").value = ""; reload(); };
-      root.querySelector("#p-kw").oninput = debounce(reload, 300);
-      root.querySelector("#p-status").onchange = reload;
-      root.querySelector("#p-plan").onchange = reload;
+      root.querySelector("#p-reset").onclick = () => { root.querySelector("#p-kw").value = ""; root.querySelector("#p-status").value = ""; root.querySelector("#p-plan").value = ""; reloadReset(); };
+      root.querySelector("#p-kw").oninput = debounce(reloadReset, 300);
+      root.querySelector("#p-status").onchange = reloadReset;
+      root.querySelector("#p-plan").onchange = reloadReset;
       await load(root);
     },
   });
 
+  let curPage = 1;
+  const PAGE_SIZE = 20;
+
   async function load(root) {
-    const q = { keyword: root.querySelector("#p-kw").value.trim(), status: root.querySelector("#p-status").value, plan: root.querySelector("#p-plan").value };
-    const list = await PG.api.listParents(q);
+    const q = { keyword: root.querySelector("#p-kw").value.trim(), status: root.querySelector("#p-status").value, plan: root.querySelector("#p-plan").value, page: curPage, size: PAGE_SIZE };
+    const resp = await PG.api.listParents(q);
+    const list = (resp && resp.items) || [];
     const tb = root.querySelector("#p-body");
-    if (!list.length) { tb.innerHTML = ""; root.querySelector("#p-empty").innerHTML = '<div class="empty">没有匹配的家长账号</div>'; return; }
+    if (!list.length) { tb.innerHTML = ""; root.querySelector("#p-empty").innerHTML = '<div class="empty">没有匹配的家长账号</div>'; root.querySelector("#p-pager").innerHTML = ""; return; }
     root.querySelector("#p-empty").innerHTML = "";
     tb.innerHTML = list.map(p => `<tr>
       <td class="cell-strong">${U.esc(p.id)}</td>
@@ -52,10 +59,10 @@
       <td class="cell-sub">${U.esc(p.lastLoginAt || "—")}</td>
       <td><div class="row-actions">
         <button class="btn btn-xs" data-detail="${U.esc(p.id)}">详情</button>
-        ${p.status === "suspended" ? '<button class="btn btn-xs btn-primary" data-act="activate" data-id="' + p.id + '">激活</button>' : '<button class="btn btn-xs" data-act="suspend" data-id="' + p.id + '">冻结</button>'}
-        <button class="btn btn-xs" data-act="edit" data-id="${U.esc(p.id)}">编辑</button>
-        <button class="btn btn-xs" data-act="reset" data-id="${U.esc(p.id)}">重置密码</button>
-        <button class="btn btn-xs btn-danger" data-act="del" data-id="${U.esc(p.id)}">删除</button>
+        ${p.status === "suspended" ? PG.guard("parents", "write", '<button class="btn btn-xs btn-primary" data-act="activate" data-id="' + p.id + '">激活</button>') : PG.guard("parents", "suspend", '<button class="btn btn-xs" data-act="suspend" data-id="' + p.id + '">冻结</button>')}
+        ${PG.guard("parents", "write", '<button class="btn btn-xs" data-act="edit" data-id="' + U.esc(p.id) + '">编辑</button>')}
+        ${PG.guard("parents", "reset_pwd", '<button class="btn btn-xs" data-act="reset" data-id="' + U.esc(p.id) + '">重置密码</button>')}
+        ${PG.guard("parents", "delete", '<button class="btn btn-xs btn-danger" data-act="del" data-id="' + U.esc(p.id) + '">删除</button>')}
       </div></td>
     </tr>`).join("");
     tb.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => openDetail(b.dataset.detail));
@@ -64,6 +71,10 @@
     tb.querySelectorAll("[data-act='edit']").forEach(b => b.onclick = () => openEdit(b.dataset.id));
     tb.querySelectorAll("[data-act='reset']").forEach(b => b.onclick = () => resetPwd(b.dataset.id));
     tb.querySelectorAll("[data-act='del']").forEach(b => b.onclick = () => delParent(b.dataset.id));
+    // 分页器（B3/B4）：渲染上/下一页与页码，点击翻页
+    const pagerEl = root.querySelector("#p-pager");
+    pagerEl.innerHTML = U.pager(resp.page, resp.totalPages);
+    pagerEl.querySelectorAll("[data-pg]").forEach(b => b.onclick = () => { curPage = parseInt(b.dataset.pg, 10); load(root); });
   }
 
   async function resetPwd(id) {

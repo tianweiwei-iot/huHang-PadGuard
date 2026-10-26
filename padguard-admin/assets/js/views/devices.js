@@ -15,21 +15,27 @@
           <th>设备</th><th>管控模式</th><th>绑定家长</th><th>机型 / 系统</th><th>在线</th><th>远程锁</th><th>未成年人模式</th><th>今日用量</th><th>操作</th>
         </tr></thead><tbody id="d-body"></tbody></table></div>
         <div id="d-empty"></div>
+        <div id="d-pager"></div>
       </div>`,
     mount: async (root) => {
       const reload = () => load(root);
-      root.querySelector("#d-reset").onclick = () => { root.querySelector("#d-kw").value = ""; root.querySelector("#d-on").value = ""; reload(); };
-      root.querySelector("#d-kw").oninput = debounce(reload, 300);
-      root.querySelector("#d-on").onchange = reload;
+      const reloadReset = () => { curPage = 1; load(root); };
+      root.querySelector("#d-reset").onclick = () => { root.querySelector("#d-kw").value = ""; root.querySelector("#d-on").value = ""; reloadReset(); };
+      root.querySelector("#d-kw").oninput = debounce(reloadReset, 300);
+      root.querySelector("#d-on").onchange = reloadReset;
       await load(root);
     },
   });
 
+  let curPage = 1;
+  const PAGE_SIZE = 20;
+
   async function load(root) {
-    const q = { keyword: root.querySelector("#d-kw").value.trim(), online: root.querySelector("#d-on").value };
-    const list = await PG.api.listDevices(q);
+    const q = { keyword: root.querySelector("#d-kw").value.trim(), online: root.querySelector("#d-on").value, page: curPage, size: PAGE_SIZE };
+    const resp = await PG.api.listDevices(q);
+    const list = (resp && resp.items) || [];
     const tb = root.querySelector("#d-body");
-    if (!list.length) { tb.innerHTML = ""; root.querySelector("#d-empty").innerHTML = '<div class="empty">没有匹配的设备</div>'; return; }
+    if (!list.length) { tb.innerHTML = ""; root.querySelector("#d-empty").innerHTML = '<div class="empty">没有匹配的设备</div>'; root.querySelector("#d-pager").innerHTML = ""; return; }
     root.querySelector("#d-empty").innerHTML = "";
     const modeMap = { DO: ["purple", "设备所有者"], DA: ["blue", "设备管理员"], NONE: ["gray", "无"], };
     tb.innerHTML = list.map(d => `<tr>
@@ -43,17 +49,24 @@
       <td>${U.fmtMinutes(d.todayUsageMinutes)}</td>
       <td><div class="row-actions">
         <button class="btn btn-xs" data-detail="${U.esc(d.deviceId)}">详情</button>
-        ${d.remoteLocked ? '<button class="btn btn-xs btn-primary" data-act="unlock" data-id="' + U.esc(d.deviceId) + '">解锁</button>' : '<button class="btn btn-xs" data-act="lock" data-id="' + U.esc(d.deviceId) + '">锁屏</button>'}
+        ${d.remoteLocked ? PG.guard("devices", "unlock", '<button class="btn btn-xs btn-primary" data-act="unlock" data-id="' + U.esc(d.deviceId) + '">解锁</button>') : PG.guard("devices", "lock", '<button class="btn btn-xs" data-act="lock" data-id="' + U.esc(d.deviceId) + '">锁屏</button>')}
+        ${PG.guard("devices", "unbind", '<button class="btn btn-xs btn-danger" data-act="unbind" data-id="' + U.esc(d.deviceId) + '">解绑</button>')}
       </div></td>
     </tr>`).join("");
     tb.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => openDetail(b.dataset.detail));
     tb.querySelectorAll("[data-act='lock']").forEach(b => b.onclick = () => PG.ui.confirm("远程锁屏", "确认向 " + b.dataset.id + " 下发锁屏指令？", async () => { await PG.api.lockDevice(b.dataset.id); PG.ui.toast("ok", "锁屏指令已下发", b.dataset.id); load(root); }, true));
     tb.querySelectorAll("[data-act='unlock']").forEach(b => b.onclick = async () => { await PG.api.unlockDevice(b.dataset.id); PG.ui.toast("ok", "解锁指令已下发", b.dataset.id); load(root); });
+    tb.querySelectorAll("[data-act='unbind']").forEach(b => b.onclick = () => PG.ui.confirm("解绑设备", "确认解绑 " + b.dataset.id + "？解绑后设备归属清除、设备令牌作废，孩子端将失去管控，操作不可恢复。", async () => { await PG.api.unbindDevice(b.dataset.id); PG.ui.toast("ok", "已解绑", b.dataset.id); load(root); }, true));
+    // 分页器（B3/B4）
+    const pagerEl = root.querySelector("#d-pager");
+    pagerEl.innerHTML = U.pager(resp.page, resp.totalPages);
+    pagerEl.querySelectorAll("[data-pg]").forEach(b => b.onclick = () => { curPage = parseInt(b.dataset.pg, 10); load(root); });
   }
 
   async function openDetail(id) {
-    const list = await PG.api.listDevices({});
-    const d = list.find(x => x.deviceId === id);
+    // 详情按 id 反查：放大单页上限取全量（最大 200 台），避免当前分页页内查不到
+    const resp = await PG.api.listDevices({ page: 1, size: 200 });
+    const d = ((resp && resp.items) || []).find(x => x.deviceId === id);
     if (!d) return;
     const dl = PG.ui.drawer({
       title: "设备详情 · " + U.esc(d.name),
@@ -68,8 +81,9 @@
         <div class="stat-line"><span>绑定时间</span><span>${U.esc(d.boundAt)}</span></div>
         <div class="stat-line"><span>区域</span><span>${U.esc(d.region || "—")}</span></div>
         <div class="row" style="margin-top:16px;gap:10px">
-          <button class="btn btn-primary" id="dl-lock">${d.remoteLocked ? "解锁" : "远程锁屏"}</button>
+          ${d.remoteLocked ? PG.guard("devices", "unlock", '<button class="btn btn-primary" id="dl-lock">解锁</button>') : PG.guard("devices", "lock", '<button class="btn btn-primary" id="dl-lock">远程锁屏</button>')}
           <button class="btn" id="dl-parent">查看家长</button>
+          ${PG.guard("devices", "unbind", '<button class="btn btn-danger" id="dl-unbind">解绑设备</button>')}
         </div>`,
       width: 460,
     });
@@ -93,6 +107,13 @@
       PG.state.search = d.parentPhone || d.parentName || "";
       PG.router.go("parents");
     };
+    const dlUnbind = dl.el.querySelector("#dl-unbind");
+    if (dlUnbind) dlUnbind.onclick = () => PG.ui.confirm("解绑设备", "确认解绑 " + U.esc(d.deviceId) + "？解绑后设备归属清除、设备令牌作废，孩子端将失去管控，操作不可恢复。", async () => {
+      await PG.api.unbindDevice(d.deviceId);
+      PG.ui.toast("ok", "已解绑", d.deviceId);
+      dl.close();
+      load(document.getElementById("view"));
+    }, true);
   }
 
   function debounce(fn, ms) { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; }

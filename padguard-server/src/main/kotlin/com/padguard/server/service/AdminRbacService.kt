@@ -89,7 +89,7 @@ class AdminRbacService(
 
     fun listAdmins(adminId: String): List<AdminDto> {
         requireRead(adminPerm, adminId, "rbac")
-        return adminRepository.findAll().map { toAdminDto(it) }
+        return adminRepository.findAll().map { toAdminDto(it, adminPerm) }
     }
 
     @Transactional
@@ -113,7 +113,7 @@ class AdminRbacService(
         )
         adminRepository.save(admin)
         auditService.record(adminId, admin.id, AdminAudit.RBAC_CREATE, targetType = "admin", targetId = admin.id, detail = "新建管理员 ${admin.username} 角色 ${req.roleId}")
-        return mapOf("ok" to true, "admin" to toAdminDto(admin), "password" to pwd)
+        return mapOf("ok" to true, "admin" to toAdminDto(admin, adminPerm), "password" to pwd)
     }
 
     @Transactional

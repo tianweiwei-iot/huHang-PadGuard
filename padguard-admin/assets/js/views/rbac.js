@@ -58,7 +58,7 @@
     render: () => `
       <div class="page-head"><div><h2>权限与角色（RBAC）</h2>
         <p>基于 <code>area:action</code> 动词模型的细粒度授权；矩阵由服务端下发，保存后即时生效</p></div>
-        <div class="page-actions"><button class="btn btn-primary" id="r-newrole">＋ 新建角色</button></div></div>
+        <div class="page-actions">${PG.guard("rbac", "write", '<button class="btn btn-primary" id="r-newrole">＋ 新建角色</button>')}</div></div>
       <div class="card">
         <div class="row" style="gap:8px;margin-bottom:14px;border-bottom:1px solid var(--border-soft);padding-bottom:10px">
           <button class="btn btn-xs btn-primary tab" data-tab="matrix">权限矩阵</button>
@@ -205,10 +205,10 @@
         <div class="row-actions">
           ${isLocked(role)
             ? '<span class="badge gray">系统锁定 · 不可编辑</span>'
-            : `<button class="btn btn-sm" id="r-readonly">一键只读</button>
-               <button class="btn btn-sm" id="r-selectall">全选</button>
-               ${role.overridden ? '<button class="btn btn-sm btn-ghost" id="r-reset">还原默认</button>' : ''}
-               ${role.isSystem ? '' : '<button class="btn btn-sm btn-danger" id="r-del">删除角色</button>'}`}
+            : `${PG.guard("rbac", "write", '<button class="btn btn-sm" id="r-readonly">一键只读</button>')}
+               ${PG.guard("rbac", "write", '<button class="btn btn-sm" id="r-selectall">全选</button>')}
+               ${role.overridden ? PG.guard("rbac", "write", '<button class="btn btn-sm btn-ghost" id="r-reset">还原默认</button>') : ''}
+               ${role.isSystem ? '' : PG.guard("rbac", "delete", '<button class="btn btn-sm btn-danger" id="r-del">删除角色</button>')}`}
         </div>
       </div>
       ${locked
@@ -416,10 +416,10 @@
         <td>${a.status === "active" ? '<span class="badge green">启用</span>' : '<span class="badge gray">停用</span>'}</td>
         <td class="cell-sub">${U.esc(a.lastLoginAt || "—")}</td>
         <td><div class="row-actions">
-          <button class="btn btn-xs" data-assign="${U.esc(a.id)}">变更角色</button>
-          <button class="btn btn-xs" data-edit="${U.esc(a.id)}">编辑</button>
-          <button class="btn btn-xs" data-reset="${U.esc(a.id)}">重置密码</button>
-          <button class="btn btn-xs btn-danger" data-del="${U.esc(a.id)}">删除</button>
+          ${PG.guard("rbac", "assign", '<button class="btn btn-xs" data-assign="' + U.esc(a.id) + '">变更角色</button>')}
+          ${PG.guard("rbac", "write", '<button class="btn btn-xs" data-edit="' + U.esc(a.id) + '">编辑</button>')}
+          ${PG.guard("rbac", "reset_pwd", '<button class="btn btn-xs" data-reset="' + U.esc(a.id) + '">重置密码</button>')}
+          ${PG.guard("rbac", "delete", '<button class="btn btn-xs btn-danger" data-del="' + U.esc(a.id) + '">删除</button>')}
         </div></td></tr>`).join("")}
     </tbody></table></div>`;
     el.querySelectorAll("[data-assign]").forEach((b) => (b.onclick = () => assignRole(b.dataset.assign, roles, root)));

@@ -167,6 +167,13 @@ table.tbl tbody tr:hover { background: var(--surface-2); }
 table.tbl tbody tr:last-child td { border-bottom: none; }
 .tbl .row-actions { display: flex; gap: 6px; }
 .cell-strong { font-weight: 600; }
+
+/* ---------- 分页器（B3/B4） ---------- */
+.pager { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+.pager .pg-cur { background: var(--brand); color: #fff; border-color: var(--brand); }
+.pager .pg-ell { cursor: default; opacity: .6; }
+.pager .pg-info { margin-left: auto; color: var(--text-3); font-size: 12px; }
+
 .cell-sub { color: var(--text-3); font-size: 12px; }
 
 /* ---------- 徽章 ---------- */

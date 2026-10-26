@@ -7,6 +7,7 @@ import com.padguard.core.data.model.CommandAck
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
 import com.padguard.core.data.model.policy.AppListMode
+import com.padguard.core.data.model.policy.AppPolicy
 import com.padguard.core.data.model.policy.BlacklistAction
 import com.padguard.core.data.model.policy.PolicyPackage
 import com.padguard.core.data.repository.AuthRepository
@@ -41,10 +42,8 @@ import com.padguard.core.engine.lock.LockReason
 import com.padguard.core.engine.lock.LockState
 import com.padguard.core.engine.schedule.ScheduleEvaluator
 import com.padguard.core.engine.schedule.ScheduleVerdict
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Instant
@@ -103,15 +102,6 @@ class PolicyEngine @Inject constructor(
 
     /** 锁定态，锁屏页与状态页直接订阅 */
     val lockState: StateFlow<LockState> = lockController.state
-
-    /**
-     * 当前生效的管控模式（NORMAL / LEARNING / FOCUS），随策略包下发。
-     *
-     * PolicyPackage 携带 sceneMode 字段，引擎据此持有当前管控模式，
-     * 供 UI / 后续模式化管控消费。
-     */
-    private val _sceneMode = MutableStateFlow("NORMAL")
-    val sceneMode: StateFlow<String> = _sceneMode.asStateFlow()
 
     /**
      * 串行化 [applyAll]。
@@ -173,8 +163,6 @@ class PolicyEngine @Inject constructor(
             }
 
             lastAppliedVersion = policy.version
-            //  把本次策略包携带的管控模式提升为当前生效模式，供 UI / 模式化管控消费。
-            if (_sceneMode.value != policy.sceneMode) _sceneMode.value = policy.sceneMode
 
             if (report.hasFailure) {
                 raiseOnce(
@@ -285,9 +273,7 @@ class PolicyEngine @Inject constructor(
         val limit = appLimitEnforcer.track(policy.appLimit, foregroundPackage, screenOn, eyeCareResting)
         var blockedPackage: String? = null
         var blockedReason = ""
-        // 命中黑名单时的处置方式：默认弹拦截页，黑名单分支按策略覆盖为 SILENT_CLOSE。
-        // 限额超额分支不覆盖 —— 那里必须给解释，见 [EngineTick.blockedAction] 的说明。
-        var blockedAction: BlacklistAction = BlacklistAction.BLOCK_DIALOG
+        var silentClose = false
         if (limit is LimitVerdict.Blocked) {
             // 家长已放行（临时解锁）的应用本轮不拦。
             // 孩子端最常见的申请入口是"应用拦截页"，家长同意的正是"再玩一会儿这一个应用"；
@@ -325,21 +311,19 @@ class PolicyEngine @Inject constructor(
         // 黑名单的主管控手段是 DO 的「隐藏应用」（图标消失、无法启动），
         // 但设备失去 Device Owner（重装/解绑后重新激活、ROM 升级等）后会退化为 LEGACY，
         // 隐藏/挂起都不可用 —— 如果这里不再拦截，孩子就能照常打开被管控的应用（实际故障）。
-        // 因此在每个采样点检查前台包名：命中黑名单就复用单应用拦截页压回去，
+        // 因此在每个采样点检查前台包名：命中黑名单就按 blacklistAction 处置
+        // （BLOCK_DIALOG 弹拦截页 / SILENT_CLOSE 静默退回桌面），
         // 并上报 BLACKLIST_APP_LAUNCH 让家长知道孩子尝试过。
         if (foregroundPackage != null && blockedPackage == null) {
-            val isBlacklisted = when (policy.app.mode) {
-                AppListMode.BLACKLIST ->
-                    foregroundPackage in policy.app.blacklist ||
-                        policy.app.systemAppRules[foregroundPackage]?.uppercase() == "BLOCK"
-                // 白名单模式不在此兜底：差集逻辑需要"全部可启动应用"参与，
-                // 在采样点做会把桌面、输入法等一并拦死，风险远大于收益（白名单依赖 DO）。
-                AppListMode.WHITELIST -> false
-            }
-            if (isBlacklisted && !lockController.isTempUnlockActive(foregroundPackage)) {
-                blockedPackage = foregroundPackage
-                blockedReason = "该应用已被家长管控，无法使用"
-                blockedAction = policy.app.blacklistAction
+            val (blocked, silent) = decideBlacklistBlock(
+                foregroundPackage,
+                policy.app,
+                lockController.isTempUnlockActive(foregroundPackage)
+            )
+            if (blocked != null) {
+                blockedPackage = blocked
+                silentClose = silent
+                if (!silent) blockedReason = "该应用已被家长管控，无法使用"
                 raiseOnce(
                     key = "blacklist:$foregroundPackage",
                     type = RiskType.BLACKLIST_APP_LAUNCH,
@@ -399,7 +383,7 @@ class PolicyEngine @Inject constructor(
             minorMode = minorMode,
             blockedPackage = blockedPackage,
             blockedReason = blockedReason,
-            blockedAction = blockedAction,
+            silentClose = silentClose,
             pendingRestReport = pendingRestReport
         )
     }
@@ -465,36 +449,15 @@ class PolicyEngine @Inject constructor(
 
     fun kioskRuntime() = kioskEnforcer.runtime()
 
-    fun isKioskAllowed(packageName: String): Boolean = kioskEnforcer.isAllowed(packageName)
-
     fun matchUrl(url: String, pageTitle: String = ""): WebVerdict = webEnforcer.match(url, pageTitle)
 
     fun isMonitoredBrowser(packageName: String): Boolean = webEnforcer.isMonitoredBrowser(packageName)
 
-    fun activePeripheralOverrides(): Map<String, Boolean> = peripheralEnforcer.activeOverrides()
-
-    /** 未成年人模式当前状态（是否开启 / 是否处于宵禁），供状态页与家长展示 */
-    suspend fun minorModeVerdict(): MinorModeVerdict =
-        minorModeEnforcer.evaluate(policyRepository.getPolicy().minorMode, timezone = policyRepository.getPolicy().schedule.timezone)
-
-    /** 当前档位对应的宵禁时段；模式关闭或未启用宵禁时返回 null */
-    suspend fun curfewRule(): com.padguard.core.data.model.policy.ScheduleRule? =
-        minorModeEnforcer.curfewRuleOf(policyRepository.getPolicy().minorMode)
-
-    /**
-     * 未成年人模式是否开启。
-     *
-     * 孩子端据此**隐藏**退出入口：指南要求"退出未成年人模式需家长验证"，
-     * 最稳的实现是孩子端根本不给这个入口，而不是"给了但验证失败"。
-     */
-    suspend fun minorModeEnabled(): Boolean =
-        policyRepository.getPolicy().minorMode.enabled
-
-    /** 护眼休息的"跳过"入口，供家长临时授权场景使用 */
-    fun skipEyeCareRest() {
-        eyeCareEnforcer.skipRest()
-        lockController.releaseLock(LockReason.EYE_CARE)
-    }
+    // 注：以下只读 API 经核验无任何消费点（E6），已按评估文档"接线或删除"原则移除：
+    // isKioskAllowed / activePeripheralOverrides / minorModeVerdict / curfewRule /
+    // minorModeEnabled / skipEyeCareRest。
+    // 保留 monitoring()（GuardService:619 已消费）、kioskRuntime()（E2 水印桥接使用）、
+    // matchUrl / isMonitoredBrowser（E1 上网管控依赖，单独迭代）。
 
     // ==================== 内部 ====================
 
@@ -529,6 +492,38 @@ class PolicyEngine @Inject constructor(
         private const val TAG = "PolicyEngine"
         private const val NOT_APPLIED = -1
         private const val MAX_DETAIL_CHARS = 500
+
+        /**
+         * 黑名单前台拦截判定（纯函数，便于 JVM 单测）。
+         *
+         * 仅在「设备退化为 LEGACY（无 DO/PO，隐藏/挂起不可用）」时由 [tick] 兜底调用，
+         * 命中黑名单且未被家长临时放行时返回被拦包名；[BlacklistAction.SILENT_CLOSE] 时
+         * 第二个返回值为 true，告知 app 层静默退回桌面而非弹拦截页。
+         *
+         * 抽出为纯函数是因为 [tick] 整体依赖大量 Android 侧 Enforcer，无法在 JVM 单测里直接构造；
+         * 把"命中判定 + 处置方式"这一核心策略与平台副作用解耦，既保证可测，也不改变既有行为。
+         */
+        internal fun decideBlacklistBlock(
+            foregroundPackage: String,
+            app: AppPolicy,
+            tempUnlocked: Boolean
+        ): Pair<String?, Boolean> {
+            if (tempUnlocked) return null to false
+            // 白名单模式不在此兜底：差集逻辑需要"全部可启动应用"参与，
+            // 在采样点做会把桌面、输入法等一并拦死，风险远大于收益（白名单依赖 DO）。
+            if (app.mode == AppListMode.WHITELIST) return null to false
+            // systemAppRules 是按包显式覆盖：ALLOW 优先于黑名单成员资格（例如被归类进黑名单的
+            // 系统应用明确放行），BLOCK 则强制纳入拦截（即便不在黑名单列表里）。
+            return when (app.systemAppRules[foregroundPackage]?.uppercase()) {
+                "ALLOW" -> null to false
+                "BLOCK" -> foregroundPackage to (app.blacklistAction == BlacklistAction.SILENT_CLOSE)
+                else -> if (foregroundPackage in app.blacklist) {
+                    foregroundPackage to (app.blacklistAction == BlacklistAction.SILENT_CLOSE)
+                } else {
+                    null to false
+                }
+            }
+        }
     }
 }
 
@@ -550,14 +545,11 @@ data class EngineTick(
     /** 拦截原因文案（限额超额/黑名单命中），供拦截页展示 */
     val blockedReason: String = "",
     /**
-     * 命中**黑名单**时的处置方式，取自 `app.blacklistAction`：
-     * - [BlacklistAction.BLOCK_DIALOG]：弹出拦截页说明理由（默认，也是最诚实的一种 —— 孩子知道为什么被拦）；
-     * - [BlacklistAction.SILENT_CLOSE]：不弹页，直接把孩子送回桌面。
-     *
-     * 仅黑名单命中会覆盖它；**单应用限额超额恒为 BLOCK_DIALOG** ——
-     * 超额是一种"用完额度"的状态，不给解释会让孩子以为应用坏了。
+     * 黑名单命中的处置方式：true = 静默退回桌面（[BlacklistAction.SILENT_CLOSE]），
+     * 不弹拦截页；false = 弹拦截页（[BlacklistAction.BLOCK_DIALOG]）。
+     * 仅在 [blockedPackage] 非空且来自黑名单兜底时适用。
      */
-    val blockedAction: BlacklistAction = BlacklistAction.BLOCK_DIALOG,
+    val silentClose: Boolean = false,
     /**
      * 护眼强制休息结束后待上报服务端的事件（restId, 实际休息毫秒）。
      * 非空时由 [com.padguard.child.service.GuardService] 异步上报，

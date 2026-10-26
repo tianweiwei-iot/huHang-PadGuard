@@ -34,6 +34,19 @@ class DataInitializer(
     private val contentFilterService: ContentFilterService,
     private val env: Environment,
     /**
+     * 演示/测试账号开关。
+     *
+     * 默认关闭（false）。仅当「local profile + 显式开启」时才播种弱口令演示账号
+     * （便于开发联调）。正式部署（start-server.bat 走 local 但未开启此开关）不会播种
+     * 任何弱口令账号，转而走下方安全分支：无账号时随机生成强口令并落盘、存量弱口令账号
+     * 每次启动强制重置。
+     *
+     * 这是把"后门账号随安装包分发"从根上收掉的最后一道闸：早期演示账号对所有环境
+     * 无条件生效，等于把家长端全功能入口的默认凭据印在安装包里。
+     */
+    @Value("\${padguard.demo-accounts-enabled:false}")
+    private val demoAccountsEnabled: Boolean,
+    /**
      * 家长端初始/重置口令文件落盘路径。
      * 口令文件需落在挂载卷（uploads/）内而非容器工作目录：工作目录在容器可写层里、容器一重建即丢，
      * 而该口令是家长端初始/重置口令、无人知晓明文，文件丢失即等于锁死家长端。
@@ -53,8 +66,8 @@ class DataInitializer(
     @EventListener(ApplicationReadyEvent::class)
     fun seed() {
         seedParentAccount()
-        if (env.activeProfiles.contains(PROFILE_LOCAL)) {
-            // 测试账号（PERMANENT 永久订阅）只允许在 local 联调环境播种。
+        if (demoAccountsEnabled && env.activeProfiles.contains(PROFILE_LOCAL)) {
+            // 测试账号（PERMANENT 永久订阅）只允许在「local 联调 + 显式开启演示账号」时播种。
             // 早期它对所有环境无条件生效，等于随安装包分发一个永久全功能账号，
             // 密码还随源码/安装包分发 —— 与演示账号属同一类漏洞，收口到同一处理口径。
             seedTestAccount()
@@ -77,7 +90,10 @@ class DataInitializer(
      *   避免口令随安装包分发导致任何人都能登录家长端、查看实时画面、定位轨迹并远程操控设备。
      */
     private fun seedParentAccount() {
-        if (env.activeProfiles.contains(PROFILE_LOCAL)) {
+        // 演示账号只在「local profile 且显式开启 demo-accounts」时播种，避免随发布包分发弱口令账号。
+        // 正式部署（start-server.bat 走 local 但未开启此开关）走下方安全分支：
+        // 库里无账号时随机生成强口令并落盘；存量仍在使用出厂弱口令的账号强制重置。
+        if (demoAccountsEnabled && env.activeProfiles.contains(PROFILE_LOCAL)) {
             seedDemoAccount()
             return
         }

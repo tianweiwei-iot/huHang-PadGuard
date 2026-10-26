@@ -45,7 +45,13 @@ class Admin(
      */
     @Column(name = "token_version", nullable = false) var tokenVersion: Long = 0,
     @Column(name = "last_login_at") var lastLoginAt: Long? = null,
-    @Column(name = "created_at") var createdAt: Long = 0
+    @Column(name = "created_at") var createdAt: Long = 0,
+    /**
+     * 令牌版本号（B6 登出吊销）：每次登出自增。管理员令牌签发时写入当前版本，
+     * 拦截器校验令牌版本 == 账号当前版本，不等即视为已吊销（旧令牌一律拒绝）。
+     * 历史令牌（本字段上线前签发、无 ver 声明）默认按 0 处理，首次登出后即被淘汰。
+     */
+    @Column(name = "token_version") var tokenVersion: Long = 0
 )
 
 /**

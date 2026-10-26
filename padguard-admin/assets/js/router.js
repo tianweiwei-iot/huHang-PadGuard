@@ -4,18 +4,22 @@
 (function (global) {
   const PG = global.PG || (global.PG = {});
   const views = PG.views;          // 复用 components.js 中初始化的注册表
+  // 每个菜单项绑定到其「读权限」领域；无该领域读权限的管理员看不到对应菜单（服务端同样会拒绝读请求）。
   const NAV = [
-    { title: "总览", items: ["dashboard"] },
-    { title: "运营管理", items: ["parents", "devices", "billing"] },
-    { title: "平台治理", items: ["rbac", "server", "serverProfile", "audit", "settings"] },
+    { title: "总览", items: [{ k: "dashboard", area: "server" }] },
+    { title: "运营管理", items: [{ k: "parents", area: "parents" }, { k: "devices", area: "devices" }, { k: "billing", area: "billing" }] },
+    { title: "平台治理", items: [{ k: "rbac", area: "rbac" }, { k: "server", area: "server" }, { k: "serverProfile", area: "server" }, { k: "audit", area: "audit" }, { k: "settings", area: "settings" }] },
   ];
 
   function buildSidebar() {
     const nav = document.getElementById("sidebar-nav");
-    nav.innerHTML = NAV.map(g => '<div class="nav-group-title">' + g.title + '</div>' + g.items.map(k => {
-      const v = views[k]; if (!v) return "";
-      return '<div class="nav-item" data-view="' + k + '"><span class="nav-ico">' + v.icon + '</span><span class="nav-label">' + v.title + '</span></div>';
-    }).join("")).join("");
+    nav.innerHTML = NAV.map(g => {
+      const items = g.items.filter(it => PG.canRead(it.area)).map(it => {
+        const v = views[it.k]; if (!v) return "";
+        return '<div class="nav-item" data-view="' + it.k + '"><span class="nav-ico">' + v.icon + '</span><span class="nav-label">' + v.title + '</span></div>';
+      }).join("");
+      return '<div class="nav-group-title">' + g.title + '</div>' + items;
+    }).join("");
     nav.querySelectorAll(".nav-item").forEach(el => el.onclick = () => go(el.dataset.view));
   }
 

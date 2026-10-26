@@ -11,7 +11,16 @@ package com.padguard.server.dto
 /** 登录返回 */
 data class AdminLoginResponse(val token: String, val admin: AdminDto)
 
-/** 管理员概要（前端用 name / roleName / roleId / username / status / mfa / lastLoginAt / id） */
+/** 分页信封：列表接口统一返回 items + 分页元信息，前端据此渲染分页器（B3/B4） */
+data class PageResult<T>(
+    val items: List<T>,
+    val page: Int,
+    val size: Int,
+    val total: Int,
+    val totalPages: Int
+)
+
+/** 管理员概要（前端用 name / roleName / roleId / username / status / mfa / lastLoginAt / id / privileges） */
 data class AdminDto(
     val id: String,
     val username: String,
@@ -22,7 +31,9 @@ data class AdminDto(
     val status: String,
     val mfa: Boolean,
     val createdAt: Long,
-    val lastLoginAt: Long?
+    val lastLoginAt: Long?,
+    /** 当前管理员的有效权限（area -> 动作列表），供前端按权限隐藏菜单与按钮 */
+    val privileges: Map<String, List<String>> = emptyMap()
 )
 
 /** 家长账号列表行 */

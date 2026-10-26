@@ -98,6 +98,14 @@ class AuthRepository @Inject constructor(
          * [com.padguard.child.consent.OneTimeConsentViewModel.finishAnyway]）即清掉。
          */
         val REAUTH_REQUIRED = booleanPreferencesKey("reauth_required")
+         * 家长已在引导页**显式确认已知风险仍要继续**、跳过「设备所有者(DO)」预置的标记（发布包强制首步用）。
+         *
+         * 见 [com.padguard.child.MainActivity]：发布包把 DO 预置设为装机第一道门，
+         * 未开 DO 时防卸载 / 静默安装 / 禁止恢复出厂等核心承诺在系统层面全部不可用，
+         * "孩子可自卸"即成立。仅当家长在引导页明确确认「已知风险仍要继续」才置位本标记，
+         * 正常部署（恢复出厂 + 扫码 / adb 预置）不会触发它，DO 始终就位。
+         */
+        val DEVICE_OWNER_PROMPT_ACK = booleanPreferencesKey("device_owner_prompt_ack")
     }
 
     /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
@@ -320,6 +328,17 @@ class AuthRepository @Inject constructor(
     suspend fun clearReauthRequired() {
         runCatching { store.edit { it[Keys.REAUTH_REQUIRED] = false } }
             .onFailure { Logger.w(TAG) { "clear reauth required failed" } }
+    /**
+     * 家长是否已显式跳过「设备所有者(DO)」预置引导（发布包强制首步）。
+     * 入口分流据此决定是否仍因「未成为 DO」强制停在预置引导页。
+     */
+    val isDeviceOwnerPromptAck: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+        .map { it[Keys.DEVICE_OWNER_PROMPT_ACK] ?: false }
+
+    /** 标记家长已显式跳过 DO 预置（已知风险仍要继续），停止强制预置页。 */
+    suspend fun setDeviceOwnerPromptAck() {
+        runCatching { store.edit { it[Keys.DEVICE_OWNER_PROMPT_ACK] = true } }
+            .onFailure { Logger.w(TAG) { "set device owner prompt ack failed" } }
     }
 
     /** 标记权限引导已完成，后续登录不再重复申请。 */

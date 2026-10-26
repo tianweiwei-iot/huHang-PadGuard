@@ -174,6 +174,17 @@ class AdminServiceTest {
             table.values.filter { it.receivedAt < ts }
     }
 
+    private class FakeUsageSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionRepository {
+        override val table = LinkedHashMap<String, UsageSession>()
+        override fun idOf(e: UsageSession) = e.deviceId
+        override fun findByDeviceId(deviceId: String): UsageSession? = table.values.firstOrNull { it.deviceId == deviceId }
+        override fun deleteByDeviceId(deviceId: String): Int {
+            val before = table.size
+            table.values.removeIf { it.deviceId == deviceId }
+            return before - table.size
+        }
+    }
+
     // ----------------------------- 测试夹具 -----------------------------
 
     private class Fixture(
@@ -185,7 +196,8 @@ class AdminServiceTest {
         val devices: FakeDeviceRepo,
         val alerts: FakeAlertRepo,
         val overrides: FakeOverrideRepo,
-        val settings: FakeSystemSettingRepo
+        val settings: FakeSystemSettingRepo,
+        val usageSessions: FakeUsageSessionRepo
     )
 
     private fun fixture(activeProfiles: Set<String> = emptySet()): Fixture {
@@ -200,6 +212,7 @@ class AdminServiceTest {
         val settings = FakeSystemSettingRepo()
         val commands = FakeCommandRepo()
         val screenshots = FakeScreenshotRepo()
+        val usageSessions = FakeUsageSessionRepo()
 
         val objectMapper = ObjectMapper()
         // 计费/指令等服务仅用于满足 AdminService 构造；本测试不触发它们的业务路径。
@@ -231,14 +244,14 @@ class AdminServiceTest {
 
         // W25：AdminService 已拆分为多个领域 @Service，门面仅做委托。测试直接构造各子服务，
         // 公开方法签名与原本一致（f.svc.* 调用无需改动）。
-        val authS = AdminAuthService(admins, jwt)
+        val authS = AdminAuthService(admins, jwt, adminPerm)
         val auditS = AdminAuditService(adminPerm, admins, users, auditLogs, alerts, auditService)
         val billingS = AdminBillingService(subs, orders, users, billing, adminPerm, auditService)
         val rbacS = AdminRbacService(admins, adminPerm, auditService, mailService, settings, objectMapper)
         val settingsS = AdminSettingsService(adminPerm, settings, billing, objectMapper, auditService, env)
         val monitorS = AdminServerMonitorService(adminPerm, requestMetrics, runtimeLogRing, dataSource, serverProfileService)
-        val parentS = AdminParentService(users, subs, devices, adminPerm, billing, mailService, billingS, auditService, settings, objectMapper)
-        val deviceS = AdminDeviceService(devices, users, commandService, adminPerm, auditService)
+        val parentS = AdminParentService(users, subs, devices, usageSessions, adminPerm, billing, mailService, billingS, auditService, settings, objectMapper)
+        val deviceS = AdminDeviceService(devices, users, commandService, usageSessions, mqtt, adminPerm, auditService)
         val dashboardS = AdminDashboardService(users, devices, subs, orders, alerts, adminPerm, auditS, requestMetrics, runtimeLogRing, dataSource, serverProfileService)
 
         val svc = AdminService(
@@ -252,7 +265,7 @@ class AdminServiceTest {
         admins.save(Admin("A-finance", "finance", "h", "财务", null, "finance", "active", false, null, 0))
         admins.save(Admin("A-disabled", "disabled", "h", "停用超管", null, "super", "disabled", false, null, 0))
 
-        return Fixture(svc, users, admins, orders, subs, devices, alerts, overrides, settings)
+        return Fixture(svc, users, admins, orders, subs, devices, alerts, overrides, settings, usageSessions)
     }
 
     private fun seedParent(f: Fixture, id: String = "parent-1", status: String = "active") {
@@ -592,5 +605,168 @@ class AdminServiceTest {
         val r = f.svc.saveSettings("A-super", AdminSettingsSaveDto(mockPay = true))
         assertEquals(true, r.mockPay, "开发环境允许开启示例支付（本地联调用）")
         assertEquals(true, f.svc.settings("A-super").mockPay, "开启必须真实落库并被回读确认")
+    }
+
+    // ----------------------------- B6：登出吊销（token 版本） -----------------------------
+
+    @Test
+    fun `logout bumps admin token version so prior tokens are revoked`() {
+        val f = fixture()
+        assertEquals(0, f.admins.table["A-super"]!!.tokenVersion, "初始令牌版本为 0")
+        f.svc.logout("A-super")
+        assertEquals(1, f.admins.table["A-super"]!!.tokenVersion, "登出必须自增令牌版本，使所有历史令牌（含本次）失效")
+    }
+
+    // ----------------------------- B7：运营后台设备解绑端点 -----------------------------
+
+    @Test
+    fun `super can unbind a device and revoke its token`() {
+        val f = fixture()
+        f.users.save(User("p-b7", "13800000005", "h").also { it.status = "active" })
+        f.devices.save(com.padguard.server.domain.Device("dev-b7").also {
+            it.userId = "p-b7"; it.deviceTokenHash = "valid-token"
+        })
+        val r = f.svc.unbindDevice("A-super", "dev-b7")
+        assertEquals(true, r["ok"])
+        val dev = f.devices.table["dev-b7"]!!
+        assertEquals(null, dev.userId, "解绑必须清除设备归属")
+        assertTrue(dev.deviceTokenHash.startsWith("revoked_"), "解绑必须作废设备令牌，使旧凭据心跳 401")
+    }
+
+    @Test
+    fun `ops without devices unbind is blocked from unbinding`() {
+        val f = fixture()
+        f.users.save(User("p-b7b", "13800000004", "h").also { it.status = "active" })
+        f.devices.save(com.padguard.server.domain.Device("dev-b7b").also { it.userId = "p-b7b" })
+        // A-ops 默认无 devices:unbind 权限
+        val ex = assertThrows(BizException::class.java) { f.svc.unbindDevice("A-ops", "dev-b7b") }
+        assertEquals(ParentErr.FORBIDDEN, ex.code, "缺 devices:unbind 必须返回 FORBIDDEN")
+        assertEquals("p-b7b", f.devices.table["dev-b7b"]!!.userId, "越权解绑不得清除归属")
+    }
+
+    // ----------------------------- B8：登录/列表返回有效权限（前端据此隐藏按钮） -----------------------------
+
+    @Test
+    fun `admin dto carries effective privileges derived from the role`() {
+        val f = fixture()
+        val list = f.svc.listAdmins("A-super")
+        val superDto = list.first { it.id == "A-super" }
+        assertTrue(superDto.privileges.isNotEmpty(), "管理员 DTO 必须携带有效权限，供前端隐藏按钮")
+        assertEquals(true, superDto.privileges["parents"]?.contains("delete"), "超管应拥有 parents:delete")
+        // 运营角色无财务退款权限：前端据此隐藏「退款」按钮
+        val opsDto = list.first { it.id == "A-ops" }
+        assertEquals(false, opsDto.privileges["billing"]?.contains("refund") == true, "运营不应拥有 billing:refund")
+    }
+
+    // ----------------------------- B1：设备列表真实数据（今日用量 + 区域） -----------------------------
+
+    @Test
+    fun `device list shows real region and today usage derived from usage session`() {
+        val f = fixture()
+        f.users.save(User("p-b1", "13800000007", "h").also { it.status = "active"; it.region = "上海"; it.nickname = "张家长" })
+        f.devices.save(com.padguard.server.domain.Device("dev-b1").also { it.userId = "p-b1" })
+        // 今日计时会话：起点 30 分钟前、额度 120 分钟、无休息扣除
+        val now = System.currentTimeMillis()
+        f.usageSessions.save(
+            com.padguard.server.domain.UsageSession(
+                "dev-b1", todayKey(now), startEpoch = now - 30 * 60_000L,
+                quotaMinutes = 120, extendedMinutes = 0, restAccumulatedMs = 0
+            )
+        )
+        val rows = f.svc.listDevices("A-super", null, null).items
+        val row = rows.first { it.deviceId == "dev-b1" }
+        assertEquals("上海", row.region, "设备区域应来自归属家长 region，而非恒为空串")
+        assertTrue(row.todayUsageMinutes in 29..31, "今日用量应来自真实会话（约 30 分钟），而非恒为 0")
+    }
+
+    @Test
+    fun `device list falls back to empty region and zero usage when no session today`() {
+        val f = fixture()
+        f.users.save(User("p-b2", "13800000006", "h").also { it.status = "active" })
+        f.devices.save(com.padguard.server.domain.Device("dev-b2").also { it.userId = "p-b2" })
+        val rows = f.svc.listDevices("A-super", null, null).items
+        val row = rows.first { it.deviceId == "dev-b2" }
+        assertEquals("", row.region, "无区域时回退空串（前端对空串显示 —）")
+        assertEquals(0, row.todayUsageMinutes, "无今日会话时应为 0（前端显示 —）")
+    }
+
+    // ----------------------------- B3/B4：列表分页与带参筛选 -----------------------------
+
+    @Test
+    fun `parents list is paginated with correct total and totalPages`() {
+        val f = fixture()
+        repeat(25) { i -> f.users.save(User("p-%02d".format(i), "1380000%03d".format(i), "h").also { it.status = "active" }) }
+        val p1 = f.svc.listParents("A-super", null, null, null, 1, 10)
+        assertEquals(25, p1.total, "total 应为已种入的家长总数")
+        assertEquals(3, p1.totalPages, "25 条 / 每页 10 → 共 3 页")
+        assertEquals(1, p1.page)
+        assertEquals(10, p1.size)
+        assertEquals(10, p1.items.size, "第 1 页应返回 10 条")
+
+        val p2 = f.svc.listParents("A-super", null, null, null, 2, 10)
+        assertEquals(2, p2.page)
+        assertEquals(10, p2.items.size, "第 2 页应返回 10 条")
+
+        val p3 = f.svc.listParents("A-super", null, null, null, 3, 10)
+        assertEquals(3, p3.page)
+        assertEquals(5, p3.items.size, "第 3 页（末页）应返回剩余 5 条")
+
+        // 跨页不重复：三页 id 并集 = 25 且彼此无交集，分页切片不能丢数据也不能重复
+        val ids = (p1.items + p2.items + p3.items).map { it.id }.toSet()
+        assertEquals(25, ids.size, "三页去重后应为 25 个不同家长")
+    }
+
+    @Test
+    fun `parents list filters by status and paginates the filtered subset`() {
+        val f = fixture()
+        repeat(25) { i ->
+            val status = if (i < 10) "suspended" else "active"
+            f.users.save(User("p-%02d".format(i), "1380000%03d".format(i), "h").also { it.status = status })
+        }
+        // 筛选已冻结（10 条），每页 4 条 → 3 页（4+4+2）
+        val p1 = f.svc.listParents("A-super", null, "suspended", null, 1, 4)
+        assertEquals(10, p1.total, "按 status=suspended 筛选后应只剩 10 条")
+        assertEquals(3, p1.totalPages, "10 / 4 → 3 页")
+        assertEquals(4, p1.items.size, "首页 4 条")
+
+        val p3 = f.svc.listParents("A-super", null, "suspended", null, 3, 4)
+        assertEquals(2, p3.items.size, "末页 2 条")
+    }
+
+    @Test
+    fun `parents list keyword matches id or phone and returns single page subset`() {
+        val f = fixture()
+        f.users.save(User("unique-target", "13900008888", "h").also { it.status = "active" })
+        f.users.save(User("other-1", "13800000001", "h").also { it.status = "active" })
+        val byId = f.svc.listParents("A-super", "unique-target", null, null, 1, 20)
+        assertEquals(1, byId.total, "按 id 关键字应精确命中 1 条")
+        assertEquals("unique-target", byId.items.first().id)
+
+        val byPhone = f.svc.listParents("A-super", "13900008888", null, null, 1, 20)
+        assertEquals(1, byPhone.total, "按手机号关键字应精确命中 1 条")
+        assertEquals("unique-target", byPhone.items.first().id)
+    }
+
+    @Test
+    fun `paginate helper clamps page and caps size at 200`() {
+        val all = (1..500).map { "i-$it" }
+        // size 超过 200 应被压回 200
+        val capped = paginate(all, 1, 500)
+        assertEquals(200, capped.size, "单页上限 200")
+        assertEquals(200, capped.items.size, "被截断到 200 条")
+        assertEquals(3, capped.totalPages, "500 / 200 → 3 页")
+        // page 越界（大于总页数）→ 返回空页但保留 total 信息
+        val over = paginate(all, 99, 20)
+        assertEquals(500, over.total, "越界页仍上报真实总数")
+        assertEquals(99, over.page)
+        assertEquals(0, over.items.size, "越界页内容为空")
+        // page < 1 被钳回 1
+        val neg = paginate(all, 0, 20)
+        assertEquals(1, neg.page, "page<1 钳回 1")
+        assertEquals(20, neg.items.size, "钳回后仍正常切片")
+        // 空集合：totalPages 为 1 而非 0，避免前端除零
+        val empty = paginate(emptyList<String>(), 1, 20)
+        assertEquals(0, empty.total)
+        assertEquals(1, empty.totalPages, "空集合 totalPages 应为 1")
     }
 }

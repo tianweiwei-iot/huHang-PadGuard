@@ -7,6 +7,7 @@ import com.padguard.server.common.ParentErr
 import com.padguard.server.common.SERVER_ZONE_ID
 import com.padguard.server.domain.*
 import com.padguard.server.dto.AdminDto
+import com.padguard.server.dto.PageResult
 import com.padguard.server.dto.RevenueMonth
 import com.padguard.server.repository.AdminRepository
 import com.padguard.server.repository.PaymentOrderRepository
@@ -52,6 +53,7 @@ object AdminAudit {
     const val PARENTS_UPDATE = "PARENTS_UPDATE"
     const val PARENTS_DELETE = "PARENTS_DELETE"
     const val DEVICES_LOCK = "DEVICES_LOCK"
+    const val DEVICES_UNBIND = "DEVICE_UNBIND"
     const val DEVICES_UNLOCK = "DEVICES_UNLOCK"
     const val BILLING_MANUAL = "BILLING_MANUAL"
     const val BILLING_REFUND = "BILLING_REFUND"
@@ -72,6 +74,30 @@ fun online(dev: Device): Boolean {
     if (dev.onlineStatus != "ONLINE") return false
     val last = dev.lastOnlineAt ?: return false
     return System.currentTimeMillis() - last <= ONLINE_STALE_MS
+}
+
+/**
+ * 北京时间下的 "yyyy-MM-dd" 日键，用于按天切分 usage_sessions。
+ */
+fun todayKey(now: Long): String =
+    Instant.ofEpochMilli(now).atZone(SERVER_ZONE_ID).toLocalDate().toString()
+
+/**
+ * 设备当日已用时长（分钟），从 usage_sessions 派生：从计时起点到现在、扣除护眼强制休息、受当日额度封顶。
+ *
+ * 这是 B1 修复的核心 —— 此前后台设备列表把"今日用量"恒写为 0，家长看到的永远是 0h0m（前端对 0 显示"—"）。
+ * 现在改为读取真实计时会话：startEpoch 为空（今日尚未开始计时）或会话不属于今天时返回 0，
+ * 否则返回 (now - start - rest) ∩ (quota + extended)。
+ */
+fun todayUsedMinutes(session: UsageSession?, now: Long): Int {
+    val s = session ?: return 0
+    if (s.dayKey != todayKey(now)) return 0
+    val start = s.startEpoch ?: return 0
+    val raw = (now - start) - s.restAccumulatedMs
+    if (raw <= 0) return 0
+    val capMs = (s.quotaMinutes + s.extendedMinutes) * 60_000L
+    val capped = if (capMs > 0) minOf(raw, capMs) else raw
+    return ((capped + 59_999) / 60_000).toInt()
 }
 
 /** 套餐归类（用于后台筛选与分布统计）。PERMANENT 单独成类，避免被误判为 free。 */
@@ -97,11 +123,31 @@ fun orderStatusLower(status: String): String = when (status.uppercase()) {
     else -> status.lowercase()
 }
 
-fun toAdminDto(a: Admin): AdminDto = AdminDto(
+fun toAdminDto(a: Admin, adminPerm: AdminPermissionService? = null): AdminDto = AdminDto(
     id = a.id, username = a.username, name = a.displayName, roleId = a.role,
     roleName = AdminRoles.roleName(a.role), email = a.email, status = a.status,
-    mfa = a.mfaEnabled, createdAt = a.createdAt, lastLoginAt = a.lastLoginAt
+    mfa = a.mfaEnabled, createdAt = a.createdAt, lastLoginAt = a.lastLoginAt,
+    privileges = adminPerm?.rolePrivileges(a.role) ?: emptyMap()
 )
+
+/**
+ * 内存分页（B3/B4）：对已经过筛选的全量集合做切片，返回分页信封。
+ * 单页上限 200，避免超大 page/size 拖垮服务端；page 从 1 开始。
+ */
+fun <T> paginate(all: List<T>, page: Int, size: Int): PageResult<T> {
+    val p = if (page < 1) 1 else page
+    val s = when {
+        size < 1 -> 20
+        size > 200 -> 200
+        else -> size
+    }
+    val total = all.size
+    val totalPages = if (total == 0) 1 else (total + s - 1) / s
+    val from = (p - 1) * s
+    if (from >= total) return PageResult(emptyList(), p, s, total, totalPages)
+    val to = minOf(from + s, total)
+    return PageResult(all.subList(from, to), p, s, total, totalPages)
+}
 
 /**
  * 读操作的权限闸门。早期服务端只对写操作 require，全系统没有任何一处校验过 read —— 因此

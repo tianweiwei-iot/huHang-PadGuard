@@ -2,6 +2,8 @@ package com.padguard.core.engine.enforcer
 
 import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
+import com.padguard.core.data.db.AppUsageDao
+import com.padguard.core.data.db.DailyUsageDao
 import com.padguard.core.data.model.policy.AppLimitPolicy
 import com.padguard.core.data.repository.UsageRepository
 import com.padguard.core.engine.schedule.ScheduleEvaluator
@@ -10,10 +12,8 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
-import org.mockito.ArgumentMatchers.anyLong
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
-import org.mockito.Mockito.mockingDetails
 
 /**
  * [AppLimitEnforcer] 护眼休息期间跳过本地累计的 JVM 行为测试。
@@ -26,16 +26,15 @@ import org.mockito.Mockito.mockingDetails
  * 1. 正常亮屏 tick 会调用 addTotalUsage / addAppUsage 累计；
  * 2. 当 eyeCareResting=true 时，同样的亮屏 tick 不再新增累计（仅更新前台包名基线以防休息结束后误记）。
  *
- * 关于断言方式（重要）：[UsageRepository] 的累计方法均为 `suspend` 函数，编译后在 JVM 层
- * 多出一个 `Continuation` 形参。若用 `verify(repo).addTotalUsage(anyLong(), anyLong())`
- * 这种带 matcher 的写法，matcher 数量(2) 与实际形参(3) 不匹配，会抛
- * `InvalidUseOfMatchersException` / `UnfinishedVerificationException`。
- * 因此这里改用 [Mockito.mockingDetails].invocations 直接检视已记录的调用——
- * 绕开 matcher 对 suspend continuation 的计数约束，断言更稳定、且零额外依赖。
+ * 关于 suspend 函数验证：Kotlin 会给 suspend 函数追加一个隐藏且非空的 [kotlin.coroutines.Continuation]
+ * 参数，纯 Mockito 既无法在源码层显式写出该参数（"Too many arguments"），也无法用 `verify`
+ * 干净匹配（matcher 数量与运行时参数数量失配 → InvalidUseOfMatchersException）。
+ * 因此这里用 [CountingUsageRepository] 替身覆写 suspend 累计方法做计数，
+ * 既绕开 Mockito 的 suspend 限制，又让断言聚焦于"是否累计"这一语义本身。
  */
 class AppLimitEnforcerTest {
 
-    private lateinit var repo: UsageRepository
+    private lateinit var repo: CountingUsageRepository
     private lateinit var timeProvider: TimeProvider
     private var elapsed = 0L
     private var wall = 0L
@@ -45,11 +44,10 @@ class AppLimitEnforcerTest {
     fun setUp() {
         originalLoggerEnabled = Logger.enabled
         Logger.enabled = false
-        repo = mock(UsageRepository::class.java)
         timeProvider = mock(TimeProvider::class.java)
         `when`(timeProvider.elapsedRealtime()).thenAnswer { elapsed }
         `when`(timeProvider.now()).thenAnswer { wall }
-        `when`(repo.dayKey(anyLong())).thenReturn("2026-10-16")
+        repo = CountingUsageRepository(timeProvider)
     }
 
     @After
@@ -83,9 +81,8 @@ class AppLimitEnforcerTest {
         elapsed = 30_000L; wall = 1_030_000L
         enforcer.track(AppLimitPolicy(), "com.game", true, false)
 
-        assertEquals("亮屏非休息 tick 应累计 2 次总时长", 2, callCount("addTotalUsage"))
-        assertEquals("亮屏非休息 tick 应累计 2 次 com.game 应用时长",
-            2, appUsagePackages().count { it == "com.game" })
+        assertEquals(2, repo.totalUsageCalls)
+        assertEquals(2, repo.appUsageCalls("com.game"))
     }
 
     @Test
@@ -97,18 +94,16 @@ class AppLimitEnforcerTest {
         // 2) 亮屏且非休息：正常累计一次
         elapsed = 15_000L; wall = 1_015_000L
         enforcer.track(AppLimitPolicy(), "com.game", true, false)
-        assertEquals("非休息 tick 应累计 1 次总时长", 1, callCount("addTotalUsage"))
-        assertEquals("非休息 tick 应累计 1 次 com.game 应用时长",
-            1, appUsagePackages().count { it == "com.game" })
+        assertEquals(1, repo.totalUsageCalls)
+        assertEquals(1, repo.appUsageCalls("com.game"))
 
         // 3) 进入护眼休息锁屏（eyeCareResting=true），屏幕仍亮：不应再累计
         elapsed = 30_000L; wall = 1_030_000L
         enforcer.track(AppLimitPolicy(), "com.game", true, true)
 
         // 计数仍为 1，证明休息 tick 未新增任何累计
-        assertEquals("休息 tick 不应新增总时长累计", 1, callCount("addTotalUsage"))
-        assertEquals("休息 tick 不应新增应用时长累计",
-            1, appUsagePackages().count { it == "com.game" })
+        assertEquals(1, repo.totalUsageCalls)
+        assertEquals(1, repo.appUsageCalls("com.game"))
     }
 
     @Test
@@ -123,18 +118,35 @@ class AppLimitEnforcerTest {
         // 休息期间切换到 com.video（eyeCareResting=true）：只更新基线，不累计
         elapsed = 30_000L; wall = 1_030_000L
         enforcer.track(AppLimitPolicy(), "com.video", true, true)
-        assertEquals("休息期间 com.game 累计应保持 1 次",
-            1, appUsagePackages().count { it == "com.game" })
+        assertEquals(1, repo.appUsageCalls("com.game"))
         // com.video 在休息期间不应被累计
-        assertEquals("休息期间 com.video 不应被累计",
-            0, appUsagePackages().count { it == "com.video" })
+        assertEquals(0, repo.appUsageCalls("com.video"))
 
         // 休息结束后恢复亮屏非休息：com.video 作为新前台应被累计一次
         elapsed = 45_000L; wall = 1_045_000L
         enforcer.track(AppLimitPolicy(), "com.video", true, false)
-        assertEquals("休息结束后 com.video 应被累计 1 次",
-            1, appUsagePackages().count { it == "com.video" })
-        // 总时长累计：com.game 1 次 + com.video 1 次 = 2 次
-        assertEquals("全程总时长累计应为 2 次", 2, callCount("addTotalUsage"))
+        assertEquals(1, repo.appUsageCalls("com.video"))
+    }
+
+    /**
+     * 计数替身：覆写 suspend 累计方法做调用计数，绕开纯 Mockito 对 suspend 函数 verify 的限制。
+     * 父类 [UsageRepository] 已开放继承；dayKey() 等非 suspend 方法沿用真实实现（依赖 mock 的 timeProvider）。
+     */
+    private class CountingUsageRepository(
+        timeProvider: TimeProvider
+    ) : UsageRepository(mock(AppUsageDao::class.java), mock(DailyUsageDao::class.java), timeProvider) {
+        var totalUsageCalls = 0
+            private set
+        private val appUsageByPackage = mutableMapOf<String, Int>()
+
+        override suspend fun addTotalUsage(deltaMs: Long, timestamp: Long) {
+            totalUsageCalls++
+        }
+
+        override suspend fun addAppUsage(packageName: String, deltaMs: Long, timestamp: Long) {
+            appUsageByPackage[packageName] = appUsageByPackage.getOrDefault(packageName, 0) + 1
+        }
+
+        fun appUsageCalls(packageName: String): Int = appUsageByPackage.getOrDefault(packageName, 0)
     }
 }

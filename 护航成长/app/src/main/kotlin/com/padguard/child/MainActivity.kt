@@ -17,12 +17,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.padguard.child.BuildConfig
 import com.padguard.child.agreement.AgreementDialogHost
 import com.padguard.child.agreement.AgreementSessionState
 import com.padguard.child.bind.BindActivity
 import com.padguard.child.consent.OneTimeConsentScreen
 import com.padguard.child.hidden.AppHider
 import com.padguard.child.login.ChildLoginScreen
+import com.padguard.child.permission.DoProvisioningScreen
 import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.service.GuardService
 import com.padguard.child.ui.nav.PadGuardApp
@@ -140,11 +142,21 @@ private fun EntryRouter(
     val daPromptAck by authRepository.isDeviceAdminPromptAck.collectAsState(initial = false)
     // 装机授权完成后某项被关掉，需家长重新勾选（见 AuthorizationKeeper）
     val reauthRequired by authRepository.reauthRequired.collectAsState(initial = false)
+    // 家长是否已显式跳过「设备所有者(DO)」预置引导：为 true 时不再因「未成为 DO」卡在强制首步
+    val doPromptAck by authRepository.isDeviceOwnerPromptAck.collectAsState(initial = false)
+    // 发布包才强制 DO 预置；debug 构建保留软降级（开发机常多账号 / 已 DO，强制会卡死联调）
+    val isRelease = BuildConfig.BUILD_TYPE == "release"
+    val isDeviceOwner = controlMode == ControlMode.DEVICE_OWNER
     val context = LocalContext.current
 
     when {
         // 任一流尚未就绪前先显示启动页，避免裸奔
         consentDone == null || loggedIn == null || isBound == null -> Splash()
+
+        // 发布包强制首步：设备所有者（Device Owner）。核心承诺（防卸载 / 静默安装 /
+        // 禁止恢复出厂）全部依赖 DO；未开 DO 时这些能力在系统层面不可用，必须先预置。
+        // 仅发布包强制；家长显式确认已知风险（doPromptAck）或已为 DO 时放行。
+        isRelease && !isDeviceOwner && !doPromptAck -> DoProvisioningScreen()
 
         // ① 未登录家庭账号：登录页（复用家长端账号体系）
         loggedIn == false -> ChildLoginScreen()

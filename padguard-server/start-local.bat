@@ -107,7 +107,8 @@ REM 确需固定对外地址时用环境变量注入：set PADGUARD_BASE_URL=htt
 java -jar "%JAR%" ^
     --spring.profiles.active=%PROFILE% ^
     --server.port=%PORT% ^
-    --padguard.base-url= ^
+    --padguard.base-url=http://localhost:%PORT% ^
+    --padguard.demo-accounts-enabled=true ^
     %MQTT_FLAG%
 
 echo.

@@ -39,12 +39,12 @@ class AdminBillingService(
         }
     }
 
-    fun listSubscriptions(adminId: String, status: String?): List<SubRow> {
+    fun listSubscriptions(adminId: String, status: String?, page: Int = 1, size: Int = 20): PageResult<SubRow> {
         requireRead(adminPerm, adminId, "billing")
         var subs = subscriptionRepository.findAllByOrderByExpiredAtDesc()
         if (!status.isNullOrBlank()) subs = subs.filter { subStatusLower(it.status) == status.lowercase() }
         val userMap = userRepository.findAll().associateBy { it.id }
-        return subs.map { s ->
+        val rows = subs.map { s ->
             val owner = userMap[s.userId]
             SubRow(
                 parentPhone = owner?.phone ?: s.userId, parentName = owner?.nickname ?: (owner?.phone?.let { "家长" + it.takeLast(4) } ?: ""),
@@ -53,14 +53,15 @@ class AdminBillingService(
                 autoRenew = s.autoRenew, channel = ""
             )
         }
+        return paginate(rows, page, size)
     }
 
-    fun listOrders(adminId: String, status: String?): List<OrderRow> {
+    fun listOrders(adminId: String, status: String?, page: Int = 1, size: Int = 20): PageResult<OrderRow> {
         requireRead(adminPerm, adminId, "billing")
         var orders = paymentOrderRepository.findAllByOrderByCreatedAtDesc()
         if (!status.isNullOrBlank()) orders = orders.filter { orderStatusLower(it.status) == status.lowercase() }
         val userMap = userRepository.findAll().associateBy { it.id }
-        return orders.map { o ->
+        val rows = orders.map { o ->
             val owner = userMap[o.userId]
             OrderRow(
                 orderNo = o.orderNo, parentPhone = owner?.phone ?: o.userId,
@@ -70,6 +71,7 @@ class AdminBillingService(
                 createdAt = fmt(o.createdAt)
             )
         }
+        return paginate(rows, page, size)
     }
 
     @Transactional
