@@ -34,7 +34,7 @@ class AdminParentService(
 ) {
     private val log = LoggerFactory.getLogger(AdminParentService::class.java)
 
-    fun listParents(adminId: String, keyword: String?, status: String?, plan: String?): List<ParentRow> {
+    fun listParents(adminId: String, keyword: String?, status: String?, plan: String?, page: Int = 1, size: Int = 20): PageResult<ParentRow> {
         requireRead(adminPerm, adminId, "parents")
         var users = userRepository.findAll()
         if (!status.isNullOrBlank()) users = users.filter { (it.status ?: "active") == status }
@@ -50,7 +50,8 @@ class AdminParentService(
                 it.id.lowercase().contains(k)
             }
         }
-        return users.map { toParentRow(it) }
+        val rows = users.map { toParentRow(it) }
+        return paginate(rows, page, size)
     }
 
     fun parentDetail(adminId: String, id: String): ParentDetail? {

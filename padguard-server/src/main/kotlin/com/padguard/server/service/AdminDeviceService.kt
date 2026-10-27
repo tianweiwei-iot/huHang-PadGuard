@@ -6,6 +6,7 @@ import com.padguard.server.common.ParentErr
 import com.padguard.server.domain.Device
 import com.padguard.server.dto.DeviceMini
 import com.padguard.server.dto.DeviceRow
+import com.padguard.server.dto.PageResult
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.AdminPermissionService
@@ -23,11 +24,12 @@ class AdminDeviceService(
     private val commandService: CommandService,
     private val adminPerm: AdminPermissionService,
     private val auditService: AuditService,
-    private val usageSessionService: UsageSessionService
+    private val usageSessionService: UsageSessionService,
+    private val deviceService: DeviceService
 ) {
     private val log = LoggerFactory.getLogger(AdminDeviceService::class.java)
 
-    fun listDevices(adminId: String, keyword: String?, online: String?): List<DeviceRow> {
+    fun listDevices(adminId: String, keyword: String?, online: String?, page: Int = 1, size: Int = 20): PageResult<DeviceRow> {
         requireRead(adminPerm, adminId, "devices")
         val users = userRepository.findAll()
         val userMap = users.associateBy { it.id }
@@ -45,7 +47,7 @@ class AdminDeviceService(
         // 一次性取全部设备的今日用量，避免逐台查询。
         // 取不到的（今日尚未开始计时）保持 null，前端显示"—"而不是伪造一个 0。
         val usedMinutes = usageSessionService.usedMinutesBatch(devs.map { it.id })
-        return devs.map { d ->
+        val rows = devs.map { d ->
             val owner = userMap[d.userId]
             DeviceRow(
                 deviceId = d.id, deviceSn = d.deviceSn, name = d.name,
@@ -58,6 +60,7 @@ class AdminDeviceService(
                 boundAt = fmt(d.createdAt)
             )
         }
+        return paginate(rows, page, size)
     }
 
     @Transactional
@@ -81,6 +84,20 @@ class AdminDeviceService(
         runCatching { deviceRepository.save(dev) }.onFailure { log.warn("persist remoteLocked failed: ${it.message}") }
         commandService.issueCommand(deviceId, CommandType.UNLOCK, mapOf(CommandKey.REASON to "管理员远程解锁"))
         auditService.record(adminId, deviceId, AdminAudit.DEVICES_UNLOCK, targetType = "device", targetId = deviceId)
+        return mapOf("ok" to true)
+    }
+
+    @Transactional
+    fun unbindDevice(adminId: String, deviceId: String): Map<String, Any> {
+        adminPerm.require(adminId, "devices", "unbind")
+        val dev = deviceRepository.findById(deviceId).orElse(null)
+            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+        val userId = dev.userId
+        if (userId != null) {
+            // 复用家长端解绑逻辑：清归属、作废设备令牌、清理私有数据、下发 unbind 通知。
+            deviceService.unbind(userId, deviceId)
+        }
+        auditService.record(adminId, deviceId, AdminAudit.DEVICES_UNBIND, targetType = "device", targetId = deviceId)
         return mapOf("ok" to true)
     }
 }

@@ -71,8 +71,10 @@ class AdminController(
         @RequestAttribute("adminId") adminId: String,
         @RequestParam(required = false) keyword: String?,
         @RequestParam(required = false) status: String?,
-        @RequestParam(required = false) plan: String?
-    ): ApiResponse<List<ParentRow>> = ApiResponse.ok(adminService.listParents(adminId, keyword, status, plan))
+        @RequestParam(required = false) plan: String?,
+        @RequestParam(required = false, defaultValue = "1") page: Int,
+        @RequestParam(required = false, defaultValue = "20") size: Int
+    ): ApiResponse<PageResult<ParentRow>> = ApiResponse.ok(adminService.listParents(adminId, keyword, status, plan, page, size))
 
     @GetMapping("/parents/{id}")
     fun parentDetail(
@@ -122,8 +124,10 @@ class AdminController(
     fun listDevices(
         @RequestAttribute("adminId") adminId: String,
         @RequestParam(required = false) keyword: String?,
-        @RequestParam(required = false) online: String?
-    ): ApiResponse<List<DeviceRow>> = ApiResponse.ok(adminService.listDevices(adminId, keyword, online))
+        @RequestParam(required = false) online: String?,
+        @RequestParam(required = false, defaultValue = "1") page: Int,
+        @RequestParam(required = false, defaultValue = "20") size: Int
+    ): ApiResponse<PageResult<DeviceRow>> = ApiResponse.ok(adminService.listDevices(adminId, keyword, online, page, size))
 
     @PostMapping("/devices/{id}/lock")
     fun lockDevice(
@@ -137,6 +141,12 @@ class AdminController(
         @PathVariable id: String
     ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.unlockDevice(adminId, id))
 
+    @PostMapping("/devices/{id}/unbind")
+    fun unbindDevice(
+        @RequestAttribute("adminId") adminId: String,
+        @PathVariable id: String
+    ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.unbindDevice(adminId, id))
+
     // ---------- 订阅计费 ----------
     @GetMapping("/billing/plans")
     fun listPlans(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AdminPlanDto>> =
@@ -145,14 +155,18 @@ class AdminController(
     @GetMapping("/billing/subscriptions")
     fun listSubscriptions(
         @RequestAttribute("adminId") adminId: String,
-        @RequestParam(required = false) status: String?
-    ): ApiResponse<List<SubRow>> = ApiResponse.ok(adminService.listSubscriptions(adminId, status))
+        @RequestParam(required = false) status: String?,
+        @RequestParam(required = false, defaultValue = "1") page: Int,
+        @RequestParam(required = false, defaultValue = "20") size: Int
+    ): ApiResponse<PageResult<SubRow>> = ApiResponse.ok(adminService.listSubscriptions(adminId, status, page, size))
 
     @GetMapping("/billing/orders")
     fun listOrders(
         @RequestAttribute("adminId") adminId: String,
-        @RequestParam(required = false) status: String?
-    ): ApiResponse<List<OrderRow>> = ApiResponse.ok(adminService.listOrders(adminId, status))
+        @RequestParam(required = false) status: String?,
+        @RequestParam(required = false, defaultValue = "1") page: Int,
+        @RequestParam(required = false, defaultValue = "20") size: Int
+    ): ApiResponse<PageResult<OrderRow>> = ApiResponse.ok(adminService.listOrders(adminId, status, page, size))
 
     @PostMapping("/billing/subscriptions/manual")
     fun manualActivate(
