@@ -4,6 +4,8 @@ import com.padguard.server.domain.UploadedFile
 import com.padguard.server.repository.UploadedFileRepository
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
+import org.springframework.web.context.request.RequestContextHolder
+import org.springframework.web.context.request.ServletRequestAttributes
 import java.io.File
 import java.util.UUID
 
@@ -61,8 +63,50 @@ class FileStorageService(
     /** 落盘结果：id 用于后续按文件操作，url 用于直接访问，name 用于界面回显。 */
     data class StoredFile(val id: String, val url: String, val name: String)
 
-    fun url(id: String): String =
-        if (baseUrl.isNotBlank()) "${baseUrl.trimEnd('/')}/v1/files/$id" else "/v1/files/$id"
+    /**
+     * 生成可访问的文件 URL。
+     *
+     * 优先级（这是视频/截图/录屏集体加载失败的根治点）：
+     * 1. **当前 HTTP 请求的 Host（动态 origin）** —— 永远是「客户端实际访问服务端的那台机器」，
+     *    从根本上消除「写死地址 / 孩子端 origin 错配」导致的整批 404；
+     * 2. 无请求上下文（极少数离线重算）且显式配置了 [baseUrl] → 用配置值兜底；
+     * 3. 都没有 → 退回相对路径 `/v1/files/{id}`，交由客户端按自己的 baseUrl 拼接。
+     *
+     * ## 为什么动态 origin 必须优先于 base-url
+     * 早期把 [baseUrl] 写成一个固定地址（或 `localhost`）、或留空下发相对路径让客户端自行拼接，
+     * 都会在孩子端出现「地址错配」：服务端实际部署在 A（局域网 IP / 公网域名 / 端口映射），
+     * 而写死值或孩子端 [com.padguard.child.ui.message.MediaUrlResolver] 用来拼接的
+     * origin 是 B（例如硬编码公网 `8.148.68.183:8090`，或孩子端自己的 `localhost`）。
+     * 于是所有已发布的视频、截图、录屏都指向 B，文件却落在 A → 整批 404，
+     * 表现为「最初稳定、改了配置后视频就加载不出来」。
+     *
+     * 动态取当前请求 Host，保证「上传接口返回的地址」与「客户端实际访问服务端的地址」
+     * 是同一台机器，从根本上消除错配，且天然支持换 IP / 换域名 / 迁移，无需重发包。
+     * 因此即便 [baseUrl] 被误配成 `localhost`，也只在「请求上下文缺失」时才兜底，
+     * 不会污染正常上传返回的地址。
+     */
+    fun url(id: String): String {
+        val origin = currentOrigin()
+        if (origin != null) return "$origin/v1/files/$id"
+        if (baseUrl.isNotBlank()) return "${baseUrl.trimEnd('/')}/v1/files/$id"
+        return "/v1/files/$id"
+    }
+
+    /**
+     * 从当前 HTTP 请求取出 origin（scheme://host[:port]）。
+     * 仅在请求线程内（如 `/v1/media/upload`）可用；无请求上下文（离线重算等）返回 null，交给上层兜底。
+     */
+    private fun currentOrigin(): String? {
+        val attrs = RequestContextHolder.getRequestAttributes() as? ServletRequestAttributes
+        val req = attrs?.request
+        if (req != null) {
+            val scheme = req.scheme
+            val host = req.serverName
+            val port = req.serverPort
+            return if (port == 80 || port == 443) "$scheme://$host" else "$scheme://$host:$port"
+        }
+        return null
+    }
 
     /**
      * 按 id 删除文件（磁盘 + 记录）。

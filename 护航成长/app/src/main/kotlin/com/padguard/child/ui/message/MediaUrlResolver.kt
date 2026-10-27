@@ -28,29 +28,17 @@ class MediaUrlResolver @Inject constructor(
 ) {
     fun resolve(raw: String): String {
         if (raw.isBlank()) return raw
-        if (raw.contains("://")) return alignToCurrentOrigin(raw)
-        // 相对路径：兼容不带前导斜杠的形态（原实现只认 "/" 开头，会把 "v1/files/x" 误判成绝对地址）
+        // 绝对地址：服务端已基于「当前请求 Host」生成（见 FileStorageService.resolveOriginUrl），
+        // 就是孩子端实际能访问的服务端地址，直接使用，绝不再用自身可能错误的 baseUrl 去改写——
+        // 旧版 alignToCurrentOrigin 会把正确的服务器地址改成孩子端写死的 origin（如硬编码公网），
+        // 反而把文件指向另一台机器 → 整批视频 / 截图 / 录屏 404。这是此前「视频加载失败」的根因之一。
+        if (raw.contains("://")) return raw
+        // 兼容极旧数据 / 离线重算留下的相对路径：用当前 baseUrl 的 origin 拼接
+        // （旧版只认 "/" 开头，会把 "v1/files/x" 误判成绝对地址，这里兼容不带前导斜杠的形态）
         val path = if (raw.startsWith("/")) raw else "/$raw"
         val origin = originOf(transportSettings.baseUrl.value).ifBlank { lastGoodOrigin }
         if (origin.isBlank()) return raw // 无法解析，交由下载层给出明确错误而非静默失败
         return "$origin$path"
-    }
-
-    /**
-     * 绝对地址校正：仅针对服务端自有文件接口 `/v1/files/{id}`。
-     *
-     * 地址 host 与孩子端当前连接的 [TransportSettings.baseUrl] 不一致时（服务端迁移、
-     * base-url 配错、历史消息残留旧地址），改写为当前 origin，避免整批历史媒体 404。
-     * 其他地址（外部 CDN / 对象存储）一律原样返回。
-     */
-    private fun alignToCurrentOrigin(absolute: String): String {
-        val markerIndex = absolute.indexOf(FILE_MARKER)
-        if (markerIndex < 0) return absolute
-        val currentOrigin = originOf(transportSettings.baseUrl.value)
-        if (currentOrigin.isBlank()) return absolute
-        val urlOrigin = originOf(absolute)
-        if (urlOrigin.equals(currentOrigin, ignoreCase = true)) return absolute
-        return currentOrigin + absolute.substring(markerIndex)
     }
 
     private fun originOf(base: String): String {
@@ -62,9 +50,6 @@ class MediaUrlResolver @Inject constructor(
     }
 
     companion object {
-        /** 服务端自有文件接口的路径标记；命中才做 origin 校正，避免误伤外部地址 */
-        private const val FILE_MARKER = "/v1/files/"
-
         /** 自愈：最近一次成功下载的 origin，作为 baseUrl 为空时的兜底 */
         @Volatile
         var lastGoodOrigin: String = ""

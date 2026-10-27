@@ -106,7 +106,13 @@ class FilesController(
         val ownerDeviceId = owner.deviceId
 
         val allow = when {
+            // 历史文件（早期版本上传，无归属记录）→ 放行，否则老素材集体打不开
             ownerUserId.isNullOrBlank() && ownerDeviceId.isNullOrBlank() -> true
+            // 家长主动上传的素材（只有 ownerUserId、无 ownerDeviceId）：通过「信息发布」主动分享给孩子，
+            // 必须放行孩子端下载，否则家长发的图片 / 视频会 403。
+            // fileId 为随机 128 位不可穷举（能力 URL），与历史文件同一安全级别。
+            ownerUserId != null && ownerDeviceId.isNullOrBlank() -> true
+            // 归属匹配（家长下载自己上传的 / 孩子下载自己设备产生的）
             viewerUserId != null && ownerUserId == viewerUserId -> true
             viewerDeviceId != null && ownerDeviceId == viewerDeviceId -> true
             // 家长下载自家设备上行的文件（截图/录屏/录音归属只记了 deviceId）
