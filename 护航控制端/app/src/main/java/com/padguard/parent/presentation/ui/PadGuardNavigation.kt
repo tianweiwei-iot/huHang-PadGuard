@@ -29,6 +29,7 @@ import androidx.navigation.compose.rememberNavController
 import com.padguard.parent.domain.model.ReportPeriod
 import com.padguard.parent.notification.NotificationHelper
 import com.padguard.parent.presentation.MainActivity
+import com.padguard.parent.presentation.ui.theme.ThemeMode
 import com.padguard.parent.presentation.viewmodel.SessionViewModel
 import com.padguard.parent.presentation.ui.alert.AlertCenterScreen
 import com.padguard.parent.presentation.ui.auth.LoginScreen
@@ -139,7 +140,11 @@ object MainTab {
 @Composable
 fun PadGuardNavHost(
     navController: NavHostController = rememberNavController(),
-    sessionViewModel: SessionViewModel = hiltViewModel()
+    sessionViewModel: SessionViewModel = hiltViewModel(),
+    /** 当前主题模式（由根层从持久化读取后传入） */
+    themeMode: ThemeMode = ThemeMode.MINT,
+    /** 切换主题：写入持久化并触发整树重组 */
+    onThemeChange: (ThemeMode) -> Unit = {}
 ) {
     // ---- 会话门控 ----
     // 启动时读取持久化会话决定起点；bootResolved=false 期间显示启动占位，
@@ -270,7 +275,9 @@ fun PadGuardNavHost(
                 rootNavController = navController,
                 // 铃铛红点合并解锁工单、延时申请与风险告警三类未读
                 unreadAlertCount = unlockState.unreadCount + delayState.unreadCount + riskState.unreadCount,
-                onNavigateToAlerts = { navController.navigate(Screen.AlertList.route) }
+                onNavigateToAlerts = { navController.navigate(Screen.AlertList.route) },
+                themeMode = themeMode,
+                onThemeChange = onThemeChange
             )
         }
         composable(Screen.Subscription.route) {

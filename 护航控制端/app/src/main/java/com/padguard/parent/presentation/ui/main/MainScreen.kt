@@ -24,6 +24,7 @@ import com.padguard.parent.presentation.ui.home.HomeScreen
 import com.padguard.parent.presentation.ui.profile.ProfileAction
 import com.padguard.parent.presentation.ui.profile.ProfileScreen
 import com.padguard.parent.presentation.ui.statistics.StatisticsScreen
+import com.padguard.parent.presentation.ui.theme.ThemeMode
 import com.padguard.parent.presentation.viewmodel.HomeViewModel
 import com.padguard.parent.presentation.viewmodel.ProfileViewModel
 
@@ -40,7 +41,11 @@ fun MainScreen(
     /** 未读消息数（解锁申请），驱动首页铃铛红点 */
     unreadAlertCount: Int = 0,
     /** 点击铃铛进入消息中心 */
-    onNavigateToAlerts: () -> Unit = {}
+    onNavigateToAlerts: () -> Unit = {},
+    /** 当前主题模式（透传给「我的」页切换入口） */
+    themeMode: ThemeMode = ThemeMode.MINT,
+    /** 切换主题（透传给「我的」页切换入口） */
+    onThemeChange: (ThemeMode) -> Unit = {}
 ) {
     val homeVm: HomeViewModel = hiltViewModel()
     val homeUiState by homeVm.uiState.collectAsState()
@@ -155,6 +160,8 @@ fun MainScreen(
                     onLogout = profileVm::logout,
                     serverUrl = serverUrl,
                     onSaveServerUrl = profileVm::saveServerUrl,
+                    themeMode = themeMode,
+                    onThemeChange = onThemeChange,
                     onAction = { action ->
                         when (action) {
                             ProfileAction.Subscription ->
