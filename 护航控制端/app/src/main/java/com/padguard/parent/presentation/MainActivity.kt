@@ -10,7 +10,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
+import com.padguard.parent.di.ThemePrefs
 import com.padguard.parent.notification.NotificationHelper
 import com.padguard.parent.presentation.ui.PadGuardNavHost
 import com.padguard.parent.presentation.ui.theme.PadGuardTheme
@@ -29,6 +32,11 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var notificationHelper: NotificationHelper
 
+    // 主题模式：由 ThemePrefs 持久化持有，根层收集后传入 PadGuardTheme。
+    // 切换主题即触发整树重组，所有页面令牌与 Material3 ColorScheme 同步刷新。
+    @Inject
+    lateinit var themePrefs: ThemePrefs
+
     // 仅在 Android 13+ 且尚未授权时发起；系统会去重，用户拒绝后不再重复打扰。
     // 授权结果无需处理：未授权时 notifyUnlockRequest 内部静默返回。
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -41,12 +49,16 @@ class MainActivity : ComponentActivity() {
         notificationHelper.createChannel()
         enableEdgeToEdge()
         setContent {
-            PadGuardTheme {
+            val themeMode by themePrefs.themeMode.collectAsState()
+            PadGuardTheme(mode = themeMode) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    PadGuardNavHost()
+                    PadGuardNavHost(
+                        themeMode = themeMode,
+                        onThemeChange = themePrefs::setThemeMode
+                    )
                 }
             }
         }

@@ -1,6 +1,7 @@
 package com.padguard.parent.presentation.ui.profile
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -18,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -26,6 +28,8 @@ import androidx.compose.ui.unit.dp
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.presentation.ui.auth.ServerConfigDialog
+import com.padguard.parent.presentation.ui.theme.ThemeMode
+import com.padguard.parent.presentation.ui.theme.tokensFor
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 
@@ -55,7 +59,11 @@ fun ProfileScreen(
     /** 当前服务器地址，作为「服务器地址」条目的副标题展示 */
     serverUrl: String = "",
     /** 保存服务器地址（改完立即生效） */
-    onSaveServerUrl: (String) -> Unit = {}
+    onSaveServerUrl: (String) -> Unit = {},
+    /** 当前主题模式 */
+    themeMode: ThemeMode = ThemeMode.MINT,
+    /** 切换主题（写入持久化并触发整树重组） */
+    onThemeChange: (ThemeMode) -> Unit = {}
 ) {
     val context = LocalContext.current
     var showLogoutConfirm by remember { mutableStateOf(false) }
@@ -99,6 +107,13 @@ fun ProfileScreen(
                     }
                 }
             }
+
+            // 外观（主题）切换：默认「青空薄荷」，另提供「静谧蓝灰」「晨雾奶油」两款浅色主题。
+            // 切换仅改变视觉令牌，不触碰任何业务逻辑；选择落盘后重启保持。
+            ThemeSelectorCard(
+                themeMode = themeMode,
+                onThemeChange = onThemeChange
+            )
 
             val items = listOf(
                 ProfileItem(
@@ -227,6 +242,86 @@ private fun ProfileListItem(item: ProfileItem, onClick: () -> Unit) {
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurface.copy(alpha = if (item.enabled) 0.3f else 0.15f)
             )
+        }
+    }
+}
+
+/**
+ * 外观（主题）切换卡片：三款浅色主题三选一，含色板预览。
+ *
+ * 设计要点：
+ * - 色板预览直接取自 [tokensFor]，与页面运行期令牌同源，避免重复硬编码导致漂移。
+ * - 选中态用 MaterialTheme.colorScheme.primary 描边 + 对勾，未选中弱化，视觉反馈明确。
+ * - 仅改变视觉令牌，不触发任何业务逻辑；[onThemeChange] 写入持久化后由根层触发整树重组。
+ */
+@Composable
+private fun ThemeSelectorCard(
+    themeMode: ThemeMode,
+    onThemeChange: (ThemeMode) -> Unit
+) {
+    val options = listOf(
+        ThemeMode.MINT to "青空薄荷",
+        ThemeMode.BLUEGRAY to "静谧蓝灰",
+        ThemeMode.CREAM to "晨雾奶油"
+    )
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "外观",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                options.forEach { (mode, label) ->
+                    val selected = themeMode == mode
+                    val tokens = tokensFor(mode)
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onThemeChange(mode) },
+                        shape = RoundedCornerShape(12.dp),
+                        color = tokens.pageBg,
+                        border = BorderStroke(
+                            width = 2.dp,
+                            color = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                        // 色板预览：页面底色 + 主色块，直观表达主题气质
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(tokens.primary)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                        )
+                        if (selected) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        }
+                    }
+                }
+            }
         }
     }
 }
