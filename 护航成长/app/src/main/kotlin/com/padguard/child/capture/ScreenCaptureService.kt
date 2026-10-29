@@ -95,6 +95,10 @@ class ScreenCaptureService : Service() {
 
     // ==================== 实时看屏推流状态 ====================
     private val streaming = AtomicBoolean(false)
+    /** 看屏"被命令激活"态：从 start 到 stop 全程为真；错误退出不清除（区别于 streaming，避免自愈误判为已停止）。 */
+    private val liveViewCommanded = AtomicBoolean(false)
+    /** 最近一次泵循环是否因错误（而非正常到期/外部停止）退出，决定是否自愈重连。 */
+    private val liveStreamErrored = AtomicBoolean(false)
     private var streamJob: Job? = null
     @Volatile private var streamDeadlineMs = 0L
 
@@ -925,16 +929,37 @@ class ScreenCaptureService : Service() {
             return
         }
         streaming.set(true)
+        liveViewCommanded.set(true)
         // 归零 = "尚未写出任何帧"，走宽限期判定；真正出帧时刻由帧泵写入
         lastPushAtMs = 0L
         streamStartedAtMs = SystemClock.elapsedRealtime()
         streamDeadlineMs = SystemClock.elapsedRealtime() + LIVE_TTL_MS
         streamJob = scope.launch {
-            pumpFrames(projection)
+            // 看屏断流自愈：单次推流因网络抖动等异常退出时，不空等服务端最长 ~26s 的重发，
+            // 而在命令态仍有效、未过期的窗口内带短退避立即重连，把黑屏压到秒级。
+            // 有界重试（LIVE_RETRY_MAX）+ 以 liveViewCommanded 为闸门，杜绝重连风暴。
+            var attempt = 0
+            while (liveViewCommanded.get() && SystemClock.elapsedRealtime() < streamDeadlineMs) {
+                attempt++
+                liveStreamErrored.set(false)
+                try {
+                    pumpFrames(projection)
+                } catch (ce: kotlinx.coroutines.CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    Logger.w(TAG) { "live stream pump ended by error (attempt $attempt): ${t.message}" }
+                }
+                // 正常结束（外部停止 / 到期）无需重连；仅异常退出且仍在有效期才带退避自愈。
+                if (!liveStreamErrored.get()) break
+                if (attempt >= LIVE_RETRY_MAX) break
+                delay((LIVE_RETRY_BACKOFF_MS * attempt).coerceAtMost(LIVE_RETRY_BACKOFF_MAX_MS))
+            }
+            if (!liveViewCommanded.get()) stopIfIdle()
         }
     }
 
     private fun stopLiveStream() {
+        liveViewCommanded.set(false)
         releaseStream("stop")
         Logger.i(TAG) { "live stream stopped" }
         stopIfIdle()
@@ -1056,6 +1081,7 @@ class ScreenCaptureService : Service() {
                         }
                     } catch (t: Throwable) {
                         Logger.i(TAG) { "live stream write ended after $frames frames: ${t.message}" }
+                        liveStreamErrored.set(true)
                         return
                     }
                 }
@@ -1078,6 +1104,7 @@ class ScreenCaptureService : Service() {
             }
         } catch (t: Throwable) {
             Logger.w(TAG) { "live stream upload failed: ${t.message}" }
+            liveStreamErrored.set(true)
         } finally {
             streamCall = null
             streaming.set(false)
@@ -1632,6 +1659,12 @@ class ScreenCaptureService : Service() {
          * 续期停止，推流在这里自动结束 —— 不会有一条流永远推下去耗孩子的电和流量。
          */
         private const val LIVE_TTL_MS = 180_000L
+    /** 看屏断流自愈：单次推流异常退出后的最大重连次数（有界，防重连风暴）。 */
+    private const val LIVE_RETRY_MAX = 3
+    /** 看屏断流自愈：重连退避基数（毫秒），按尝试次数线性增长。 */
+    private const val LIVE_RETRY_BACKOFF_MS = 500L
+    /** 看屏断流自愈：重连退避上限（毫秒）。 */
+    private const val LIVE_RETRY_BACKOFF_MAX_MS = 3_000L
 
         // ---- 自适应码率参数（在家长选定的档位内浮动，见 [adaptQuality]）----
         // 并发一高，每路都按最高画质猛推会把服务端出口带宽打满、各路一起卡。

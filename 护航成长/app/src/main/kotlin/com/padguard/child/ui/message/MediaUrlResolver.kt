@@ -32,7 +32,17 @@ class MediaUrlResolver @Inject constructor(
         // 就是孩子端实际能访问的服务端地址，直接使用，绝不再用自身可能错误的 baseUrl 去改写——
         // 旧版 alignToCurrentOrigin 会把正确的服务器地址改成孩子端写死的 origin（如硬编码公网），
         // 反而把文件指向另一台机器 → 整批视频 / 截图 / 录屏 404。这是此前「视频加载失败」的根因之一。
-        if (raw.contains("://")) return raw
+        if (raw.contains("://")) {
+            // 若指向本服务端文件接口（路径含 /v1/files/），统一改写到孩子端当前连接的服务端 origin，
+            // 避免服务端误配 base-url 为内网/IP/localhost 时，孩子端跨网加载失败（同类历史故障）。
+            // 真正的外部 CDN/对象存储地址（不含 /v1/files/）保持原样，不误伤。
+            if (raw.contains("/v1/files/")) {
+                val id = raw.substringAfterLast("/v1/files/").substringBefore('?').takeIf { it.isNotBlank() }
+                val origin = originOf(transportSettings.baseUrl.value).ifBlank { lastGoodOrigin }
+                if (id != null && origin.isNotBlank()) return "$origin/v1/files/$id"
+            }
+            return raw
+        }
         // 兼容极旧数据 / 离线重算留下的相对路径：用当前 baseUrl 的 origin 拼接
         // （旧版只认 "/" 开头，会把 "v1/files/x" 误判成绝对地址，这里兼容不带前导斜杠的形态）
         val path = if (raw.startsWith("/")) raw else "/$raw"

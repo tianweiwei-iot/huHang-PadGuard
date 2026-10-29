@@ -12,7 +12,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.media.projection.MediaProjectionManager
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.Manifest
 import android.net.ConnectivityManager
 import android.os.Build
 import android.os.Handler
@@ -1984,12 +1986,22 @@ class GuardService : Service() {
         // 借由常驻前台服务读取位置——Android 将此视为"使用中"，从而豁免 ACCESS_BACKGROUND_LOCATION
         // （该权限对儿童向 App 受限）。这是合规且主流的家长管控定位方案。
         // API 29 以下无前台服务类型概念，且后台定位限制本身从 API 29 才引入，故仅 Q+ 叠加。
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            base or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-        } else {
-            base
+        //
+        // ⚠️ 关键约束(API 29+)：启动带 location 类型的前台服务，要求应用此刻持有
+        // ACCESS_FINE/COARSE_LOCATION；若该危险权限被孩子在系统设置里撤销，startForeground
+        // 会抛 SecurityException，守护进程随即被系统回收 —— 即「孩子撤销定位权限即可杀掉管控」。
+        // 因此**仅当定位权限仍被授予时才叠加 location 类型**；权限被撤则退回 base 类型，
+        // 守护进程照常存活（后台定位暂不可用，权限恢复后由 LocationAutoReporter 兜底补传）。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && hasLocationPermission()) {
+            return base or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         }
+        return base
     }
+
+    /** 定位危险权限是否仍被授予（定位权限被撤销时不可再启动带 location 类型的前台服务）。 */
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
     private fun buildNotification(): Notification {
         val tapIntent = PendingIntent.getActivity(

@@ -54,6 +54,10 @@ class SelfProtectionModule @Inject constructor(
         // 3) 防恢复出厂 / 安全模式：封住从底层绕过管控的入口。
         admin.setUserRestriction(UserManager.DISALLOW_FACTORY_RESET, true)
         admin.setUserRestriction(UserManager.DISALLOW_SAFE_BOOT, true)
+        // 4) 防改系统时间：封掉"设置日期时间"并强制自动对时。否则孩子改时间即可绕过所有
+        // 时段/限额管控（最高优先级漏洞）。与 SecurityEnforcer 同批限制幂等，离线开机窗口由本模块兜底。
+        admin.setUserRestriction(UserManager.DISALLOW_CONFIG_DATE_TIME, true)
+        runCatching { admin.setAutoTimeEnforced(true) }
         return true
     }
 
