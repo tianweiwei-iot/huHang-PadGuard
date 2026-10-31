@@ -15,7 +15,10 @@ import com.padguard.server.dto.AdminUpdateAdminRequest
 import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.*
 import com.padguard.server.security.AdminPermissionService
+import com.padguard.server.security.DeviceOwnershipGuard
 import com.padguard.server.security.JwtTokenProvider
+import com.padguard.server.ws.WebSocketPushService
+import org.mockito.Mockito
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -82,6 +85,14 @@ class AdminServiceTest {
         override fun findByUserIdAndStatus(userId: String, status: String) =
             table.values.filter { it.userId == userId && it.status == status }
         override fun findAllByOrderByCreatedAtDesc() = table.values.sortedByDescending { it.createdAt }
+        override fun claimPendingOrder(
+            orderNo: String, paidStatus: String, pendingStatus: String, paidAt: Long, txId: String?
+        ): Int {
+            val order = findByOrderNo(orderNo) ?: return 0
+            if (order.status != pendingStatus) return 0
+            order.status = paidStatus; order.paidAt = paidAt; order.transactionId = txId
+            return 1
+        }
     }
 
     private class FakeAdminRepo : FakeJpaRepository<Admin, String>(), AdminRepository {
@@ -185,6 +196,22 @@ class AdminServiceTest {
         }
     }
 
+    private class FakePolicyRepo : FakeJpaRepository<Policy, String>(), PolicyRepository {
+        override val table = LinkedHashMap<String, Policy>()
+        override fun idOf(e: Policy) = e.id
+        override fun findFirstByDeviceIdOrderByVersionDesc(deviceId: String): Policy? = null
+    }
+
+    private class FakeDeviceSettingRepo : FakeJpaRepository<DeviceSetting, String>(), DeviceSettingRepository {
+        override val table = LinkedHashMap<String, DeviceSetting>()
+        override fun idOf(e: DeviceSetting) = e.deviceId
+        override fun deleteByDeviceId(deviceId: String): Int {
+            val existed = table.containsKey(deviceId)
+            table.remove(deviceId)
+            return if (existed) 1 else 0
+        }
+    }
+
     // ----------------------------- 测试夹具 -----------------------------
 
     private class Fixture(
@@ -219,9 +246,27 @@ class AdminServiceTest {
         // 计费验签器用示例支付放行模式（mockPayEnabled=true），避免影响 refund/manualActivate 等用例。
         val billing = BillingService(subs, orders, devices, users, 7L, 3, 3800, 9800, 29800, 3, 3, 5, 30L, true, com.padguard.server.security.ConfigurablePaymentVerifier(true, settings, objectMapper, listOf()), FakeSystemSettingRepo(), ObjectMapper())
         val auditService = AuditService(auditLogs, com.padguard.server.security.DeviceOwnershipGuard(devices))
+        // mqtt 在 DeviceService/CommandService 构造前声明（Kotlin 属性初始化顺序：先声明后用）。
+        val mqtt = MqttGateway(null, objectMapper, "default")
+        // 真实 DeviceService：被测 AdminDeviceService.unbindDevice 把"清归属/作废令牌/清理私有数据"
+        // 委托给它，必须用真实实现（mock 会架空 B7 的断言）。重型协作者以 mock 占位（unbind 路径不触发）。
+        val policyRepo = FakePolicyRepo()
+        val deviceSettingRepo = FakeDeviceSettingRepo()
+        val ws = Mockito.mock(WebSocketPushService::class.java)
+        val deviceService = DeviceService(
+            devices, DeviceOwnershipGuard(devices),
+            Mockito.mock(EnrollmentService::class.java),
+            Mockito.mock(PolicyService::class.java),
+            ws, mqtt, users, policyRepo, auditService,
+            30L, "", "", billing,
+            Mockito.mock(DeviceDataPurgeService::class.java)
+        )
+        // UsageSessionService 用真实实现驱动 B1/B2 的"今日用量"派生（走假 usageSessionRepo）。
+        // usageDelayService 在 list 路径不触发，以 mock 占位。
+        val usageSessionService =
+            UsageSessionService(usageSessions, deviceSettingRepo, deviceService, Mockito.mock(UsageDelayService::class.java))
         // 真实 RBAC 闸门，与 AdminService 共享同一份 admin 仓储 —— 权限事实一致。
         val adminPerm = AdminPermissionService(admins, overrides, FakeCustomRoleRepo(), objectMapper)
-        val mqtt = MqttGateway(null, objectMapper, "default")
         val sweeper = ExpiredCommandSweeper(commands, screenshots, objectMapper)
         val commandService = CommandService(
             devices, commands, mqtt, objectMapper, sweeper, auditService,
@@ -244,14 +289,14 @@ class AdminServiceTest {
 
         // W25：AdminService 已拆分为多个领域 @Service，门面仅做委托。测试直接构造各子服务，
         // 公开方法签名与原本一致（f.svc.* 调用无需改动）。
-        val authS = AdminAuthService(admins, jwt, adminPerm)
+        val authS = AdminAuthService(admins, jwt)
         val auditS = AdminAuditService(adminPerm, admins, users, auditLogs, alerts, auditService)
         val billingS = AdminBillingService(subs, orders, users, billing, adminPerm, auditService)
         val rbacS = AdminRbacService(admins, adminPerm, auditService, mailService, settings, objectMapper)
         val settingsS = AdminSettingsService(adminPerm, settings, billing, objectMapper, auditService, env)
         val monitorS = AdminServerMonitorService(adminPerm, requestMetrics, runtimeLogRing, dataSource, serverProfileService)
-        val parentS = AdminParentService(users, subs, devices, usageSessions, adminPerm, billing, mailService, billingS, auditService, settings, objectMapper)
-        val deviceS = AdminDeviceService(devices, users, commandService, usageSessions, mqtt, adminPerm, auditService)
+        val parentS = AdminParentService(users, subs, devices, adminPerm, billing, mailService, billingS, auditService, settings, objectMapper, usageSessionService)
+        val deviceS = AdminDeviceService(devices, users, commandService, adminPerm, auditService, usageSessionService, deviceService)
         val dashboardS = AdminDashboardService(users, devices, subs, orders, alerts, adminPerm, auditS, requestMetrics, runtimeLogRing, dataSource, serverProfileService)
 
         val svc = AdminService(
@@ -259,11 +304,11 @@ class AdminServiceTest {
         )
 
         // 种入管理员：超管 / 运营 / 审计 / 财务 / 已停用超管
-        admins.save(Admin("A-super", "super", "h", "超级管理员", null, "super", "active", false, null, 0))
-        admins.save(Admin("A-ops", "ops", "h", "运营", null, "ops", "active", false, null, 0))
-        admins.save(Admin("A-audit", "audit", "h", "审计", null, "audit", "active", false, null, 0))
-        admins.save(Admin("A-finance", "finance", "h", "财务", null, "finance", "active", false, null, 0))
-        admins.save(Admin("A-disabled", "disabled", "h", "停用超管", null, "super", "disabled", false, null, 0))
+        admins.save(Admin("A-super", "super", "h", "超级管理员", null, "super", "active", false, 0, null))
+        admins.save(Admin("A-ops", "ops", "h", "运营", null, "ops", "active", false, 0, null))
+        admins.save(Admin("A-audit", "audit", "h", "审计", null, "audit", "active", false, 0, null))
+        admins.save(Admin("A-finance", "finance", "h", "财务", null, "finance", "active", false, 0, null))
+        admins.save(Admin("A-disabled", "disabled", "h", "停用超管", null, "super", "disabled", false, 0, null))
 
         return Fixture(svc, users, admins, orders, subs, devices, alerts, overrides, settings, usageSessions)
     }
@@ -534,7 +579,7 @@ class AdminServiceTest {
     @Test
     fun `deleting a non last super admin is allowed`() {
         val f = fixture()
-        f.admins.save(com.padguard.server.domain.Admin("A-super2", "super2", "h", "二号超管", null, "super", "active", false, null, 0))
+        f.admins.save(com.padguard.server.domain.Admin("A-super2", "super2", "h", "二号超管", null, "super", "active", false, 0, null))
         val r = f.svc.deleteAdmin("A-super", "A-super2")
         assertEquals(true, r["ok"])
         assertEquals(false, f.admins.table.containsKey("A-super2"))

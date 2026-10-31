@@ -1,11 +1,19 @@
-# 生产编排（阿里云轻量 8.148.68.183，武汉）——与 test 用 docker-compose.yml 相互独立。
+# 生产编排（阿里云轻量，武汉）——与 test 用 docker-compose.yml 相互独立。
 # 差异：postgres 无宿主端口映射（仅 compose 内网）、broker 换 Mosquitto（password_file 认证）、
-#       app 8090 对外、uploads/admin 目录挂载持久化、密码与 JWT 走 .env。
-# 前置（一次性，见 docs/控制端手机适配与云服务器迁移计划.md M3）：
+#       Nginx 终止 TLS（443 对外）、uploads/admin 目录挂载持久化、密码与 JWT 走 .env。
+#
+# 前置（一次性）：
 #   1) cp .env.prod.example .env 并填入强密码
-#   2) 生成 mosquitto/passwd（mosquitto_passwd，见计划文档）
-# 用法：cd padguard-server && docker compose -f docker-compose.prod.yml up -d postgres mosquitto
-#       docker compose -f docker-compose.prod.yml up -d --build app
+#   2) 生成 mosquitto/passwd（mosquitto_passwd，见 docs/控制端手机适配与云服务器迁移计划.md M3）
+#   3) 生成 TLS 证书：bash scripts/gen-certs.sh 你的域名（自签名仅测试/内网；生产换 Let's Encrypt/商业证书）
+#
+# 用法：
+#   docker compose -f docker-compose.prod.yml up -d postgres mosquitto nginx
+#   docker compose -f docker-compose.prod.yml up -d --build app
+#
+# 端口安全说明：
+#   · 公网仅暴露 80/443（Nginx，TLS 在此终止）与 8883（MQTT over TLS）。
+#   · 1883（MQTT 明文）与 8080（app）仅 compose 内网，绝不映射到宿主，避免凭据/令牌明文暴露。
 services:
   postgres:
     image: postgres:16
@@ -26,36 +34,49 @@ services:
     image: eclipse-mosquitto:2
     restart: unless-stopped
     ports:
-      - "1883:1883"   # 孩子端 MQTT 直连入口（M6 防火墙放行；8883 TLS 未启用不映射）
+      - "8883:8883"   # 公网 MQTT over TLS（设备从公网连；1883 明文仅内网，不映射）
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto/aclfile:/mosquitto/config/aclfile:ro
       - ./mosquitto/passwd:/mosquitto/config/passwd:ro
+      - ./mosquitto/certs:/mosquitto/config/certs:ro
       - mosquitto-data:/mosquitto/data
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    ports:
+      - "80:80"     # HTTP 一律 301 重定向到 HTTPS
+      - "443:443"   # 公网 HTTPS 入口，TLS 在此终止，反代到 app:8080
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/logs:/var/log/nginx
+    environment:
+      TZ: Asia/Shanghai
 
   app:
     build: .
     restart: unless-stopped
-    ports:
-      - "8090:8080"   # 容器内 8080（application.yml 默认），宿主 8090 对外，全链路约定不变
+    # app 仅 compose 内网监听 8080，公网经 nginx:443 反代；此处不映射 8080 到宿主。
     depends_on:
       postgres:
         condition: service_healthy
       mosquitto:
         condition: service_started
     environment:
-      # JVM 默认时区：temurin 镜像默认 UTC，导致后台时间显示/统计日切/订单号时间戳全部偏 8 小时。
-      # 显式锁定 Asia/Shanghai 一次修复全部 ZoneId.systemDefault() 消费点，docker logs 时间戳同步归位。
       TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${PG_DB:-padguard}
       SPRING_DATASOURCE_USERNAME: ${PG_USER:-padguard}
       SPRING_DATASOURCE_PASSWORD: ${PG_PASSWORD}
       PADGUARD_JWT_SECRET: ${PADGUARD_JWT_SECRET:?PADGUARD_JWT_SECRET 必须在 .env 中设置强随机值}
+      # app 连 mosquitto 走内网明文 1883（compose 内网，不暴露公网），避免服务端处理 TLS 信任
       PADGUARD_MQTT_BROKER_URL: tcp://mosquitto:1883
       PADGUARD_MQTT_USERNAME: ${PADGUARD_MQTT_USERNAME:?PADGUARD_MQTT_USERNAME 必须在 .env 中设置}
       PADGUARD_MQTT_PASSWORD: ${PADGUARD_MQTT_PASSWORD:?PADGUARD_MQTT_PASSWORD 必须在 .env 中设置}
-      # 设备共享凭据：注入 DeviceService → 绑定时经 BindResult 自动下发给孩子端（MqttTransport 使用）；
-      # App 端零配置，仅需在高级设置填 broker 地址。收敛为 per-device。
       PADGUARD_MQTT_DEVICE_USERNAME: ${PADGUARD_MQTT_DEVICE_USERNAME:?PADGUARD_MQTT_DEVICE_USERNAME 必须在 .env 中设置}
       PADGUARD_MQTT_DEVICE_PASSWORD: ${PADGUARD_MQTT_DEVICE_PASSWORD:?PADGUARD_MQTT_DEVICE_PASSWORD 必须在 .env 中设置}
       PADGUARD_DEV_CHILDSIMULATOR: "false"

@@ -64,7 +64,7 @@ class AdminParentService(
         val devices = owned.map {
             DeviceMini(
                 name = it.name, deviceId = it.id, controlMode = it.controlMode,
-                online = online(it), todayUsageMinutes = usedMinutes[it.id]
+                online = online(it), todayUsageMinutes = usedMinutes[it.id] ?: 0
             )
         }
         val subscription = sub?.let {

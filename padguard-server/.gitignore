@@ -21,3 +21,5 @@ guard.*
 .env
 # mosquitto 口令文件（服务器上生成，含凭据哈希）
 mosquitto/passwd
+# 运行时自动生成的 JWT 密钥（首次启动生成并写入 config/jwt-secret.txt，绝不入库/进镜像）
+config/

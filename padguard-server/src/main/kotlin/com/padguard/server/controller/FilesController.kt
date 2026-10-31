@@ -63,17 +63,36 @@ class FilesController(
         }
 
         val (meta, file) = resolved
-        // contentType 来自客户端上传时声明的字符串，可能是任意值；
-        // 解析失败时退回二进制流，绝不能让它变成 500 ——
-        // 下载降级是一种正常结果，不是服务端故障。
-        val type = runCatching { MediaType.parseMediaType(meta.contentType) }
-            .getOrDefault(MediaType.APPLICATION_OCTET_STREAM)
+        // 安全策略（存储型 XSS 防护，第八轮评估 P1-A）：
+        // contentType 是上传时客户端声明的任意字符串，绝不能原样透传。
+        // 若按声明返回 `text/html` 之类的类型并 inline 渲染，攻击者上传一个 HTML 文件后，
+        // /v1/files/{id} 会与 /admin 管理后台同源执行任意 JS —— 窃取管理员会话。
+        // 因此：仅媒体类（image/video/audio）允许按声明类型 inline 渲染；
+        // 其余一律降级为 application/octet-stream 并强制 attachment 下载，
+        // 配合 nginx 的 X-Content-Type-Options:nosniff 双保险。
+        val declared = runCatching { MediaType.parseMediaType(meta.contentType) }
+            .getOrNull()
+        val safeInline = declared != null && INLINE_SAFE_TYPES.any { declared.isCompatibleWith(it) }
+        val type = if (safeInline) declared!! else MediaType.APPLICATION_OCTET_STREAM
+        val disposition = if (safeInline) "inline" else "attachment"
 
         return ResponseEntity.ok()
             .contentType(type)
-            .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"${file.name}\"")
+            .header(HttpHeaders.CONTENT_DISPOSITION, "$disposition; filename=\"${headerSafeName(file.name)}\"")
+            .header("X-Content-Type-Options", "nosniff")
             .body(FileSystemResource(file))
     }
+
+    /** 允许 inline 渲染的白名单：浏览器/WebView 只渲染这三族媒体，脚本类文件全部强制下载。 */
+    private val INLINE_SAFE_TYPES = listOf(
+        MediaType.parseMediaType("image/*"),
+        MediaType.parseMediaType("video/*"),
+        MediaType.parseMediaType("audio/*")
+    )
+
+    /** Content-Disposition 头里的文件名必须干净：去引号/反斜杠/换行，防止响应头注入。 */
+    private fun headerSafeName(name: String): String =
+        name.replace(Regex("[\"\\\\\\r\\n]"), "_").take(200).ifBlank { "file" }
 
     /**
      * 归属校验：凭证认得出身份时才拦，认不出则不拦（见 [com.padguard.server.security.FileAccessInterceptor]）。
@@ -181,8 +200,19 @@ class ParentMediaUploadController(private val fileStorageService: FileStorageSer
         if (file.isEmpty) {
             return ApiResponse.fail(ParentErr.PARAM_ERROR, "文件为空，请重新选择")
         }
+        // 上传类型黑名单（第八轮评估 P1-A）：本产品只承载媒体/音频/视频/APK 分发，
+        // 一切可被浏览器执行的格式（HTML/SVG/JS 等）一律拒绝——它们一旦落盘，
+        // 即使下载侧已强制 attachment，仍会被搬进各种渲染路径制造存储型 XSS。
+        val name = file.originalFilename ?: ""
+        val ext = name.substringAfterLast('.', "").lowercase()
+        if (ext in BLOCKED_EXTENSIONS) {
+            return ApiResponse.fail(ParentErr.PARAM_ERROR, "不支持上传 .$ext 类型的文件")
+        }
         val mime = file.contentType?.takeIf { it.isNotBlank() && it != "*/*" }
             ?: guessContentType(file.originalFilename)
+        if (mime.substringBefore(';').trim().lowercase() in BLOCKED_MIME_TYPES) {
+            return ApiResponse.fail(ParentErr.PARAM_ERROR, "不支持上传该类型的文件")
+        }
         val stored = fileStorageService.storeDetailed(mime, file.bytes, file.originalFilename, ownerUserId = userId)
         // 上传是唯一能往磁盘写任意内容的入口，出问题时（磁盘打满、传错文件）需要能追到是谁传的
         log.info("parent upload: userId={} fileId={} name={} size={} type={}", userId, stored.id, stored.name, file.size, mime)
@@ -220,5 +250,18 @@ class ParentMediaUploadController(private val fileStorageService: FileStorageSer
                 else -> "application/octet-stream"
             }
         }
+
+        /** 上传黑名单：可执行/可渲染脚本的扩展名（存储型 XSS 源头，见 upload 注释）。 */
+        private val BLOCKED_EXTENSIONS = setOf(
+            "html", "htm", "xhtml", "shtml", "svg", "js", "mjs", "css", "xml",
+            "json", "swf", "hta", "jsp", "asp", "aspx", "php", "exe", "bat", "cmd", "ps1", "sh"
+        )
+
+        /** 上传黑名单：MIME 层兜底（防止改扩展名绕过）。 */
+        private val BLOCKED_MIME_TYPES = setOf(
+            "text/html", "application/xhtml+xml", "image/svg+xml",
+            "text/javascript", "application/javascript", "application/x-javascript",
+            "text/xml", "application/xml", "application/x-shockwave-flash"
+        )
     }
 }

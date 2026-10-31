@@ -51,6 +51,14 @@ class AuthServiceTest {
         override fun findByUserIdAndStatus(userId: String, status: String) =
             table.values.filter { it.userId == userId && it.status == status }
         override fun findAllByOrderByCreatedAtDesc() = table.values.sortedByDescending { it.createdAt }
+        override fun claimPendingOrder(
+            orderNo: String, paidStatus: String, pendingStatus: String, paidAt: Long, txId: String?
+        ): Int {
+            val order = findByOrderNo(orderNo) ?: return 0
+            if (order.status != pendingStatus) return 0
+            order.status = paidStatus; order.paidAt = paidAt; order.transactionId = txId
+            return 1
+        }
     }
 
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
@@ -72,7 +80,9 @@ class AuthServiceTest {
         // 验签器用示例支付放行模式（与注册链路无关，仅满足 BillingService 构造）
         val billing = BillingService(subs, orders, devices, users, 1L, 3, 3800, 9800, 29800, 3, 3, 5, 30L, true, ConfigurablePaymentVerifier(true, FakeSystemSettingRepo(), ObjectMapper(), listOf()), FakeSystemSettingRepo(), ObjectMapper())
         val jwt = JwtTokenProvider("padguard-unit-test-secret-0123456789abcdef", 120, 30)
-        val auth = AuthService(users, jwt, billing, false)
+        // prod profile 未激活：短信登录走 smsLoginEnabled 配置位（false）即被拒
+        val auth = AuthService(users, jwt, billing, false,
+            org.springframework.mock.env.MockEnvironment())
         return Triple(auth, users, subs)
     }
 

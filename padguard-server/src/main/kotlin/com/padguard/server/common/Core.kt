@@ -392,6 +392,15 @@ object HashUtil {
  * 出现一处改了另一处没改的漂移。
  */
 object ClientIps {
+    /**
+     * 转发头感知的客户端 IP（用于**局域网发现 / 设备存活定位**这类非安全决策）。
+     *
+     * 家庭部署常见前置 Nginx / 端口转发，只认 `RemoteAddr` 会一律拿到 127.0.0.1，
+     * 局域网发现会因此永远发现不了任何设备。
+     *
+     * **不得用于限流/鉴权等安全决策**：`X-Forwarded-For` 是客户端可任意伪造的头，
+     * 用了它等于把频控的 IP 维度交给了攻击者。安全场景请用 [peerOf]。
+     */
     fun of(request: jakarta.servlet.http.HttpServletRequest): String? {
         val xff = request.getHeader("X-Forwarded-For")
             ?.split(',')
@@ -400,4 +409,14 @@ object ClientIps {
             ?.takeIf { it.isNotBlank() }
         return (xff ?: request.remoteAddr)?.trim()?.takeIf { it.isNotBlank() }
     }
+
+    /**
+     * TCP 对端地址：由内核从三次握手得来，**客户端无法伪造**。
+     *
+     * 限流、风控等安全决策一律以此为准（见 [com.padguard.server.security.RateLimit]）。
+     * 代价是在受信任反向代理之后会一律看到代理的地址，因此部署在 Nginx 之后时
+     * 需要显式打开 `padguard.ratelimit.trust-forwarded-for`，由 [of] 承担解析。
+     */
+    fun peerOf(request: jakarta.servlet.http.HttpServletRequest): String? =
+        request.remoteAddr?.trim()?.takeIf { it.isNotBlank() }
 }

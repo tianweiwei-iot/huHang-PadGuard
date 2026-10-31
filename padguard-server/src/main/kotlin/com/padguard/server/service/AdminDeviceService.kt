@@ -56,7 +56,7 @@ class AdminDeviceService(
                 model = d.model, osVersion = d.osVersion, controlMode = d.controlMode,
                 online = online(d), lastOnlineAt = fmt(d.lastOnlineAt),
                 remoteLocked = d.remoteLocked ?: false, minorMode = d.ageBand != null,
-                todayUsageMinutes = usedMinutes[d.id], region = owner?.region,
+                todayUsageMinutes = usedMinutes[d.id] ?: 0, region = owner?.region ?: "",
                 boundAt = fmt(d.createdAt)
             )
         }

@@ -13,3 +13,5 @@ tomcat-work
 data
 uploads
 logs
+# 运行时自动生成的 JWT 密钥（首次启动生成，绝不进构建上下文/镜像层）
+config

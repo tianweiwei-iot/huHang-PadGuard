@@ -64,15 +64,20 @@ class UsageSessionServiceTest {
     @Test
     @DisplayName("reportRest 累加 restAccumulatedMs 并从剩余时长扣除")
     fun `reportRest deducts rest from remaining`() {
+        // 上报前剩余（含墙钟流逝，整数分钟截断）
+        val before = service.get("device-1").remainingMinutes
         service.reportRest("device-1", "r1", 10 * 60_000L)
 
         val entity = sessionRepo.table["device-1"]!!
         assertThat(entity.restAccumulatedMs).isEqualTo(10 * 60_000L)
         assertThat(entity.restIds).isEqualTo("r1")
 
-        // 剩余 = 总额度(120) - 墙钟流逝(≈30) - 休息(10) = 80min
-        val dto = service.get("device-1")
-        assertThat(dto.remainingMinutes).isEqualTo(80)
+        // 剩余应比上报前少 10 分钟（休息直接扣减，与墙钟流逝无关）。
+        // 允许 ±1 分钟：若两次读取之间恰好跨越分钟边界，整分截断会把额外流逝的
+        // 亚分钟时长计入其中一侧（2026-11-01 复测发现的偶发失败根因）。
+        // 核心不变量：扣减量 ∈ [10, 11]，绝不允许出现"休息不计入"（差 0）或"双倍扣减"（差 ≥ 12）。
+        val after = service.get("device-1").remainingMinutes
+        assertThat(after).isBetween(before - 11, before - 10)
     }
 
     @Test

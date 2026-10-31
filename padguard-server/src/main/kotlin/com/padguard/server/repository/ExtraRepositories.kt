@@ -266,4 +266,25 @@ interface PaymentOrderRepository : JpaRepository<PaymentOrder, String> {
     fun findByUserIdAndStatus(userId: String, status: String): List<PaymentOrder>
     /** 全量订单（后台计费报表用），按创建时间倒序 */
     fun findAllByOrderByCreatedAtDesc(): List<PaymentOrder>
+
+    /**
+     * 原子抢占：仅当订单仍为 PENDING 时置为 PAID，返回受影响行数（1=抢占成功，0=已被处理）。
+     *
+     * 第八轮评估 P1-B：此前 markPaid 是"读状态→内存判断→写回"的 check-then-act，
+     * 微信重复回调并发到达时两个事务都能通过检查，订阅被 extend 两次（多延长一个月）。
+     * 改为条件 UPDATE 后，行锁保证同一订单只有一个事务能抢占成功——
+     * 后到的事务在第一个事务提交前阻塞，提交后其 UPDATE 命中 0 行，走幂等返回。
+     */
+    @Modifying
+    @Query(
+        "update PaymentOrder o set o.status = :paidStatus, o.paidAt = :paidAt, o.transactionId = :txId " +
+            "where o.orderNo = :orderNo and o.status = :pendingStatus"
+    )
+    fun claimPendingOrder(
+        @Param("orderNo") orderNo: String,
+        @Param("paidStatus") paidStatus: String,
+        @Param("pendingStatus") pendingStatus: String,
+        @Param("paidAt") paidAt: Long,
+        @Param("txId") txId: String?
+    ): Int
 }

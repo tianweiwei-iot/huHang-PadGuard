@@ -122,3 +122,6 @@ wb-gradle-home/
 wb-init.gradle
 wb-init-ran.txt
 wb-pcache/
+
+# ===================== 构建产物（Maven 风格 target/）=====================
+target/

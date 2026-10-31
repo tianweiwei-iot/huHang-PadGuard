@@ -24,6 +24,8 @@ import com.padguard.server.repository.SubscriptionRepository
 import com.padguard.server.repository.SystemSettingRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.PaymentVerifier
+import com.padguard.server.security.WeChatPayClient
+import com.padguard.server.security.WeChatPayVerifier
 import com.padguard.server.dto.PayRequest
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
@@ -69,7 +71,10 @@ class BillingService(
     @Value("\${padguard.billing.mock-pay-enabled:false}") private val configMockPayEnabled: Boolean,
     private val paymentVerifier: PaymentVerifier,
     private val systemSettingRepository: SystemSettingRepository,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    // 微信支付客户端/校验器：生产由 Spring 注入；单测手动构造时留空（置灰该渠道），保证测试不依赖微信配置。
+    private val weChatPayClient: WeChatPayClient? = null,
+    private val weChatVerifier: WeChatPayVerifier? = null
 ) {
     private val log = LoggerFactory.getLogger(BillingService::class.java)
 
@@ -100,20 +105,28 @@ class BillingService(
         )
     }
 
+    /** 微信支付是否已按完整配置就绪（开关+商户号+私钥+序列号+APIv3 密钥齐全） */
+    private fun weChatReady(): Boolean = weChatPayClient?.isConfigured() ?: false
+
     /**
      * 收银台可选的支付渠道。
      *
-     * 真实渠道未接入前一律返回**示例支付**（[PayChannelDto.mock] = true），
-     * UI 据此打上"示例"角标，家长不会产生"我已经付款了"的误解。
-     * 接入真实渠道后，这里按渠道返回对应的可用性，前端不用改。
+     * 示例支付（mock）开启时全部渠道标记为示例；否则仅"已配置就绪"的真实渠道（当前为微信支付）
+     * 显示为可用，其余仍提示"渠道接入中"，避免放出"能下单、没人收款"的口子。
      */
     fun channels(): List<PayChannelDto> = PayChannel.checkoutChannels().map { c ->
+        val isWeChat = c == PayChannel.WECHAT
+        val available = mockPayEnabled() || (isWeChat && weChatReady())
         PayChannelDto(
             key = c.name,
             label = c.label,
-            enabled = mockPayEnabled(),
+            enabled = available,
             mock = mockPayEnabled(),
-            note = if (mockPayEnabled()) "示例支付，不会产生真实扣款" else "渠道接入中，暂不可用"
+            note = when {
+                mockPayEnabled() -> "示例支付，不会产生真实扣款"
+                isWeChat && weChatReady() -> "微信支付（真实扣款）"
+                else -> "渠道接入中，暂不可用"
+            }
         )
     }
 
@@ -215,9 +228,16 @@ class BillingService(
             createdAt = now,
             updatedAt = now
         )
-        subscriptionRepository.save(sub)
-        log.info("trial subscription created: userId={}, days={}", userId, days)
-        return sub
+        return try {
+            subscriptionRepository.save(sub)
+            log.info("trial subscription created: userId={}, days={}", userId, days)
+            sub
+        } catch (_: org.springframework.dao.DataIntegrityViolationException) {
+            // 第八轮 P1-B：subscriptions.user_id 已加唯一约束，并发 createTrial 只有一个事务成功；
+            // 输家回退读取赢家刚插入的订阅，保证调用方永远拿到有效订阅（而非抛 500）。
+            subscriptionRepository.findByUserId(userId)
+                ?: throw IllegalStateException("subscription insert raced but row not visible: userId=$userId")
+        }
     }
 
     // ------------------------------------------------------------------ 校验
@@ -339,10 +359,11 @@ class BillingService(
         }
         val channel = req.channel?.let { PayChannel.of(it) }
             ?: throw BizException(ParentErr.PARAM_ERROR, "请选择支付渠道", Audience.PARENT)
-        // 客服代开通（MANUAL）永远可用；收银台渠道只有在开了示例支付时才可下单 ——
+        // 客服代开通（MANUAL）永远可用；收银台渠道只有在开了示例支付、或该真实渠道已配置就绪时才可下单 ——
         // 真实渠道未接入前就在生产放开它们，等于开一条"能下单、没人收款、也没人开通"的口子，
         // 家长付款后订阅不变，是最难解释的一类投诉。
-        if (channel != PayChannel.MANUAL && !mockPayEnabled()) {
+        val weChatAvailable = channel == PayChannel.WECHAT && weChatReady()
+        if (channel != PayChannel.MANUAL && !mockPayEnabled() && !weChatAvailable) {
             throw BizException(
                 ParentErr.PARAM_ERROR,
                 "支付渠道 ${channel.label} 尚未接入，请稍后开放",
@@ -365,20 +386,39 @@ class BillingService(
         )
         paymentOrderRepository.save(order)
         log.info("order created: no={}, userId={}, plan={}, amount={}fen", order.orderNo, userId, plan.key, order.amountFen)
+        // 第八轮 P2-5：newOrderNo 先查后写仍有微窗口（两事务同秒取到同一候选号且互相未提交），
+        // 撞 unique 约束会抛 DataIntegrityViolation → 家长看到 500。
+        // 注意：本方法 @Transactional，标记 rollback-only 后同事务内重试已无意义，
+        // 因此这里只把异常翻译成明确的业务提示（家长重新点一次即成功），而非生硬的 500。
+        try {
+            paymentOrderRepository.flush()
+        } catch (_: org.springframework.dao.DataIntegrityViolationException) {
+            throw BizException(ParentErr.PARAM_ERROR, "下单冲突，请重新提交", Audience.PARENT)
+        }
+
+        // 真实微信支付：向微信下单并取回调所需的 payParams；其余渠道（示例/代开通）无 payParams。
+        var payParams: Map<String, Any?>? = null
+        if (weChatAvailable && !mockPayEnabled()) {
+            payParams = weChatPayClient?.createAppOrder(order.orderNo, order.amountFen, "护航成长-${plan.label}")
+                ?: throw BizException(ParentErr.PARAM_ERROR, "微信下单失败，请稍后重试", Audience.PARENT)
+        }
         return CreateOrderResponse(
             orderNo = order.orderNo,
             amountFen = order.amountFen,
             channel = order.channel,
             payDeadline = order.payDeadline,
-            payParams = null
+            payParams = payParams
         )
     }
 
     /**
      * 支付成功 → 开通/续费。
      *
-     * 幂等：回调可能重复投递，重复处理会把订阅延长两次。
-     * 只有 PENDING → PAID 才真正入账，其余状态直接返回成功。
+     * 幂等（第八轮 P1-B 加固）：回调可能重复投递，且可能**并发**到达。
+     * 此前是"读状态→内存判断→写回"的 check-then-act，两个并发事务都能通过检查，
+     * 订阅被 extend 两次（资损：多延长一个月）。
+     * 现改为 [PaymentOrderRepository.claimPendingOrder] 条件 UPDATE 原子抢占：
+     * 行锁保证同一订单只有一个事务能把 PENDING 翻转为 PAID，命中 0 行即视为重复回调幂等返回。
      */
     @Transactional
     fun markPaid(orderNo: String, transactionId: String? = null): SubscriptionDto {
@@ -399,10 +439,18 @@ class BillingService(
             throw BizException(ParentErr.ORDER_STATE_INVALID, "订单已超时关闭，请重新下单", Audience.PARENT)
         }
 
-        order.status = OrderStatus.PAID.name
-        order.paidAt = now
-        order.transactionId = transactionId
-        paymentOrderRepository.save(order)
+        // 原子抢占：WHERE status='PENDING' 保证并发重复回调只有一个事务入账
+        val claimed = paymentOrderRepository.claimPendingOrder(
+            orderNo = orderNo,
+            paidStatus = OrderStatus.PAID.name,
+            pendingStatus = OrderStatus.PENDING.name,
+            paidAt = now,
+            txId = transactionId
+        )
+        if (claimed == 0) {
+            log.info("order claimed by concurrent callback first: no={} (duplicate ignored)", orderNo)
+            return statusOf(order.userId)
+        }
 
         extend(order.userId, order.months, order.plan)
         log.info("order paid: no={}, userId={}, plan={}", orderNo, order.userId, order.plan)
@@ -436,6 +484,28 @@ class BillingService(
         }
 
         return markPaid(req.orderNo, req.transactionId)
+    }
+
+    /**
+     * 微信支付原生回调入口（[BillingController.notify] 识别到 Wechatpay-Signature 头后调用）。
+     *
+     * 微信回调是加密报文，不能直接按 [PayRequest] 解析，因此走此专用分支：
+     * 1. [WeChatPayVerifier.verifyAndParse] 完成验签 + 解密 + 取单号（内部已校验 trade_state=SUCCESS）；
+     * 2. 用 out_trade_no 反查本系统订单，校验其渠道确为 WECHAT（防止串用）；
+     * 3. 入账（幂等，markPaid 内部处理重复投递）。
+     */
+    @Transactional
+    fun handleWeChatNotify(rawBody: String, headers: Map<String, String>): SubscriptionDto {
+        val result = weChatVerifier?.verifyAndParse(rawBody, headers)
+            ?: throw BizException(ParentErr.ORDER_STATE_INVALID, "微信支付校验未通过", Audience.PARENT)
+
+        val order = paymentOrderRepository.findByOrderNo(result.outTradeNo)
+            ?: throw BizException(ParentErr.ORDER_NOT_FOUND, "订单不存在", Audience.PARENT)
+        if (order.channel != PayChannel.WECHAT.name) {
+            log.warn("微信回调单号 {} 对应订单渠道非 WECHAT：{}", result.outTradeNo, order.channel)
+            throw BizException(ParentErr.FORBIDDEN, "订单渠道不匹配", Audience.PARENT)
+        }
+        return markPaid(result.outTradeNo, result.transactionId)
     }
 
     /** 延长订阅：从"当前有效期"或"现在"中较晚者起算，避免过期后续费被倒扣时长 */
@@ -496,10 +566,26 @@ class BillingService(
 
     // ------------------------------------------------------------------ 工具
 
-    private fun newOrderNo(now: Long): String =
-        "PG" + java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
-            .format(Instant.ofEpochMilli(now).atZone(SERVER_ZONE_ID)) +
-            (1000..9999).random()
+    /**
+     * 生成商户订单号，并在库内确认唯一后才返回。
+     *
+     * 号段为 `PG + yyyyMMddHHmmss + 4 位随机`，同一秒内的随机空间只有 9000。
+     * 而 `order_no` 列带 `unique = true` —— 撞号时落库会抛
+     * `DataIntegrityViolationException`，家长看到的是一个没头没尾的 500，
+     * 钱没付成也不知道为什么（促销期两位家长同秒下单并非不可能）。
+     * 这里先查后写并有限重试，把"撞号"从用户可见的失败降为内部自愈。
+     */
+    private fun newOrderNo(now: Long): String {
+        val prefix = "PG" + java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
+            .format(Instant.ofEpochMilli(now).atZone(SERVER_ZONE_ID))
+        repeat(ORDER_NO_MAX_ATTEMPTS) { attempt ->
+            val candidate = prefix + (1000..9999).random()
+            if (paymentOrderRepository.findByOrderNo(candidate) == null) return candidate
+            log.warn("order no collision detected (attempt {}): {}", attempt + 1, candidate)
+        }
+        // 极端情况（9000 个号全被占满）才走到这里：用 UUID 兜底，绝不返回重复号
+        return prefix + UUID.randomUUID().toString().replace("-", "").take(12)
+    }
 
     /**
      * 按**自然月**顺延，而不是按 30 天乘。
@@ -522,5 +608,8 @@ class BillingService(
     companion object {
         /** 后台「系统设置」在 SystemSetting 表中的主键，必须与 AdminService 使用的值一致 */
         private const val SETTINGS_KEY = "admin.settings"
+
+        /** 订单号撞号时的最大重试次数（见 [newOrderNo]） */
+        private const val ORDER_NO_MAX_ATTEMPTS = 8
     }
 }

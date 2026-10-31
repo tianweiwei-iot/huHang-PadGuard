@@ -93,13 +93,18 @@ class BillingController(
         // 限定读取体积：支付回调报文极小（通常 < 1KB），无上限的 readBytes() 可被恶意超大请求
         // 撑爆堆内存（DoS）。这里按 1MB 上限流式读取，超限即拒绝。
         val rawBody = readBoundedBody(request, MAX_NOTIFY_BODY_BYTES)
+        val headers = request.headerNames?.toList().orEmpty()
+            .associateWith { request.getHeader(it) }
+        // 微信支付原生回调：报文经加密，且携带 Wechatpay-Signature 头，走专用分支
+        // （不能按 PayRequest 解析，否则拿不到订单号）。其余渠道（示例/代开通等）走通用分支。
+        if (headers.any { it.key.equals("Wechatpay-Signature", ignoreCase = true) }) {
+            return ApiResponse.ok(billingService.handleWeChatNotify(rawBody, headers))
+        }
         val req = try {
             objectMapper.readValue(rawBody, PayRequest::class.java)
         } catch (e: Exception) {
             throw BizException(ParentErr.PARAM_ERROR, "回调报文无法解析", Audience.PARENT)
         }
-        val headers = request.headerNames?.toList().orEmpty()
-            .associateWith { request.getHeader(it) }
         return ApiResponse.ok(billingService.handleNotify(req, rawBody, headers))
     }
 

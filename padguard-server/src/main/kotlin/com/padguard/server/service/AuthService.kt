@@ -16,9 +16,11 @@ import com.padguard.server.security.JwtTokenProvider
 import com.padguard.server.security.Passwords
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.core.env.Environment
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
 
 @Service
@@ -26,12 +28,45 @@ class AuthService(
     private val userRepository: UserRepository,
     private val jwt: JwtTokenProvider,
     private val billingService: BillingService,
-    @Value("\${padguard.auth.sms-login-enabled:false}") private val smsLoginEnabled: Boolean
+    @Value("\${padguard.auth.sms-login-enabled:false}") private val smsLoginEnabled: Boolean,
+    private val env: Environment
 ) {
     private val log = LoggerFactory.getLogger(AuthService::class.java)
 
     /** 中国大陆手机号：1 开头、第二位 3-9、共 11 位 */
     private val CN_MOBILE = Pattern.compile("^1[3-9]\\d{9}$")
+
+    /**
+     * 登录失败账号级锁定（纵深防御，配合 resilience4j 限流）。
+     *
+     * 为什么需要：限流只按"IP+账号"限速（10 次/分钟），专业爆破仍可低速尝试；
+     * 这里再加一道"连续 N 次失败 → 锁 M 分钟"的账号级闸门，大幅抬升爆破成本。
+     * 内存态（单实例部署足够），重启即清空——但重启需服务器权限，攻击者无法利用；
+     * 配合限流，二者叠加。仅对已存在账号计数，避免被用来恶意锁定受害者账号(DoS)。
+     */
+    private val failedAttempts = ConcurrentHashMap<String, Int>()
+    private val lockedUntil = ConcurrentHashMap<String, Long>()
+
+    @Value("\${padguard.auth.max-fail-attempts:5}")
+    private val maxFailAttempts: Int = 5
+
+    @Value("\${padguard.auth.lock-minutes:15}")
+    private val lockMinutes: Int = 15
+
+    init {
+        // 第八轮评估 P2-1：锁定/计数 map 的过期条目此前永不清理，长期运行下缓慢泄漏。
+        // 每 30 分钟清扫一次：锁定已过期、且失败计数为 0（或无计数）的条目即可移除。
+        val cleaner = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "auth-lock-sweeper").apply { isDaemon = true }
+        }
+        cleaner.scheduleWithFixedDelay({
+            runCatching {
+                val now = System.currentTimeMillis()
+                lockedUntil.entries.removeIf { it.value <= now }
+                failedAttempts.entries.removeIf { it.value <= 0 && lockedUntil[it.key] == null }
+            }.onFailure { LoggerFactory.getLogger(AuthService::class.java).warn("auth lock sweep failed: {}", it.message) }
+        }, 30, 30, java.util.concurrent.TimeUnit.MINUTES)
+    }
 
     /**
      * 登录前置闸门：账号必须处于可用状态。
@@ -60,13 +95,37 @@ class AuthService(
     }
 
     fun loginWithPassword(req: LoginPasswordRequest): LoginResponse {
+        // 锁定检查：未到解锁时间直接拒绝（给出剩余分钟，避免家长反复重试）。
+        val lockExpire = lockedUntil[req.phone] ?: 0L
+        if (lockExpire > System.currentTimeMillis()) {
+            val remainMin = ((lockExpire - System.currentTimeMillis()) / 60_000L).coerceAtLeast(1)
+            throw BizException(
+                ParentErr.TOO_MANY_REQUESTS,
+                "密码连续错误次数过多，账号已临时锁定，请约 ${remainMin} 分钟后再试",
+                Audience.PARENT
+            )
+        }
         val user = userRepository.findByPhone(req.phone)
             ?: throw BizException(ParentErr.UNAUTHORIZED, "用户不存在", Audience.PARENT)
         if (!Passwords.matches(req.password, user.passwordHash)) {
+            recordFailure(req.phone)
             throw BizException(ParentErr.UNAUTHORIZED, "密码错误", Audience.PARENT)
         }
+        // 登录成功：清空失败计数与锁定。
+        failedAttempts.remove(req.phone)
+        lockedUntil.remove(req.phone)
         requireUsableAccount(user)
         return buildLoginResponse(user)
+    }
+
+    /** 记录一次失败并尝试加锁；仅对已存在账号生效，避免被用来锁定受害者。 */
+    private fun recordFailure(phone: String) {
+        val n = failedAttempts.merge(phone, 1, Int::plus)
+        if (n != null && n >= maxFailAttempts) {
+            lockedUntil[phone] = System.currentTimeMillis() + lockMinutes * 60_000L
+            failedAttempts[phone] = 0
+            log.warn("account locked due to {} consecutive failed logins: phone={}", maxFailAttempts, phone)
+        }
     }
 
     /**
@@ -123,8 +182,16 @@ class AuthService(
      * 当前**没有接入短信服务商**：`sms/send` 只返回一个空的 ok，验证码也从未被校验过。
      * 也就是说只要手机号在库里，任何人都能直接进入家长端 —— 这是一条免密入口。
      * 因此默认关闭，只有真正接入短信服务商后才可开启。
+     *
+     * 第八轮评估 P2-1 追加的生产闸门：`prod` profile 下**无论配置怎么写都技术性禁用**——
+     * 此前仅靠配置项兜底，一次误配置（如照抄 local 的 .env）就会把免密入口带上公网。
+     * 接入真实短信服务商并上线验证码校验时，需连同本闸门一起评审移除。
      */
     fun loginWithSms(req: LoginSmsRequest): LoginResponse {
+        if (env.activeProfiles.contains("prod")) {
+            log.warn("sms login blocked in prod profile: phone={}", req.phone)
+            throw BizException(ParentErr.UNAUTHORIZED, "短信登录未启用，请使用密码登录", Audience.PARENT)
+        }
         if (!smsLoginEnabled) {
             throw BizException(ParentErr.UNAUTHORIZED, "短信登录未启用，请使用密码登录", Audience.PARENT)
         }

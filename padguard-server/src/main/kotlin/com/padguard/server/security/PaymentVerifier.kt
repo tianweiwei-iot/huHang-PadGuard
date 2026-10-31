@@ -5,6 +5,7 @@ import com.padguard.server.domain.PayChannel
 import com.padguard.server.repository.SystemSettingRepository
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.context.annotation.Primary
 import org.springframework.stereotype.Component
 
 /**
@@ -55,6 +56,7 @@ interface ChannelPaymentVerifier : PaymentVerifier {
  * 但 MANUAL 也不会有对应验签器，所以生产默认下会被第 2 步直接挡掉。
  */
 @Component
+@Primary
 class ConfigurablePaymentVerifier(
     @Value("\${padguard.billing.mock-pay-enabled:false}") private val configMockPayEnabled: Boolean,
     private val systemSettingRepository: SystemSettingRepository,

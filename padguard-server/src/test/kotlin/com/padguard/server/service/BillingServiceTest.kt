@@ -72,6 +72,17 @@ class BillingServiceTest {
         override fun findByUserIdAndStatus(userId: String, status: String): List<PaymentOrder> =
             table.values.filter { it.userId == userId && it.status == status }
         override fun findAllByOrderByCreatedAtDesc(): List<PaymentOrder> = emptyList()
+        // 模拟条件 UPDATE 的原子抢占语义：仅 PENDING → PAID 才命中 1 行
+        override fun claimPendingOrder(
+            orderNo: String, paidStatus: String, pendingStatus: String, paidAt: Long, txId: String?
+        ): Int {
+            val order = findByOrderNo(orderNo) ?: return 0
+            if (order.status != pendingStatus) return 0
+            order.status = paidStatus
+            order.paidAt = paidAt
+            order.transactionId = txId
+            return 1
+        }
     }
 
     /** 设备台账：BillingService 只关心数量，无需构造完整 Device 实体。 */

@@ -11,7 +11,7 @@ import org.springframework.web.socket.WebSocketMessage
 import org.springframework.web.socket.WebSocketSession
 import org.springframework.stereotype.Component
 
-/** 家长端 WebSocket：wss://host/ws?token=<JWT> */
+/** 家长端 WebSocket：优先 Authorization: Bearer 头鉴权；旧版客户端兼容 wss://host/ws?token=<JWT> */
 @Component
 class DeviceWebSocketHandler(
     private val jwt: JwtTokenProvider,
@@ -30,7 +30,13 @@ class DeviceWebSocketHandler(
      * 该家长的长连接仍能收到告警、上下线、解锁申请等推送 —— 冻结出现一条绕过口子。
      */
     override fun afterConnectionEstablished(session: WebSocketSession) {
-        val token = session.uri?.query?.let { parseToken(it) }
+        // 第八轮评估 P1-F：token 优先取 Authorization 头（JWT 不再进 URL），
+        // URL 里的 token 会被反向代理访问日志、浏览器历史、系统代理日志长期留存。
+        // 保留 query 方式仅为向后兼容旧版客户端；新版客户端一律走头。
+        val headerToken = session.handshakeHeaders.getFirst("Authorization")
+            ?.takeIf { it.startsWith("Bearer ", ignoreCase = true) }
+            ?.substring(7)?.trim()?.takeIf { it.isNotBlank() }
+        val token = headerToken ?: session.uri?.query?.let { parseToken(it) }
         // 必须是 access token（refresh/管理员令牌不得建立家长推送通道），
         // 且账号必须真实存在 —— 与 ParentAuthInterceptor 的"幽灵账号"防护同口径。
         val userId = if (token != null) {

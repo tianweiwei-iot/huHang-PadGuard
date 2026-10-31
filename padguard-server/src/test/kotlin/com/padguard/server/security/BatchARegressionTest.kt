@@ -166,7 +166,7 @@ class BatchARegressionTest {
         val p = jwt()
         assertEquals("u1", p.parseAccessToken(p.createAccessToken("u1")))
         assertEquals("u1", p.parseRefreshToken(p.createRefreshToken("u1")))
-        assertEquals("A1", p.parseAdminToken(p.createAdminToken("A1")))
+        assertEquals("A1", p.parseAdminToken(p.createAdminToken("A1", 0)).adminId)
     }
 
     // ----------------------------- S6：ack 状态机 -----------------------------
@@ -305,9 +305,19 @@ class BatchARegressionTest {
             Mockito.`when`(it.remoteAddr).thenReturn(ip)
         }
 
+    /**
+     * 构造"TCP 对端固定、但转发头可随意伪造"的请求 —— 真实网络里攻击者正是这么做的：
+     * 连得上就说明对端地址变不了，能变的只有请求头。
+     */
+    private fun requestWith(remoteAddr: String, xForwardedFor: String?): HttpServletRequest =
+        Mockito.mock(HttpServletRequest::class.java).also {
+            Mockito.`when`(it.getHeader("X-Forwarded-For")).thenReturn(xForwardedFor)
+            Mockito.`when`(it.remoteAddr).thenReturn(remoteAddr)
+        }
+
     @Test
     fun `eleventh login attempt from same ip is rejected (s14)`() {
-        val rl = RateLimit()
+        val rl = RateLimit(RateLimitProperties().apply { login = 10 })
         val req = requestFrom("10.0.0.1")
         repeat(10) { rl.require("login", req, "13800000001") }
         val ex = assertThrows(BizException::class.java) { rl.require("login", req, "13800000001") }
@@ -316,7 +326,7 @@ class BatchARegressionTest {
 
     @Test
     fun `account dimension is independent of ip (s14)`() {
-        val rl = RateLimit()
+        val rl = RateLimit(RateLimitProperties().apply { login = 10 })
         // 换 10 个不同 IP 打同一账号：每次 IP 预算全新，但账号预算耗尽
         repeat(10) { i -> rl.require("login", requestFrom("10.0.0.$i"), "13800000002") }
         val ex = assertThrows(BizException::class.java) { rl.require("login", requestFrom("10.0.0.11"), "13800000002") }
@@ -325,7 +335,7 @@ class BatchARegressionTest {
 
     @Test
     fun `different scenario has its own budget (s14)`() {
-        val rl = RateLimit()
+        val rl = RateLimit(RateLimitProperties().apply { login = 10 })
         val req = requestFrom("10.0.1.1")
         repeat(10) { rl.require("login", req, "13800000003") }
         // login 已耗尽，但 admin_login / bind 是独立计数
@@ -335,7 +345,7 @@ class BatchARegressionTest {
 
     @Test
     fun `different ip is not affected by another ip budget (s14)`() {
-        val rl = RateLimit()
+        val rl = RateLimit(RateLimitProperties().apply { login = 10 })
         val reqA = requestFrom("10.0.2.1")
         repeat(10) { rl.require("login", reqA, "13800000004") }
         assertThrows(BizException::class.java) { rl.require("login", reqA, "13800000004") }
@@ -343,5 +353,53 @@ class BatchARegressionTest {
         rl.require("login", requestFrom("10.0.2.2"), "13800000005")
         // 新 IP + 同账号仍被拒：账号维度预算独立于 IP（与上一用例互证）
         assertThrows(BizException::class.java) { rl.require("login", requestFrom("10.0.2.2"), "13800000004") }
+    }
+
+    @Test
+    fun `spoofed X-Forwarded-For does not buy extra ip budget by default`() {
+        val rl = RateLimit(RateLimitProperties().apply { login = 10 })
+        // 同一 TCP 对端，每次换一个伪造的 XFF：若限流采信转发头，每次都会得到一份全新预算，
+        // IP 维度频控即被完全绕过。默认必须取不可伪造的 remoteAddr，第 11 次就该被拒。
+        repeat(10) { i ->
+            rl.require("login", requestWith("203.0.113.7", "1.2.3.$i"), "13800000010")
+        }
+        val ex = assertThrows(BizException::class.java) {
+            rl.require("login", requestWith("203.0.113.7", "1.2.3.99"), "13800000010")
+        }
+        assertEquals(ParentErr.TOO_MANY_REQUESTS, ex.code, "伪造 X-Forwarded-For 不得刷新 IP 维度预算")
+    }
+
+    @Test
+    fun `trust-forwarded-for opt-in restores proxy awareness`() {
+        val rl = RateLimit(RateLimitProperties().apply { login = 10; trustForwardedFor = true })
+        // 仅在"确实部署于受信任反向代理之后"时才打开此开关；打开后同一对端、
+        // 不同 XFF 应各自独立计数（代理会重写该头，真实客户端因此被区分开）。
+        repeat(10) { i ->
+            rl.require("login", requestWith("127.0.0.1", "198.51.100.$i"), "13800000011")
+        }
+        rl.require("login", requestWith("127.0.0.1", "198.51.100.88"), "13800000012")
+    }
+
+    @Test
+    fun `bucket map is bounded and fails closed instead of growing without limit`() {
+        // 早期实现为"每个 IP 一个 Resilience4j 限流器、且从不淘汰"，伪造海量源 IP 即可撑爆内存。
+        // 这里制造远超上限的**互不相同的 IP 维度 key**，且每个 key 只打 1 次（远低于阈值 10），
+        // 因此任何被拒都只能来自"容量封顶"，不可能来自频次超限 —— 测的正是目标行为。
+        val rl = RateLimit(RateLimitProperties().apply { login = 10; trustForwardedFor = true })
+        var rejected = false
+        repeat(21_000) { i ->
+            // 不传 account：只按 IP 维度计数，避免账号维度提前触发频次拦截而掩盖容量结论
+            val req = requestWith("127.0.0.1", "198.18.${(i / 250) % 250}.${i % 250}")
+            try {
+                rl.require("login", req)
+            } catch (e: BizException) {
+                if (e.code == ParentErr.TOO_MANY_REQUESTS) {
+                    rejected = true
+                    return@repeat
+                }
+                throw e
+            }
+        }
+        assertTrue(rejected, "海量不同 IP 冲击时必须在容量上限处 fail closed，而非无限增长")
     }
 }
