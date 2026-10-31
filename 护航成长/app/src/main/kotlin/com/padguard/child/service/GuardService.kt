@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -28,6 +29,7 @@ import com.padguard.child.MainActivity
 import com.padguard.child.R
 import com.padguard.child.capture.CaptureConsentPrompter
 import com.padguard.child.capture.CaptureConsentStore
+import com.padguard.child.usagesession.UsageStartOverlay
 import com.padguard.child.capture.CaptureConsent
 import com.padguard.child.capture.AccessibilityScreenshot
 import com.padguard.child.capture.MediaUploadRetry
@@ -194,6 +196,8 @@ class GuardService : Service() {
     @Inject lateinit var appHider: AppHider
     /** 玻璃球悬浮控制器（绑定后常驻展示已用/剩余，是隐藏形态下孩子可见、家长可触达的唯一载体） */
     @Inject lateinit var glassBall: com.padguard.child.glassball.GlassBallController
+    /** 计时开始确认浮层：needsStartConfirm 为真时以系统浮层弹出，确保后台保活也能提示孩子确认计时 */
+    @Inject lateinit var usageStartOverlay: UsageStartOverlay
 
     /**
      * 无障碍截屏通道：远程截屏优先走这里 —— 授权（启用无障碍）持久有效，
@@ -379,11 +383,22 @@ class GuardService : Service() {
                     scope.launch { runCatching { a11yCapabilityHealer.ensureEnabled() } }
                     // 解锁后抢恢复看屏（见 maybeResumeLiveViewOnUnlock）
                     maybeResumeLiveViewOnUnlock()
+                    // 亮屏即刷新计时会话并复位悬浮球：确保「第二天」等新日切后，计时开始确认浮层 /
+                    // 剩余额度立即刷新、玻璃球重新可见（后台保活下孩子不在 App 前台，必须主动拉起）。
+                    if (boundNow.get()) {
+                        scope.launch { runSafely("sessionSyncOnScreenOn") { usageSessionManager.refresh() } }
+                        scope.launch { runSafely("showBallOnScreenOn") { glassBall.show() } }
+                    }
                 }
                 Intent.ACTION_USER_PRESENT -> {
                     // 用户已解锁（亮屏且过了锁屏页）：同样抢一次无障碍静默重绑 + 看屏恢复
                     scope.launch { runCatching { a11yCapabilityHealer.ensureEnabled() } }
                     maybeResumeLiveViewOnUnlock()
+                    // 解锁即刷新计时会话并复位悬浮球（同上，覆盖无系统锁屏时 USER_PRESENT 即屏幕点亮的情形）
+                    if (boundNow.get()) {
+                        scope.launch { runSafely("sessionSyncOnUserPresent") { usageSessionManager.refresh() } }
+                        scope.launch { runSafely("showBallOnUserPresent") { glassBall.show() } }
+                    }
                 }
             }
         }
@@ -479,6 +494,9 @@ class GuardService : Service() {
         if (GuardHeartbeat.readGuardState(this)) {
             GuardAlarmReceiver.schedule(this)
         }
+        // 计时开始确认浮层观察者：needsStartConfirm 为真且亮屏/已绑定时，用系统浮层弹出，
+        // 修复「后台保活下计时开始确认框不可见、第二天亮屏无提示、计时不启动」。
+        observeUsageStart()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -693,6 +711,34 @@ class GuardService : Service() {
         while (scope.isActive) {
             delay(REAUTH_CHECK_INTERVAL_MS)
             runSafely("authReconcileTick") { authorizationKeeper.reconcile() }
+        }
+    }
+
+    /**
+     * 计时开始确认浮层观察者。
+     *
+     * ## 修复背景
+     * 原「计时开始」确认框只渲染在孩子端**前台 App UI**（UsageSessionHost），而孩子端日常以
+     * **后台保活**形态运行、App 不在前台，确认框永远不可见，于是「第二天亮屏无任何提示开始计时、
+     * 计时始终不启动」。这里改为：needsStartConfirm 为真且设备已绑定、屏幕亮着时，用系统浮层
+     * （TYPE_APPLICATION_OVERLAY，与玻璃球同源）弹出确认框，孩子无论停留哪个 App 都能看到并确认，
+     * 计时才会真正开始。确认成功后会话转 active、needsStartConfirm 翻转，浮层自动收起。
+     */
+    private fun observeUsageStart() {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        scope.launch {
+            usageSessionManager.state.collect { s ->
+                if (!boundNow.get()) {
+                    usageStartOverlay.hide()
+                    return@collect
+                }
+                val interactive = pm?.isInteractive == true
+                if (s.needsStartConfirm && interactive) {
+                    usageStartOverlay.show { scope.launch { usageSessionManager.confirmStart() } }
+                } else {
+                    usageStartOverlay.hide()
+                }
+            }
         }
     }
 

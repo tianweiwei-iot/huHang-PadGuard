@@ -7,6 +7,7 @@ import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import com.padguard.child.capture.AccessibilityScreenshot
 import com.padguard.child.capture.CaptureConsentStore
+import com.padguard.child.service.GuardService
 import com.padguard.child.di.ApplicationScope
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.ui.lock.LockScreenPresenter
@@ -165,6 +166,13 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             }
         }
         startLockWatchdog()
+        // 系统会在进程被杀后自动重启已启用的无障碍服务——这是非 DO 设备「进程被杀→自愈」最可靠的通道。
+        // 借此刻把守护服务一并拉起，闭合「进程被杀 → 脱管 → 卸载闸门（无障碍软门）失效 → 可被卸载」的断链：
+        // 只要无障碍服务还启用，孩子端即便被清理工具/系统杀掉也能源头重新拉起守护，保持永驻与管控生效。
+        if (!GuardService.isRunning) {
+            runCatching { GuardService.start(this, "a11yReconnect") }
+                .onFailure { Logger.w(TAG, it) { "guard restart from a11y failed" } }
+        }
     }
 
     override fun onDestroy() {

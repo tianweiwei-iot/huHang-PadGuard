@@ -74,7 +74,7 @@ fun UsageSessionHost(viewModel: UsageSessionViewModel = hiltViewModel()) {
  * 因此这是模态框——不点"开始计时"就不会 dismiss，避免计时被绕过。
  */
 @Composable
-private fun UsageStartDialog(
+internal fun UsageStartDialog(
     loading: Boolean,
     onConfirm: () -> Unit
 ) {
