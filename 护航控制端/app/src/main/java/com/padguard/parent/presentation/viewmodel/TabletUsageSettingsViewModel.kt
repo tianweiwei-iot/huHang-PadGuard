@@ -43,11 +43,16 @@ class TabletUsageSettingsViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, saved = false, error = null)
             policyRepository.getTabletUsageSettings(deviceId)
+                // 必须用 copy 增量更新，不能整体重建 state：
+                // 本页进入时 load() 与 loadSession() 是并行发起的，且 usageSession 还有独立轮询在刷新。
+                // 整体重建会把先到的会话数据（以及延时工单列表）一把清空，
+                // "今日剩余时长"因此卡回"正在读取计时状态…"，最长要等下一个轮询周期才恢复；
+                // save() 成功后同样会把 delayTickets 清掉，延时审批区瞬间变空。
                 .onSuccess { settings ->
-                    _uiState.value = TabletUsageSettingsUiState(settings = settings, isLoading = false)
+                    _uiState.value = _uiState.value.copy(settings = settings, isLoading = false)
                 }
                 .onFailure { e ->
-                    _uiState.value = TabletUsageSettingsUiState(
+                    _uiState.value = _uiState.value.copy(
                         settings = TabletUsageSettings(deviceId = deviceId),
                         isLoading = false,
                         error = e.message
@@ -204,7 +209,8 @@ class TabletUsageSettingsViewModel @Inject constructor(
                 _uiState.value.settings.copy(syncToDevice = true)
             )
                 .onSuccess { synced ->
-                    _uiState.value = TabletUsageSettingsUiState(
+                    // 同 load()：增量更新，保留 usageSession / delayTickets 等已加载数据
+                    _uiState.value = _uiState.value.copy(
                         settings = synced,
                         isLoading = false,
                         saved = true

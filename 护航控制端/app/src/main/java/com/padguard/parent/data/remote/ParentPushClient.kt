@@ -16,7 +16,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -81,20 +82,31 @@ class ParentPushClient @Inject constructor(
         }
     }
 
-    private fun setActive(shouldBeActive: Boolean) {
+    private suspend fun setActive(shouldBeActive: Boolean) {
         active = shouldBeActive
         if (shouldBeActive) connect() else disconnect()
     }
 
-    @Synchronized
-    private fun connect() {
+    /**
+     * 第八轮 P2-7：原实现用 `runBlocking` 读 DataStore（token），阻塞 IO 线程池线程；
+     * 且 `@Synchronized` 会在挂起点持锁（DataStore 读取是挂起 IO），高并发重连时可能长时间占住锁。
+     * 改为 suspend + Mutex：等价互斥，不阻塞线程，所有调用点本就运行在 [scope] 协程内。
+     */
+    private val connectMutex = Mutex()
+
+    private suspend fun connect() = connectMutex.withLock {
         if (webSocket != null) return
         // token 拿不到（登录态刚被清 / 刷新尚未完成）→ 不连也不排重连：
         // 登录态 collector（isLoggedInFlow）在重新登录时会再次驱动 connect()，
         // 在这里硬排重连只会对着空 token 无限空转。
-        val token = runBlocking { tokenManager.getAccessToken() } ?: return
-        val url = buildWsUrl(token) ?: return
-        val request = Request.Builder().url(url).build()
+        val token = tokenManager.getAccessToken() ?: return
+        val url = buildWsUrl() ?: return
+        // 第八轮评估 P1-F：JWT 改走 Authorization 头，不再拼进 URL ——
+        // URL 里的 token 会被反向代理访问日志、系统代理日志长期留存。
+        // 服务端已支持头鉴权（query 兼容保留，仅供旧版客户端）。
+        val request = Request.Builder().url(url)
+            .header("Authorization", "Bearer $token")
+            .build()
         webSocket = wsClient.newWebSocket(request, listener)
         // 不要在这里复位 reconnectAttempts。
         // connect() 也是断线退避重连的入口，在这里复位会让每次重连都从 1s 重新起算，
@@ -109,8 +121,7 @@ class ParentPushClient @Inject constructor(
     }
 
     /** 服务器地址变化：断开旧连接，按新地址重连 */
-    @Synchronized
-    private fun reconnect() {
+    private suspend fun reconnect() {
         webSocket?.close(1000, "reconnect")
         webSocket = null
         connect()
@@ -127,12 +138,12 @@ class ParentPushClient @Inject constructor(
         }
     }
 
-    private fun buildWsUrl(token: String): String? {
+    private fun buildWsUrl(): String? {
         val base = serverPrefs.getBaseUrl().trim().trimEnd('/')
         if (base.isBlank()) return null
         val scheme = if (base.startsWith("https://", ignoreCase = true)) "wss://" else "ws://"
         val host = base.removePrefix("http://").removePrefix("https://")
-        return "$scheme$host/ws?token=$token"
+        return "$scheme$host/ws"
     }
 
     private fun handleText(text: String) {

@@ -203,6 +203,15 @@ interface MonitorRepository {
      */
     suspend fun downloadImage(imageUrl: String): Result<ByteArray>
 
+    /**
+     * 把服务端文件**流式**下载到本地临时文件，返回该文件（调用方用完须删除）。
+     *
+     * 存在理由：[downloadImage] 会把整个响应体读进 `ByteArray`。截图（几百 KB）没问题，
+     * 但录屏默认可达 10 分钟、动辄上百 MB —— 一次性进堆必然 OOM 崩溃。
+     * 落临时文件只是换个"容器"，内存占用恒定为缓冲区大小，随后由调用方流式写入相册。
+     */
+    suspend fun downloadToFile(url: String): Result<java.io.File>
+
     /** 远程拍照 */
     suspend fun takePhoto(deviceId: String): Result<String>  // 返回图片URL
 

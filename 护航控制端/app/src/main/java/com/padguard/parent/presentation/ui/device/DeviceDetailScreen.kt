@@ -29,6 +29,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import com.padguard.parent.domain.model.Device
 import com.padguard.parent.domain.model.DeviceOnlineStatus
+import com.padguard.parent.domain.model.ProtectionLevel
 import com.padguard.parent.presentation.ui.components.FeatureGridItem
 import com.padguard.parent.presentation.ui.components.FeatureItem
 import com.padguard.parent.presentation.ui.components.SoftCard
@@ -103,6 +104,7 @@ fun DeviceDetailScreen(
                 DeviceHeaderCard(device)
                 ChildProfileCard(device)
                 GuardianHealthCard(device)
+                ProtectionLevelCard(device)
             }
 
             // 原网格中「重启」「授权」与「定位」一样只弹假 toast（一个请求都不发），
@@ -395,6 +397,42 @@ private fun GuardianHealthCard(device: Device) {
                         color = PadGuardColors.WarningRed
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 防护等级卡：展示孩子端实际管控强度（软管控 / 设备所有者硬管控）。
+ * 数据由服务端 devices.control_mode（孩子端随心跳上报的权限等级）安全推导，
+ * 与场景模式(NORMAL/LEARNING/FOCUS)相互独立。
+ */
+@Composable
+private fun ProtectionLevelCard(device: Device) {
+    val hard = device.protectionLevel == ProtectionLevel.HARD
+    val bg = if (hard) Color(0xFFE8F5E9) else Color(0xFFFFF8E1)
+    val fg = if (hard) Color(0xFF1B5E20) else Color(0xFF8D6E00)
+    val title = if (hard) "防护等级：设备所有者硬管控" else "防护等级：软管控（非设备所有者）"
+    val subtitle = if (hard) {
+        "防卸载 / 防停止 / 防改时间 已由系统锁定"
+    } else {
+        "功能正常；孩子进「设置」可卸载 / 停止 / 改时间，可在孩子端「我的」页升级为设备所有者"
+    }
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(
+                imageVector = if (hard) Icons.Default.VerifiedUser else Icons.Default.Warning,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(28.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = title, style = MaterialTheme.typography.titleMedium, color = fg, fontWeight = FontWeight.Bold)
+                Text(text = subtitle, style = MaterialTheme.typography.bodySmall, color = fg.copy(alpha = 0.85f))
             }
         }
     }

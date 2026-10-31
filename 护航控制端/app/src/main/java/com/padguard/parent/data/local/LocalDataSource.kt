@@ -477,6 +477,10 @@ class LocalDataSource @Inject constructor(
     override suspend fun downloadImage(imageUrl: String): Result<ByteArray> =
         Result.failure(Exception("本地模式下无截图可下载"))
 
+    /** 本地 Mock 模式无真实文件可下载：明确失败而非伪造（第八轮实施时补齐接口缺失实现）。 */
+    override suspend fun downloadToFile(url: String): Result<java.io.File> =
+        Result.failure(Exception("本地模式下无文件可下载"))
+
     override suspend fun takePhoto(deviceId: String): Result<String> =
         Result.success("https://mock.padguard.com/photos/${deviceId}_${System.currentTimeMillis()}.jpg")
 

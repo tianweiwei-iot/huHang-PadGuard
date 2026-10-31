@@ -24,4 +24,6 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+    // 本地加密密钥管理（KeystoreManager）使用的 JSR-330 注入注解
+    implementation("javax.inject:javax.inject:1")
 }

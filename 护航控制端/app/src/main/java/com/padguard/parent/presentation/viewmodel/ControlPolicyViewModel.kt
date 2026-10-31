@@ -167,30 +167,47 @@ class ControlPolicyViewModel @Inject constructor(
     fun toggleTimeRestriction(restriction: TimeRestriction) {
         viewModelScope.launch {
             val updated = restriction.copy(isEnabled = !restriction.isEnabled)
+            // 必须判 Result：早期版本直接丢弃返回值并立刻弹"已生效"，
+            // 弱网/订阅过期/设备解绑时服务端什么都没发生，界面却显示成功 ——
+            // 家长以为禁用了某时段，孩子端照常用（"假成功"是管控类产品最不可接受的缺陷）。
             policyRepository.setTimeRestriction(updated)
-            _uiState.value = _uiState.value.copy(
-                timeRestrictions = _uiState.value.timeRestrictions.map {
-                    if (it.id == restriction.id) updated else it
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        timeRestrictions = _uiState.value.timeRestrictions.map {
+                            if (it.id == restriction.id) updated else it
+                        },
+                        toast = if (updated.isEnabled) "已启用该时段限制" else "已停用该时段限制"
+                    )
                 }
-            )
+                .onFailure { e -> fail("时段限制保存失败", e) }
         }
     }
 
     fun applyPreset(preset: FamilyPreset) {
         viewModelScope.launch {
-            policyRepository.setControlMode(deviceId, preset.controlMode)
+            // 两步都必须判 Result：预设包含"切模式 + 改限额"两个独立写操作，
+            // 任一步失败都要如实告诉家长，不能两个都丢掉返回值然后统一弹"已应用"。
+            val modeResult = policyRepository.setControlMode(deviceId, preset.controlMode)
+            if (modeResult.isFailure) {
+                fail("应用预设失败（切换管控模式未成功）", modeResult.exceptionOrNull())
+                return@launch
+            }
             val limitMinutes = preset.dailyLimitMinutes
             if (limitMinutes != null) {
                 // 同样走「时间管控」权威来源，避免写入服务端不读的旧字段
                 val current = policyRepository.getTabletUsageSettings(deviceId).getOrNull()
                     ?: TabletUsageSettings(deviceId = deviceId)
-                policyRepository.updateTabletUsageSettings(
+                val limitResult = policyRepository.updateTabletUsageSettings(
                     current.copy(
                         weekdayLimitMinutes = limitMinutes,
                         weekendLimitMinutes = limitMinutes,
                         syncToDevice = true
                     )
                 )
+                if (limitResult.isFailure) {
+                    fail("应用预设失败（每日时长未保存）", limitResult.exceptionOrNull())
+                    return@launch
+                }
             }
             val limitLabel = limitMinutes
                 ?.let { " · ${TimeFormat.formatDurationFromMinutes(it)}" }
@@ -216,12 +233,15 @@ class ControlPolicyViewModel @Inject constructor(
                 if (isBlocked) a.packageName else null
             }
             policyRepository.updateAppBlacklist(deviceId, blockedPackages)
-            _uiState.value = _uiState.value.copy(
-                installedApps = _uiState.value.installedApps.map {
-                    if (it.packageName == app.packageName) updated else it
-                },
-                toast = if (blocked) "已禁用：${app.appName}" else "已解禁：${app.appName}"
-            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        installedApps = _uiState.value.installedApps.map {
+                            if (it.packageName == app.packageName) updated else it
+                        },
+                        toast = if (blocked) "已禁用：${app.appName}" else "已解禁：${app.appName}"
+                    )
+                }
+                .onFailure { e -> fail(if (blocked) "禁用失败" else "解禁失败", e) }
         }
     }
 
@@ -239,11 +259,14 @@ class ControlPolicyViewModel @Inject constructor(
             if (apps.isEmpty()) return@launch
             val packages = if (blocked) apps.map { it.packageName } else emptyList()
             policyRepository.updateAppBlacklist(deviceId, packages)
-            _uiState.value = _uiState.value.copy(
-                installedApps = apps.map { it.copy(isBlocked = blocked) },
-                toast = if (blocked) "已管控全部 ${apps.size} 个应用，孩子端将不再显示"
-                else "已放行全部应用"
-            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        installedApps = apps.map { it.copy(isBlocked = blocked) },
+                        toast = if (blocked) "已管控全部 ${apps.size} 个应用，孩子端将不再显示"
+                        else "已放行全部应用"
+                    )
+                }
+                .onFailure { e -> fail(if (blocked) "一键管控失败" else "一键放行失败", e) }
         }
     }
 
@@ -253,12 +276,16 @@ class ControlPolicyViewModel @Inject constructor(
             // 单应用限时改走 setAppLimit（per-app 端点），
             // 之前误走 setAppTimeLimit 会写入"全局每日总时长"端点，造成单应用限额与全局限额互相覆盖、单应用限额实际不生效。
             policyRepository.setAppLimit(deviceId, app.packageName, minutes ?: 0)
-            _uiState.value = _uiState.value.copy(
-                installedApps = _uiState.value.installedApps.map {
-                    if (it.packageName == app.packageName) updated else it
-                },
-                toast = if (minutes == null) "已取消 ${app.appName} 时长限制" else "已设置 ${app.appName} 限时 ${TimeFormat.formatDurationFromMinutes(minutes)}"
-            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        installedApps = _uiState.value.installedApps.map {
+                            if (it.packageName == app.packageName) updated else it
+                        },
+                        toast = if (minutes == null) "已取消 ${app.appName} 时长限制"
+                        else "已设置 ${app.appName} 限时 ${TimeFormat.formatDurationFromMinutes(minutes)}"
+                    )
+                }
+                .onFailure { e -> fail("保存 ${app.appName} 时长限制失败", e) }
         }
     }
 
@@ -267,10 +294,13 @@ class ControlPolicyViewModel @Inject constructor(
     fun setBrowserDisabled(disabled: Boolean) {
         viewModelScope.launch {
             policyRepository.setBrowserDisabled(deviceId, disabled)
-            _uiState.value = _uiState.value.copy(
-                webPolicy = _uiState.value.webPolicy?.copy(browserDisabled = disabled),
-                toast = if (disabled) "已禁用浏览器" else "已启用浏览器"
-            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        webPolicy = _uiState.value.webPolicy?.copy(browserDisabled = disabled),
+                        toast = if (disabled) "已禁用浏览器" else "已启用浏览器"
+                    )
+                }
+                .onFailure { e -> fail(if (disabled) "禁用浏览器失败" else "启用浏览器失败", e) }
         }
     }
 
@@ -280,10 +310,13 @@ class ControlPolicyViewModel @Inject constructor(
             val current = _uiState.value.webPolicy ?: WebPolicy(deviceId = deviceId)
             val newList = (current.blockedUrls + url).distinct()
             policyRepository.updateUrlBlacklist(deviceId, newList)
-            _uiState.value = _uiState.value.copy(
-                webPolicy = current.copy(blockedUrls = newList),
-                toast = "已拦截：$url"
-            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        webPolicy = current.copy(blockedUrls = newList),
+                        toast = "已拦截：$url"
+                    )
+                }
+                .onFailure { e -> fail("添加拦截网址失败", e) }
         }
     }
 
@@ -292,7 +325,10 @@ class ControlPolicyViewModel @Inject constructor(
             val current = _uiState.value.webPolicy ?: WebPolicy(deviceId = deviceId)
             val newList = current.blockedUrls - url
             policyRepository.updateUrlBlacklist(deviceId, newList)
-            _uiState.value = _uiState.value.copy(webPolicy = current.copy(blockedUrls = newList))
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(webPolicy = current.copy(blockedUrls = newList))
+                }
+                .onFailure { e -> fail("移除拦截网址失败", e) }
         }
     }
 
@@ -372,27 +408,44 @@ class ControlPolicyViewModel @Inject constructor(
     fun setEyeProtection(enabled: Boolean, level: Int) {
         viewModelScope.launch {
             policyRepository.setEyeProtection(deviceId, enabled, level)
-            _uiState.value = _uiState.value.copy(
-                eyeProtectionEnabled = enabled,
-                eyeProtectionLevel = level,
-                toast = if (enabled) "护眼已开启（等级 $level）" else "护眼已关闭"
-            )
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        eyeProtectionEnabled = enabled,
+                        eyeProtectionLevel = level,
+                        toast = if (enabled) "护眼已开启（等级 $level）" else "护眼已关闭"
+                    )
+                }
+                .onFailure { e -> fail(if (enabled) "开启护眼失败" else "关闭护眼失败", e) }
         }
     }
 
     fun setControlMode(mode: ControlMode) {
         viewModelScope.launch {
-            policyRepository.setControlMode(deviceId, mode).onSuccess {
-                _uiState.value = _uiState.value.copy(
-                    device = _uiState.value.device?.copy(sceneMode = mode),
-                    toast = "已切换为${mode.label()}"
-                )
-            }
+            policyRepository.setControlMode(deviceId, mode)
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        device = _uiState.value.device?.copy(sceneMode = mode),
+                        toast = "已切换为${mode.label()}"
+                    )
+                }
+                .onFailure { e -> fail("切换管控模式失败", e) }
         }
     }
 
     fun clearToast() {
         _uiState.value = _uiState.value.copy(toast = null)
+    }
+
+    /**
+     * 统一的写失败反馈。
+     *
+     * 管控类写操作一旦静默失败，家长看到的仍是"已生效"，而孩子端完全没收到策略 ——
+     * 这是本产品最不能接受的一类缺陷（比直接报错严重得多）。
+     * 这里统一落到 `error`（而非 toast）：错误需要显式确认，一闪而过的 toast 会被忽略。
+     */
+    private fun fail(action: String, cause: Throwable?) {
+        val reason = cause?.message?.takeIf { it.isNotBlank() } ?: "网络或服务异常"
+        _uiState.value = _uiState.value.copy(error = "$action：$reason")
     }
 }
 

@@ -109,7 +109,10 @@ class AppManageViewModel @Inject constructor(
         val cur = _uiState.value
         if (cur.isLoading || cur.selectionMode || cur.installing) return
         policyRepository.getAppInventory(deviceId)
-            .onSuccess { list -> _uiState.value = _uiState.value.copy(apps = list) }
+            // 成功必须顺手清掉 error：首屏若因网络抖动失败一次，界面会渲染整页错误；
+            // 之后轮询成功却只更新 apps 不清 error 的话，列表数据回来了界面仍卡在错误页，
+            // 只有手动点"重试"才恢复 —— 家长观感是"应用管理彻底坏了"。
+            .onSuccess { list -> _uiState.value = _uiState.value.copy(apps = list, error = null) }
             .onFailure { Log.w("AppManageVM", "refreshInventory failed: ${it.message}") }
     }
 

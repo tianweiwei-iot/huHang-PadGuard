@@ -103,6 +103,7 @@ import com.padguard.parent.domain.model.AlertStatus
 import com.padguard.parent.domain.model.AppPolicy
 import com.padguard.parent.domain.model.AppUsage
 import com.padguard.parent.domain.model.ControlMode
+import com.padguard.parent.domain.model.ProtectionLevel
 import com.padguard.parent.domain.model.DailyUsage
 import com.padguard.parent.domain.model.Device
 import com.padguard.parent.domain.repository.DeviceGroup
@@ -263,6 +264,11 @@ class ApiDataSource @Inject constructor(
                 )
             }
         } catch (e: Exception) {
+            // CancellationException 必须原样抛出，不能被包成 Result.failure：
+            // 它是 Exception 的子类，宽泛 catch 会把它吞掉 —— 用户退出页面 / 轮询被取消时，
+            // 本该静默中止的请求会被当成"业务失败"走 onFailure 分支，
+            // 弹出「网络异常」之类的错误提示，而实际上什么都没出错。
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)
         }
     }
@@ -308,6 +314,8 @@ class ApiDataSource @Inject constructor(
                 else Result.success(Unit)
             }
         } catch (e: Exception) {
+            // 同 exec()：协程取消不是失败，必须放行而不是包成 Result.failure
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)
         }
     }
@@ -626,6 +634,26 @@ class ApiDataSource @Inject constructor(
                 authenticatedClient.newCall(Request.Builder().url(url).get().build()).execute().use { resp ->
                     check(resp.isSuccessful) { "图片下载失败: HTTP ${resp.code}" }
                     resp.body?.bytes() ?: error("图片下载失败: 空响应")
+                }
+            }
+        }
+
+    /**
+     * 流式下载到临时文件（录屏等大文件专用，避免整体读进内存 OOM）。
+     * 第八轮实施时补齐：接口已声明本方法但两个实现类缺失，属未提交的半成品漂移。
+     */
+    override suspend fun downloadToFile(url: String): Result<java.io.File> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val resolved = retrofit.baseUrl().resolve(url) ?: error("非法文件地址: $url")
+                authenticatedClient.newCall(Request.Builder().url(resolved).get().build()).execute().use { resp ->
+                    check(resp.isSuccessful) { "文件下载失败: HTTP ${resp.code}" }
+                    val body = resp.body ?: error("文件下载失败: 空响应")
+                    val tmp = java.io.File.createTempFile("pg_download_", ".bin")
+                    body.byteStream().use { input ->
+                        tmp.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    tmp
                 }
             }
         }
@@ -1317,7 +1345,8 @@ private fun DeviceDto.toDomain(): Device = Device(
     daemonOnlineState = daemonOnlineState,
     lastRestartReason = lastRestartReason,
     permissionVersion = permissionVersion,
-    daemonLost = daemonLost
+    daemonLost = daemonLost,
+    protectionLevel = ProtectionLevel.fromControlMode(controlMode)
 )
 
 private fun DeviceGroupDto.toDomain(): DeviceGroup = DeviceGroup(

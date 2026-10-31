@@ -91,6 +91,14 @@ private const val METERS_PER_LAT_DEGREE = 111_320.0
 private const val DEFAULT_VIEW_RADIUS_METERS = 800.0
 
 /**
+ * 历史轨迹时间线的最大高度。
+ *
+ * 外层页面自身可竖向滚动，嵌套的 LazyColumn 必须有确定高度才能正确测量；
+ * 同时它也天然限制了单屏组合量，避免"打开定位页就卡死"。
+ */
+private val TRACK_TIMELINE_MAX_HEIGHT = 360.dp
+
+/**
  * 实时管控 · 定位
  *
  * 实时获取被管控平板位置并在地图上展示，支持高德地图与 2D / 3D 视图；
@@ -702,59 +710,81 @@ private fun TrackHistoryCard(track: List<LocationInfo>, geofences: List<Geofence
         val groups = remember(track) {
             track.groupBy { dayKey(it.timestamp) }.toSortedMap(reverseOrder())
         }
-        groups.forEach { (key, points) ->
-            Text(
-                text = dayLabel(key),
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(vertical = 6.dp)
-            )
-            points.forEach { point ->
-                val inside = enabled.isEmpty() || enabled.any {
-                    haversine(it.centerLatitude, it.centerLongitude, point.latitude, point.longitude) <= it.radiusMeters
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(if (inside) PadGuardColors.SuccessGreen else PadGuardColors.WarningRed)
+
+        // 必须用 LazyColumn 而不是在 Column 里 groups.forEach { points.forEach { ... } }：
+        // 普通 Column 会**一次性组合全部条目**，本页最多可拉到 TRACK_HISTORY_LIMIT 个点，
+        // 每一行又是 4 个 Text + 2 个 Box 的复合结构，进页面就要组合数千个组件 ——
+        // 主线程长时间卡死直到 ANR，且这些点根本没画到地图上（地图走的是 AmapMapView 自己的数据）。
+        // 懒加载 + 定高（外层页面本身可滚动，嵌套列表必须有确定高度）即可只组合可见项。
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = TRACK_TIMELINE_MAX_HEIGHT)
+        ) {
+            groups.forEach { (key, points) ->
+                item(key = "day-$key") {
+                    Text(
+                        text = dayLabel(key),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(vertical = 6.dp)
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = point.address ?: "未知位置",
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = "${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(
-                            text = TimeFormat.formatClockFromMillis(point.timestamp),
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                        Text(
-                            text = if (inside) "安全区" else "区域外",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (inside) PadGuardColors.SuccessGreen else PadGuardColors.WarningRed
-                        )
-                    }
+                }
+                items(items = points, key = { "pt-${it.timestamp}" }) { point ->
+                    TrackPointRow(point = point, geofences = enabled)
+                }
+                item(key = "divider-$key") {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
                 }
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+        }
+    }
+}
+
+/** 轨迹时间线上的单个定位点行（安全区内绿、区域外红）。 */
+@Composable
+private fun TrackPointRow(point: LocationInfo, geofences: List<GeofenceConfig>) {
+    val inside = geofences.isEmpty() || geofences.any {
+        haversine(it.centerLatitude, it.centerLongitude, point.latitude, point.longitude) <= it.radiusMeters
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .clip(CircleShape)
+                .background(if (inside) PadGuardColors.SuccessGreen else PadGuardColors.WarningRed)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = point.address ?: "未知位置",
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "${formatCoordinate(point.latitude)}, ${formatCoordinate(point.longitude)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                text = TimeFormat.formatClockFromMillis(point.timestamp),
+                style = MaterialTheme.typography.labelMedium
+            )
+            Text(
+                text = if (inside) "安全区" else "区域外",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (inside) PadGuardColors.SuccessGreen else PadGuardColors.WarningRed
+            )
         }
     }
 }

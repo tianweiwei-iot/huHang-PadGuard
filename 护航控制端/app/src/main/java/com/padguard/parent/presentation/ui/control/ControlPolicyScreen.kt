@@ -331,6 +331,44 @@ private fun WebPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolicy
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // 如实降级：上网过滤（网址黑名单 / 禁用浏览器）依赖孩子端「上网防护」VPN 通道，
+        // 该通道本版本尚未启用 —— 配置会保存到服务端，但孩子端没有任何 URL 判定通道，
+        // 不会真正拦截。不下架入口（待 VPN 通道上线即生效），但必须让家长知道当前不生效，
+        // 避免「加了黑名单以为拦住了」的虚假安全感（见 E1 上网管控 gap）。
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = PadGuardColors.WarningRed.copy(alpha = 0.08f),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = PadGuardColors.WarningRed,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "上网过滤暂未生效",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = PadGuardColors.WarningRed
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "网址黑名单、禁用浏览器需在孩子端开启「上网防护」通道（VPN）后才会真正拦截。" +
+                                "当前版本该通道尚未启用：您添加的网址会保存但不会实际拦截。" +
+                                "定时锁机、应用管控、使用时长等其余策略不受影响、照常生效。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+            }
+        }
+
         item {
             SoftCard(modifier = Modifier.fillMaxWidth()) {
                 Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -40,6 +40,33 @@ enum class ControlMode {
 }
 
 /**
+ * 防护等级（孩子端实际管控强度）。
+ *
+ * HARD = 设备所有者 / 资料所有者(DO/PO)：防卸载 / 防停止 / 防改时间 系统级锁定；
+ * SOFT = 普通设备管理员 / 无管理员：软管控，设置里可被卸载 / 停止 / 改时间。
+ * 由服务端 devices.control_mode（孩子端随心跳上报的权限等级）安全推导，与场景模式(sceneMode)无关。
+ */
+enum class ProtectionLevel {
+    HARD,       // 设备所有者硬管控
+    SOFT        // 软管控（非设备所有者）
+    ;
+
+    companion object {
+        /**
+         * 由服务端上报的设备控制权等级（devices.control_mode）安全推导防护等级。
+         *
+         * DEVICE_OWNER / PROFILE_OWNER → 硬管控(HARD)；其余（含 null、普通管理员、无管理员）→ 软管控(SOFT)。
+         * 与场景模式(sceneMode)无关，避免早前"错读 controlMode 为权限等级"的坑。
+         */
+        fun fromControlMode(value: String?): ProtectionLevel =
+            when (value) {
+                "DEVICE_OWNER", "PROFILE_OWNER" -> HARD
+                else -> SOFT
+            }
+    }
+}
+
+/**
  * 告警级别
  */
 enum class AlertLevel {
@@ -130,7 +157,12 @@ data class Device(
     val lastRestartReason: String? = null,
     val permissionVersion: Int? = null,
     /** 服务端据 daemonAlive=false 持续上报判定为守护失联（多为被强制停止） */
-    val daemonLost: Boolean? = null
+    val daemonLost: Boolean? = null,
+    /**
+     * 防护等级（孩子端实际管控强度）：HARD=设备所有者硬管控，SOFT=软管控。
+     * 由服务端 control_mode（孩子端上报的权限等级）安全推导，与场景模式无关。
+     */
+    val protectionLevel: ProtectionLevel = ProtectionLevel.SOFT
 )
 
 /**

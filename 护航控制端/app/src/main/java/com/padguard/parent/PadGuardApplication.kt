@@ -28,7 +28,7 @@ class PadGuardApplication : Application() {
      * SDK 拒绝工作，地图引擎报 errorCode 555570、瓦片一张不加载——且与 Key / 包名 / SHA1
      * 绑定无关，debug 与 release 表现一致（曾因此误往控制台 Key 绑定方向排查）。
      *
-     * 本 App 已内置《隐私政策》并在设置中可见，视为已告知并取得用户同意；
+     * 本 App 已内置《隐私政策》与《用户协议》（登录页勾选 + 「关于」页可查看），视为已告知并取得用户同意；
      * 两参数 true = 隐私政策已包含 SDK 收集信息说明、已向用户弹窗告知。
      */
     private fun initAmapPrivacyCompliance() {

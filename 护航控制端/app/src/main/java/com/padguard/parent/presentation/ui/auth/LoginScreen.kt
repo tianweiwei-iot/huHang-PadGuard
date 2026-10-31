@@ -141,12 +141,10 @@ fun LoginScreen(
                             phone = uiState.phone,
                             password = uiState.password,
                             history = uiState.history,
-                            rememberPassword = uiState.rememberPassword,
                             onPhoneChange = viewModel::updatePhone,
                             onPasswordChange = viewModel::updatePassword,
                             onSelectHistory = viewModel::selectHistoryAccount,
                             onRemoveHistory = viewModel::removeHistoryAccount,
-                            onRememberChange = viewModel::toggleRememberPassword,
                             onLogin = { viewModel.loginWithPassword() },
                             isLoading = uiState.isLoading
                         )
@@ -440,7 +438,7 @@ private fun HistoryAccountField(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(acc.phone, style = MaterialTheme.typography.bodyMedium)
                                 Text(
-                                    text = if (acc.password != null) "已记住密码" else "仅记住账号",
+                                    text = "已记住账号",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                                 )
@@ -472,12 +470,10 @@ private fun PasswordLoginForm(
     phone: String,
     password: String,
     history: List<AccountPrefs.SavedAccount>,
-    rememberPassword: Boolean,
     onPhoneChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
     onSelectHistory: (String) -> Unit,
     onRemoveHistory: (String) -> Unit,
-    onRememberChange: (Boolean) -> Unit,
     onLogin: () -> Unit,
     isLoading: Boolean
 ) {
@@ -518,27 +514,17 @@ private fun PasswordLoginForm(
 
     Spacer(modifier = Modifier.height(4.dp))
 
-    // 记住密码：勾选后密码随账号一起存到本地，下次进入自动回填；取消则立即清除
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Checkbox(
-            checked = rememberPassword,
-            onCheckedChange = onRememberChange,
-            modifier = Modifier.size(24.dp)
-        )
-        Spacer(modifier = Modifier.width(4.dp))
-        Text(
-            text = "记住账号和密码",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
-            modifier = Modifier.clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) { onRememberChange(!rememberPassword) }
-        )
-    }
+    // 这里刻意**没有**「记住密码」复选框。
+    //
+    // 早期版本有这个勾选框，但 AccountPrefs 出于安全从不持久化家长密码（设备被 root 或
+    // 备份提取即等同于把家长门户钥匙交给孩子），于是勾选后密码永远不会被回填 ——
+    // 一个点了永远不生效的开关，比没有这个开关更糟：家长会反复勾选并认为 App 坏了。
+    // 现在改为一句如实说明，界面承诺与实际行为保持一致。
+    Text(
+        text = "为保护账号安全，本机只记住登录手机号，不保存密码",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+    )
 
     Spacer(modifier = Modifier.height(16.dp))
 
@@ -846,7 +832,7 @@ fun ServerConfigDialog(
  * 后续备案完成后可替换为跳转正式协议页。
  */
 @Composable
-private fun AgreementDialog(onDismiss: () -> Unit) {
+internal fun AgreementDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {

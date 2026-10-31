@@ -1,5 +1,6 @@
 package com.padguard.parent.presentation.ui.profile
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,9 +18,14 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.padguard.parent.presentation.ui.auth.AgreementDialog
 
 /**
  * 关于页。
@@ -41,6 +47,7 @@ fun AboutScreen(onBack: () -> Unit) {
             )
         }
     ) { padding ->
+        var showAgreement by remember { mutableStateOf(false) }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -70,6 +77,18 @@ fun AboutScreen(onBack: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
             )
+            Text(
+                text = "用户协议与隐私政策",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showAgreement = true }
+                    .padding(vertical = 8.dp)
+            )
+        }
+        if (showAgreement) {
+            AgreementDialog(onDismiss = { showAgreement = false })
         }
     }
 }
