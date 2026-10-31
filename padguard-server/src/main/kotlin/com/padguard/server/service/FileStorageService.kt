@@ -12,7 +12,9 @@ import java.util.UUID
 class FileStorageService(
     @Value("\${padguard.storage.dir:./uploads}") private val storageDir: String,
     @Value("\${padguard.base-url:}") private val baseUrl: String,
-    private val uploadedFileRepository: UploadedFileRepository
+    private val uploadedFileRepository: UploadedFileRepository,
+    // 可选注入（默认 null 保证纯单测可直构）：存在时下发的文件 URL 自动附带短期签名
+    private val urlSigner: com.padguard.server.security.MediaUrlSigner? = null
 ) {
     private val dir = File(storageDir).apply { if (!exists()) mkdirs() }
 
@@ -78,9 +80,12 @@ class FileStorageService(
      * 注：不采用「当前请求 Host 动态拼绝对地址」——上传方网络位置 ≠ 下载方网络位置，
      * 反而会把文件指向另一台机器（如内网/localhost/代理地址），导致孩子端下载失败。
      */
-    fun url(id: String): String =
-        if (baseUrl.isNotBlank()) "${baseUrl.trimEnd('/')}/v1/files/$id"
-        else "/v1/files/$id"
+    fun url(id: String): String {
+        val raw = if (baseUrl.isNotBlank()) "${baseUrl.trimEnd('/')}/v1/files/$id" else "/v1/files/$id"
+        // 签名 URL（第八轮评估 P1-2）：URL 泄漏（日志/转发）后只能在 TTL 内被匿名访问，
+        // 过期自动失效。未注入签名器（纯单测）时保持原样。
+        return urlSigner?.sign(raw) ?: raw
+    }
 
     /**
      * 按 id 删除文件（磁盘 + 记录）。

@@ -32,6 +32,12 @@ class JwtTokenProvider(
 
     private val key: SecretKey = Keys.hmacShaKeyFor(secret.toByteArray(Charsets.UTF_8))
 
+    /**
+     * 暴露给其他签名场景（如媒体 URL 签名）的底层密钥。
+     * 与 JWT 共用同一密钥文件：密钥的生成/持久化/丢失告警逻辑已在 [loadOrCreateSecret] 落实，不重复造轮子。
+     */
+    fun signingSecret(): String = secret
+
     private fun resolveSecret(): String {
         val configured = configuredSecret.trim()
         if (configured.isNotBlank()) return configured

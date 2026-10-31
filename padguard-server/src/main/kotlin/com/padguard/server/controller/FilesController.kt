@@ -44,15 +44,49 @@ import org.springframework.web.multipart.MultipartFile
 class FilesController(
     private val fileStorageService: FileStorageService,
     private val uploadedFileRepository: com.padguard.server.repository.UploadedFileRepository,
-    private val deviceRepository: com.padguard.server.repository.DeviceRepository
+    private val deviceRepository: com.padguard.server.repository.DeviceRepository,
+    // 可选注入（纯单测可直构）：媒体 URL 签名验签与匿名强制签名闸门
+    private val mediaUrlSigner: com.padguard.server.security.MediaUrlSigner? = null,
+    @org.springframework.beans.factory.annotation.Value("\${padguard.media.require-signature:false}")
+    private val requireSignature: Boolean = false
 ) {
 
     private val log = LoggerFactory.getLogger(FilesController::class.java)
 
     @GetMapping("/{id}")
     fun get(request: jakarta.servlet.http.HttpServletRequest, @PathVariable id: String): ResponseEntity<Any> {
-        val denied = ownershipDenied(request, id)
-        if (denied != null) return denied
+        // ---- 签名 URL 校验（第八轮评估 P1-2）----
+        // 带了 exp/sig 任一参数即进入签名语义：fail-closed，验不过一律 403，
+        // 绝不降级放行——否则攻击者删掉 sig 参数就能绕过"强制匿名签名"闸门。
+        val sigExp = request.getParameter("exp")
+        val sigVal = request.getParameter("sig")
+        val signaturePresent = sigExp != null || sigVal != null
+        val signatureValid = signaturePresent &&
+            mediaUrlSigner != null && mediaUrlSigner.verify(id, sigExp, sigVal)
+        if (signaturePresent && !signatureValid) {
+            log.warn("media url signature rejected: fileId={}", id)
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(ApiResponse.fail<Any>(ParentErr.FORBIDDEN, "链接已失效，请刷新后重试"))
+        }
+
+        // ---- 访问主体判定 ----
+        val hasCredentials = request.getAttribute("fileViewerUserId") != null ||
+            request.getAttribute("fileViewerDeviceId") != null
+        if (hasCredentials) {
+            // 有凭证：按精确归属校验（签名不能替凭证提权，防止泄漏的签名链接越过归属规则）
+            val denied = ownershipDenied(request, id)
+            if (denied != null) return denied
+        } else if (requireSignature && !signatureValid && isDeviceOwnedFile(id)) {
+            // 匿名强制签名闸门（默认关）：开启后，设备上行敏感文件（截图/录屏/录音）
+            // 不再依赖"128 位 id 不可穷举"这一唯一防线，匿名访问必须持有效签名。
+            // 家长发布的共享素材（ownerUserId 独有）不在此列——孩子端图片库匿名加载依赖它。
+            log.warn("anonymous access to device media requires signed url: fileId={}", id)
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(ApiResponse.fail<Any>(ParentErr.FORBIDDEN, "请使用有效凭证或签名链接访问"))
+        }
+        // 无凭证且闸门未开：维持能力 URL 语义（历史行为，见 FileAccessInterceptor 注释）
 
         val resolved = fileStorageService.resolve(id)
         if (resolved == null) {
@@ -155,6 +189,11 @@ class FilesController(
     private fun ownsDevice(userId: String, deviceId: String): Boolean =
         runCatching { deviceRepository.findByUserId(userId).any { it.id == deviceId } }
             .onFailure { log.warn("device ownership check failed: user={} device={} err={}", userId, deviceId, it.message) }
+            .getOrDefault(false)
+
+    /** 该文件是否为孩子端设备上行（截图/录屏/录音）——匿名强制签名闸门的适用范围。 */
+    private fun isDeviceOwnedFile(fileId: String): Boolean =
+        runCatching { uploadedFileRepository.findById(fileId).orElse(null)?.deviceId != null }
             .getOrDefault(false)
 
     /**

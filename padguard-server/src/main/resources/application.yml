@@ -127,6 +127,15 @@ padguard:
   # 确需固定对外地址时（如对象存储/CDN 域名），用环境变量注入，不要写死在仓库里：
   #   PADGUARD_BASE_URL=https://files.example.com
   base-url: ${PADGUARD_BASE_URL:}
+  media:
+    # 敏感媒体签名 URL（第八轮评估 P1-2）：FileStorageService 下发的文件 URL 自动附带
+    # exp/sig 短期签名（HMAC，密钥复用 JWT 密钥文件），URL 泄漏（日志/转发）后 TTL 过期即失效。
+    # 签名 URL 默认 TTL：7 天。需覆盖客户端对消息/截图 URL 的 Room 缓存周期，勿设过短。
+    url-ttl-hours: 168
+    # 匿名强制签名闸门（默认关）：开启后，设备上行的截图/录屏/录音不再允许匿名凭
+    # "128 位 id 不可穷举"下载，必须持有效签名或凭证；家长发布的共享素材不受影响。
+    # 上线路径：客户端全面升级（支持带 query 的文件 URL）后再开启，与短信登录闸门同一治理思路。
+    require-signature: false
   dev:
     # 无真实被管控端时，开启内置"孩子端模拟器"自动回执指令，便于演示主链路闭环
     child-simulator: false
