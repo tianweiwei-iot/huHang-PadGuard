@@ -47,7 +47,8 @@ services:
     restart: unless-stopped
     depends_on:
       app:
-        condition: service_started
+        # 等 /health 真正 UP（DB 就绪）再放流量，避免发布窗口把 502 暴露给公网
+        condition: service_healthy
     ports:
       - "80:80"     # HTTP 一律 301 重定向到 HTTPS
       - "443:443"   # 公网 HTTPS 入口，TLS 在此终止，反代到 app:8080
@@ -89,6 +90,14 @@ services:
       - ../padguard-admin:/app/padguard-admin:ro   # 后台 SPA 同源托管 /admin/
       - ./uploads:/app/uploads                     # 用户录屏/截图，容器重建不丢
       - ./secrets:/app/secrets                     # 管理员/家长初始口令文件（敏感，勿挂给 nginx）
+    # 健康检查（第八轮评估运维批）：探 /health（含真实 DB 查询，进程活着但库不可用会 503）。
+    # start_period 给足 JVM 启动 + Flyway 迁移时间；连续失败由 docker 自动重启。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
 
 volumes:
   pgdata:

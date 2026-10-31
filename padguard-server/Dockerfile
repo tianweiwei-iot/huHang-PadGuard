@@ -12,6 +12,9 @@ RUN --mount=type=cache,target=/home/gradle/.gradle \
 FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /app/build/libs/app.jar app.jar
+# curl：compose healthcheck 探测 /health 用（基础镜像精简版不带，装完即清列表省体积）
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 # 镜像级时区兜底：
 # 只设 TZ 依赖镜像内已安装 tzdata，缺失时会静默回落到 UTC；因此再用
 # -Duser.timezone 直接钉死 JVM 默认时区，不依赖系统时区数据库。
