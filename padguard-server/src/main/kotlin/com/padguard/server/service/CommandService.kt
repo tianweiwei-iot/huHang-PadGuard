@@ -87,8 +87,13 @@ class CommandService(
         val cmd = commandRepository.findByMsgId(msgId)
             ?: throw BizException(ParentErr.PARAM_ERROR, "指令不存在", Audience.PARENT)
         ownershipGuard.requireOwned(userId, cmd.deviceId)
-        val payloadMap = cmd.payloadJson?.let {
-            runCatching { objectMapper.readValue(it, Map::class.java) as Map<String, Any?> }.getOrNull()
+        val payloadMap = cmd.payloadJson?.let { json ->
+            runCatching { objectMapper.readValue(json, Map::class.java) as Map<String, Any?> }
+                .getOrNull()
+                ?: run {
+                    log.warn("command payload json corrupted: msgId={} type={}", cmd.msgId, cmd.type)
+                    null
+                }
         }
         return CommandDto(cmd.msgId, cmd.type, cmd.status, payloadMap, cmd.createdAt, cmd.executedAt,
             errorCode = cmd.errorCode, errorMessage = cmd.errorMessage)
@@ -132,15 +137,22 @@ class CommandService(
         // 既消除死代码，又把高频轮询路径上的维护成本降到 1/10。
         return commandRepository.findPendingForPolling(
             deviceId, STATUS_PENDING, now, cursor, PageRequest.of(0, MAX_POLLING_BATCH)
-        ).map {
-                val payloadMap = it.payloadJson?.let {
-                    runCatching { objectMapper.readValue(it, Map::class.java) as Map<String, Any?> }.getOrNull()
+        ).map { cmd ->
+                val payloadMap = cmd.payloadJson?.let { json ->
+                    runCatching { objectMapper.readValue(json, Map::class.java) as Map<String, Any?> }
+                        .getOrNull()
+                        ?: run {
+                            // payload 损坏静默变 null 会让端上执行"无参指令"（如解锁时长=0），
+                            // 后果隐蔽且难排查，必须留痕：msgId + type 让运维能定位脏数据来源。
+                            log.warn("command payload json corrupted, delivering null payload: msgId={} type={}", cmd.msgId, cmd.type)
+                            null
+                        }
                 }
                 CommandPacket(
-                    msgId = it.msgId, type = it.type,
-                    version = 1, timestamp = it.createdAt, expiresAt = it.expiresAt,
-                    priority = it.priority ?: "NORMAL", payload = payloadMap,
-                    signature = it.signature ?: ""
+                    msgId = cmd.msgId, type = cmd.type,
+                    version = 1, timestamp = cmd.createdAt, expiresAt = cmd.expiresAt,
+                    priority = cmd.priority ?: "NORMAL", payload = payloadMap,
+                    signature = cmd.signature ?: ""
                 )
             }
     }

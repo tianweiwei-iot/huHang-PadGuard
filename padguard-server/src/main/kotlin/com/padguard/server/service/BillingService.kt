@@ -233,8 +233,9 @@ class BillingService(
             log.info("trial subscription created: userId={}, days={}", userId, days)
             sub
         } catch (_: org.springframework.dao.DataIntegrityViolationException) {
-            // 第八轮 P1-B：subscriptions.user_id 已加唯一约束，并发 createTrial 只有一个事务成功；
-            // 输家回退读取赢家刚插入的订阅，保证调用方永远拿到有效订阅（而非抛 500）。
+            // 输家回退读取赢家刚插入的订阅（唯一约束兜底语义，见上方注释）；
+            // warn 记录并发创建频率，频繁出现说明注册链路存在重复触发。
+            log.warn("trial subscription insert raced, falling back to existing row: userId={}", userId)
             subscriptionRepository.findByUserId(userId)
                 ?: throw IllegalStateException("subscription insert raced but row not visible: userId=$userId")
         }
@@ -393,6 +394,9 @@ class BillingService(
         try {
             paymentOrderRepository.flush()
         } catch (_: org.springframework.dao.DataIntegrityViolationException) {
+            // 翻译为明确业务提示而非 500（事务已 rollback-only，同事务内重试无意义）。
+            // 留 warn 便于运维观察撞号频率——频繁出现说明 newOrderNo 熵不足，需扩号段。
+            log.warn("order create raced on orderNo: userId={}, regenerating hint", userId)
             throw BizException(ParentErr.PARAM_ERROR, "下单冲突，请重新提交", Audience.PARENT)
         }
 

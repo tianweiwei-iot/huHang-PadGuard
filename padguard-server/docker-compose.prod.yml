@@ -80,9 +80,15 @@ services:
       PADGUARD_MQTT_DEVICE_USERNAME: ${PADGUARD_MQTT_DEVICE_USERNAME:?PADGUARD_MQTT_DEVICE_USERNAME 必须在 .env 中设置}
       PADGUARD_MQTT_DEVICE_PASSWORD: ${PADGUARD_MQTT_DEVICE_PASSWORD:?PADGUARD_MQTT_DEVICE_PASSWORD 必须在 .env 中设置}
       PADGUARD_DEV_CHILDSIMULATOR: "false"
+      # 初始/重置口令文件移出 uploads（第八轮评估第三批+纵深防御）：
+      # uploads 是"用户媒体目录"，运维一旦加 nginx alias/改挂载就会把口令明文一并暴露；
+      # 独立 secrets 卷与业务文件物理隔离，且同样持久化（容器重建不丢）。
+      PADGUARD_INITIAL_PASSWORD_FILE: /app/secrets/管理员初始密码-请登录后修改.txt
+      PADGUARD_PARENT_INITIAL_PASSWORD_FILE: /app/secrets/初始密码-请登录后修改.txt
     volumes:
       - ../padguard-admin:/app/padguard-admin:ro   # 后台 SPA 同源托管 /admin/
       - ./uploads:/app/uploads                     # 用户录屏/截图，容器重建不丢
+      - ./secrets:/app/secrets                     # 管理员/家长初始口令文件（敏感，勿挂给 nginx）
 
 volumes:
   pgdata:
