@@ -24,6 +24,7 @@ import com.padguard.parent.presentation.ui.home.HomeScreen
 import com.padguard.parent.presentation.ui.profile.ProfileAction
 import com.padguard.parent.presentation.ui.profile.ProfileScreen
 import com.padguard.parent.presentation.ui.statistics.StatisticsScreen
+import com.padguard.parent.presentation.ui.theme.DarkMode
 import com.padguard.parent.presentation.ui.theme.ThemeMode
 import com.padguard.parent.presentation.viewmodel.HomeViewModel
 import com.padguard.parent.presentation.viewmodel.ProfileViewModel
@@ -45,7 +46,11 @@ fun MainScreen(
     /** 当前主题模式（透传给「我的」页切换入口） */
     themeMode: ThemeMode = ThemeMode.MINT,
     /** 切换主题（透传给「我的」页切换入口） */
-    onThemeChange: (ThemeMode) -> Unit = {}
+    onThemeChange: (ThemeMode) -> Unit = {},
+    /** 深色模式三态（透传给「我的」页切换入口） */
+    darkMode: DarkMode = DarkMode.SYSTEM,
+    /** 切换深色模式（透传给「我的」页切换入口） */
+    onDarkModeChange: (DarkMode) -> Unit = {}
 ) {
     val homeVm: HomeViewModel = hiltViewModel()
     val homeUiState by homeVm.uiState.collectAsState()
@@ -162,6 +167,8 @@ fun MainScreen(
                     onSaveServerUrl = profileVm::saveServerUrl,
                     themeMode = themeMode,
                     onThemeChange = onThemeChange,
+                    darkMode = darkMode,
+                    onDarkModeChange = onDarkModeChange,
                     onAction = { action ->
                         when (action) {
                             ProfileAction.Subscription ->

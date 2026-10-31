@@ -3,6 +3,7 @@ package com.padguard.parent.di
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
+import com.padguard.parent.presentation.ui.theme.DarkMode
 import com.padguard.parent.presentation.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,17 +32,31 @@ class ThemePrefs @Inject constructor(
     private val _themeMode = MutableStateFlow(read())
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
 
+    // 深色模式三态（第八轮评估 P1-3）：与色板主题正交的独立开关，默认跟随系统
+    private val _darkMode = MutableStateFlow(
+        DarkMode.fromId(prefs.getString(KEY_DARK_MODE, null))
+    )
+    val darkMode: StateFlow<DarkMode> = _darkMode.asStateFlow()
+
     private fun read(): ThemeMode =
         ThemeMode.fromId(prefs.getString(KEY_THEME_MODE, null))
 
     fun getThemeMode(): ThemeMode = _themeMode.value
+
+    fun getDarkMode(): DarkMode = _darkMode.value
 
     fun setThemeMode(mode: ThemeMode) {
         prefs.edit().putString(KEY_THEME_MODE, mode.id).apply()
         _themeMode.value = mode
     }
 
+    fun setDarkMode(mode: DarkMode) {
+        prefs.edit().putString(KEY_DARK_MODE, mode.id).apply()
+        _darkMode.value = mode
+    }
+
     companion object {
         private const val KEY_THEME_MODE = "theme_mode"
+        private const val KEY_DARK_MODE = "dark_mode"
     }
 }

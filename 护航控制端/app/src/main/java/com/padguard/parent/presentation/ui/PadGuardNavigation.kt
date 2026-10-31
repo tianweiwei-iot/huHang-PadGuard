@@ -29,6 +29,7 @@ import androidx.navigation.compose.rememberNavController
 import com.padguard.parent.domain.model.ReportPeriod
 import com.padguard.parent.notification.NotificationHelper
 import com.padguard.parent.presentation.MainActivity
+import com.padguard.parent.presentation.ui.theme.DarkMode
 import com.padguard.parent.presentation.ui.theme.ThemeMode
 import com.padguard.parent.presentation.viewmodel.SessionViewModel
 import com.padguard.parent.presentation.ui.alert.AlertCenterScreen
@@ -144,7 +145,11 @@ fun PadGuardNavHost(
     /** 当前主题模式（由根层从持久化读取后传入） */
     themeMode: ThemeMode = ThemeMode.MINT,
     /** 切换主题：写入持久化并触发整树重组 */
-    onThemeChange: (ThemeMode) -> Unit = {}
+    onThemeChange: (ThemeMode) -> Unit = {},
+    /** 深色模式三态（跟随系统/浅色/深色），透传给「我的」页切换入口 */
+    darkMode: DarkMode = DarkMode.SYSTEM,
+    /** 切换深色模式 */
+    onDarkModeChange: (DarkMode) -> Unit = {}
 ) {
     // ---- 会话门控 ----
     // 启动时读取持久化会话决定起点；bootResolved=false 期间显示启动占位，
@@ -277,7 +282,9 @@ fun PadGuardNavHost(
                 unreadAlertCount = unlockState.unreadCount + delayState.unreadCount + riskState.unreadCount,
                 onNavigateToAlerts = { navController.navigate(Screen.AlertList.route) },
                 themeMode = themeMode,
-                onThemeChange = onThemeChange
+                onThemeChange = onThemeChange,
+                darkMode = darkMode,
+                onDarkModeChange = onDarkModeChange
             )
         }
         composable(Screen.Subscription.route) {

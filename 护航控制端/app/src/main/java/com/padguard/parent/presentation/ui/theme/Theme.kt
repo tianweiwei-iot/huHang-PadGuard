@@ -1,6 +1,7 @@
 package com.padguard.parent.presentation.ui.theme
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Brush
@@ -45,6 +46,23 @@ enum class ThemeMode(val id: String) {
     }
 }
 
+// ---------- 深色模式三态（第八轮评估 P1-3） ----------
+/**
+ * 深色模式偏好，与 [ThemeMode]（色板气质）正交：
+ * - SYSTEM：跟随系统（默认，尊重系统级"深色/省电"设置）；
+ * - LIGHT / DARK：手动强制浅色/深色。
+ * 深色启用时忽略 [ThemeMode] 的浅色令牌，统一使用 [DarkTokens]（单一深色方案，维护成本最低）。
+ */
+enum class DarkMode(val id: String) {
+    SYSTEM("system"),
+    LIGHT("light"),
+    DARK("dark");
+
+    companion object {
+        fun fromId(id: String?): DarkMode = entries.firstOrNull { it.id == id } ?: SYSTEM
+    }
+}
+
 // ---------- 单套主题的完整令牌 ----------
 /**
  * 一套主题所需的全部视觉令牌。三套方案共用同一结构，仅取值不同。
@@ -75,11 +93,37 @@ data class ThemeTokens(
     val successGreen: Color,
     val onlineGreen: Color,
     val offlineGray: Color,
-    val amber: Color
+    val amber: Color,
+    // 深色标记（第八轮评估 P1-3）：决定 Material3 ColorScheme 用浅色还是深色基底。
+    // 默认 false —— 已上线的三套浅色方案构造点零改动。
+    val isDark: Boolean = false
 ) {
-    /** 由本套令牌构建 Material3 浅色 ColorScheme，保证 colorScheme.* 与自定义令牌一致。 */
+    /** 由本套令牌构建 Material3 ColorScheme，保证 colorScheme.* 与自定义令牌一致。 */
     val colorScheme
-        get() = lightColorScheme(
+        get() = if (isDark) darkColorScheme(
+            primary = primary,
+            // 深色底上的 onPrimary 用深墨色而非纯白：主色按钮上文字对比更柔和自然
+            onPrimary = Color(0xFF06231A),
+            primaryContainer = primary.copy(alpha = 0.24f),
+            onPrimaryContainer = primary,
+            secondary = secondary,
+            onSecondary = Color(0xFF06131F),
+            secondaryContainer = secondary.copy(alpha = 0.24f),
+            onSecondaryContainer = secondary,
+            tertiary = tertiary,
+            onTertiary = Color(0xFF1F1503),
+            tertiaryContainer = tertiary.copy(alpha = 0.24f),
+            onTertiaryContainer = tertiary,
+            background = pageBg,
+            onBackground = textPrimary,
+            surface = cardWhite,
+            onSurface = textPrimary,
+            surfaceVariant = pageBg,
+            onSurfaceVariant = textSecondary,
+            error = warningRed,
+            onError = Color(0xFF2A0B0B),
+            outline = outline
+        ) else lightColorScheme(
             primary = primary,
             onPrimary = Color.White,
             primaryContainer = primary.copy(alpha = 0.12f),
@@ -187,6 +231,34 @@ fun tokensFor(mode: ThemeMode): ThemeTokens = when (mode) {
     ThemeMode.CREAM -> CreamTokens
 }
 
+// 深色方案（第八轮评估 P1-3）：取青空薄荷的品牌绿做主色，
+// 背景/卡片用深绿灰调（不是纯黑，纯黑上浅灰文字对比过烈且无层次），
+// 语义状态色沿用行业通用值（深色底上同样可辨识）。
+private val DarkTokens = ThemeTokens(
+    primary = Color(0xFF35C08E),
+    primaryDeep = Color(0xFF1F8A66),
+    secondary = Color(0xFF62B6F0),
+    tertiary = Color(0xFFE8B04B),
+    textPrimary = Color(0xFFE6EFEA),
+    textSecondary = Color(0xFF9DB3AA),
+    outline = Color(0xFF2A3B34),
+    pageBg = Color(0xFF101915),
+    cardWhite = Color(0xFF1A2420),
+    tintContainers = listOf(Color(0xFF1D3A30), Color(0xFF1C3140), Color(0xFF3A3323)),
+    tintIconColors = listOf(Color(0xFF5BD6A7), Color(0xFF62B6F0), Color(0xFFE8B04B)),
+    heroGradient = Brush.linearGradient(
+        colors = listOf(Color(0xFF1F8A66), Color(0xFF1D6FA3))
+    ),
+    cardShadow = Color(0xFF000000).copy(alpha = 0.4f),
+    heroShadow = Color(0xFF35C08E).copy(alpha = 0.18f),
+    warningRed = Color(0xFFFF6B6B),
+    successGreen = Color(0xFF52C41A),
+    onlineGreen = Color(0xFF07C160),
+    offlineGray = Color(0xFF7A8A84),
+    amber = Color(0xFFF59E0B),
+    isDark = true
+)
+
 /**
  * 进程内当前主题令牌。由 [PadGuardTheme] 在每次重组时同步刷新，
  * 所有 getter 读取此变量即可拿到最新主题——无需逐页注入、调用点零改动。
@@ -195,17 +267,20 @@ fun tokensFor(mode: ThemeMode): ThemeTokens = when (mode) {
 private var activeTokens: ThemeTokens = MintTokens
 
 /**
- * 主题顶层入口。在重组时先把 [activeTokens] 对齐到当前 [mode]，再重建 Material3 ColorScheme，
- * 然后下发内容。两者同步发生，子节点读取到的令牌与 colorScheme 必然一致。
+ * 主题顶层入口。在重组时先把 [activeTokens] 对齐到当前 [mode]（深色启用时用 [DarkTokens]），
+ * 再重建 Material3 ColorScheme，然后下发内容。两者同步发生，子节点读取到的令牌与
+ * colorScheme 必然一致。
  *
- * [mode] 由根层（MainActivity）从持久化读取后传入；默认 MINT，保证未接入前的预览/启动安全。
+ * [mode] 由根层（MainActivity）从持久化读取后传入；[dark] 三态见 [DarkMode]，
+ * SYSTEM 时由调用方用 `isSystemInDarkTheme()` 解析成 true/false 后传入 [dark]，本组合函数不做系统判定。
  */
 @Composable
 fun PadGuardTheme(
     mode: ThemeMode = ThemeMode.MINT,
+    dark: Boolean = false,
     content: @Composable () -> Unit
 ) {
-    activeTokens = tokensFor(mode)
+    activeTokens = if (dark) DarkTokens else tokensFor(mode)
     MaterialTheme(
         colorScheme = activeTokens.colorScheme,
         content = content

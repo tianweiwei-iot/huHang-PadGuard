@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.padguard.parent.presentation.ui.theme.DarkMode
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.presentation.ui.auth.ServerConfigDialog
@@ -63,7 +64,11 @@ fun ProfileScreen(
     /** 当前主题模式 */
     themeMode: ThemeMode = ThemeMode.MINT,
     /** 切换主题（写入持久化并触发整树重组） */
-    onThemeChange: (ThemeMode) -> Unit = {}
+    onThemeChange: (ThemeMode) -> Unit = {},
+    /** 深色模式三态（跟随系统/浅色/深色） */
+    darkMode: DarkMode = DarkMode.SYSTEM,
+    /** 切换深色模式（写入持久化并触发整树重组） */
+    onDarkModeChange: (DarkMode) -> Unit = {}
 ) {
     val context = LocalContext.current
     var showLogoutConfirm by remember { mutableStateOf(false) }
@@ -112,7 +117,9 @@ fun ProfileScreen(
             // 切换仅改变视觉令牌，不触碰任何业务逻辑；选择落盘后重启保持。
             ThemeSelectorCard(
                 themeMode = themeMode,
-                onThemeChange = onThemeChange
+                onThemeChange = onThemeChange,
+                darkMode = darkMode,
+                onDarkModeChange = onDarkModeChange
             )
 
             val items = listOf(
@@ -257,7 +264,9 @@ private fun ProfileListItem(item: ProfileItem, onClick: () -> Unit) {
 @Composable
 private fun ThemeSelectorCard(
     themeMode: ThemeMode,
-    onThemeChange: (ThemeMode) -> Unit
+    onThemeChange: (ThemeMode) -> Unit,
+    darkMode: DarkMode = DarkMode.SYSTEM,
+    onDarkModeChange: (DarkMode) -> Unit = {}
 ) {
     val options = listOf(
         ThemeMode.MINT to "青空薄荷",
@@ -320,6 +329,61 @@ private fun ThemeSelectorCard(
                         }
                         }
                     }
+                }
+            }
+
+            // 深色模式三态：与色板正交。深色启用时统一使用深色令牌（忽略上方色板）。
+            DarkModeRow(darkMode = darkMode, onDarkModeChange = onDarkModeChange)
+        }
+    }
+}
+
+/**
+ * 深色模式选择行（跟随系统 / 浅色 / 深色）。
+ *
+ * 默认「跟随系统」：尊重系统级深色与省电设置，也符合 Android 设计规范；
+ * 深色启用时 [com.padguard.parent.presentation.ui.theme.tokensFor] 的浅色令牌被
+ * 深色令牌整体替换，页面零改动。
+ */
+@Composable
+private fun DarkModeRow(
+    darkMode: DarkMode,
+    onDarkModeChange: (DarkMode) -> Unit
+) {
+    Spacer(modifier = Modifier.height(12.dp))
+    val options = listOf(
+        DarkMode.SYSTEM to "跟随系统",
+        DarkMode.LIGHT to "浅色",
+        DarkMode.DARK to "深色"
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "深色模式",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f)
+        )
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant
+        ) {
+            Row(modifier = Modifier.padding(3.dp)) {
+                options.forEach { (mode, label) ->
+                    val selected = darkMode == mode
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        color = if (selected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onDarkModeChange(mode) }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
                 }
             }
         }

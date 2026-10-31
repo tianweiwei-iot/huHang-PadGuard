@@ -50,14 +50,25 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val themeMode by themePrefs.themeMode.collectAsState()
-            PadGuardTheme(mode = themeMode) {
+            val darkMode by themePrefs.darkMode.collectAsState()
+            val isSystemDark = androidx.compose.foundation.isSystemInDarkTheme()
+            PadGuardTheme(
+                mode = themeMode,
+                dark = when (darkMode) {
+                    com.padguard.parent.presentation.ui.theme.DarkMode.SYSTEM -> isSystemDark
+                    com.padguard.parent.presentation.ui.theme.DarkMode.LIGHT -> false
+                    com.padguard.parent.presentation.ui.theme.DarkMode.DARK -> true
+                }
+            ) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
                     PadGuardNavHost(
                         themeMode = themeMode,
-                        onThemeChange = themePrefs::setThemeMode
+                        onThemeChange = themePrefs::setThemeMode,
+                        darkMode = darkMode,
+                        onDarkModeChange = themePrefs::setDarkMode
                     )
                 }
             }
