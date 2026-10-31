@@ -37,9 +37,11 @@ class MediaUrlResolver @Inject constructor(
             // 避免服务端误配 base-url 为内网/IP/localhost 时，孩子端跨网加载失败（同类历史故障）。
             // 真正的外部 CDN/对象存储地址（不含 /v1/files/）保持原样，不误伤。
             if (raw.contains("/v1/files/")) {
-                val id = raw.substringAfterLast("/v1/files/").substringBefore('?').takeIf { it.isNotBlank() }
+                // 查询串必须保留：服务端已对文件 URL 附加短期签名（exp/sig），
+                // 剥掉后开启"匿名强制签名"闸门的部署里该请求会被 403。
+                val tail = raw.substringAfterLast("/v1/files/").takeIf { it.isNotBlank() }
                 val origin = originOf(transportSettings.baseUrl.value).ifBlank { lastGoodOrigin }
-                if (id != null && origin.isNotBlank()) return "$origin/v1/files/$id"
+                if (tail != null && origin.isNotBlank()) return "$origin/v1/files/$tail"
             }
             return raw
         }
