@@ -11,7 +11,8 @@
       root.querySelector("#s-refresh").onclick = () => PG.views.server.mount(root);
       const s = await PG.api.serverMetrics();
       const up = (s.status === "UP");
-      const heapPct = Math.round(s.jvmHeapUsedMb / s.jvmHeapMaxMb * 100);
+      // 第八轮 P2：jvmHeapMaxMb 为 0/缺失时（虚拟机未设上限）除零得 NaN，页面显示 "NaN%"
+      const heapPct = s.jvmHeapMaxMb > 0 ? Math.round(s.jvmHeapUsedMb / s.jvmHeapMaxMb * 100) : 0;
       const uptimeH = Math.round(s.uptimeMs / 3600000);
       root.querySelector("#s-body").innerHTML = `
       <div class="grid grid-4">

@@ -56,7 +56,13 @@
       trialDays: parseInt(root.querySelector("#st-trial").value) || 14, passwordPolicy: root.querySelector("#st-pwd").value,
       mfaRequired: root.querySelector("#st-mfa").checked, mockPay: root.querySelector("#st-mock").checked, plans,
     };
-    await PG.api.saveSettings(body);
+    // 第八轮 P2：保存失败必须有提示——此前 rejection 静默，管理员以为改价成功
+    try {
+      await PG.api.saveSettings(body);
+    } catch (e) {
+      PG.ui.toast("err", "保存失败", String((e && e.message) || e));
+      return;
+    }
     PG.ui.toast("ok", "设置已保存", "部分项需重启服务端生效");
   }
 })(window.PG);

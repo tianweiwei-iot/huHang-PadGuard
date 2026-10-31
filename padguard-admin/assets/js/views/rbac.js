@@ -262,7 +262,8 @@
       const msg = role.memberCount
         ? `该角色下仍有 ${role.memberCount} 名管理员，服务端将拒绝删除，请先在「管理员账号」页改派角色。`
         : "删除后不可恢复。";
-      U.confirm("删除角色", `${U.esc(role.name)}：${msg}`, async () => {
+      // confirm 内部已 esc：这里传原始 role.name，避免双重转义把引号显示成 &#39;
+      U.confirm("删除角色", `${role.name}：${msg}`, async () => {
         try { await PG.api.deleteRole(role.id); U.toast("ok", "角色已删除", role.name); await reload(); redraw(); }
         catch (e) { U.toast("err", "删除失败", e.message); }
       }, true);

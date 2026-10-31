@@ -39,10 +39,21 @@
 
   let curPage = 1;
   const PAGE_SIZE = 20;
+  // 第八轮 P2-9：请求序号防竞态——快速翻页/输入搜索时，慢的旧响应不得覆盖新结果
+  let loadSeq = 0;
 
   async function load(root) {
+    const seq = ++loadSeq;
     const q = { keyword: root.querySelector("#p-kw").value.trim(), status: root.querySelector("#p-status").value, plan: root.querySelector("#p-plan").value, page: curPage, size: PAGE_SIZE };
-    const resp = await PG.api.listParents(q);
+    let resp;
+    try {
+      resp = await PG.api.listParents(q);
+    } catch (e) {
+      if (seq !== loadSeq) return; // 已有更新的请求，旧失败忽略
+      PG.ui.toast("err", "加载失败", String((e && e.message) || e));
+      return;
+    }
+    if (seq !== loadSeq) return; // 旧响应到达时已有新请求在途，丢弃
     const list = (resp && resp.items) || [];
     const tb = root.querySelector("#p-body");
     if (!list.length) { tb.innerHTML = ""; root.querySelector("#p-empty").innerHTML = '<div class="empty">没有匹配的家长账号</div>'; root.querySelector("#p-pager").innerHTML = ""; return; }
@@ -59,7 +70,7 @@
       <td class="cell-sub">${U.esc(p.lastLoginAt || "—")}</td>
       <td><div class="row-actions">
         <button class="btn btn-xs" data-detail="${U.esc(p.id)}">详情</button>
-        ${p.status === "suspended" ? PG.guard("parents", "write", '<button class="btn btn-xs btn-primary" data-act="activate" data-id="' + p.id + '">激活</button>') : PG.guard("parents", "suspend", '<button class="btn btn-xs" data-act="suspend" data-id="' + p.id + '">冻结</button>')}
+        ${p.status === "suspended" ? PG.guard("parents", "write", '<button class="btn btn-xs btn-primary" data-act="activate" data-id="' + U.esc(p.id) + '">激活</button>') : PG.guard("parents", "suspend", '<button class="btn btn-xs" data-act="suspend" data-id="' + U.esc(p.id) + '">冻结</button>')}
         ${PG.guard("parents", "write", '<button class="btn btn-xs" data-act="edit" data-id="' + U.esc(p.id) + '">编辑</button>')}
         ${PG.guard("parents", "reset_pwd", '<button class="btn btn-xs" data-act="reset" data-id="' + U.esc(p.id) + '">重置密码</button>')}
         ${PG.guard("parents", "delete", '<button class="btn btn-xs btn-danger" data-act="del" data-id="' + U.esc(p.id) + '">删除</button>')}
@@ -82,7 +93,8 @@
     const p = await PG.api.getParent(id).catch(() => null);
     const phone = (p && p.phone) || id;
     // 注意：后端目前没有"强制下次登录修改"的实现，文案必须如实，不得承诺不存在的约束
-    PG.ui.confirm("重置密码", "将为家长 " + U.esc(phone) + " 生成随机强密码（明文仅显示一次），原密码立即失效。请转告家长并提醒其尽快修改。", async () => {
+    // 注意：confirm 内部会对 text 做一次 esc，这里传原始值——双重转义会把引号显示成 &#39;
+    PG.ui.confirm("重置密码", "将为家长 " + phone + " 生成随机强密码（明文仅显示一次），原密码立即失效。请转告家长并提醒其尽快修改。", async () => {
       const r = await PG.api.resetParentPwd(id);
       const emailed = r && r.emailed;
       // newPwd 缺失时显示 "—"（绝不能现场编一个假密码展示）

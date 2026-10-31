@@ -84,7 +84,17 @@
       foot: '<button class="btn btn-ghost" id="cf-cancel">取消</button><button class="btn ' + (danger ? "btn-danger" : "btn-primary") + '" id="cf-ok">' + (danger ? "确认执行" : "确认") + '</button>',
     });
     m.el.querySelector("#cf-cancel").onclick = m.close;
-    m.el.querySelector("#cf-ok").onclick = () => { m.close(); onOk && onOk(); };
+    // 第八轮评估 P1-D：onOk 常为 async（解绑/退款/删除等真实请求）。
+    // 此前 rejection 直接落成 unhandled rejection —— 操作失败但界面毫无反应，
+    // 管理员会误以为操作已成功。这里统一 await + 兜底报错，一处修复全部调用点。
+    m.el.querySelector("#cf-ok").onclick = async () => {
+      m.close();
+      try {
+        await (onOk && onOk());
+      } catch (e) {
+        toast("err", "操作失败", String((e && e.message) || e));
+      }
+    };
   }
 
   // ---------- 状态徽章 ----------

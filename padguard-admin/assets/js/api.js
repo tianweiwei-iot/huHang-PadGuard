@@ -9,23 +9,38 @@
   const M = PG.Mock;
 
   // ---------- 后端地址解析 ----------
-  // 后台应通过「服务端同源地址」访问：http://<服务器>:8090/admin/
+  // 后台应通过「服务端同源地址」访问：http(s)://<服务器>:8090/admin/
   // 此时 fetch("/v1/admin/...") 与页面同源，浏览器不会拦截，最稳妥。
-  // 若以本地文件方式（file://）打开，浏览器会禁止页面直接请求 http 接口，
-  // 这也是「Failed to fetch / 实时接口不可用」的根因，这里给出明确提示。
-  const DEFAULT_ORIGIN = "http://8.148.68.183:8090";
+  // 安全策略（第八轮评估 P0-1）：
+  // 1) 不再内置任何硬编码生产地址——公网 IP 明文 HTTP 等于把管理员凭据裸奔，
+  //    且仓库里带生产 IP 会在代码泄漏时直接暴露攻击面；
+  // 2) ?api= 覆盖参数加白名单：仅允许 https 源、或内网/本机 http 源
+  //    （192.168/10/172.16-31/localhost）——防止诱导链接把后台指向恶意服务器窃取凭据。
   const IS_FILE = (typeof location !== "undefined") && location.protocol === "file:";
+  const PRIVATE_HTTP = /^(http:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)|http:\/\/\[)/i;
+
+  function allowedOverride(url) {
+    try {
+      const u = new URL(url);
+      if (u.protocol === "https:") return true;
+      if (u.protocol === "http:" && PRIVATE_HTTP.test(url)) return true;
+    } catch (e) { /* 非法 URL 一律拒绝 */ }
+    return false;
+  }
 
   function resolveBaseUrl() {
-    // 1) 允许用 URL 参数临时覆盖：?api=http://host:port
+    // 1) 允许用 URL 参数临时覆盖：?api=https://host（https 任意；http 仅限内网/本机）
     try {
       const q = new URLSearchParams(location.search).get("api");
-      if (q) return q.replace(/\/+$/, "");
+      if (q) {
+        if (allowedOverride(q)) return q.replace(/\/+$/, "");
+        console && console.warn && console.warn("[PadGuard] ?api= 已拒绝非白名单地址（仅允许 https 或内网 http）");
+      }
     } catch (e) { /* ignore */ }
     // 2) http/https 打开时（经 /admin/ 访问）直接用当前源，彻底无跨域
     if (location.protocol === "http:" || location.protocol === "https:") return location.origin;
-    // 3) 兜底：本地文件打开，仍指向默认服务端（仅供调试，浏览器通常会拦截）
-    return DEFAULT_ORIGIN;
+    // 3) 兜底：本地文件打开时不预设任何公网地址，由部署者显式以 ?api= 指定（白名单校验同上）
+    return "";
   }
 
   const config = {

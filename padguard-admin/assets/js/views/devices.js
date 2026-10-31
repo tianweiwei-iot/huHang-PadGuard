@@ -29,10 +29,21 @@
 
   let curPage = 1;
   const PAGE_SIZE = 20;
+  // 第八轮 P2-9：请求序号防竞态——快速翻页/搜索时，慢的旧响应不得覆盖新结果
+  let loadSeq = 0;
 
   async function load(root) {
+    const seq = ++loadSeq;
     const q = { keyword: root.querySelector("#d-kw").value.trim(), online: root.querySelector("#d-on").value, page: curPage, size: PAGE_SIZE };
-    const resp = await PG.api.listDevices(q);
+    let resp;
+    try {
+      resp = await PG.api.listDevices(q);
+    } catch (e) {
+      if (seq !== loadSeq) return;
+      PG.ui.toast("err", "加载失败", String((e && e.message) || e));
+      return;
+    }
+    if (seq !== loadSeq) return;
     const list = (resp && resp.items) || [];
     const tb = root.querySelector("#d-body");
     if (!list.length) { tb.innerHTML = ""; root.querySelector("#d-empty").innerHTML = '<div class="empty">没有匹配的设备</div>'; root.querySelector("#d-pager").innerHTML = ""; return; }
@@ -64,10 +75,21 @@
   }
 
   async function openDetail(id) {
-    // 详情按 id 反查：放大单页上限取全量（最大 200 台），避免当前分页页内查不到
-    const resp = await PG.api.listDevices({ page: 1, size: 200 });
-    const d = ((resp && resp.items) || []).find(x => x.deviceId === id);
-    if (!d) return;
+    // 详情按 id 反查：分页拉取（每页 200，最多 20 页 = 4000 台封顶），
+    // 第八轮 P2-9 修复：此前只取一页 200，设备超限时静默 return，详情按钮点了毫无反应。
+    let d = null;
+    try {
+      for (let page = 1; page <= 20 && !d; page++) {
+        const resp = await PG.api.listDevices({ page, size: 200 });
+        const items = (resp && resp.items) || [];
+        d = items.find(x => x.deviceId === id) || null;
+        if (!items.length || (resp.page || page) >= (resp.totalPages || 1)) break;
+      }
+    } catch (e) {
+      PG.ui.toast("err", "设备详情加载失败", String((e && e.message) || e));
+      return;
+    }
+    if (!d) { PG.ui.toast("warn", "未找到设备", "设备 " + U.esc(id) + " 不在当前设备列表中（可能刚被解绑或删除）。"); return; }
     const dl = PG.ui.drawer({
       title: "设备详情 · " + U.esc(d.name),
       body: `<div class="stat-line"><span>设备ID</span><span>${U.esc(d.deviceId)}</span></div>
