@@ -2,7 +2,6 @@ package com.padguard.child.usagesession
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.padguard.core.common.TimeProvider
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -16,8 +15,7 @@ import javax.inject.Inject
  */
 @HiltViewModel
 class UsageSessionViewModel @Inject constructor(
-    private val manager: UsageSessionManager,
-    private val timeProvider: TimeProvider
+    private val manager: UsageSessionManager
 ) : ViewModel() {
 
     /** 会话 UI 状态（含是否需要确认计时、是否进入倒计时、档位等） */
@@ -33,6 +31,11 @@ class UsageSessionViewModel @Inject constructor(
         viewModelScope.launch { manager.requestDelay(minutes) }
     }
 
-    /** 本地平滑倒计时：在"当前校准墙钟"时刻的实时剩余毫秒，供浮层每秒刷新 */
-    fun liveRemainingMs(): Long = manager.liveRemainingMs(timeProvider.now())
+    /**
+     * 本地平滑倒计时：当前实时剩余毫秒，供浮层每秒刷新。
+     *
+     * 推进量由 [UsageSessionManager] 内部用单调时钟 (elapsedRealtime) 计算，
+     * 不再接收墙钟入参 —— 否则孩子改系统时间即可倒拨剩余时长（见该类注释）。
+     */
+    fun liveRemainingMs(): Long = manager.liveRemainingMs()
 }

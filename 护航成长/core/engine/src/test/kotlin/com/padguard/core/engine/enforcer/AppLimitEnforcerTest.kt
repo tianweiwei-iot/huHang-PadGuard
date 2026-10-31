@@ -58,15 +58,13 @@ class AppLimitEnforcerTest {
     /** ScheduleEvaluator 在本测试中无规则命中，mock 即可（空策略 evaluate 不会触碰 dayTypeOf） */
     private fun evaluator(): ScheduleEvaluator = mock(ScheduleEvaluator::class.java)
 
-    /** 统计 mock 上某方法的调用次数（不依赖 matcher，天然兼容 suspend 的 continuation 形参）。 */
-    private fun callCount(methodName: String): Int =
-        mockingDetails(repo).invocations.count { it.method.name == methodName }
-
-    /** 取出所有 addAppUsage 调用的首个实参（即被累计的应用包名），用于按应用断言。 */
-    private fun appUsagePackages(): List<String> =
-        mockingDetails(repo).invocations
-            .filter { it.method.name == "addAppUsage" }
-            .map { it.arguments[0] as String }
+    // 注：这里原本还有两个用 `mockingDetails(repo)` 统计调用的辅助方法，已删除。
+    // 其一，`repo` 是真实对象（CountingUsageRepository）而非 Mockito mock，
+    // `mockingDetails` 对它调用必然抛 "NotAMockException"，逻辑本身就是错的；
+    // 其二，它们在测试中从未被引用 —— 断言走的是替身自己的计数器
+    // （repo.totalUsageCalls / repo.appUsageCalls）。
+    // 结果是这两个死方法连同缺失的 import 让 `:core:engine` 的**整个测试源码集编译失败**，
+    // 本模块所有单元测试从未真正跑过。删除后测试源码即可编译、用例开始生效。
 
     @Test
     fun `normal screen-on ticks accumulate usage`() = runBlocking {

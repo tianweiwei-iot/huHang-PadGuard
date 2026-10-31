@@ -88,6 +88,13 @@ class UsageSessionManager @Inject constructor(
     /** 最近一次刷新得到的基线，用于本地平滑倒计时 */
     private var baselineServerNow: Long = 0L
     private var baselineRemainingMs: Long = 0L
+    /**
+     * 基线落库时刻的**单调时钟**读数（毫秒，含休眠，无法被用户修改）。
+     *
+     * 见 [liveRemainingMs] 的说明：本地推进量必须用它，不能用墙钟。
+     */
+    @Volatile
+    private var baselineElapsedRealtime: Long = 0L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val refreshMutex = Mutex()
@@ -178,21 +185,45 @@ class UsageSessionManager @Inject constructor(
         return result
     }
 
-    /** 本地平滑倒计时：在 [now] 时刻的实时剩余（毫秒），永不为负 */
-    fun liveRemainingMs(now: Long): Long =
-        maxOf(0L, baselineRemainingMs - (now - baselineServerNow))
+    /**
+     * 本地平滑倒计时：当前的实时剩余（毫秒），永不为负。
+     *
+     * ## 为什么推进量必须用单调时钟（elapsedRealtime）而不是墙钟
+     *
+     * 早期实现是 `baselineRemainingMs - (timeProvider.now() - baselineServerNow)`，
+     * 其中 `timeProvider.now()` = `System.currentTimeMillis() + offset`。
+     * 墙钟是**孩子在设置里可以直接改的**：把系统时间往前拨 2 小时，
+     * `now - baselineServerNow` 立刻变小甚至为负，剩余时长不减反增，`isExpired()` 永远为假 →
+     * 引擎不会挂 `DAILY_LIMIT` → **总时长管控被彻底绕过**，而且没有任何报错。
+     * 这正是本产品最致命的一类绕过面（改时间是最低门槛的操作）。
+     *
+     * 现在改为：收到服务端权威剩余时同时记下当时 `SystemClock.elapsedRealtime()`，
+     * 本地推进量 = `elapsedRealtime() - baselineElapsedRealtime`。
+     * 单调时钟只随真实流逝前进，不受用户改时间 / NTP 校时跳变影响，无法被倒拨。
+     *
+     * 副作用（可接受且方向正确）：单调时钟在设备休眠期间同样前进，
+     * 因此熄屏期间也会计入消耗 —— 宁可"多算"也不能"少算"，
+     * 且每 15 秒的服务端权威刷新会立刻把偏差纠正回来。
+     */
+    fun liveRemainingMs(): Long {
+        if (baselineRemainingMs <= 0L) return 0L
+        val advanced = android.os.SystemClock.elapsedRealtime() - baselineElapsedRealtime
+        // 单调时钟不会倒流，但仍防御负值（极端 ROM 行为）以免"越用越多"
+        return maxOf(0L, baselineRemainingMs - maxOf(0L, advanced))
+    }
 
     /** 计时已激活且实时剩余已耗尽（用于 PolicyEngine 统一挂 DAILY_LIMIT） */
     fun isExpired(): Boolean {
         val s = _state.value
         if (!s.active) return false
-        return liveRemainingMs(timeProvider.now()) <= 0L
+        return liveRemainingMs() <= 0L
     }
 
     /** 解绑 / 退出管控时清空会话状态，避免陈旧会话误导 UI 与锁定 */
     fun reset() {
         baselineServerNow = 0L
         baselineRemainingMs = 0L
+        baselineElapsedRealtime = 0L
         _state.value = UiState()
         // 若早期因会话到期锁过屏，这里把 DAILY_LIMIT 原因释放掉（新一轮 tick 也会由 syncAutoReasons 兜底）
         lockController.releaseLock(LockReason.DAILY_LIMIT)
@@ -202,6 +233,8 @@ class UsageSessionManager @Inject constructor(
     private fun applyDto(dto: UsageSessionDto) {
         baselineServerNow = dto.serverNow
         baselineRemainingMs = dto.remainingMs
+        // 与权威剩余同帧记录单调时钟读数（见 liveRemainingMs 注释：本地推进量不能用墙钟）
+        baselineElapsedRealtime = android.os.SystemClock.elapsedRealtime()
         val countdownActive = dto.active && dto.remainingMs <= dto.countdownThresholdMs
         _state.update { s ->
             s.copy(

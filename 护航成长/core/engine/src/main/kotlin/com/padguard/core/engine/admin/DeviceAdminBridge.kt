@@ -53,8 +53,17 @@ class DeviceAdminBridge @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
 
+    /**
+     * 设备策略管理器。
+     *
+     * 用 `as?` + 明确报错而不是硬转换 `as`：某些定制 ROM / 极早期启动阶段
+     * `getSystemService` 可能返回 null，硬转换会直接抛 NPE —— 而本类是 `@Singleton`
+     * 且在构造期初始化，一次失败就是整个管控进程启动即崩（表现为孩子端反复闪退、
+     * 守护进程连环重启）。改成可空转换后，至少能拿到一条带明确上下文的错误日志。
+     */
     private val dpm: DevicePolicyManager =
-        context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
+            ?: error("DevicePolicyManager 不可用：系统服务获取失败，管控引擎无法初始化")
 
     // -----------------------------------------------------------------------
     // 两份**互不共享**的本地账本。

@@ -555,6 +555,14 @@ class GuardService : Service() {
         isRunning = false
         runCatching { unregisterReceiver(restartReceiver) }
             .onFailure { Logger.w(TAG) { "unregister restart receiver failed: ${it.message}" } }
+        // 第八轮评估 P1-E：应用安装/卸载广播接收器此前只注册不注销，
+        // 服务反复销毁重建时每次都会挂一个新的 receiver 到系统上（旧实例连同
+        // 其引用的 Service context 一起泄漏），且旧 receiver 仍会置 appSyncRequested。
+        appChangeReceiver?.let { r ->
+            runCatching { unregisterReceiver(r) }
+                .onFailure { Logger.w(TAG) { "unregister app-change receiver failed: ${it.message}" } }
+        }
+        appChangeReceiver = null
         Logger.w(TAG) { "GuardService destroyed" }
         // 周期定位必须跟着守护服务一起停：服务停掉通常意味着解绑 / 退出管控，
         // 此时继续采集位置既没有上报对象，也越过"家长未授权即采集"的边界。

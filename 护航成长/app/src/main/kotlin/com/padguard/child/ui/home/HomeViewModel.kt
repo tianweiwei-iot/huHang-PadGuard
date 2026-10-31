@@ -119,11 +119,11 @@ class HomeViewModel @Inject constructor(
                 val remaining: Int
                 val used: Int
                 if (session.active) {
-                    // 权威口径：剩余由服务端锚点 (startEpoch / serverNow) 派生，本地仅用单调时钟做平滑插值。
-                    // timeProvider.now() = 本地墙钟 + offset，而 baselineServerNow 也是同一 offset 系，
-                    // 作差时 offset 相互抵消，不会因平板与服务端存在时钟偏移而漂移 ——
+                    // 权威口径：剩余由服务端锚点 (startEpoch / serverNow) 派生，
+                    // 本地推进量由 UsageSessionManager 用**单调时钟** (elapsedRealtime) 插值 ——
+                    // 不用墙钟是因为孩子可在设置里直接改系统时间倒拨剩余时长（见该类注释）。
                     // 这样首页倒计时与锁机判定 (UsageSessionManager.isExpired) 始终同源，且与家长端头条一致。
-                    val liveRemaining = usageSessionManager.liveRemainingMs(timeProvider.now())
+                    val liveRemaining = usageSessionManager.liveRemainingMs()
                     dailyQuota = session.quotaMinutes
                     remaining = (liveRemaining / 60_000L).toInt().coerceAtLeast(0)
                     used = (dailyQuota - remaining).coerceAtLeast(0)

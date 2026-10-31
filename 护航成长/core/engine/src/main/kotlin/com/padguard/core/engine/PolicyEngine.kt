@@ -115,7 +115,15 @@ class PolicyEngine @Inject constructor(
     @Volatile
     private var lastAppliedVersion = NOT_APPLIED
 
-    /** 当日已上报过的告警 key，防止同一原因每 15s 刷一条 */
+    /**
+     * 当日已上报过的告警 key，防止同一原因每 15s 刷一条。
+     *
+     * 必须由 [alertLock] 保护：本集合有两个并发写入入口 —— `applyAll`（受 [applyMutex] 保护）
+     * 与 `tick`（**不在**该互斥内）。无保护的 `HashSet.add()` 在并发下会丢失更新，
+     * 极端情况还会破坏内部结构；后果是同一告警重复上报（刷屏）或该报的一条被吞掉。
+     * 跨天重置（clear + 换 dayKey）也必须与 add 一起原子完成。
+     */
+    private val alertLock = Any()
     private val alertedKeys = mutableSetOf<String>()
     private var alertDayKey = ""
 
@@ -474,11 +482,16 @@ class PolicyEngine @Inject constructor(
         detail: Map<String, String>
     ) {
         val today = currentDayKey()
-        if (today != alertDayKey) {
-            alertDayKey = today
-            alertedKeys.clear()
+        // "跨天重置"与"去重登记"必须在同一临界区内完成，否则并发下可能
+        // 线程 A 刚 clear、线程 B 就把新 key 加进去，随后 A 再 clear 一次把它抹掉。
+        val shouldRaise = synchronized(alertLock) {
+            if (today != alertDayKey) {
+                alertDayKey = today
+                alertedKeys.clear()
+            }
+            alertedKeys.add(key)
         }
-        if (!alertedKeys.add(key)) return
+        if (!shouldRaise) return
 
         val deviceId = authRepository.getDeviceId()
         logRepository.raise(type = type, level = level, detail = detail, deviceId = deviceId)

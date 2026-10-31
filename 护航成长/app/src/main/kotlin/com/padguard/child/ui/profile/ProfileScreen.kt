@@ -18,6 +18,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -264,10 +266,20 @@ private fun ProfileContent(
                     style = MaterialTheme.typography.headlineSmall
                 )
             }
+            // 防护等级状态条：一眼看清当前是「设备所有者硬管控」还是「软管控」（软管控为默认，DO 设备自动升级）
+            item {
+                ProtectionLevelCard(state = state)
+            }
             // 操作密码闸门基础设施告警：密码已启用但无障碍服务未开 → 拦截失效，必须引导开启
             if (state.guardInfraWarning) {
                 item {
                     GuardInfraWarningBanner(onOpen = onOpenGuardA11y)
+                }
+            }
+            // 非设备所有者（软管控）：如实告知防护边界 + 升级入口
+            if (state.adminState != AdminState.OWNER) {
+                item {
+                    SoftControlRiskBanner(onUpgrade = { onPermissionGuide("device_admin") })
                 }
             }
             item {
@@ -494,9 +506,12 @@ private fun AsyncAvatar(
     }
 
     Surface(color = MaterialTheme.colorScheme.primary, modifier = modifier) {
-        if (bitmap != null) {
+        // 局部快照替代 !!：bitmap 是委托属性（produceState），理论上可在判空与使用之间被重载，
+        // 先捕获到局部 val 再用，既消除 `!!` 也消除读撕裂的窗口。
+        val current = bitmap
+        if (current != null) {
             Image(
-                bitmap = bitmap!!.asImageBitmap(),
+                bitmap = current.asImageBitmap(),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
@@ -910,6 +925,97 @@ private fun GuardInfraWarningBanner(onOpen: () -> Unit) {
             )
             TextButton(onClick = onOpen) {
                 Text(text = "去开启无障碍服务")
+            }
+        }
+    }
+}
+
+/**
+ * 防护等级状态条。
+ *
+ * 一眼告知当前管控强度：设备所有者(DO/PO) = 硬管控（防卸载 / 防停止 / 防改时间系统级锁定）；
+ * 其余（普通设备管理员 / 无管理员）= 软管控（功能正常，但设置里可被卸载 / 停止 / 改时间）。
+ * 与 [ProfileViewModel.detectAdminState] 同源，避免界面与运行时口径脱节。
+ */
+private data class LevelVisual(
+    val bg: Color,
+    val fg: Color,
+    val title: String,
+    val subtitle: String
+)
+
+@Composable
+private fun ProtectionLevelCard(state: ProfileUiState) {
+    val isHard = state.adminState == AdminState.OWNER
+    val v = if (isHard) {
+        LevelVisual(
+            bg = Color(0xFFE8F5E9),
+            fg = Color(0xFF1B5E20),
+            title = "防护等级：设备所有者硬管控",
+            subtitle = "防卸载 / 防停止 / 防改时间 已由系统级锁定"
+        )
+    } else {
+        LevelVisual(
+            bg = Color(0xFFFFF8E1),
+            fg = Color(0xFF8D6E00),
+            title = "防护等级：软管控（非设备所有者）",
+            subtitle = "计时/监控/资讯正常，但设置里可被卸载/停止/改时间"
+        )
+    }
+    Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = v.bg)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(
+                imageVector = if (isHard) Icons.Filled.VerifiedUser else Icons.Filled.Warning,
+                contentDescription = null,
+                tint = v.fg,
+                modifier = Modifier.size(28.dp)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = v.title, style = MaterialTheme.typography.titleMedium, color = v.fg, fontWeight = FontWeight.SemiBold)
+                Text(text = v.subtitle, style = MaterialTheme.typography.bodySmall, color = v.fg.copy(alpha = 0.85f))
+            }
+        }
+    }
+}
+
+/**
+ * 软管控风险告知横幅。
+ *
+ * 仅在「非设备所有者」时出现：如实告知家长本机防护边界——
+ * 设置里可强制停止 / 卸载 / 改时间，这些绕过软管控无法阻止。
+ * 提供「去升级为设备所有者」入口（复用设备管理员引导页中的 DO 升级路径）。
+ */
+@Composable
+private fun SoftControlRiskBanner(onUpgrade: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "当前为软管控，防卸载不保证",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            Text(
+                text = "计时、监控、资讯下发均正常；但孩子若进入「设置」，可强制停止、卸载本应用或更改系统时间，" +
+                    "从而绕过管控。要彻底锁死，请把平板设为「设备所有者(DO)」。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            TextButton(onClick = onUpgrade) {
+                Text(text = "了解如何升级为设备所有者")
             }
         }
     }

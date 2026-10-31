@@ -30,14 +30,13 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
 
-        // 服务端地址与 MQTT Broker 由构建期注入。
-        // 本项目是局域网/私有化部署（服务端跑在家长电脑上），不存在公网接入点，
-        // 因此默认地址用内网示例地址，与 debug 保持一致。
-        // 曾在此填写虚构公网域名 api.padguard.cn：DNS 根本解析不了，
-        // 客户端只会得到"无法连接"，且用户完全无法判断是地址问题还是网络问题。
-        // 真实部署请在 App 内「高级设置」改成家长电脑的实际 IP（或由打包脚本注入）。
-        buildConfigField("String", "DEFAULT_BASE_URL", "\"http://8.148.68.183:8090/api/v1/\"")
-        buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://8.148.68.183:1883\"")
+        // 服务端地址与 MQTT Broker 默认接入点（构建期注入）。
+        // 本项目为局域网/私有化部署，默认值仅作「未绑定前引导页」使用；
+        // 真实部署由扫码绑定（二维码含服务器地址）或「高级设置」覆盖，无需改代码发版。
+        // 生产环境（云部署）经 Nginx 终止 TLS（见 docs/生产部署TLS配置说明.md），
+        // 此处默认 https/ssl，公网明文传输由反向代理消除；家庭局域网部署走 http/tcp 内网（同一信任域）。
+        buildConfigField("String", "DEFAULT_BASE_URL", "\"https://padguard.example.com/api/v1/\"")
+        buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"ssl://padguard.example.com:8883\"")
     }
 
     signingConfigs {
@@ -77,8 +76,10 @@ android {
         debug {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
-            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://8.148.68.183:8090/api/v1/\"")
-            buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://8.148.68.183:1883\"")
+            // 局域网联调示例（开发者真机直连本机服务端用），请改为你电脑的实际内网 IP；
+            // 生产包以 defaultConfig 的 https/ssl 默认值为准，且实际由绑定/高级设置覆盖。
+            buildConfigField("String", "DEFAULT_BASE_URL", "\"http://192.168.1.100:8090/api/v1/\"")
+            buildConfigField("String", "DEFAULT_MQTT_BROKER", "\"tcp://192.168.1.100:1883\"")
         }
     }
 

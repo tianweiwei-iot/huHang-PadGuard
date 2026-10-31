@@ -65,8 +65,17 @@ class MqttTransport @Inject constructor(
     /**
      * 下行消息流。replay = 0 且 extraBufferCapacity 留足，
      * 避免上层来不及消费时把 Paho 的回调线程堵住（Paho 回调线程被堵会连带停掉心跳）。
+     *
+     * 第八轮 P2-6 优化：缓冲满时由"静默丢弃新消息"改为 **DROP_OLDEST**——
+     * 指令队列挤爆时丢最旧的（通常是早已被新状态覆盖的过期指令，如连续多次 applyPolicy），
+     * 保留最新的。静默丢新的风险场景：孩子离线期间堆积的指令重放 + 高频心跳同时到达，
+     * 丢掉新指令意味着"最新锁屏指令没执行"，比丢旧指令严重得多。
      */
-    private val _inbound = MutableSharedFlow<MqttInbound>(extraBufferCapacity = 128)
+    private val _inbound = MutableSharedFlow<MqttInbound>(
+        replay = 0,
+        extraBufferCapacity = 128,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
+    )
     val inbound: SharedFlow<MqttInbound> = _inbound.asSharedFlow()
 
     @Volatile
@@ -90,7 +99,7 @@ class MqttTransport @Inject constructor(
         return try {
             withContext(Dispatchers.IO) {
                 val mqttClient = client ?: createClient(broker, deviceId).also { client = it }
-                val options = buildConnectOptions(tenant, deviceId)
+                val options = buildConnectOptions(tenant, deviceId, broker)
                 awaitToken("connect") { listener -> mqttClient.connect(options, null, listener) }
                 subscribeAll(mqttClient, tenant, deviceId)
                 publishOnlineStatus(tenant, deviceId)
@@ -155,7 +164,7 @@ class MqttTransport @Inject constructor(
         val persistenceDir = File(context.filesDir, PERSISTENCE_DIR).apply { mkdirs() }
         val sender = AlarmPingSender(context).also { pingSender = it }
         return MqttAsyncClient(
-            broker,
+            normalizeBrokerUri(broker),
             CLIENT_ID_PREFIX + deviceId,
             MqttDefaultFilePersistence(persistenceDir.absolutePath),
             sender
@@ -164,7 +173,60 @@ class MqttTransport @Inject constructor(
         }
     }
 
-    private fun buildConnectOptions(tenant: String, deviceId: String) = MqttConnectOptions().apply {
+    /**
+     * 第八轮评估 P1-C：TLS 支持。
+     *
+     * 协议归一化：允许配置里写更直观的别名——
+     * - `mqtts://host:8883` → `ssl://host:8883`（Paho 的 TLS 协议名是 ssl）
+     * - `mqtt://host:1883`  → `tcp://host:1883`
+     *
+     * TLS 信任策略：走**系统 CA**（SSLContext 默认），与 OkHttp 侧一致——
+     * 公网部署用 Let's Encrypt/商业证书即天然可信；家庭局域网保持 tcp 明文（隐私政策已告知）。
+     * 自签名 CA 的私有化部署需在客户端分发 CA 证书后注入自定义 TrustManager，
+     * 与服务端 `scripts/gen-certs.sh` 的证书一起联调（第二批任务，见第八轮评估报告）。
+     */
+    private fun normalizeBrokerUri(broker: String): String = when {
+        broker.startsWith("mqtts://") -> "ssl://" + broker.removePrefix("mqtts://")
+        broker.startsWith("mqtt://") -> "tcp://" + broker.removePrefix("mqtt://")
+        else -> broker
+    }
+
+    private fun isTlsBroker(broker: String): Boolean =
+        broker.startsWith("ssl://") || broker.startsWith("mqtts://") || broker.startsWith("tls://")
+
+    /**
+     * TLS 套接字工厂（第八轮第二批：自签名 CA 支持）。
+     *
+     * 信任策略按部署形态分两档：
+     * 1. `filesDir/mqtt/ca.pem` 存在 → 以该 CA 为唯一信任锚（私有化自签名部署：
+     *    随 `scripts/gen-certs.sh` 生成的根证书在装机时一并放进该路径）；
+     * 2. 不存在 → 系统 CA（公网部署用 Let's Encrypt/商业证书，免配置）。
+     *
+     * 任何构建失败都降级回系统默认工厂并告警，绝不让 TLS 配置问题变成"连不上 broker"的哑故障。
+     */
+    private fun buildSocketFactory(): javax.net.ssl.SSLSocketFactory =
+        runCatching {
+            val caFile = File(context.filesDir, "mqtt/ca.pem")
+            if (caFile.isFile) {
+                val cf = java.security.cert.CertificateFactory.getInstance("X.509")
+                val ca = caFile.inputStream().use { cf.generateCertificate(it) }
+                val keyStore = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType())
+                    .apply { load(null, null); setCertificateEntry("padguard-ca", ca) }
+                val tmf = javax.net.ssl.TrustManagerFactory.getInstance(javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm())
+                    .apply { init(keyStore) }
+                val sslCtx = javax.net.ssl.SSLContext.getInstance("TLS")
+                sslCtx.init(null, tmf.trustManagers, null)
+                Logger.i(TAG) { "mqtt tls: trusting provisioned CA (${caFile.name})" }
+                sslCtx.socketFactory
+            } else {
+                javax.net.ssl.SSLContext.getDefault().socketFactory
+            }
+        }.getOrElse {
+            Logger.w(TAG, it) { "mqtt tls socket factory build failed, falling back to system default" }
+            javax.net.ssl.SSLContext.getDefault().socketFactory
+        }
+
+    private fun buildConnectOptions(tenant: String, deviceId: String, broker: String) = MqttConnectOptions().apply {
         userName = credentials.mqttUsername.ifBlank { deviceId }
         password = credentials.mqttPassword.toCharArray()
         // false：保留离线期间的 QoS1 指令，见类注释
@@ -173,6 +235,9 @@ class MqttTransport @Inject constructor(
         connectionTimeout = CONNECT_TIMEOUT_SEC
         isAutomaticReconnect = true
         maxInflight = MAX_INFLIGHT
+        if (isTlsBroker(normalizeBrokerUri(broker))) {
+            socketFactory = buildSocketFactory()
+        }
         // 遗嘱消息 retain = true，管控端订阅即可拿到最后已知状态
         setWill(
             MqttTopics.upStatus(tenant, deviceId),
@@ -214,10 +279,8 @@ class MqttTransport @Inject constructor(
                 payload = String(message.payload),
                 receivedAt = System.currentTimeMillis()
             )
-            // tryEmit 不挂起，保证 Paho 回调线程立即返回
-            if (!_inbound.tryEmit(inbound)) {
-                Logger.w(TAG) { "inbound buffer full, dropped message from $topic" }
-            }
+            // DROP_OLDEST 策略下 tryEmit 恒成功（见 _inbound 注释），此处不再有静默丢新消息的路径
+            _inbound.tryEmit(inbound)
         }
 
         override fun deliveryComplete(token: org.eclipse.paho.client.mqttv3.IMqttDeliveryToken?) = Unit

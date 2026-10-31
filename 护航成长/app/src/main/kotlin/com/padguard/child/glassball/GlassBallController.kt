@@ -230,13 +230,12 @@ class GlassBallController @Inject constructor(
     private fun renderNow() {
         val view = ball ?: return
         val session = usageSessionManager.state.value
-        val now = timeProvider.now()
 
         val usedMinutes: Int
         val remainingLabel: String
         val ratio: Float
         if (session.active) {
-            val remainingMs = usageSessionManager.liveRemainingMs(now)
+            val remainingMs = usageSessionManager.liveRemainingMs()
             val quotaMinutes = session.quotaMinutes.coerceAtLeast(0)
             usedMinutes = (quotaMinutes - remainingMs / 60_000.0).roundToInt().coerceAtLeast(0)
             remainingLabel = formatRemaining(remainingMs)

@@ -227,12 +227,21 @@ class OneTimeConsentViewModel @Inject constructor(
         Logger.i(TAG) { "retry current step: $key" }
         _phase.value = Phase.WAITING_PARENT
         when (key) {
-            KEY_DEVICE_ADMIN -> tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
+            KEY_DEVICE_ADMIN -> {
+                tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
+                // 与 advance 同口径：盯守激活，免去手动返回
+                consentReturn.watch({ admin.isAdminActive() }, "设备管理员")
+                gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
+            }
             KEY_RUNTIME -> {
                 runtimeInFlight = true
                 tryEmit(ConsentLaunch.Runtime(permissionGranter.missingRuntimePermissions()))
             }
-            KEY_CAPTURE -> tryEmit(ConsentLaunch.MediaProjection)
+            KEY_CAPTURE -> {
+                tryEmit(ConsentLaunch.MediaProjection)
+                consentReturn.watch({ ScreenCaptureSession.hasToken() }, "屏幕采集")
+                gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
+            }
             else -> SpecialPermission.fromKey(key)?.let { openAgain(it.key) }
         }
     }
@@ -286,6 +295,10 @@ class OneTimeConsentViewModel @Inject constructor(
             _currentKey.value = KEY_DEVICE_ADMIN
             _phase.value = Phase.WAITING_PARENT
             tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
+            // 盯守 DA 激活：部分 ROM 的确认页点完「激活」后既不自动回前台、也不回调 ActivityResult，
+            // 这里轮询 isAdminActive，办妥即把授权页接回前台并自动接续下一项，免去手动返回。
+            consentReturn.watch({ admin.isAdminActive() }, "设备管理员")
+            gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
             return
         }
 
@@ -342,6 +355,9 @@ class OneTimeConsentViewModel @Inject constructor(
             _currentKey.value = KEY_CAPTURE
             _phase.value = Phase.WAITING_PARENT
             tryEmit(ConsentLaunch.MediaProjection)
+            // 令牌拿到即接回前台并收尾（避免个别 ROM 的 MediaProjection 回调缺失导致停在等待态）
+            consentReturn.watch({ ScreenCaptureSession.hasToken() }, "屏幕采集")
+            gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
             return
         }
 

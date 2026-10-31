@@ -21,6 +21,12 @@ import javax.inject.Singleton
 /**
  * 授权自动回前台引擎（"免手动返回"的核心）。
  *
+ * ## 覆盖对象（全部离屏授权步骤）
+ * 系统设置项（使用情况/悬浮窗/无障碍/未知来源）、设备管理员（[com.padguard.core.engine.admin.DeviceAdminBridge]）、
+ * 屏幕采集（MediaProjection 令牌）共用同一套"轮询完成 → 拉回前台 → 自动接续"机制。
+ * 后两者原先只靠 ActivityResult 回调，**在部分 ROM 上点了授权却回不来**（确认页不自动回前台、也不回调），
+ * 统一接入本引擎后，家长无需再手动按返回键即可进入下一项授权。
+ *
  * ## 家长在系统设置页拨开关时本 App 处于后台，且开关变更**没有任何系统回调**
  * —— 既不能靠广播感知、也不能靠 onActivityResult 感知（设置页没有"完成"按钮）。
  * 因此这里用一条后台轮询守护：盯着"刚带家长去办的那一项"是否被授予，
@@ -60,18 +66,40 @@ class ConsentReturnPresenter @Inject constructor(
      * onResume → `advance()` 调 [stop] 收尾。
      * 重复调用会先 [stop] 清掉上一条，保证同一时刻只有一组在盯。
      */
-    fun watch(targets: Set<SpecialPermission>) {
-        if (targets.isEmpty()) return
-        startWatching(targets)
+    /**
+     * 开始盯守一个「已完成」判定；家长在系统页把对应授权办妥后，
+     * 立即把授权页接回前台并自动接续下一项（见 [bringBackConsentScreen]），
+     * 家长无需手动按返回。
+     *
+     * 与 [watch] 的区别：本方法对任意完成判定开放，因此设备管理员
+     * （[com.padguard.core.engine.admin.DeviceAdminBridge.isAdminActive]）、
+     * 屏幕采集令牌（[com.padguard.child.capture.ScreenCaptureSession.hasToken]）
+     * 这类"非 SpecialPermission"的离屏授权也能复用同一套自动回前台引擎，
+     * 否则它们只能靠 ActivityResult 回调，在部分 ROM 上点了授权却回不来。
+     *
+     * @param completion 判定目标授权是否已办妥（在主线程外周期性调用，须轻量、可重复）
+     * @param label 刚办妥的授权名，用于兜底通知文案（如"设备管理员"）
+     */
+    fun watch(completion: () -> Boolean, label: String) {
+        startWatching(completion, label)
     }
 
-    private fun startWatching(targets: Set<SpecialPermission>) {
+    /**
+     * 兼容旧调用：盯一组系统设置类权限（使用情况 / 悬浮窗 / 无障碍 / 未知来源）。
+     * 转译为完成判定后复用同一引擎。
+     */
+    fun watch(targets: Set<SpecialPermission>) {
+        if (targets.isEmpty()) return
+        watch({ targets.any { it.isGranted(context) } }, targets.firstOrNull()?.label ?: "授权")
+    }
+
+    private fun startWatching(completion: () -> Boolean, label: String) {
         stop()
         watchJob = scope.launch {
-            // ① 等家长在系统设置页里把开关拨开（AppOps/无障碍没有回调，只能轮询复检）
-            if (!awaitGranted(targets)) return@launch
-            // ② 已授予：把授权页拉回前台并接续下一项；拉不动就带着通知兜底持续重试
-            bringBackConsentScreen(targets)
+            // ① 等家长在系统页里把授权办妥（AppOps/无障碍/管理员激活都没有回调，只能轮询复检）
+            if (!awaitGranted(completion)) return@launch
+            // ② 已办妥：把授权页拉回前台并接续下一项；拉不动就带着通知兜底持续重试
+            bringBackConsentScreen(label)
         }
     }
 
@@ -84,12 +112,12 @@ class ConsentReturnPresenter @Inject constructor(
     /** 撤掉回前台通知（授权页已可见时调用，避免通知栏留一条过期提醒）。 */
     fun cancelNotification() = notifier.cancel()
 
-    /** 轮询等待目标权限被授予。超时返回 false（调用方据此放弃自动回前台）。 */
-    private suspend fun awaitGranted(targets: Set<SpecialPermission>): Boolean {
+    /** 轮询等待目标授权办妥。超时返回 false（调用方据此放弃自动回前台）。 */
+    private suspend fun awaitGranted(completion: () -> Boolean): Boolean {
         var round = 0
         while (coroutineContext.isActive && round < MAX_ROUNDS) {
-            if (targets.any { it.isGranted(context) }) {
-                Logger.i(TAG) { "consent target granted (${targets.map { it.key }}), returning to consent screen" }
+            if (completion()) {
+                Logger.i(TAG) { "consent target granted, returning to consent screen" }
                 return true
             }
             round++
@@ -106,7 +134,7 @@ class ConsentReturnPresenter @Inject constructor(
      * 后台启动被系统静默丢弃时 `startActivity` 既不抛异常也没有任何回调，
      * 不验证就会把"以为拉回来了"当成成功，家长仍旧卡在设置页。
      */
-    private suspend fun bringBackConsentScreen(targets: Set<SpecialPermission>) {
+    private suspend fun bringBackConsentScreen(label: String) {
         var attempt = 0
         var notified = false
         while (coroutineContext.isActive && attempt < MAX_RETURN_ATTEMPTS) {
@@ -121,7 +149,7 @@ class ConsentReturnPresenter @Inject constructor(
             // 只发一次——同一 ID 反复更新会让悬浮通知反复弹出，反而添乱。
             if (!notified) {
                 notified = true
-                notifier.postReturnToConsent(targets.firstOrNull()?.label)
+                notifier.postReturnToConsent(label)
             }
             delay(POLL_INTERVAL_MS)
         }

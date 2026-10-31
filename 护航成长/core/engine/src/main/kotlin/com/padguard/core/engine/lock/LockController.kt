@@ -41,6 +41,20 @@ import javax.inject.Singleton
  *   「家长反复解锁、孩子端始终黑屏」的隐蔽成因之一。
  * 因此 REMOTE 态落盘（[PREFS_NAME]）：置位即写、清除即删、进程启动即恢复。
  * 重启不该成为管控真空，家长解锁指令到达前设备保持锁定，是安全的失败方向。
+ *
+ * ## 为什么所有状态变更必须串行化
+ *
+ * 本类的调用方不止一个线程：策略引擎的自检循环（[com.padguard.core.engine.PolicyEngine.tick]）、
+ * 无障碍服务回调线程、远程指令执行线程都会同时请求/释放锁定原因。
+ * 而 `requestLock` / `releaseLock` 本质是**读—改—写**三步：
+ * 读 `_state.value` → 算差集 → 写回。没有任何同步时，两个线程并发执行会互相覆盖，
+ * 后写的一方把先写的一方的 `LockReason` 静默丢掉 —— `reasons` 因此变空、
+ * `locked` 变 false，锁屏页被判定"未锁定"而收起，表现为**"家长明明锁了屏，孩子照常能用"**，
+ * 且没有任何异常日志可查。
+ *
+ * 因此这里用 [stateLock] 把状态变更全部串行化；临时解锁的到期清理原本还藏在
+ * `isTempUnlockActive()` 这个"看起来只是查询"的方法里，现在拆成显式的到期清算 +
+ * 纯查询两步，均在锁内完成。
  */
 @Singleton
 class LockController @Inject constructor(
@@ -54,8 +68,11 @@ class LockController @Inject constructor(
     private val _state = MutableStateFlow(LockState())
     val state: StateFlow<LockState> = _state.asStateFlow()
 
+    /** 保护 [_state] 与三个临时解锁字段的读—改—写（见类注释「为什么所有状态变更必须串行化」） */
+    private val stateLock = Any()
+
     init {
-        restoreRemoteLock()
+        synchronized(stateLock) { restoreRemoteLockLocked() }
     }
 
     /**
@@ -64,8 +81,10 @@ class LockController @Inject constructor(
      * 在 init 里做而不是懒加载：任何收集者（LockScreenPresenter 的解锁分流、
      * GuardService 的周期自检）拿到 state 的第一帧就必须已经包含 REMOTE，
      * 否则会出现"启动瞬间判定未锁定 → 误触解锁链路"的竞态。
+     *
+     * 必须在持有 [stateLock] 时调用。
      */
-    private fun restoreRemoteLock() {
+    private fun restoreRemoteLockLocked() {
         if (!remoteLockPrefs.getBoolean(KEY_REMOTE_LOCKED, false)) return
         val detail = remoteLockPrefs.getString(KEY_REMOTE_DETAIL, "").orEmpty()
         val current = _state.value
@@ -100,6 +119,32 @@ class LockController @Inject constructor(
     private var tempUnlockPackage: String = ""
 
     /**
+     * 在持有 [stateLock] 时调用：若临时解锁已到期则就地清算。
+     *
+     * 单独成一步而不是塞进查询方法：早期实现把"顺手清状态"藏在 `isTempUnlockActive()` 里，
+     * 一个看似只读的方法实际会写 `_state`，调用方完全无法预期，也让加锁边界说不清楚。
+     */
+    private fun expireTempUnlockIfNeededLocked() {
+        if (tempUnlockUntilElapsed == 0L) return
+        val elapsedExpired = timeProvider.elapsedRealtime() >= tempUnlockUntilElapsed
+        val wallExpired = timeProvider.now() >= tempUnlockUntilWall
+        if (elapsedExpired || wallExpired) {
+            tempUnlockUntilElapsed = 0L
+            tempUnlockUntilWall = 0L
+            tempUnlockPackage = ""
+            _state.value = _state.value.copy(tempUnlockUntilMillis = 0L)
+            Logger.i(TAG) { "temp unlock expired (elapsed=$elapsedExpired, wall=$wallExpired)" }
+        }
+    }
+
+    /** 纯查询：临时解锁是否覆盖该包名。必须在持有 [stateLock] 时调用，且已先做过到期清算。 */
+    private fun isTempUnlockActiveLocked(packageName: String? = null): Boolean {
+        if (tempUnlockUntilElapsed == 0L) return false
+        // 整机放行（未指定包名）覆盖任何应用；指定了包名则只对那一个应用生效
+        return tempUnlockPackage.isEmpty() || packageName == null || packageName == tempUnlockPackage
+    }
+
+    /**
      * 请求锁定。
      *
      * @param reason 锁定来源
@@ -107,33 +152,49 @@ class LockController @Inject constructor(
      * @param detail 展示给孩子的补充说明（如"今日剩余时长已用完"）
      */
     fun requestLock(reason: LockReason, untilMillis: Long = 0L, detail: String = "") {
-        // 临时解锁期内屏蔽除远程强制锁屏外的所有自动锁定，
-        // 否则家长刚放行 30 分钟就被时段规则立刻锁回去，等于放行无效。
-        if (reason != LockReason.REMOTE && isTempUnlockActive()) {
-            Logger.d(TAG) { "lock($reason) suppressed by temp unlock" }
-            return
+        var applied = false
+        synchronized(stateLock) {
+            expireTempUnlockIfNeededLocked()
+            // 临时解锁期内屏蔽除远程强制锁屏外的所有自动锁定，
+            // 否则家长刚放行 30 分钟就被时段规则立刻锁回去，等于放行无效。
+            if (reason != LockReason.REMOTE && isTempUnlockActiveLocked()) {
+                Logger.d(TAG) { "lock($reason) suppressed by temp unlock" }
+            } else {
+                val current = _state.value
+                if (reason !in current.reasons || current.details[reason] != detail) {
+                    val reasons = current.reasons + reason
+                    val details = current.details + (reason to detail)
+                    val untils =
+                        if (untilMillis > 0) current.untilMillis + (reason to untilMillis)
+                        else current.untilMillis - reason
+                    _state.value = LockState(reasons, details, untils)
+                    applied = true
+                }
+            }
         }
-        val current = _state.value
-        if (reason in current.reasons && current.details[reason] == detail) return
-
-        val reasons = current.reasons + reason
-        val details = current.details + (reason to detail)
-        val untils = if (untilMillis > 0) current.untilMillis + (reason to untilMillis) else current.untilMillis - reason
-        _state.value = LockState(reasons, details, untils)
-        // REMOTE 置位即落盘：指令是一次性的，不回写的话进程一死锁定态就凭空消失
+        if (!applied) return
+        // REMOTE 置位即落盘：指令是一次性的，不回写的话进程一死锁定态就凭空消失。
+        // 放在锁外：SharedPreferences 写入是 IO，不应拖长临界区。
         if (reason == LockReason.REMOTE) persistRemoteLock(detail)
-        Logger.i(TAG) { "lock requested: $reason, until=$untilMillis, reasons=$reasons" }
+        Logger.i(TAG) { "lock requested: $reason, until=$untilMillis, reasons=${_state.value.reasons}" }
     }
 
     /** 解除某一来源的锁定；其余来源仍生效时设备保持锁定 */
     fun releaseLock(reason: LockReason) {
-        val current = _state.value
-        if (reason !in current.reasons) return
-        _state.value = LockState(
-            reasons = current.reasons - reason,
-            details = current.details - reason,
-            untilMillis = current.untilMillis - reason
-        )
+        val removed = synchronized(stateLock) {
+            val current = _state.value
+            if (reason !in current.reasons) {
+                false
+            } else {
+                _state.value = LockState(
+                    reasons = current.reasons - reason,
+                    details = current.details - reason,
+                    untilMillis = current.untilMillis - reason
+                )
+                true
+            }
+        }
+        if (!removed) return
         if (reason == LockReason.REMOTE) clearPersistedRemoteLock()
         Logger.i(TAG) { "lock released: $reason, remaining=${_state.value.reasons}" }
     }
@@ -159,8 +220,17 @@ class LockController @Inject constructor(
 
     /** 远程解锁：清空所有锁定原因。自动原因若仍成立，下一轮自检会重新锁上。 */
     fun releaseAll() {
-        if (_state.value.reasons.isEmpty()) return
-        _state.value = LockState()
+        val had = synchronized(stateLock) {
+            val current = _state.value
+            if (current.reasons.isEmpty()) {
+                false
+            } else {
+                // 清空锁定原因，但保留"仍在临时解锁中"的展示字段，避免 UI 倒计时被无谓打断
+                _state.value = LockState(tempUnlockUntilMillis = current.tempUnlockUntilMillis)
+                true
+            }
+        }
+        if (!had) return
         clearPersistedRemoteLock()
         Logger.i(TAG) { "all locks released" }
     }
@@ -183,22 +253,33 @@ class LockController @Inject constructor(
     fun tempUnlock(durationMinutes: Int, packageName: String = "") {
         val minutes = durationMinutes.coerceIn(1, MAX_TEMP_UNLOCK_MINUTES)
         val durationMs = minutes * 60_000L
-        tempUnlockUntilElapsed = timeProvider.elapsedRealtime() + durationMs
-        tempUnlockUntilWall = timeProvider.now() + durationMs
-        tempUnlockPackage = packageName.trim()
-        _state.value = LockState(tempUnlockUntilMillis = tempUnlockUntilWall)
+        synchronized(stateLock) {
+            tempUnlockUntilElapsed = timeProvider.elapsedRealtime() + durationMs
+            tempUnlockUntilWall = timeProvider.now() + durationMs
+            tempUnlockPackage = packageName.trim()
+            _state.value = LockState(tempUnlockUntilMillis = tempUnlockUntilWall)
+        }
         // 临时解锁即放行：REMOTE 锁定态一并清除（家长主动放行优先于一切锁定）
         clearPersistedRemoteLock()
-        Logger.i(TAG) { "temp unlock for $minutes min, pkg='${tempUnlockPackage}', until=$tempUnlockUntilWall" }
+        Logger.i(TAG) { "temp unlock for $minutes min, pkg='${packageName.trim()}', until=${tempUnlockUntilWall()}" }
     }
 
+    /** 临时解锁到期墙钟点（供日志/展示读取，需在锁内取以免读到撕裂值） */
+    private fun tempUnlockUntilWall(): Long = synchronized(stateLock) { tempUnlockUntilWall }
+
     fun cancelTempUnlock() {
-        if (tempUnlockUntilElapsed == 0L) return
-        tempUnlockUntilElapsed = 0L
-        tempUnlockUntilWall = 0L
-        tempUnlockPackage = ""
-        _state.value = _state.value.copy(tempUnlockUntilMillis = 0L)
-        Logger.i(TAG) { "temp unlock cancelled" }
+        val cancelled = synchronized(stateLock) {
+            if (tempUnlockUntilElapsed == 0L) {
+                false
+            } else {
+                tempUnlockUntilElapsed = 0L
+                tempUnlockUntilWall = 0L
+                tempUnlockPackage = ""
+                _state.value = _state.value.copy(tempUnlockUntilMillis = 0L)
+                true
+            }
+        }
+        if (cancelled) Logger.i(TAG) { "temp unlock cancelled" }
     }
 
     /**
@@ -206,39 +287,32 @@ class LockController @Inject constructor(
      *
      * 注意只在 [isTempUnlockActive] 判定为**有效期内**时才有意义，取用前必须先判定。
      */
-    fun tempUnlockTarget(): String = tempUnlockPackage
+    fun tempUnlockTarget(): String = synchronized(stateLock) { tempUnlockPackage }
 
     /**
      * 临时解锁是否仍在有效期内。
      *
      * 双时钟判定：单调时钟为主（防改时间），墙钟为辅（防重启后单调时钟归零导致的"永久解锁"）。
      * 两者任一判定为过期即视为过期 —— 宁可提前恢复管控，也不能出现管控真空。
+     *
+     * 本方法会在锁内先清算已到期的临时解锁，再返回纯查询结果。
      */
-    fun isTempUnlockActive(packageName: String? = null): Boolean {
-        if (tempUnlockUntilElapsed == 0L) return false
-        val elapsedExpired = timeProvider.elapsedRealtime() >= tempUnlockUntilElapsed
-        val wallExpired = timeProvider.now() >= tempUnlockUntilWall
-        if (elapsedExpired || wallExpired) {
-            tempUnlockUntilElapsed = 0L
-            tempUnlockUntilWall = 0L
-            tempUnlockPackage = ""
-            _state.value = _state.value.copy(tempUnlockUntilMillis = 0L)
-            Logger.i(TAG) { "temp unlock expired (elapsed=$elapsedExpired, wall=$wallExpired)" }
-            return false
-        }
-        // 整机放行（未指定包名）覆盖任何应用；指定了包名则只对那一个应用生效
-        return tempUnlockPackage.isEmpty() || packageName == null || packageName == tempUnlockPackage
+    fun isTempUnlockActive(packageName: String? = null): Boolean = synchronized(stateLock) {
+        expireTempUnlockIfNeededLocked()
+        isTempUnlockActiveLocked(packageName)
     }
 
     /** 重启后调用：单调时钟已归零，临时解锁一律失效，避免出现管控真空 */
     fun onDeviceBoot() {
-        tempUnlockUntilElapsed = 0L
-        tempUnlockUntilWall = 0L
-        tempUnlockPackage = ""
-        _state.value = LockState()
-        // 重启不应成为管控真空：持久化的 REMOTE 锁定在开机后继续生效，
-        // 直到家长解锁指令到达（自动锁定原因由策略自检重新派生）。
-        restoreRemoteLock()
+        synchronized(stateLock) {
+            tempUnlockUntilElapsed = 0L
+            tempUnlockUntilWall = 0L
+            tempUnlockPackage = ""
+            _state.value = LockState()
+            // 重启不应成为管控真空：持久化的 REMOTE 锁定在开机后继续生效，
+            // 直到家长解锁指令到达（自动锁定原因由策略自检重新派生）。
+            restoreRemoteLockLocked()
+        }
         Logger.i(TAG) { "state reset after boot" }
     }
 

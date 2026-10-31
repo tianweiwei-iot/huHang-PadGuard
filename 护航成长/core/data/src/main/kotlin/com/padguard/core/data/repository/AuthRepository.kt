@@ -12,6 +12,7 @@ import com.padguard.core.data.di.AuthDataStore
 import com.padguard.core.common.Logger
 import com.padguard.core.data.db.PadGuardDatabase
 import com.padguard.core.data.model.BindResult
+import com.padguard.core.data.crypto.KeystoreManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -30,7 +31,8 @@ import javax.inject.Singleton
 @Singleton
 class AuthRepository @Inject constructor(
     @AuthDataStore private val store: DataStore<Preferences>,
-    private val db: PadGuardDatabase
+    private val db: PadGuardDatabase,
+    private val keystore: KeystoreManager
 ) {
 
     private object Keys {
@@ -151,16 +153,38 @@ class AuthRepository @Inject constructor(
     suspend fun getDeviceId(): String = deviceId.first()
 
     suspend fun getDeviceToken(): String =
-        store.data.catch { emit(emptyPreferences()) }.first()[Keys.DEVICE_TOKEN].orEmpty()
+        dec(store.data.catch { emit(emptyPreferences()) }.first()[Keys.DEVICE_TOKEN].orEmpty())
 
     suspend fun getMqttUsername(): String =
-        store.data.catch { emit(emptyPreferences()) }.first()[Keys.MQTT_USERNAME].orEmpty()
+        dec(store.data.catch { emit(emptyPreferences()) }.first()[Keys.MQTT_USERNAME].orEmpty())
 
     suspend fun getMqttPassword(): String =
-        store.data.catch { emit(emptyPreferences()) }.first()[Keys.MQTT_PASSWORD].orEmpty()
+        dec(store.data.catch { emit(emptyPreferences()) }.first()[Keys.MQTT_PASSWORD].orEmpty())
 
     suspend fun getHmacSecret(): String =
-        store.data.catch { emit(emptyPreferences()) }.first()[Keys.HMAC_SECRET].orEmpty()
+        dec(store.data.catch { emit(emptyPreferences()) }.first()[Keys.HMAC_SECRET].orEmpty())
+
+    /**
+     * 敏感凭据落库加密：经 Android Keystore(AES/GCM) 加密为 Base64。
+     * 空串原样返回；加密异常（极老旧设备 Keystore 不可用）降级为明文并告警，
+     * 避免绑定流程因加密失败而中断（安全性降级但不崩）。
+     */
+    private fun enc(plain: String): String {
+        if (plain.isEmpty()) return plain
+        return runCatching { keystore.encryptToBase64(plain) }
+            .onFailure { Logger.w(TAG) { "encrypt credential failed, plaintext fallback: ${it.message}" } }
+            .getOrElse { plain }
+    }
+
+    /**
+     * 敏感凭据读取解密：先尝试解密；若失败（老版本明文数据 / 密钥变更 / 坏标签）
+     * 回退为原文，保证升级迁移平滑，下次写入即被加密覆盖。
+     */
+    private fun dec(cipher: String): String {
+        if (cipher.isEmpty()) return cipher
+        return runCatching { keystore.decryptFromBase64(cipher) }
+            .getOrElse { cipher }
+    }
 
     suspend fun getTenantId(): String =
         store.data.catch { emit(emptyPreferences()) }.first()[Keys.TENANT_ID].orEmpty()
@@ -176,14 +200,14 @@ class AuthRepository @Inject constructor(
         store.edit { it[Keys.DEVICE_NAME] = name }
     }
 
-    /** 保存绑定结果。绑定成功后终端即进入受控态。 */
+    /** 保存绑定结果。绑定成功后终端即进入受控态。敏感凭据经 Keystore 加密落库。 */
     suspend fun saveBindResult(result: BindResult, deviceSn: String) {
         store.edit { prefs ->
             prefs[Keys.DEVICE_ID] = result.deviceId
-            prefs[Keys.DEVICE_TOKEN] = result.deviceToken
-            prefs[Keys.MQTT_USERNAME] = result.mqttUsername
-            prefs[Keys.MQTT_PASSWORD] = result.mqttPassword
-            prefs[Keys.HMAC_SECRET] = result.hmacSecret
+            prefs[Keys.DEVICE_TOKEN] = enc(result.deviceToken)
+            prefs[Keys.MQTT_USERNAME] = enc(result.mqttUsername)
+            prefs[Keys.MQTT_PASSWORD] = enc(result.mqttPassword)
+            prefs[Keys.HMAC_SECRET] = enc(result.hmacSecret)
             prefs[Keys.TOKEN_EXPIRES_AT] = result.expiresAt
             prefs[Keys.BOUND_AT] = System.currentTimeMillis()
             prefs[Keys.DEVICE_SN] = deviceSn
@@ -219,11 +243,11 @@ class AuthRepository @Inject constructor(
         store.edit { it[Keys.AGREEMENT_VERSION] = version }
     }
 
-    /** 保存家庭账号登录态（账号/令牌/用户ID），置 [Keys.CHILD_LOGGED_IN]=true。 */
+    /** 保存家庭账号登录态（账号/令牌/用户ID），置 [Keys.CHILD_LOGGED_IN]=true。令牌经 Keystore 加密落库。 */
     suspend fun saveChildLogin(phone: String, token: String, userId: String) {
         store.edit {
             it[Keys.CHILD_PHONE] = phone
-            it[Keys.CHILD_TOKEN] = token
+            it[Keys.CHILD_TOKEN] = enc(token)
             it[Keys.CHILD_USER_ID] = userId
             it[Keys.CHILD_LOGGED_IN] = true
         }

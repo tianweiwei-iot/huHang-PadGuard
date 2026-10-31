@@ -5,6 +5,7 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.widget.MediaController
 import android.widget.VideoView
+import com.padguard.core.common.Logger
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -140,10 +141,16 @@ internal fun ResizableVideo(
                                 setVideoURI(Uri.parse(localPath))
                                 if (showControls) setMediaController(MediaController(ctx))
                                 setOnPreparedListener {
-                                    it.isLooping = true
-                                    val dur = runCatching { it.duration / 1000 }.getOrDefault(0)
-                                    if (dur > 0) onDuration(dur)
-                                    start()
+                                    // onPrepared 在主线程回调，start()/looping 在个别低端机可能因
+                                    // 编解码异常抛未捕获异常，直接 FATAL 杀进程。这里兜底吞掉并记录。
+                                    runCatching {
+                                        it.isLooping = true
+                                        val dur = (it.duration / 1000).coerceAtLeast(0)
+                                        if (dur > 0) onDuration(dur)
+                                        it.start()
+                                    }.onFailure { e ->
+                                        Logger.e("ResizableVideo", e) { "video prepare/start failed" }
+                                    }
                                 }
                                 setOnErrorListener { _, _, _ -> true }
                             }
@@ -173,10 +180,16 @@ internal fun ResizableVideo(
                                 setVideoURI(Uri.parse(localPath))
                                 if (showControls) setMediaController(MediaController(ctx))
                                 setOnPreparedListener {
-                                    it.isLooping = true
-                                    val dur = runCatching { it.duration / 1000 }.getOrDefault(0)
-                                    if (dur > 0) onDuration(dur)
-                                    start()
+                                    // onPrepared 在主线程回调，start()/looping 在个别低端机可能因
+                                    // 编解码异常抛未捕获异常，直接 FATAL 杀进程。这里兜底吞掉并记录。
+                                    runCatching {
+                                        it.isLooping = true
+                                        val dur = (it.duration / 1000).coerceAtLeast(0)
+                                        if (dur > 0) onDuration(dur)
+                                        it.start()
+                                    }.onFailure { e ->
+                                        Logger.e("ResizableVideo", e) { "video prepare/start failed" }
+                                    }
                                 }
                                 setOnErrorListener { _, _, _ -> true }
                             }
@@ -239,9 +252,11 @@ internal fun RemoteImage(url: String, modifier: Modifier = Modifier, downloader:
         onDispose { job.cancel() }
     }
 
+    // 局部快照替代 !!：bitmap 是可变状态，先捕获到局部 val 再判空使用（第八轮 P2-6）。
+    val current = bitmap
     when {
-        bitmap != null -> androidx.compose.foundation.Image(
-            bitmap = bitmap!!.asImageBitmap(),
+        current != null -> androidx.compose.foundation.Image(
+            bitmap = current.asImageBitmap(),
             contentDescription = "信息发布图片",
             modifier = modifier,
             contentScale = ContentScale.Fit

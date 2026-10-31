@@ -60,7 +60,7 @@ class UsageStatusProvider @Inject constructor(
         val used: Int
         if (session.active) {
             // 权威口径：剩余由服务端锚点派生，本地仅用单调时钟平滑插值。
-            val liveRemaining = usageSessionManager.liveRemainingMs(nowMillis)
+            val liveRemaining = usageSessionManager.liveRemainingMs()
             dailyQuota = session.quotaMinutes
             remaining = (liveRemaining / 60_000L).toInt().coerceAtLeast(0)
             used = (dailyQuota - remaining).coerceAtLeast(0)

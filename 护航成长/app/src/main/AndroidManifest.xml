@@ -185,6 +185,11 @@
       缺失时相关提示/遮罩层将静默失效。
     -->
 
+    <!--
+      明文传输开关（android:usesCleartextTraffic）保持 true：家庭局域网部署（服务端跑在家长电脑，内网 http/tcp 同一信任域）必须允许明文，
+      否则 release 包连不上本地服务端。公网/云部署经 Nginx 终止 TLS（见 docs/生产部署TLS配置说明.md），
+      孩子端填 https:// 域名即走加密。不在此强制 false，否则会废掉核心的家庭局域网部署场景。
+    -->
     <application
         android:name=".PadGuardApplication"
         android:allowBackup="false"

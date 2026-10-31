@@ -21,7 +21,10 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.Base64
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -168,18 +171,28 @@ class GuardPasswordManager @Inject constructor(
 
     fun isEnabledNow(): Boolean = snapshot.enabled
 
-    /** 服务端下发的密码哈希（SHA-256(明文)），直接落库，明文永不出网。 */
+    /**
+     * 服务端下发的密码哈希（PBKDF2 格式，见 [protocolHash]），存入前用 Android Keystore 二次加密，
+     * 即使 DataStore 文件被提取也解不开，离线爆破门槛抬到「先破解 TEE」+ 慢哈希。
+     * Keystore 不可用时降级明文存储并告警（与现状一致，但哈希已是慢哈希）。
+     */
     suspend fun setPasswordHash(protocolHash: String) {
+        val enc = HashCipher.safeEncrypt(protocolHash) ?: protocolHash.also {
+            Logger.w(TAG) { "Keystore 不可用，操作密码哈希以明文存储（降级）" }
+        }
         store.edit {
-            it[KEY_HASH] = protocolHash
+            it[KEY_HASH] = enc
             it[KEY_ENABLED] = true
         }
     }
 
-    /** 本端直接按明文设置（本地/调试/家长端同设备回落用）。 */
+    /** 本端直接按明文设置（本地/调试/家长端同设备回落用）：PBKDF2 慢哈希 + Keystore 加密存储。 */
     suspend fun setPasswordPlain(plain: String) {
+        val enc = HashCipher.safeEncrypt(pbkdf2Hash(plain)) ?: pbkdf2Hash(plain).also {
+            Logger.w(TAG) { "Keystore 不可用，操作密码哈希以明文存储（降级）" }
+        }
         store.edit {
-            it[KEY_HASH] = hash(plain)
+            it[KEY_HASH] = enc
             it[KEY_ENABLED] = true
         }
     }
@@ -230,8 +243,15 @@ class GuardPasswordManager @Inject constructor(
             return VerifyResult(false, 0, (lockedUntilW - now).coerceAtLeast(0L))
         }
 
-        val stored = prefs[KEY_HASH].orEmpty()
-        if (stored.isNotEmpty() && hash(plain) == stored) {
+        // stored 为 Keystore 加密串（或 Keystore 降级时的明文哈希）；先解密，降级时 stored 即原文。
+        val storedEnc = prefs[KEY_HASH].orEmpty()
+        val stored = HashCipher.safeDecrypt(storedEnc) ?: storedEnc
+        val matches = if (stored.startsWith("pbkdf2:")) {
+            pbkdf2Verify(stored, plain)
+        } else {
+            legacySha256Verify(stored, plain) // 升级前设备兼容（无 pbkdf2 前缀）
+        }
+        if (stored.isNotEmpty() && matches) {
             store.edit {
                 it[KEY_FAIL_COUNT] = 0
                 it[KEY_LOCKED_UNTIL_ELAPSED] = 0L
@@ -400,10 +420,8 @@ class GuardPasswordManager @Inject constructor(
         appAccessUntilWall = prefs[KEY_APP_ACCESS_UNTIL] ?: 0L
     )
 
-    private fun hash(plain: String): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        return Base64.getEncoder().encodeToString(md.digest(plain.toByteArray(Charsets.UTF_8)))
-    }
+    // 哈希计算已迁移至 companion [pbkdf2Hash] / [protocolHash]（PBKDF2 慢哈希，与服务端一致）；
+    // 旧的本地 [hash] 无盐 SHA-256 不再使用，保留 [legacySha256Verify] 仅用于升级前设备兼容。
 
     companion object {
         private const val TAG = "GuardPasswordManager"
@@ -414,10 +432,44 @@ class GuardPasswordManager @Inject constructor(
         /** 锁定时长：足够让"守着平板试密码"这种手速失效 */
         const val LOCKOUT_MS = 5 * 60 * 1000L
 
-        /** 协议哈希算法，与服务端保持一致：SHA-256(明文) 的 Base64。 */
-        fun protocolHash(plain: String): String =
-            Base64.getEncoder().encodeToString(
-                MessageDigest.getInstance("SHA-256").digest(plain.toByteArray(Charsets.UTF_8))
-            )
+        /** 协议哈希算法，与服务端 [com.padguard.server.security.GuardPasswords] 保持一致：PBKDF2WithHmacSHA1（加盐、慢哈希）。 */
+        fun protocolHash(plain: String): String = pbkdf2Hash(plain)
+
+        // ---- 与孩子的 GuardPasswordManager / 服务端的 GuardPasswords 完全一致的 PBKDF2 参数 ----
+        private const val PBKDF2_ITERATIONS = 120_000
+        private const val PBKDF2_SALT_BYTES = 16
+        private const val PBKDF2_KEY_BYTES = 32
+
+        /** 新格式哈希：pbkdf2:<iter>:<base64salt>:<base64hash> */
+        internal fun pbkdf2Hash(plain: String): String {
+            val salt = ByteArray(PBKDF2_SALT_BYTES).also { SecureRandom().nextBytes(it) }
+            val spec = PBEKeySpec(plain.toCharArray(), salt, PBKDF2_ITERATIONS, PBKDF2_KEY_BYTES * 8)
+            val skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1")
+            val hash = skf.generateSecret(spec).encoded
+            return "pbkdf2:$PBKDF2_ITERATIONS:${b64(salt)}:${b64(hash)}"
+        }
+
+        /** 新格式校验：从 stored 解析 salt/iter 重算比对（慢哈希，离线爆破成本高）。 */
+        internal fun pbkdf2Verify(stored: String, plain: String): Boolean {
+            val parts = stored.split(":")
+            if (parts.size != 4 || parts[0] != "pbkdf2") return false
+            val iter = parts[1].toIntOrNull() ?: return false
+            val salt = b64dec(parts[2])
+            val expected = b64dec(parts[3])
+            val spec = PBEKeySpec(plain.toCharArray(), salt, iter, expected.size * 8)
+            val skf = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1")
+            val actual = skf.generateSecret(spec).encoded
+            return actual.contentEquals(expected)
+        }
+
+        /** 旧格式兼容（升级前设备存的是无盐 SHA-256 Base64）：仅在 stored 非 pbkdf2 前缀时走此分支。 */
+        internal fun legacySha256Verify(stored: String, plain: String): Boolean {
+            val md = MessageDigest.getInstance("SHA-256")
+            val h = Base64.getEncoder().encodeToString(md.digest(plain.toByteArray(Charsets.UTF_8)))
+            return h == stored
+        }
+
+        internal fun b64(b: ByteArray): String = Base64.getEncoder().encodeToString(b)
+        internal fun b64dec(s: String): ByteArray = Base64.getDecoder().decode(s)
     }
 }
