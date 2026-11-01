@@ -287,4 +287,19 @@ interface PaymentOrderRepository : JpaRepository<PaymentOrder, String> {
         @Param("paidAt") paidAt: Long,
         @Param("txId") txId: String?
     ): Int
+
+    /**
+     * 原子退款标记：仅当订单仍为 PAID 时置为 REFUNDED，返回受影响行数。
+     * 幂等口径与 [claimPendingOrder] 相同：管理员退款申请与退款结果回调可能并发到达，
+     * 只有第一个事务能把 PAID 翻转为 REFUNDED，后到的命中 0 行（视为重复确认，直接成功返回）。
+     */
+    @Modifying
+    @Query(
+        "update PaymentOrder o set o.status = :refundedStatus where o.orderNo = :orderNo and o.status = :paidStatus"
+    )
+    fun markRefundedIfPaid(
+        @Param("orderNo") orderNo: String,
+        @Param("refundedStatus") refundedStatus: String,
+        @Param("paidStatus") paidStatus: String
+    ): Int
 }

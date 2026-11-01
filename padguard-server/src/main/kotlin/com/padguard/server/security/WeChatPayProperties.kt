@@ -50,6 +50,13 @@ class WeChatPayProperties {
     /** 支付结果异步回调地址（需公网可达 HTTPS，且已在商户平台配置） */
     var notifyUrl: String? = null
 
+    /**
+     * 退款结果异步回调地址（需公网可达 HTTPS）。
+     * 可选：不配置时退款结果以"申请受理成功"为准（微信退款申请通过后基本必然成功），
+     * 配置后由 /v1/billing/refund-notify 二次确认并留痕。
+     */
+    var refundNotifyUrl: String? = null
+
     /** 微信支付 API 基地址（生产与沙箱一致，均为 api.mch.weixin.qq.com） */
     var baseUrl: String = "https://api.mch.weixin.qq.com"
 

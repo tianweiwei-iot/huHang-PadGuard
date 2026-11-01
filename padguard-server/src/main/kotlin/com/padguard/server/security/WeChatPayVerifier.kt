@@ -78,7 +78,7 @@ class WeChatPayVerifier(
      * 通用验签入口（接口实现）：仅返回通过/拒绝。供 [ConfigurablePaymentVerifier] 统一调度。
      */
     override fun verify(channel: String, rawBody: String, headers: Map<String, String>): Boolean =
-        authenticate(rawBody, headers) != null
+        authenticate(rawBody, headers, allowRefund = false) != null
 
     /**
      * 微信专用回调解析：在 [verify] 全部校验通过的基础上，从解密后的交易明文里取出
@@ -86,7 +86,7 @@ class WeChatPayVerifier(
      * 任一环节失败返回 null（调用方据此拒绝入账）。
      */
     fun verifyAndParse(rawBody: String, headers: Map<String, String>): WeChatNotifyResult? {
-        val tx = authenticate(rawBody, headers)?.transaction ?: return null
+        val tx = authenticate(rawBody, headers, allowRefund = false)?.payload ?: return null
         val outTradeNo = tx["out_trade_no"]?.asText()
         if (outTradeNo.isNullOrBlank()) {
             log.warn("微信验签通过但缺少 out_trade_no")
@@ -95,9 +95,38 @@ class WeChatPayVerifier(
         return WeChatNotifyResult(outTradeNo, tx["transaction_id"]?.asText())
     }
 
+    /**
+     * 退款回调解析（/v1/billing/refund-notify 专用）。
+     *
+     * 退款回调与支付回调共用同一套验签/解密链，区别在明文结构：
+     * event_type 为 REFUND.*（REFUND.SUCCESS / REFUND.ABNORMAL / REFUND.CLOSED），
+     * 明文含 out_trade_no / out_refund_no / refund_id / refund_status。
+     *
+     * 仅 refund_status == SUCCESS 视为退款成功；ABNORMAL/CLOSED 返回 null 并留痕，
+     * 由调用方保证状态不被误推进（订单以管理员退款申请为初始依据，回调做二次确认）。
+     */
+    fun verifyRefundAndParse(rawBody: String, headers: Map<String, String>): WeChatRefundNotifyResult? {
+        val payload = authenticate(rawBody, headers, allowRefund = true)?.payload ?: return null
+        val outTradeNo = payload["out_trade_no"]?.asText()
+        if (outTradeNo.isNullOrBlank()) {
+            log.warn("微信退款回调验签通过但缺少 out_trade_no")
+            return null
+        }
+        val refundStatus = payload["refund_status"]?.asText()
+        if (refundStatus != "SUCCESS") {
+            log.warn("微信退款回调非成功状态：refund_status={} out_trade_no={}", refundStatus, outTradeNo)
+            return null
+        }
+        return WeChatRefundNotifyResult(
+            outTradeNo = outTradeNo,
+            outRefundNo = payload["out_refund_no"]?.asText(),
+            refundId = payload["refund_id"]?.asText()
+        )
+    }
+
     // ---- 以下为通用校验链，verify / verifyAndParse 共用 ----
 
-    private fun authenticate(rawBody: String, headers: Map<String, String>): Authed? {
+    private fun authenticate(rawBody: String, headers: Map<String, String>, allowRefund: Boolean): Authed? {
         if (!props.readyForVerify() || apiV3Key == null) {
             log.warn("微信验签拒绝：未配置（enabled/apiV3Key 缺失）")
             return null
@@ -133,12 +162,17 @@ class WeChatPayVerifier(
             return null
         }
 
-        // 4) 解密 resource + 5) 校验成功支付
+        // 4) 解密 resource + 5) 校验事件语义
         return try {
             val outer = objectMapper.readTree(rawBody)
             val eventType = outer["event_type"]?.asText()
-            if (eventType != null && eventType.startsWith("REFUND")) {
-                log.warn("微信验签拒绝：退款类事件 {}", eventType)
+            val isRefundEvent = eventType != null && eventType.startsWith("REFUND")
+            if (isRefundEvent && !allowRefund) {
+                log.warn("微信验签拒绝：退款类事件 {} 不允许进入支付分支", eventType)
+                return null
+            }
+            if (!isRefundEvent && allowRefund) {
+                log.warn("微信验签拒绝：非退款类事件 {} 不允许进入退款分支", eventType)
                 return null
             }
             val res = outer["resource"]
@@ -152,12 +186,19 @@ class WeChatPayVerifier(
                 apiV3Key!!, res["ciphertext"].asText(), res["nonce"].asText(), res["associated_data"]?.asText()
             )
             val tx = objectMapper.readTree(decrypted)
-            val tradeState = tx["trade_state"]?.asText()
-            if (tradeState != "SUCCESS") {
-                log.warn("微信验签拒绝：trade_state={}（仅 SUCCESS 可入账）", tradeState)
-                return null
+            if (!isRefundEvent) {
+                val tradeState = tx["trade_state"]?.asText()
+                if (tradeState != "SUCCESS") {
+                    log.warn("微信验签拒绝：trade_state={}（仅 SUCCESS 可入账）", tradeState)
+                    return null
+                }
+                log.info("微信支付回调验签通过：out_trade_no={}, transaction_id={}", tx["out_trade_no"]?.asText(), tx["transaction_id"]?.asText())
+            } else {
+                log.info(
+                    "微信退款回调验签通过：out_trade_no={}, out_refund_no={}, refund_status={}",
+                    tx["out_trade_no"]?.asText(), tx["out_refund_no"]?.asText(), tx["refund_status"]?.asText()
+                )
             }
-            log.info("微信支付回调验签通过：out_trade_no={}, transaction_id={}", tx["out_trade_no"]?.asText(), tx["transaction_id"]?.asText())
             Authed(tx)
         } catch (e: Exception) {
             log.warn("微信验签拒绝：解密/解析失败", e)
@@ -165,8 +206,15 @@ class WeChatPayVerifier(
         }
     }
 
-    private data class Authed(val transaction: JsonNode)
+    private data class Authed(val payload: JsonNode)
 }
 
 /** 微信回调解析结果：商户订单号 + 微信支付订单号 */
 data class WeChatNotifyResult(val outTradeNo: String, val transactionId: String?)
+
+/** 微信退款回调解析结果：商户订单号 + 商户退款单号 + 微信退款单号 */
+data class WeChatRefundNotifyResult(
+    val outTradeNo: String,
+    val outRefundNo: String?,
+    val refundId: String?
+)

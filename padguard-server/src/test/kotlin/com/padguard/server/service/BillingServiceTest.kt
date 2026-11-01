@@ -73,6 +73,12 @@ class BillingServiceTest {
             table.values.filter { it.userId == userId && it.status == status }
         override fun findAllByOrderByCreatedAtDesc(): List<PaymentOrder> = emptyList()
         // 模拟条件 UPDATE 的原子抢占语义：仅 PENDING → PAID 才命中 1 行
+        override fun markRefundedIfPaid(orderNo: String, refundedStatus: String, paidStatus: String): Int {
+            val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
+            if (o.status != paidStatus) return 0
+            o.status = refundedStatus
+            return 1
+        }
         override fun claimPendingOrder(
             orderNo: String, paidStatus: String, pendingStatus: String, paidAt: Long, txId: String?
         ): Int {
@@ -519,6 +525,53 @@ class BillingServiceTest {
         val ex = assertThrows(BizException::class.java) { f.svc.handleNotify(PayRequest(orderNo, "TX-1"), "{}", emptyMap()) }
         assertEquals(ParentErr.ORDER_STATE_INVALID, ex.code, "验签失败必须拒绝入账")
         // 关键：被拒的订单绝不能落到 PAID，否则就等于开了免验证通道
+        assertEquals(OrderStatus.PENDING.name, f.orders.table.values.first().status)
+    }
+
+    // ------------------------------------------------------- 退款与单订单查询（微信支付完整接入批）
+
+    @Test
+    fun `orderStatusOf returns own order with authoritative status for client polling`() {
+        val f = service()
+        val orderNo = f.order("MONTHLY")
+        f.svc.markPaid(orderNo, "TX-1")
+
+        val dto = f.svc.orderStatusOf("parent-1", orderNo)
+        assertEquals(OrderStatus.PAID.name, dto.status, "轮询端点必须返回服务端权威状态")
+        assertEquals("TX-1", f.orders.table.values.first().transactionId)
+    }
+
+    @Test
+    fun `orderStatusOf rejects polling other users orders`() {
+        val f = service()
+        val orderNo = f.order("MONTHLY")
+        val ex = assertThrows(BizException::class.java) {
+            f.svc.orderStatusOf("parent-2", orderNo)
+        }
+        assertEquals(ParentErr.DEVICE_NOT_OWNED, ex.code, "拿他人订单号探测支付状态属横向越权")
+    }
+
+    @Test
+    fun `refund only transitions PAID orders and is idempotent`() {
+        val f = service()
+        val orderNo = f.order("MONTHLY")
+        f.svc.markPaid(orderNo, "TX-1")
+        assertEquals(OrderStatus.PAID.name, f.orders.table.values.first().status)
+
+        // 管理端标记 + 退款回调并发到达：只有第一次条件 UPDATE 命中
+        assertEquals(1, f.orders.markRefundedIfPaid(orderNo, OrderStatus.REFUNDED.name, OrderStatus.PAID.name))
+        assertEquals(0, f.orders.markRefundedIfPaid(orderNo, OrderStatus.REFUNDED.name, OrderStatus.PAID.name))
+        assertEquals(OrderStatus.REFUNDED.name, f.orders.table.values.first().status)
+    }
+
+    @Test
+    fun `refund is rejected for unpaid or closed orders`() {
+        val f = service()
+        val pending = f.order("MONTHLY")
+        assertEquals(
+            0, f.orders.markRefundedIfPaid(pending, OrderStatus.REFUNDED.name, OrderStatus.PAID.name),
+            "PENDING 订单不能被退款标记（未收到钱就退款 = 单边账）"
+        )
         assertEquals(OrderStatus.PENDING.name, f.orders.table.values.first().status)
     }
 }

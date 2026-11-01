@@ -9,6 +9,7 @@ import com.padguard.server.repository.PaymentOrderRepository
 import com.padguard.server.repository.SubscriptionRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.AdminPermissionService
+import com.padguard.server.security.WeChatPayClient
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -16,7 +17,7 @@ import java.util.UUID
 
 /**
  * 订阅计费（套餐列表 / 订阅列表 / 订单列表 / 手动开通 / 退款 / 营收序列）。
- * 
+ *
  */
 @Service
 class AdminBillingService(
@@ -25,7 +26,9 @@ class AdminBillingService(
     private val userRepository: UserRepository,
     private val billingService: BillingService,
     private val adminPerm: AdminPermissionService,
-    private val auditService: AuditService
+    private val auditService: AuditService,
+    // 测试桩构造未传：可空 + 默认 null；Spring 注入真实 Bean
+    private val weChatPayClient: WeChatPayClient? = null
 ) {
     private val log = LoggerFactory.getLogger(AdminBillingService::class.java)
 
@@ -106,7 +109,8 @@ class AdminBillingService(
     @Transactional
     fun refund(adminId: String, orderNo: String): Map<String, Any> {
         adminPerm.require(adminId, "billing", "refund")
-        // 设计约定（显性化）：退款仅变更订单状态，不联动回收订阅权益；营收统计基于订单 PAID 状态，自动自洽。
+        // 退款口径：订单标记 REFUNDED；订阅权益不自动回收（显性设计约定，见下）。
+        // 营收统计基于订单 PAID 状态，退款后自动自洽（PAID 单数减少）。
         val order = paymentOrderRepository.findByOrderNo(orderNo)
             ?: throw BizException(ParentErr.ORDER_NOT_FOUND, "订单不存在", Audience.PARENT)
         if (order.status == OrderStatus.REFUNDED.name) {
@@ -116,10 +120,45 @@ class AdminBillingService(
         if (order.status != OrderStatus.PAID.name) {
             throw BizException(ParentErr.PARAM_ERROR, "仅已支付订单可退款（当前状态：${order.status}）", Audience.PARENT)
         }
-        order.status = OrderStatus.REFUNDED.name
-        paymentOrderRepository.save(order)
-        auditService.record(adminId, order.userId, AdminAudit.BILLING_REFUND, targetType = "order", targetId = orderNo, detail = "退款订单 $orderNo")
-        return mapOf("ok" to true)
+
+        // 真实微信渠道：先向微信申请退款，受理成功才允许标记本系统订单——
+        // 顺序反了会出现"订单显示已退款、微信侧钱实际没退"的单边账。
+        // 申请失败时明确报错，引导管理员到商户平台手工退款（幂等兜底路径）。
+        var refundId: String? = null
+        if (order.channel == PayChannel.WECHAT.name && weChatPayClient?.isConfigured() == true) {
+            val accepted = weChatPayClient.createRefund(
+                orderNo = order.orderNo,
+                outRefundNo = "R" + order.orderNo,
+                refundFen = order.amountFen,
+                totalFen = order.amountFen,
+                reason = "用户退款"
+            ) ?: throw BizException(
+                ParentErr.PARAM_ERROR,
+                "微信退款申请失败，请稍后重试或到微信商户平台手工退款",
+                Audience.PARENT
+            )
+            refundId = accepted["refundId"]
+            log.info("wechat refund applied: orderNo={}, refundId={}, status={}", orderNo, refundId, accepted["status"])
+        }
+
+        val marked = paymentOrderRepository.markRefundedIfPaid(
+            orderNo = orderNo,
+            refundedStatus = OrderStatus.REFUNDED.name,
+            paidStatus = OrderStatus.PAID.name
+        )
+        if (marked == 0) {
+            // 并发退款：另一事务已标记，直接幂等成功
+            return mapOf("ok" to true, "already" to true)
+        }
+        auditService.record(
+            adminId, order.userId, AdminAudit.BILLING_REFUND,
+            targetType = "order", targetId = orderNo,
+            detail = buildString {
+                append("退款订单 ").append(orderNo)
+                refundId?.let { append(" (微信退款单 ").append(it).append(")") }
+            }
+        )
+        return mapOf("ok" to true, "refundId" to (refundId ?: ""))
     }
 
     fun revenue(adminId: String): List<RevenueMonth> {

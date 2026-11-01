@@ -553,20 +553,75 @@ class BillingService(
 
     fun orders(userId: String, limit: Int): List<OrderDto> =
         paymentOrderRepository.findByUserIdOrderByCreatedAtDesc(userId, Pageable.ofSize(limit))
-            .map { o ->
-                val plan = Plan.of(o.plan)
-                OrderDto(
-                    orderNo = o.orderNo,
-                    plan = o.plan,
-                    planLabel = plan?.label ?: o.plan,
-                    amountFen = o.amountFen,
-                    priceText = fenToText(o.amountFen),
-                    channel = o.channel,
-                    status = o.status,
-                    createdAt = o.createdAt,
-                    paidAt = o.paidAt
-                )
-            }
+            .map { toOrderDto(it) }
+
+    /**
+     * 单订单查询（家长端支付后轮询用）：调起微信回来后，客户端并不知道服务端是否
+     * 已收到回调入账，需要按订单号轮询直至 PAID / CLOSED。
+     * 属主校验：只能查自己的订单，拿别人的订单号探测支付状态属于横向越权。
+     */
+    fun orderStatusOf(userId: String, orderNo: String): OrderDto {
+        val order = paymentOrderRepository.findByOrderNo(orderNo)
+            ?: throw BizException(ParentErr.ORDER_NOT_FOUND, "订单不存在", Audience.PARENT)
+        if (order.userId != userId) {
+            throw BizException(ParentErr.DEVICE_NOT_OWNED, "订单不属于当前用户", Audience.PARENT)
+        }
+        return toOrderDto(order)
+    }
+
+    private fun toOrderDto(o: PaymentOrder): OrderDto {
+        val plan = Plan.of(o.plan)
+        return OrderDto(
+            orderNo = o.orderNo,
+            plan = o.plan,
+            planLabel = plan?.label ?: o.plan,
+            amountFen = o.amountFen,
+            priceText = fenToText(o.amountFen),
+            channel = o.channel,
+            status = o.status,
+            createdAt = o.createdAt,
+            paidAt = o.paidAt
+        )
+    }
+
+    /**
+     * 微信退款结果回调入口（[BillingController.refundNotify] 调用，公开端点、验签为唯一信任依据）。
+     *
+     * 责任边界：管理员在后台发起退款申请时订单已标记 REFUNDED（申请受理即入账口径），
+     * 回调在这里做**二次确认**：
+     * - 订单已是 REFUNDED → 幂等成功（最常见路径）；
+     * - 订单仍是 PAID（回调先于管理端事务提交等竞态）→ 原子条件 UPDATE 补标 REFUNDED；
+     * - 退款结果非 SUCCESS → 由 [WeChatPayVerifier.verifyRefundAndParse] 拒绝并留痕，不推进状态。
+     */
+    @Transactional
+    fun handleWeChatRefundNotify(rawBody: String, headers: Map<String, String>): Map<String, Any> {
+        val result = weChatVerifier?.verifyRefundAndParse(rawBody, headers)
+            ?: throw BizException(ParentErr.ORDER_STATE_INVALID, "微信退款校验未通过", Audience.PARENT)
+
+        val order = paymentOrderRepository.findByOrderNo(result.outTradeNo)
+            ?: throw BizException(ParentErr.ORDER_NOT_FOUND, "订单不存在", Audience.PARENT)
+        if (order.channel != PayChannel.WECHAT.name) {
+            log.warn("微信退款回调单号 {} 对应订单渠道非 WECHAT：{}", result.outTradeNo, order.channel)
+            throw BizException(ParentErr.FORBIDDEN, "订单渠道不匹配", Audience.PARENT)
+        }
+        val marked = paymentOrderRepository.markRefundedIfPaid(
+            orderNo = order.orderNo,
+            refundedStatus = OrderStatus.REFUNDED.name,
+            paidStatus = OrderStatus.PAID.name
+        )
+        if (marked == 0) {
+            log.info(
+                "refund notify confirmed (already settled): orderNo={}, refundId={}, status={}",
+                order.orderNo, result.refundId, order.status
+            )
+        } else {
+            log.info(
+                "refund notify settled: orderNo={}, refundId={} (PAID -> REFUNDED)",
+                order.orderNo, result.refundId
+            )
+        }
+        return mapOf("ok" to true)
+    }
 
     // ------------------------------------------------------------------ 工具
 

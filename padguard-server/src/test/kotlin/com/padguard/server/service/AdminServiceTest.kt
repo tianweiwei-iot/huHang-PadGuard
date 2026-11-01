@@ -85,6 +85,12 @@ class AdminServiceTest {
         override fun findByUserIdAndStatus(userId: String, status: String) =
             table.values.filter { it.userId == userId && it.status == status }
         override fun findAllByOrderByCreatedAtDesc() = table.values.sortedByDescending { it.createdAt }
+        override fun markRefundedIfPaid(orderNo: String, refundedStatus: String, paidStatus: String): Int {
+            val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
+            if (o.status != paidStatus) return 0
+            o.status = refundedStatus
+            return 1
+        }
         override fun claimPendingOrder(
             orderNo: String, paidStatus: String, pendingStatus: String, paidAt: Long, txId: String?
         ): Int {

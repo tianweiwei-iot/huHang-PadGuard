@@ -68,6 +68,18 @@ class BillingController(
     ) = ApiResponse.ok(billingService.orders(userId, limit.coerceIn(1, 50)))
 
     /**
+     * 单订单状态（家长端支付后轮询用）。
+     *
+     * 调起微信回来后，微信回调到达服务端可能有秒级延迟；客户端轮询本端点
+     * 直至 PAID/CLOSED，即可把"支付成功但订阅未变"的体验窗口压缩到最小。
+     */
+    @GetMapping("/orders/{orderNo}")
+    fun orderStatus(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable orderNo: String
+    ) = ApiResponse.ok(billingService.orderStatusOf(userId, orderNo))
+
+    /**
      * 模拟支付（仅 `padguard.billing.mock-pay-enabled=true` 时可用）。
      *
      * 存在理由：真实渠道未接入前，没有它整个付费链路无法端到端验证，
@@ -106,6 +118,20 @@ class BillingController(
             throw BizException(ParentErr.PARAM_ERROR, "回调报文无法解析", Audience.PARENT)
         }
         return ApiResponse.ok(billingService.handleNotify(req, rawBody, headers))
+    }
+
+    /**
+     * 微信退款结果回调（无鉴权：与支付回调同理，验签是唯一信任依据）。
+     *
+     * 退款回调只有微信一个来源（示例/代开通渠道不产生退款），因此不做 Wechatpay-Signature
+     * 分流，直接进入微信退款验签分支：验签不过一律拒绝，绝不推进订单状态。
+     */
+    @PostMapping("/refund-notify")
+    fun refundNotify(request: HttpServletRequest): ApiResponse<*> {
+        val rawBody = readBoundedBody(request, MAX_NOTIFY_BODY_BYTES)
+        val headers = request.headerNames?.toList().orEmpty()
+            .associateWith { request.getHeader(it) }
+        return ApiResponse.ok(billingService.handleWeChatRefundNotify(rawBody, headers))
     }
 
     /** 按上限读取请求体；超出 [maxBytes] 直接拒绝，避免无限读入导致 OOM */

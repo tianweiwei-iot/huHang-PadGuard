@@ -68,6 +68,8 @@ class WebConfig(
                 // 其合法性由 PaymentVerifier 验签保证（BillingController 注释声明的意图，
                 // 早期漏配在本清单 —— 真实渠道回调会被这里 401 掉）。
                 "/v1/billing/notify",
+                // 退款回调同理：微信服务器-to-服务器调用，验签（verifyRefundAndParse）是唯一信任依据
+                "/v1/billing/refund-notify",
                 "/v1/files/**",
                 // 公开服务器信息端点：客户端绑定引导/信息展示需匿名读取
                 "/v1/server/info",
