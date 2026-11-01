@@ -86,6 +86,20 @@ services:
       # 独立 secrets 卷与业务文件物理隔离，且同样持久化（容器重建不丢）。
       PADGUARD_INITIAL_PASSWORD_FILE: /app/secrets/管理员初始密码-请登录后修改.txt
       PADGUARD_PARENT_INITIAL_PASSWORD_FILE: /app/secrets/初始密码-请登录后修改.txt
+      # ---- 微信支付 v3（billing wechat）透传：缺省全空 = 不启用（fail-closed，收银台该渠道置灰）----
+      # 注意：compose 只透传在此显式声明的变量，.env 里定义但不声明 = 不会进容器。
+      # 空字符串绑定安全：WeChatPayProperties 全字段 isNullOrBlank() 判空，File("") 非目录被跳过。
+      # BASE_URL / CERT_AUTO_REFRESH 有 yml 默认值，勿用空默认透传覆盖（否则 BaseURL 会被绑成空串）。
+      PADGUARD_BILLING_WECHAT_ENABLED: ${PADGUARD_BILLING_WECHAT_ENABLED:-false}
+      PADGUARD_BILLING_WECHAT_APP_ID: ${PADGUARD_BILLING_WECHAT_APP_ID:-}
+      PADGUARD_BILLING_WECHAT_MCH_ID: ${PADGUARD_BILLING_WECHAT_MCH_ID:-}
+      PADGUARD_BILLING_WECHAT_SERIAL_NO: ${PADGUARD_BILLING_WECHAT_SERIAL_NO:-}
+      PADGUARD_BILLING_WECHAT_API_V3_KEY: ${PADGUARD_BILLING_WECHAT_API_V3_KEY:-}
+      PADGUARD_BILLING_WECHAT_PRIVATE_KEY_PEM: ${PADGUARD_BILLING_WECHAT_PRIVATE_KEY_PEM:-}
+      PADGUARD_BILLING_WECHAT_PRIVATE_KEY_PATH: ${PADGUARD_BILLING_WECHAT_PRIVATE_KEY_PATH:-}
+      PADGUARD_BILLING_WECHAT_NOTIFY_URL: ${PADGUARD_BILLING_WECHAT_NOTIFY_URL:-}
+      PADGUARD_BILLING_WECHAT_REFUND_NOTIFY_URL: ${PADGUARD_BILLING_WECHAT_REFUND_NOTIFY_URL:-}
+      PADGUARD_BILLING_WECHAT_PLATFORM_CERT_DIR: ${PADGUARD_BILLING_WECHAT_PLATFORM_CERT_DIR:-}
     volumes:
       - ../padguard-admin:/app/padguard-admin:ro   # 后台 SPA 同源托管 /admin/
       - ./uploads:/app/uploads                     # 用户录屏/截图，容器重建不丢
