@@ -851,6 +851,12 @@ interface BillingRepository {
     /** 我的订单 */
     suspend fun getOrders(limit: Int = 20): Result<List<OrderDto>>
 
+    /**
+     * 单订单状态：微信支付调起返回后轮询此接口，直至 PAID/CLOSED。
+     * 订阅是否开通以服务端权威状态为准，绝不信任微信本地回调。
+     */
+    suspend fun getOrder(orderNo: String): Result<OrderDto>
+
     /** 收银台可选支付渠道（含示例支付标识） */
     suspend fun getChannels(): Result<List<PayChannelDto>>
 

@@ -594,6 +594,12 @@ interface BillingApi {
         @Query("limit") limit: Int = 20
     ): Response<ApiResponse<List<OrderDto>>>
 
+    /** 单订单状态（微信支付后轮询确认开通；服务端做属主校验） */
+    @GET("billing/orders/{orderNo}")
+    suspend fun getOrder(
+        @Path("orderNo") orderNo: String
+    ): Response<ApiResponse<OrderDto>>
+
     /** 收银台可选支付渠道（含"是否示例支付"标识） */
     @GET("billing/channels")
     suspend fun getChannels(): Response<ApiResponse<List<PayChannelDto>>>

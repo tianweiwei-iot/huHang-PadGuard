@@ -168,6 +168,11 @@ dependencies {
     // 高德地图 SDK（定位页真实底图）。3dmap 已包含地图核心与定位组件，版本经阿里云镜像托管。
     implementation("com.amap.api:3dmap:10.0.600")
 
+    // 微信 OpenSDK（APP 支付调起 + 支付结果回调）。
+    // 商户 AppID 由服务端下单响应的 payParams 携带，本工程不硬编码；
+    // WXPayEntryActivity 回调类固定位于 <applicationId>.wxapi 包下（微信侧硬性约定）。
+    implementation("com.tencent.mm.opensdk:wechat-sdk-android:6.8.40")
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

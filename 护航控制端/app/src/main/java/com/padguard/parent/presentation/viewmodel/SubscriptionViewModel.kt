@@ -7,8 +7,10 @@ import com.padguard.parent.data.model.OrderDto
 import com.padguard.parent.data.model.PayChannelDto
 import com.padguard.parent.data.model.PlanDto
 import com.padguard.parent.data.model.SubscriptionDto
+import com.padguard.parent.data.remote.WeChatPayLauncher
 import com.padguard.parent.domain.repository.BillingRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -64,7 +66,8 @@ data class CheckoutState(
  */
 @HiltViewModel
 class SubscriptionViewModel @Inject constructor(
-    private val billingRepository: BillingRepository
+    private val billingRepository: BillingRepository,
+    private val weChatPay: WeChatPayLauncher
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SubscriptionUiState())
@@ -137,9 +140,14 @@ class SubscriptionViewModel @Inject constructor(
     /**
      * 确认支付。
      *
-     * 下单与示例支付是两步：先 `createOrder` 拿到订单号，再 `mockPay` 模拟付款并开通订阅。
-     * 两步都成功才算支付完成；任何一步失败都如实回显到收银台（不甩到整页 error，
-     * 否则家长看到的是一片空白、以为购买功能坏了）。
+     * 三条路径（按服务端渠道语义分派，UI 无感知）：
+     * 1. **示例支付**（`mock=true`，仅联调）：createOrder → mockPay，立即出结果；
+     * 2. **真实微信支付**（`mock=false` 且 key=WECHAT）：createOrder 拿 payParams → 拉起微信
+     *    → 轮询服务端订单状态直至 PAID/CLOSED；
+     * 3. 其他真实渠道：服务端 fail-closed 不会返回可用渠道，选中即提示未接入。
+     *
+     * 任何失败都如实回显到收银台（不甩到整页 error，否则家长看到的是一片空白、
+     * 以为购买功能坏了）。
      */
     fun confirmPay() {
         val c = _uiState.value.checkout ?: return
@@ -158,41 +166,117 @@ class SubscriptionViewModel @Inject constructor(
                 )
                 return@launch
             }
-            // 2) 示例支付（真实渠道接入后这里换成"拉起收银台 SDK + 等回调"）
-            //
-            // 护栏：只有服务端明确标记 mock=true 的渠道才允许走示例支付。
-            // 少了这一步，等真实渠道上线后，一次接口字段变更就可能让真实渠道静默走成
-            // 示例支付 —— 结果是订阅被真实开通、钱却一分没收到，且没有任何报错。
+            val created = order.getOrThrow()
             val selected = c.channels.firstOrNull { it.key == channel }
-            if (selected != null && !selected.mock) {
+
+            // 2a) 示例支付：服务端明确标记 mock=true 才允许走
+            //（少了这道护栏，字段一变更真实渠道就会静默走成示例支付——订阅开通了钱没收）
+            if (selected?.mock == true) {
+                val paid = billingRepository.mockPay(created.orderNo)
+                if (paid.isFailure) {
+                    _uiState.value = _uiState.value.copy(
+                        checkout = c.copy(paying = false, error = paid.exceptionOrNull()?.message ?: "支付失败"),
+                        orderingPlan = null
+                    )
+                    return@launch
+                }
                 _uiState.value = _uiState.value.copy(
-                    checkout = c.copy(
-                        paying = false,
-                        error = "该渠道尚未接入支付方式，请选择其他渠道或联系客服"
-                    ),
-                    orderingPlan = null
+                    checkout = null,
+                    orderingPlan = null,
+                    subscription = paid.getOrNull() ?: _uiState.value.subscription,
+                    lastOrderNo = created.orderNo,
+                    message = "支付成功，订阅已开通/续费（示例支付，未产生真实扣款）"
                 )
+                refresh()
                 return@launch
             }
-            val paid = billingRepository.mockPay(order.getOrThrow().orderNo)
-            if (paid.isFailure) {
-                _uiState.value = _uiState.value.copy(
-                    checkout = c.copy(paying = false, error = paid.exceptionOrNull()?.message ?: "支付失败"),
-                    orderingPlan = null
-                )
+
+            // 2b) 真实微信支付
+            if (channel == CHANNEL_WECHAT && selected != null) {
+                payWithWeChat(c, created)
                 return@launch
             }
-            // 3) 支付成功：关弹窗、刷新订阅与套餐、提示
-            val sub = paid.getOrNull()
+
+            // 2c) 其他真实渠道：服务端只会下发已配置就绪的渠道（微信），
+            // 走到这里说明渠道清单与实现出现漂移，如实告知而不是静默失败
             _uiState.value = _uiState.value.copy(
-                checkout = null,
-                orderingPlan = null,
-                subscription = sub ?: _uiState.value.subscription,
-                lastOrderNo = order.getOrThrow().orderNo,
-                message = "支付成功，订阅已开通/续费（示例支付，未产生真实扣款）"
+                checkout = c.copy(
+                    paying = false,
+                    error = "该渠道尚未接入支付方式，请选择其他渠道或联系客服"
+                ),
+                orderingPlan = null
             )
-            refresh()
         }
+    }
+
+    /**
+     * 真实微信支付：拉起微信 → 感知用户操作 → 轮询服务端权威状态。
+     *
+     * 为什么不能信任微信本地回调（errCode=0）：回调可能因进程被杀而丢失，也可能被伪造；
+     * "钱付了订阅没到账"是家长最不能容忍的故障，所以开通与否只看服务端订单状态。
+     * 用户点"取消"也照样轮询一小段——微信里"取消"前可能已输完密码，本地语义不可靠。
+     */
+    private suspend fun payWithWeChat(c: CheckoutState, created: com.padguard.parent.data.model.CreateOrderResponse) {
+        val payParams = created.payParams
+        if (payParams.isNullOrEmpty()) {
+            _uiState.value = _uiState.value.copy(
+                checkout = c.copy(paying = false, error = "微信下单参数缺失，请稍后重试或联系客服"),
+                orderingPlan = null
+            )
+            return
+        }
+        if (!weChatPay.weChatInstalled()) {
+            _uiState.value = _uiState.value.copy(
+                checkout = c.copy(paying = false, error = "未检测到微信客户端，请安装微信后重试或联系客服代开通"),
+                orderingPlan = null
+            )
+            return
+        }
+
+        val localResult = weChatPay.pay(payParams)
+
+        // 轮询服务端：PAID 即成功；CLOSED 即订单关闭；超时则给出"确认中"的诚实提示
+        val settled = pollOrderUntilSettled(created.orderNo)
+        when {
+            settled?.status == ORDER_STATUS_PAID -> {
+                _uiState.value = _uiState.value.copy(
+                    checkout = null,
+                    orderingPlan = null,
+                    lastOrderNo = created.orderNo,
+                    message = "支付成功，订阅已开通/续费"
+                )
+                refresh()
+            }
+            settled?.status == ORDER_STATUS_CLOSED -> {
+                _uiState.value = _uiState.value.copy(
+                    checkout = c.copy(paying = false, error = "订单已超时关闭，如已扣款请联系客服核实退款"),
+                    orderingPlan = null
+                )
+            }
+            else -> {
+                // 未在窗口内确认到结果：不撒谎说成功也不说失败——钱可能已扣，服务端回调可能还在路上
+                val hint = if (localResult == WeChatPayLauncher.PayResult.CANCEL && settled == null)
+                    "支付未完成。如已扣款，结果确认后会在订单列表自动更新"
+                else
+                    "支付结果确认中，如已扣款，开通后会在订单列表自动更新"
+                _uiState.value = _uiState.value.copy(
+                    checkout = c.copy(paying = false, error = hint),
+                    orderingPlan = null
+                )
+            }
+        }
+    }
+
+    /** 每隔 [POLL_INTERVAL_MS] 查一次订单状态，最长 [POLL_TOTAL_MS]；查不到（网络抖动）继续重试 */
+    private suspend fun pollOrderUntilSettled(orderNo: String): OrderDto? {
+        val deadline = System.currentTimeMillis() + POLL_TOTAL_MS
+        while (System.currentTimeMillis() < deadline) {
+            billingRepository.getOrder(orderNo).getOrNull()?.let { o ->
+                if (o.status == ORDER_STATUS_PAID || o.status == ORDER_STATUS_CLOSED) return o
+            }
+            delay(POLL_INTERVAL_MS)
+        }
+        return null
     }
 
     fun dismissMessage() {
@@ -220,4 +304,14 @@ class SubscriptionViewModel @Inject constructor(
         PayChannelDto("UNIONPAY", "云闪付", enabled = true, mock = true, note = "示例支付"),
         PayChannelDto("BANKCARD", "银行卡", enabled = true, mock = true, note = "示例支付")
     )
+
+    private companion object {
+        const val CHANNEL_WECHAT = "WECHAT"
+        const val ORDER_STATUS_PAID = "PAID"
+        const val ORDER_STATUS_CLOSED = "CLOSED"
+        /** 轮询间隔：微信回调到达服务端通常在秒级，2 秒足够密且不压服务端 */
+        const val POLL_INTERVAL_MS = 2_000L
+        /** 总轮询窗口：覆盖用户在微信收银台停留 + 回调传播；超时后给"确认中"提示 */
+        const val POLL_TOTAL_MS = 60_000L
+    }
 }

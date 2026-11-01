@@ -1309,6 +1309,11 @@ class ApiDataSource @Inject constructor(
     override suspend fun getOrders(limit: Int): Result<List<OrderDto>> =
         exec { billingApi.getOrders(limit) }.mapCatching { it.data.orEmpty() }
 
+    override suspend fun getOrder(orderNo: String): Result<OrderDto> =
+        exec { billingApi.getOrder(orderNo) }.mapCatching {
+            it.data ?: throw Exception("订单不存在或已删除")
+        }
+
     override suspend fun getChannels(): Result<List<PayChannelDto>> =
         exec { billingApi.getChannels() }.mapCatching { it.data.orEmpty() }
 

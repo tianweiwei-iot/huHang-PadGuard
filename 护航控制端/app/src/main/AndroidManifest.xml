@@ -32,6 +32,15 @@
             </intent-filter>
         </activity>
 
+        <!-- 微信支付结果回调页：路径必须是 <applicationId>.wxapi.WXPayEntryActivity（微信侧硬性约定，
+             包名/类名改一个字调起和回调都会失败）。transparent 主题：微信拉起后返回时无闪屏 -->
+        <activity
+            android:name=".wxapi.WXPayEntryActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity="com.padguard.parent"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- 高德地图 SDK Key（占位，由 build.gradle.kts 的 AMAP_KEY 注入；默认空 = 回退占位底图） -->
         <meta-data
             android:name="com.amap.api.v2.apikey"
