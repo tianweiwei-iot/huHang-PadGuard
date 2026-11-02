@@ -41,7 +41,8 @@ data class LauncherAppItem(
 class KidHomeViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val appGuard: AppGuardPolicyStore,
-    private val guard: GuardPasswordManager
+    private val guard: GuardPasswordManager,
+    private val probe: com.padguard.core.engine.guard.GuardInfraProbe
 ) : ViewModel() {
 
     private val _apps = androidx.compose.runtime.mutableStateListOf<LauncherAppItem>()
@@ -160,6 +161,17 @@ class KidHomeViewModel @Inject constructor(
             appAccessGranted = guard.isAppAccessGrantedNow(pkg),
             unlocked = guard.isUnlockedNow()
         ) ?: false
+
+    /**
+     * 操作闸门无障碍服务是否真正在运行。
+     *
+     * 桌面点开受管控应用时依赖它做形态选择：服务在运行 → 直接把应用拉到前台、
+     * 由门禁浮层盖在应用之上（无障碍服务会在窗口事件里兜底重弹，闭环可靠）；
+     * 服务不在运行 → 浮层盖上去之后没人兜底，一旦浮层被应用窗口盖住就等于放行，
+     * 此时必须退化为桌面上就地弹框（不启动应用），绝不冒绕过风险。
+     */
+    fun isGateGuardAlive(): Boolean =
+        runCatching { probe.isAccessibilityServiceAlive() }.getOrDefault(false)
 }
 
 private fun Drawable.toImageBitmap(): ImageBitmap {

@@ -222,9 +222,13 @@ class OperationGuardAccessibilityService : AccessibilityService() {
                     continue
                 }
                 if (!lockController.state.value.locked) continue
+                // 分屏 / 悬浮窗（自由窗口）形态：锁屏页此刻可能**就是**焦点窗口，
+                // 但它只占半屏，另一半是桌面或别的应用，孩子照常能点开应用、能拖分隔条、
+                // 能关掉锁屏那一格 —— 这同样是逃逸，绝不能因为前台包名是自己就放过。
+                val windowed = LockScreenActivity.inMultiWindow
                 val fg = lastForegroundPkg
-                if (fg != null && fg.startsWith(OWN_PACKAGE_PREFIX)) continue
-                // 已逃逸到非本应用（桌面/其它 app）：
+                if (!windowed && fg != null && fg.startsWith(OWN_PACKAGE_PREFIX)) continue
+                // 已逃逸到非本应用（桌面/其它 app），或锁屏页被挤成了半屏：
                 // 1) 无障碍服务可后台启动 Activity（豁免华为后台限制），把锁屏 Activity 顶回前台 ——
                 //    这是非 DO 设备后台锁屏唯一可靠的前台化手段；硬锁设备同样受益。
                 // 2) 设备管理员已激活时，借系统级 lockNow() 重新唤起系统锁屏（keyguard），
@@ -233,7 +237,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
                 // 3) 委托 presenter.reenforce() 确保悬浮窗地板在位（非硬锁设备的真正锁定层）。
                 // 不再 performGlobalAction(HOME)：它反复把用户顶回桌面、且在非硬锁设备上无效，
                 // 只会和窗口切换事件叠加成日志风暴（这正是此前「锁屏崩 + 刷屏」的诱因之一）。
-                if (!LockScreenActivity.visible) {
+                if (windowed) {
+                    Logger.w(TAG) { "lock watchdog: lock screen windowed (split/freeform), re-arming fullscreen" }
+                }
+                if (!LockScreenActivity.visible || windowed) {
                     runCatching {
                         LockScreenActivity.show(
                             this@OperationGuardAccessibilityService,
@@ -354,21 +361,13 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         }
 
         // 3a) 取消授权的应用：硬拦截（最严），与全局启动闸门、是否设了家长密码都无关。
-        // 不再把人顶回桌面再在桌面上弹框——那样孩子能在桌面上再次点同一图标，
-        // 而 1.5s 去抖会压制下一次拦截，等于"关掉框就能进应用"（绕过）。
-        // 改为：把密码框作为透明浮层**直接盖在被管控应用之上**（应用留在后台、可见），
-        // 输对只放行这一个包并把它带回前台；取消 / 点框外则 kill 该应用（退出应用）。
+        // 门禁浮层**直接盖在被管控应用之上**：应用留在前台但被浮层全屏遮蔽、不可交互，
+        // 孩子看到的是"应用上面浮了一层密码框"；输对只放行这一个包并收起浮层，
+        // 取消 / 点框外则由 [AppAccessGateActivity.exitAndFinish] 先 HOME 压回后台、
+        // 再延迟 kill 该应用（退出应用）。
         // 这里不做时间去抖：浮层是 singleTask，重复 show 只是更新、不会风暴；
         // 去抖反而会压制"关框后再次打开"的拦截，重新制造绕过窗口。
         if (reason == REASON_HIDDEN_APP) {
-            // 先把被管控应用压回桌面（无论是否锁定都必须执行），确保它不进入可用前台；
-            // 再在**桌面上**弹门禁浮层（盖在桌面而非盖在应用之上）。
-            // 绝不能"浮层透明盖在应用上"——那样应用仍在前台、可见且可交互，
-            // 孩子点屏幕任意处触发浮层取消后，被压回后台的应用会因时序竞态杀不掉而原地复活，
-            // 表现为"管控了还能继续打开"（c72f4cd 引入的回归）。
-            // 注意：此处不按包名去抖——去抖会压制"关框后再次点开"的拦截，
-            // 重新制造绕过窗口；每次前台事件都即时压回+弹框，反而更严格。
-            performGlobalAction(GLOBAL_ACTION_HOME)
             runCatching { AppAccessGateActivity.show(this, pkg) }
                 .onFailure { Logger.e(TAG, it) { "failed to launch app access gate (hidden app)" } }
             return
@@ -415,10 +414,13 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 1) 顶回当前操作：
         //    - 设置页用 BACK（部分 ROM 用 HOME 会卡在最近任务）；
         //    - 安装器/卸载用 HOME（BACK 后会经最近任务回跳）；
-        //    - 受管控应用**必须先压回桌面**：门禁浮层盖在桌面上（而非盖在应用之上），
-        //      否则应用仍在前台可见可交互，孩子触发浮层取消后应用会因时序竞态复活，管控形同虚设。
+        //    - 受管控应用**不顶回**：门禁浮层直接盖在应用之上（应用被全屏遮蔽、不可交互）。
+        //      输对密码只放行这一个包；取消 / 点框外由 exitAndFinish 先 HOME 再延迟 kill，
+        //      不会出现"关掉框应用原地复活"（kill 前留出的延迟保证 HOME 已把应用压回后台）。
+        //      若 kill 因极端时序失败，本服务在下一个窗口事件会再次拦截并重弹门禁，闭环兜底。
         if (reason == REASON_CONTROLLED_APP) {
-            performGlobalAction(GLOBAL_ACTION_HOME)
+            // 锁定态没有可弹的验证框，此时才需要把应用顶回桌面，避免"浮层下应用仍可用"的错觉
+            if (lockedOut) performGlobalAction(GLOBAL_ACTION_HOME)
         } else {
             performGlobalAction(
                 if (reason == REASON_SETTINGS) GLOBAL_ACTION_BACK else GLOBAL_ACTION_HOME
@@ -428,7 +430,7 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         if (!lockedOut) {
             runCatching {
                 if (reason == REASON_CONTROLLED_APP) {
-                    // 打开受管控应用 → 盖在桌面之上的门禁浮层（输对只放行这一个包）
+                    // 打开受管控应用 → 盖在应用之上的门禁浮层（输对只放行这一个包）
                     AppAccessGateActivity.show(this, pkg)
                 } else {
                     // 改设置 / 安装卸载 → 家长设备操作解锁，输对开 10 分钟全局窗口

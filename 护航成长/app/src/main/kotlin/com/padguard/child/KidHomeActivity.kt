@@ -36,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -67,9 +68,10 @@ import javax.inject.Inject
  * 仍由 [com.padguard.child.guard.OperationGuardAccessibilityService] 顶回。两者叠加才是闭环。
  *
  * ## 需要密码时弹在哪里
- * 点开受管控应用就在**本桌面上就地弹密码框**（[com.padguard.child.guard.AppAccessGateDialog]），
- * 不跳转到任何管控系统页面 —— 门禁属于"点图标"这一刻，桌面必须始终在背后可见。
- * 从最近任务 / 通知启动的路径由无障碍服务拉起浮层 Activity 覆盖，两者共用同一套校验组件。
+ * 点开受管控应用时，密码框**直接盖在应用之上**（[com.padguard.child.guard.AppAccessGateActivity]
+ * 透明浮层）：先把应用拉到前台，再把浮层盖上去，孩子看到的是"应用上面浮了一层密码框"，
+ * 绝不跳转到管控系统页面。仅当无障碍服务不可用（没人兜底重弹浮层）时，才退化为
+ * 桌面上就地弹 [com.padguard.child.guard.AppAccessGateDialog]（应用不启动）。
  * 真正不可绕过需要 Device Owner（Kiosk）——本 Activity 已保留 HOME 类目供 KioskEnforcer 反查。
  *
  * ## 防砖
@@ -117,14 +119,16 @@ private fun KidLauncherScreen(
 ) {
     var showParentDialog by remember { mutableStateOf(false) }
     /**
-     * 当前正在等待家长验证的应用包名；非空即在**本桌面上**就地弹出门禁对话框。
+     * 当前正在等待家长验证的应用包名；非空即**就地**弹出门禁对话框（兜底形态）。
      *
-     * 这里刻意不再 `startActivity` 跳转到管控系统的解锁页：应用门禁发生在"点桌面图标"这一刻，
-     * 正确形态是桌面上浮出一个密码框，而不是把人带到另一个页面去。
-     * （从最近任务 / 通知 / 系统桌面启动的路径由无障碍服务用浮层 Activity 覆盖，
-     * 与本对话框共用同一套校验组件，行为一致。）
+     * 常规路径不经过它：无障碍服务在运行时，点图标会先把应用拉到前台、再把
+     * [com.padguard.child.guard.AppAccessGateActivity] 透明浮层**盖在应用之上**，
+     * 孩子看到的是"应用上面浮了一层密码框"，而不是"在管控系统之内弹框"。
+     * 只有当无障碍服务不可用（被杀/被关）时才退化为本对话框 —— 那种情况下应用
+     * 不能真的启动（浮层被盖住没人兜底就等于放行），就地弹框是唯一安全的形态。
      */
     var gatePackage by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
 
     // 进入与每次回到桌面都刷新名单：singleTask 复用时不会重建，靠 Lifecycle 监听 onResume
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -157,12 +161,17 @@ private fun KidLauncherScreen(
                             app = app,
                             onClick = {
                                 val pkg = app.packageName
-                                // 需要门禁时只在桌面上就地弹出密码框，绝不跳转页面；
-                                // 验证通过由 ViewModel 先落放行再启动，否则直接启动。
-                                if (vm.needsLaunchGuard(pkg)) {
-                                    gatePackage = pkg
-                                } else {
+                                if (!vm.needsLaunchGuard(pkg)) {
                                     vm.launchApp(pkg)
+                                } else if (vm.isGateGuardAlive()) {
+                                    // 常规形态：应用先上前台，门禁浮层盖在应用之上。
+                                    // 即便应用窗口与浮层出现瞬时竞态（浮层被盖住），
+                                    // 无障碍服务收到该包的窗口事件也会立即重弹门禁兜底。
+                                    vm.launchApp(pkg)
+                                    com.padguard.child.guard.AppAccessGateActivity.show(context, pkg)
+                                } else {
+                                    // 兜底形态：无障碍服务不可用，应用不能真启动，就地弹框
+                                    gatePackage = pkg
                                 }
                             }
                         )

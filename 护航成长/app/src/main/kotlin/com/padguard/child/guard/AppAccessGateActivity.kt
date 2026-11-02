@@ -21,9 +21,10 @@ import javax.inject.Inject
  * 应用访问门禁（桌面上浮出的密码框）。
  *
  * ## 它解决的是什么
- * 孩子打开受管控应用时，密码必须**在桌面上当场输入**，而不是被带进管控系统的某个页面里。
- * 本 Activity 因此采用透明浮层主题（[android.R.style] 之外自定义的 `Theme.PadGuard.Gate`）：
- * 窗口背景透明、桌面保持可见，只有一张居中的密码卡片浮在上面。
+ * 孩子打开受管控应用时，密码必须**在应用之上当场输入**：本 Activity 以透明浮层主题
+ * （`Theme.PadGuard.Gate`）直接盖在被管控应用之上，窗口背景透明、应用在背后保持可见，
+ * 只有一张居中的密码卡片浮在上面 —— 孩子看到的是"应用上面浮了一层密码框"，
+ * 而不是"被带进管控系统的某个页面"。
  *
  * ## 覆盖范围
  * 无障碍服务 [OperationGuardAccessibilityService] 拦截到的两条路径都走这里：
@@ -135,25 +136,22 @@ class AppAccessGateActivity : ComponentActivity() {
     /**
      * 孩子取消 / 点框外 → 关闭门禁并回到桌面。
      *
-     * ## 关键：绝不在"被管控应用仍可能在前台"时强杀它
-     * 门禁浮层是由无障碍服务在**已把应用压回桌面之后**才拉起的，因此进入本方法时，
-     * 被管控应用早已不在前台（被 [GLOBAL_ACTION_HOME] 压回后台）。这里只需：
+     * 门禁浮层是**盖在被管控应用之上**的（应用在前台但被全屏遮蔽、不可交互），因此取消时：
      * 1. [android.content.Intent.ACTION_MAIN] + [android.content.Intent.CATEGORY_HOME]
-     *    确保落点是桌面（华为等非默认 KidHome 启动器的设备，HOME 仍能回到系统桌面）；
-     * 2. 应用已在后台，[ActivityManager.killBackgroundProcesses] 此刻可安全生效，作为
-     *    "关闭即退出"的兜底（防孩子从最近任务重新拉起）；
+     *    把应用压回后台（华为等非默认 KidHome 启动器的设备，HOME 仍能回到系统桌面）；
+     * 2. **延迟**执行 [ActivityManager.killBackgroundProcesses]：HOME 是异步全局动作，
+     *     立即 kill 时应用往往仍是前台进程、系统会拒绝（这正是早期"关框后应用原地复活"
+     *     回归的根因）。延迟 500ms 足够应用真正退到后台再杀，且该延迟用主线程
+     *     [android.os.Handler] 挂在 finish 之后 —— 不能用 lifecycleScope，Activity
+     *     销毁会连带取消协程，延迟杀就永远不会执行；
      * 3. [finish] 收起浮层。
      *
-     * 早期实现是"先 HOME 再 kill 再 finish"的脆弱时序：HOME 是异步全局动作，kill 立即执行时
-     * 应用往往仍是前台进程、被系统拒绝强杀，浮层一收应用原地复活、直接可用 ——
-     * 这正是"管控了还是能继续打开"的回归根因。本方法把强杀前提（应用已后台）交给
-     * 调用前的不变量保证，不再依赖时序竞态。
-     * 即便 kill 因极端时序失败，孩子在桌面若再点开该应用，无障碍服务会立即重新拦截并弹门禁，
-     * 形成闭环，不会失控。
+     * 即便 kill 因极端时序失败，孩子若让该应用重新回到前台，无障碍服务会立即重新拦截
+     * 并重弹门禁，形成闭环，不会失控。
      */
     private fun exitAndFinish() {
         val pkg = targetPackage
-        // 1) 回到桌面：确保落点可预测，且被管控应用保持后台
+        // 1) 回到桌面：把被管控应用压回后台，落点可预测
         runCatching {
             startActivity(
                 Intent(Intent.ACTION_MAIN)
@@ -161,10 +159,12 @@ class AppAccessGateActivity : ComponentActivity() {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         }.onFailure { Logger.w(TAG, it) { "failed to go home on gate dismiss" } }
-        // 2) 应用已在后台，强杀此刻可安全生效（非前台进程，系统不拒）
+        // 2) 延迟强杀：等 HOME 真正把应用压回后台后再杀（前台进程 kill 是无效的）
         if (pkg.isNotEmpty()) {
-            runCatching { activityManager.killBackgroundProcesses(pkg) }
-                .onFailure { Logger.w(TAG, it) { "failed to kill $pkg on gate dismiss" } }
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                runCatching { activityManager.killBackgroundProcesses(pkg) }
+                    .onFailure { Logger.w(TAG, it) { "failed to kill $pkg on gate dismiss" } }
+            }, KILL_DELAY_MS)
         }
         // 3) 收起浮层
         finish()
@@ -180,6 +180,9 @@ class AppAccessGateActivity : ComponentActivity() {
 
         /** 待放行的目标应用包名 */
         const val EXTRA_PACKAGE = "extra_gate_package"
+
+        /** 取消门禁后延迟强杀的等待时长：给异步 HOME 动作留出把应用压回后台的时间 */
+        private const val KILL_DELAY_MS = 500L
 
         /**
          * 从无障碍服务等非 Activity 上下文拉起门禁。
