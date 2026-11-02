@@ -1,6 +1,7 @@
 package com.padguard.server.domain
 
 import jakarta.persistence.*
+import org.hibernate.annotations.ColumnDefault
 
 /**
  * 管控后台管理员账号。
@@ -42,8 +43,19 @@ class Admin(
      *   无需知道对方手里有几张令牌。
      *
      * 语义约定：`ver` 缺失（历史令牌）一律按 0 处理，与新建账号的初始值一致，不误杀存量会话。
+     *
+     * 默认值 0 必须写在注解上（同 [UnlockTicket.revision] 的教训）：
+     * 生产（PostgreSQL + Flyway）由 V2026102001 建列，带 DEFAULT 0 无所谓；
+     * 单机/家庭部署（H2 + ddl-auto=update，flyway 关闭）由 Hibernate 补列，
+     * 生成的是 `alter table admins add column token_version bigint not null` ——
+     * admins 表里通常已有管理员行，无默认值的 NOT NULL 加列会直接失败
+     * （`NULL not allowed for column "token_version"`），且 Hibernate 只记 WARN 不阻断启动，
+     * 于是列静默缺失：服务看起来起来了、/health 也是 UP，但管理员登录查这张表就 500。
+     * 这是升级存量库才会触发的问题，全新库上永远复现不出来。
      */
-    @Column(name = "token_version", nullable = false) var tokenVersion: Long = 0,
+    @Column(name = "token_version", nullable = false)
+    @ColumnDefault("0")
+    var tokenVersion: Long = 0,
     @Column(name = "last_login_at") var lastLoginAt: Long? = null,
     @Column(name = "created_at") var createdAt: Long = 0
 )
