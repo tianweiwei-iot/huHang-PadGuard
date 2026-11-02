@@ -113,7 +113,7 @@ fun AlertCenterScreen(
                         // 否则返回键/角标顶进时钟与电量图标里（自绘 Row 不像
                         // Material3 TopAppBar 那样自带 statusBars insets）
                         .statusBarsPadding()
-                        .background(Color.White)
+                        .background(PadGuardColors.CardWhite)
                         .padding(horizontal = 8.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -224,7 +224,7 @@ private fun RiskAlertCard(
 ) {
     Card(
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = PadGuardColors.CardWhite),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -365,7 +365,7 @@ private fun TicketCard(
 
     Card(
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = PadGuardColors.CardWhite),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -437,7 +437,7 @@ private fun DelayTicketCard(
 
     Card(
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = PadGuardColors.CardWhite),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {

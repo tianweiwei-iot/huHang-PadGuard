@@ -11,6 +11,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -45,7 +46,13 @@ fun ControlPolicyScreen(
 
     LaunchedEffect(Unit) {
         viewModel.uiState.collectLatest {
-            if (it.toast != null) { snackbarHostState.showSnackbar(it.toast); viewModel.clearToast() }
+            // 失败必须可见：此前只消费 toast，而所有写操作失败都落在 error ——
+            // 家长以为已下发、孩子端毫无变化，是最不能接受的形态。
+            val msg = it.toast ?: it.error
+            if (msg != null) {
+                snackbarHostState.showSnackbar(msg)
+                if (it.toast != null) viewModel.clearToast() else viewModel.clearError()
+            }
         }
     }
 
@@ -434,24 +441,15 @@ private fun WebPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolicy
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedTextField(
-                            value = web?.smartShutdownStartTime ?: "",
-                            onValueChange = { viewModel.setSmartShutdown(web?.smartShutdownEnabled ?: true, it, web?.smartShutdownEndTime) },
-                            modifier = Modifier.weight(1f),
-                            label = { Text("开始 HH:mm") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
-                            value = web?.smartShutdownEndTime ?: "",
-                            onValueChange = { viewModel.setSmartShutdown(web?.smartShutdownEnabled ?: true, web?.smartShutdownStartTime, it) },
-                            modifier = Modifier.weight(1f),
-                            label = { Text("结束 HH:mm") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            singleLine = true
-                        )
-                    }
+                    // 时间输入必须是本地草稿：此前 value 直接绑服务端回写状态 + 每个按键都发一次网络写，
+                    // 保存成功前 value 被旧状态拉回，连续输入 "22:00" 会逐字丢失/乱序，弱网下每字符一次 POST。
+                    SmartShutdownTimeEditor(
+                        startTime = web?.smartShutdownStartTime,
+                        endTime = web?.smartShutdownEndTime,
+                        onSubmit = { s, e ->
+                            viewModel.setSmartShutdown(web?.smartShutdownEnabled ?: true, s, e)
+                        }
+                    )
                 }
             }
         }
@@ -494,14 +492,18 @@ private fun SystemPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPol
                     Slider(
                         value = level.toFloat(),
                         onValueChange = { level = it.toInt() },
+                        // 只在松手时提交：此前用 LaunchedEffect(level) 提交，切回本 Tab 首组合必触发一次，
+                        // 护眼开着就每进一次页面多发一条指令 + 弹一次"已开启"提示。
+                        onValueChangeFinished = {
+                            if (uiState.eyeProtectionEnabled && level != uiState.eyeProtectionLevel) {
+                                viewModel.setEyeProtection(true, level)
+                            }
+                        },
                         valueRange = 1f..5f,
                         steps = 3,
                         enabled = uiState.eyeProtectionEnabled
                     )
                     Text("强度：$level 级", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f))
-                    LaunchedEffect(level) {
-                        if (uiState.eyeProtectionEnabled) viewModel.setEyeProtection(true, level)
-                    }
                 }
             }
         }
@@ -549,5 +551,68 @@ private fun dayLabel(dayOfWeek: Int): String {
         6 -> "周六"
         7 -> "周日"
         else -> "第${dayOfWeek}天"
+    }
+}
+
+/** HH:mm 合法格式（00:00 ~ 23:59）。非法值下发后孩子端行为未定义，必须在输入层拦掉。 */
+private val HHMM_REGEX = Regex("^([01]?\\d|2[0-3]):[0-5]\\d$")
+
+/**
+ * 定时锁机时段编辑器：本地草稿 + 失焦/回车提交。
+ *
+ * 为什么不直接绑服务端状态：输入框 value 绑回写状态时，保存成功前每次重组都会把用户
+ * 正在输入的内容拉回旧值（丢字/乱序）；而 onValueChange 直接调接口会变成"每键一次 POST"。
+ */
+@Composable
+private fun SmartShutdownTimeEditor(
+    startTime: String?,
+    endTime: String?,
+    onSubmit: (String, String) -> Unit
+) {
+    var start by remember(startTime) { mutableStateOf(startTime ?: "") }
+    var end by remember(endTime) { mutableStateOf(endTime ?: "") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun submit() {
+        val s = start.trim()
+        val e = end.trim()
+        if (s == (startTime ?: "") && e == (endTime ?: "")) return // 无改动不发请求
+        if (!HHMM_REGEX.matches(s) || !HHMM_REGEX.matches(e)) {
+            error = "时间格式应为 HH:mm（如 22:00）"
+            return
+        }
+        error = null
+        onSubmit(s, e)
+    }
+
+    Column {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(
+                value = start,
+                onValueChange = { start = it; error = null },
+                modifier = Modifier.weight(1f).onFocusChanged { if (!it.isFocused) submit() },
+                label = { Text("开始 HH:mm") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                isError = error != null,
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = end,
+                onValueChange = { end = it; error = null },
+                modifier = Modifier.weight(1f).onFocusChanged { if (!it.isFocused) submit() },
+                label = { Text("结束 HH:mm") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                isError = error != null,
+                singleLine = true
+            )
+        }
+        error?.let {
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
     }
 }

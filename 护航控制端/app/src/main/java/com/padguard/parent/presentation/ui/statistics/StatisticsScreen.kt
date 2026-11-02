@@ -56,6 +56,27 @@ fun StatisticsScreen(
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
                 )
             }
+        } else if (uiState.isLoading && !uiState.hasData) {
+            Box(
+                modifier = Modifier.fillMaxSize().padding(padding),
+                contentAlignment = Alignment.Center
+            ) { CircularProgressIndicator() }
+        } else if (uiState.error != null && !uiState.hasData) {
+            // 没有数据 + 有错误 = 整页失败：必须给出原因和重试，绝不显示"0 分钟"冒充真实用量
+            Box(
+                modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = uiState.error ?: "加载失败",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(onClick = { viewModel.load(deviceId) }) { Text("重试") }
+                }
+            }
         } else {
             LazyColumn(
                 modifier = Modifier

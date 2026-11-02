@@ -59,7 +59,7 @@ fun SoftCard(
             spotColor = PadGuardColors.CardShadow
         ),
         shape = shape,
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = PadGuardColors.CardWhite),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Box(

@@ -232,7 +232,7 @@ private fun HomeTopBar(
                     .size(40.dp)
                     .shadow(elevation = 2.dp, shape = CircleShape, spotColor = PadGuardColors.CardShadow, ambientColor = PadGuardColors.CardShadow)
                     .clip(CircleShape)
-                    .background(Color.White)
+                    .background(PadGuardColors.CardWhite)
                     .clickable(onClick = onBellClick),
                 contentAlignment = Alignment.Center
             ) {
@@ -293,7 +293,7 @@ private fun DeviceSwitchPill(
                             Modifier.background(brush = PadGuardColors.HeroGradient)
                         } else {
                             Modifier
-                                .background(Color.White)
+                                .background(PadGuardColors.CardWhite)
                                 .border(1.dp, OutlineSoft, RoundedCornerShape(20.dp))
                         }
                     )

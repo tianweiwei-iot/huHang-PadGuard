@@ -436,6 +436,11 @@ class ControlPolicyViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(toast = null)
     }
 
+    /** 错误已通过 Snackbar 展示后清除，避免返回本页时重复弹出同一错误 */
+    fun clearError() {
+        _uiState.value = _uiState.value.copy(error = null)
+    }
+
     /**
      * 统一的写失败反馈。
      *

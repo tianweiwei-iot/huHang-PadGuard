@@ -25,6 +25,7 @@ import com.padguard.parent.presentation.ui.profile.ProfileAction
 import com.padguard.parent.presentation.ui.profile.ProfileScreen
 import com.padguard.parent.presentation.ui.statistics.StatisticsScreen
 import com.padguard.parent.presentation.ui.theme.DarkMode
+import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.ui.theme.ThemeMode
 import com.padguard.parent.presentation.viewmodel.HomeViewModel
 import com.padguard.parent.presentation.viewmodel.ProfileViewModel
@@ -69,7 +70,7 @@ fun MainScreen(
         containerColor = Color.Transparent,
         bottomBar = {
             NavigationBar(
-                containerColor = Color.White,
+                containerColor = PadGuardColors.CardWhite,
                 tonalElevation = 0.dp
             ) {
                 items.forEach { item ->
