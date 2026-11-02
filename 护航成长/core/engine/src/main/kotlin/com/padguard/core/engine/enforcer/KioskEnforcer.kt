@@ -146,7 +146,15 @@ class KioskEnforcer @Inject constructor(
      * 漏掉系统 UI → 弹不出系统对话框（含权限授权框）。
      */
     private fun withEssentials(policy: KioskPolicy): Set<String> {
-        val set = policy.allowedPackages.toMutableSet()
+        // 单应用模式只放行第一个应用。
+        // 此前无论 SINGLE_APP 还是 MULTI_APP 都把整个 allowedPackages 塞进 LockTask 白名单，
+        // 于是"单应用模式"下名单内每个应用都能开 —— 家长以为只留了一个，实际全都没锁。
+        val declared = if (policy.mode == KioskMode.SINGLE_APP) {
+            policy.allowedPackages.take(1).toSet()
+        } else {
+            policy.allowedPackages.toSet()
+        }
+        val set = declared.toMutableSet()
         set += context.packageName
         set += policy.homePackage.takeIf { it.isNotBlank() } ?: context.packageName
         set += ESSENTIAL_PACKAGES

@@ -213,3 +213,50 @@ Kiosk `isAllowed` 死函数（`KioskEnforcer.isAllowed` 无调用点，非 DO �
 - 家长端：`:app:compileDebugKotlin` BUILD SUCCESSFUL
 - 管理后台：11 个 JS 文件 `node --check` 全通过
 - 服务端：`testDirect` 全量回归
+
+## 十、第四批（2026-11-02 深夜）：从「界面缺陷」转向「功能断链」
+
+第三批之前的批次都在修 UI 层问题。本轮起改为按**功能链路**核查：
+接口有没有对应 UI、字段有没有执行点、两端契约是否一致。
+方法：三路并行审计（家长端↔服务端契约、孩子端指令与策略执行、管理后台），
+只处理「能用代码位置证明」的断链，不做猜测性重构。
+
+### 10.1 家长端（功能缺失，非样式问题）
+
+| 问题 | 根因 | 改动 |
+|---|---|---|
+| 「分时段限制」无法新增/编辑/删除 | 服务端 POST/PUT/DELETE 早已齐备，端上只有列表 + 开关；新设备无种子数据 → 该区域永远空白 | `ControlPolicyViewModel.saveTimeRestriction/deleteTimeRestriction` + 编辑弹窗（重复日、起止、时段限时、启用）+ 空态引导 + 三态（读取中/失败重试/空） |
+| 删除接口「接线即炸」 | `@DELETE policies/time-restrictions/{id}` 漏传 `deviceId`，服务端该参数必填 → 400 | API 补 `@Query("deviceId")`，仓储签名同步改为 `(deviceId, restrictionId)` |
+| 护眼状态永远显示「关闭」 | 只有 PUT 没有 GET；页面用常量 false 兜底，家长每次重进都被显示成关闭，再点一次又把 false 写回 | 新增 `GET /policies/{deviceId}/eye-protection` 的客户端 getter + 仓储 + VM 回填 |
+| 地图上永远没有轨迹线 | `AmapMapView` 与占位底图都硬传 `track = emptyList()`，而 ViewModel 已拉取轨迹 | 传真实轨迹（取最近 300 点，避免 5000 点折线拖垮低端机） |
+| 上网管控页文案已过期，反向误导家长 | 文案写「本版本通道尚未启用、不会实际拦截」，但 VPN 通道上一批已落地并真的按域名拦 | 改为「需孩子端授权后生效」，说明 DO 自动授权 / 非 DO 去「权限引导」补授权，并区分哪些策略不依赖该通道 |
+| 应用「取消授权」文案与真实行为不符 | 文案称「打开需家长密码」，实际执行 `SET_APP_HIDDEN`（桌面直接隐藏），家长找不到图标会误判被误删 | 开关标签改「已隐藏」，Toast 说明「从桌面隐藏、数据保留」 |
+
+### 10.2 孩子端（策略执行一致性）
+
+| 问题 | 根因 | 改动 |
+|---|---|---|
+| 关掉「时间管控」总开关后仍按时长锁屏 | 会话到期只判 `remaining<=0`；`appLimit.enabled` 只被 UI 消费，`PolicyEngine` 挂 `DAILY_LIMIT` 时无条件 | 服务端 `UsageSessionDto` 增 `timeControlEnabled`（关闭时仍返回计时数据，便于重新开启不丢当日进度）；孩子端 `isExpired()` 与 `PolicyEngine` 双重门控 |
+| 「单应用模式」与「多应用模式」表现完全一致 | `withEssentials` 把所有 `allowedPackages` 都塞进 LockTask 白名单，`singleAppPackage` 零消费 | SINGLE_APP 只放行 `allowedPackages.first()` + 必备包 |
+| `security.logRetentionDays` 配了不执行，本地库只增不减 | `LogRepository.purge()` 全仓库零调用 | `PolicyEngine.purgeExpiredLogs()`（保留期夹到 3~180 天）+ 随周期上报任务调用；只删已上传记录 |
+
+### 10.3 服务端
+
+- `UsageSessionService.isTimeControlEnabled()`：缺省 true，避免存量无 settings 行被误判成「已关闭」。
+- 新增 2 例单测：无配置默认 true、关闭后 DTO 带 false 且计时数据仍返回。
+
+### 10.4 本轮明确不做
+
+- **告警「关闭」入口**：`closeAlert` 虽已声明但从未接线。查看 `RiskAlertCenterViewModel` 后确认这是**刻意取舍**
+  （"端上无法验证问题真的解决了，写一个关不掉真相的已解决按钮只会制造虚假安全感"），不予推翻。
+- **CSV 导出 / 周报**：服务端已实现，端上需要 FileProvider + 分享面板，属独立功能，未在无真机环境强行接线。
+- **水印跨重启持久化**：`SET_WATERMARK` 指令不落盘，进程重启后依赖策略包 `kiosk.watermark`（服务端从不写），
+  需要新增本地偏好存储 + 启动恢复，改动面涉及 DI 与启动时序，留待下一批。
+- **远程拍照 / 录音 / 设备分组 / 政策模板**：服务端与 API 齐备但无 UI 入口，属"补页面"而非"修断链"，
+  按优先级排到功能批次。
+
+### 10.5 验证
+
+- 家长端 `:app:compileDebugKotlin` BUILD SUCCESSFUL
+- 孩子端 `:app:compileDebugKotlin` + `:core:engine:testDebugUnitTest` BUILD SUCCESSFUL
+- 服务端 `testDirect` **210/210**（原 208 + 新增 2 例）

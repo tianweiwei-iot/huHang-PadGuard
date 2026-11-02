@@ -152,7 +152,11 @@ fun LocationScreen(
                     AmapMapView(
                         location = uiState.location,
                         geofences = uiState.geofences,
-                        track = emptyList(),
+                        // 此前这里硬传 emptyList()，而 ViewModel 明明拉了轨迹 ——
+                        // 结果"历史轨迹"只剩下方文字列表，地图上永远画不出线。
+                        // 只取最近 300 个点：服务端单次最多返回 5000 个点，
+                        // 全量塞进高德 Polyline 会在低端机上明显掉帧。
+                        track = uiState.track.takeLast(300),
                         viewMode = uiState.viewMode,
                         modifier = Modifier.fillMaxSize(),
                         onMapFailed = { diag ->
@@ -164,7 +168,9 @@ fun LocationScreen(
                     GeofenceMapCanvas(
                         location = uiState.location,
                         geofences = uiState.geofences,
-                        track = emptyList(),
+                        // 与 Amap 分支同口径：占位底图也要能画出轨迹，否则地图失败回退后
+                        // 家长会以为"轨迹没了"，而实际只是没画。
+                        track = uiState.track.takeLast(300),
                         provider = uiState.provider,
                         viewMode = uiState.viewMode,
                         modifier = Modifier.fillMaxSize()

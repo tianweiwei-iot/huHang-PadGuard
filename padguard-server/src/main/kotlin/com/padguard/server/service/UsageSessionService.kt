@@ -45,6 +45,15 @@ class UsageSessionService(
     }
 
     /**
+     * 「时间管控」总开关是否开启（缺省视为开启）。
+     *
+     * 关闭后本服务仍会记录计时（便于家长重新开启时不丢当日进度），
+     * 但孩子端不得据此挂锁 —— 该标记随 [toDto] 下发，是"关掉总开关后设备仍被锁"的唯一修复点。
+     */
+    private fun isTimeControlEnabled(deviceId: String): Boolean =
+        deviceSettingRepository.findById(deviceId).map { it.timeControlEnabled }.orElse(true)
+
+    /**
      * 孩子端确认"计时开始"。
      *
      * 幂等：今日已确认过则沿用原起点，避免孩子重启应用/息屏重新解锁后把时钟重置，
@@ -238,7 +247,8 @@ class UsageSessionService(
             delayOptions = UsageSession.DELAY_OPTIONS,
             maxDailyExtendMinutes = UsageSession.MAX_DAILY_EXTEND_MINUTES,
             lastDelayEpoch = s.lastDelayEpoch,
-            pendingDelayMinutes = usageDelayService.pendingDelayMinutes(s.deviceId)
+            pendingDelayMinutes = usageDelayService.pendingDelayMinutes(s.deviceId),
+            timeControlEnabled = isTimeControlEnabled(deviceId)
         )
     }
 }

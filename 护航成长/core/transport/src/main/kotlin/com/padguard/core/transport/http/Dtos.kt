@@ -59,7 +59,12 @@ data class UsageSessionDto(
     @SerialName("maxDailyExtendMinutes") val maxDailyExtendMinutes: Int = 120,
     @SerialName("lastDelayEpoch") val lastDelayEpoch: Long? = null,
     /** 当前正在等待家长审批的延时分钟数（PENDING 工单之和）；>0 表示"已提交，等待审核" */
-    @SerialName("pendingDelayMinutes") val pendingDelayMinutes: Int = 0
+    @SerialName("pendingDelayMinutes") val pendingDelayMinutes: Int = 0,
+    /**
+     * 家长「时间管控」总开关。false 时本端不得因额度耗尽而锁屏 ——
+     * 关闭总开关却仍按会话 remaining 锁屏，就是"家长关不掉管控"。
+     */
+    @SerialName("timeControlEnabled") val timeControlEnabled: Boolean = true
 )
 
 /** 延时申请请求：minutes 必须落在 delayOptions 内 */

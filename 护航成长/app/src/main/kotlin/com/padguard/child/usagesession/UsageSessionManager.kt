@@ -79,7 +79,12 @@ class UsageSessionManager @Inject constructor(
         /** 进行中的请求，UI 据此禁用按钮 */
         val loading: Boolean = false,
         /** 最近一次错误文案（仅用于调试/日志） */
-        val error: String? = null
+        val error: String? = null,
+        /**
+         * 家长「时间管控」总开关（来自服务端会话）。
+         * false 时倒计时与到期锁定都必须停用，否则关掉总开关也拦不住锁屏。
+         */
+        val timeControlEnabled: Boolean = true
     )
 
     private val _state = MutableStateFlow(UiState())
@@ -216,6 +221,9 @@ class UsageSessionManager @Inject constructor(
     fun isExpired(): Boolean {
         val s = _state.value
         if (!s.active) return false
+        // 家长已关闭「时间管控」总开关：不得再按会话剩余判到期，
+        // 否则"关掉总开关"后设备仍会被 DAILY_LIMIT 锁住 —— 管控关不掉是最难解释的故障。
+        if (!s.timeControlEnabled) return false
         return liveRemainingMs() <= 0L
     }
 
@@ -250,12 +258,14 @@ class UsageSessionManager @Inject constructor(
                 pendingDelayMinutes = dto.pendingDelayMinutes,
                 quotaMinutes = dto.quotaMinutes + dto.extendedMinutes,
                 startEpoch = dto.startEpoch,
+                timeControlEnabled = dto.timeControlEnabled,
                 error = null
             )
         }
         Logger.i(TAG) {
             "usage-session applied: active=${dto.active} remainingMs=${dto.remainingMs} " +
-                "quota=${dto.quotaMinutes} extended=${dto.extendedMinutes} countdown=$countdownActive"
+                "quota=${dto.quotaMinutes} extended=${dto.extendedMinutes} countdown=$countdownActive " +
+                "timeControl=${dto.timeControlEnabled}"
         }
     }
 

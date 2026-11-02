@@ -6,6 +6,7 @@ import com.padguard.parent.data.model.OrderDto
 import com.padguard.parent.data.model.CreateOrderResponse
 import com.padguard.parent.data.model.PayChannelDto
 import com.padguard.parent.data.model.AppListPolicyDto
+import com.padguard.parent.data.model.EyeProtectionDto
 import android.graphics.Bitmap
 import com.padguard.parent.domain.model.*
 import kotlinx.coroutines.flow.Flow
@@ -346,8 +347,11 @@ interface PolicyRepository {
     /** 设置/更新时段限制 */
     suspend fun setTimeRestriction(restriction: TimeRestriction): Result<TimeRestriction>
 
-    /** 删除时段限制 */
-    suspend fun deleteTimeRestriction(restrictionId: String): Result<Unit>
+    /**
+     * 删除时段限制。
+     * @param deviceId 必传：服务端按 (deviceId, id) 校验归属，缺省会 400。
+     */
+    suspend fun deleteTimeRestriction(deviceId: String, restrictionId: String): Result<Unit>
 
     /** 设置全局每日总时长限制 */
     suspend fun setGlobalDailyLimit(deviceId: String, minutes: Int): Result<Unit>
@@ -525,6 +529,14 @@ interface PolicyRepository {
 
     /** 设置护眼参数 */
     suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit>
+
+    /**
+     * 读取设备当前护眼状态。
+     *
+     * 与 [setEyeProtection] 成对：只有写没有读时，页面只能用常量兜底，
+     * 重进页面就会把"已开启"显示成"关闭"，家长再点一次又把关闭写回服务端。
+     */
+    suspend fun getEyeProtection(deviceId: String): Result<EyeProtectionDto>
 
     // === 解锁 / 解锁申请闭环 ===
     /** 一键解锁：解除远程锁屏、时段锁与限额锁 */

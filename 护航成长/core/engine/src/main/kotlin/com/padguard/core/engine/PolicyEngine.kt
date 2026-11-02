@@ -134,6 +134,22 @@ class PolicyEngine @Inject constructor(
         applyAll(policyRepository.getPolicy(), force)
 
     /**
+     * 按策略里的「日志保留天数」清理本地已上传日志。
+     *
+     * 保留期字段（`security.logRetentionDays`）此前没有任何执行点：家长把它设成 3 天还是 180 天，
+     * 本地库都只增不减 —— 一台设备跑上一年，日志表能把存储吃掉一大截。
+     * 由周期上报任务调用即可（幂等、只删已上传记录，不会丢未上报数据）。
+     *
+     * @return 实际使用的保留天数，便于调用方写日志。
+     */
+    suspend fun purgeExpiredLogs(): Int {
+        val policy = policyRepository.getPolicy()
+        val days = securityEnforcer.effectiveRetentionDays(policy.security)
+        logRepository.purge(days)
+        return days
+    }
+
+    /**
      * 全量下发。
      *
      * @param force true = 无条件重新下发（周期自检用，用于把被用户改回去的限制重新压上）；
@@ -406,7 +422,10 @@ class PolicyEngine @Inject constructor(
         // 到期未延时即经此处挂 DAILY_LIMIT，并经 syncAutoReasons 统一管理生命周期
         // （临时解锁期内会被 LockController 自动抑制，避免家长放行被立刻锁回）。
         // dailyLimitExpired 由 GuardService 从会话管理器算出后传入，本地不依赖采样。
-        if (dailyLimitExpired) {
+        // 双保险：会话侧已按 timeControlEnabled 判过到期，这里再按策略包的 appLimit.enabled 兜一层。
+        // 存量服务端 / 缓存策略包不带该标记时，家长关掉「时间管控」后设备仍会被锁 ——
+        // 时段锁有 schedule.enabled 兜底，时长这一路此前没有，表现为"总开关关了、照样到点锁屏"。
+        if (dailyLimitExpired && policy.appLimit.enabled) {
             autoReasons[LockReason.DAILY_LIMIT] = LockDetail(
                 text = "今日使用时间已用完"
             )

@@ -10,6 +10,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.padguard.parent.domain.model.*
 import com.padguard.parent.domain.repository.*
 import com.padguard.parent.data.model.AppListPolicyDto
+import com.padguard.parent.data.model.EyeProtectionDto
 import com.padguard.parent.domain.KnownAppIcons
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
@@ -682,7 +683,7 @@ class LocalDataSource @Inject constructor(
     override suspend fun setTimeRestriction(restriction: TimeRestriction): Result<TimeRestriction> =
         Result.success(restriction)
 
-    override suspend fun deleteTimeRestriction(restrictionId: String): Result<Unit> =
+    override suspend fun deleteTimeRestriction(deviceId: String, restrictionId: String): Result<Unit> =
         Result.success(Unit)
 
     override suspend fun setGlobalDailyLimit(deviceId: String, minutes: Int): Result<Unit> =
@@ -785,6 +786,10 @@ class LocalDataSource @Inject constructor(
 
     override suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit> =
         Result.success(Unit)
+
+    // 本地演示数据源：没有真实设备状态，按未开启返回（页面用真实服务端时以 GET 结果为准）
+    override suspend fun getEyeProtection(deviceId: String): Result<EyeProtectionDto> =
+        Result.success(EyeProtectionDto(enabled = false, level = 2))
 
     override suspend fun unlock(deviceId: String): Result<Unit> =
         Result.success(Unit)

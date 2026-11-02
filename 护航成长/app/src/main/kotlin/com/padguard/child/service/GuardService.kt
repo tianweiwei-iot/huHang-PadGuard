@@ -1424,6 +1424,11 @@ class GuardService : Service() {
         // DELETE WHERE createdAt < cutoff 幂等且廉价，随上报周期跑即可。
         runCatching { unlockRequestRepository.purge(UNLOCK_REQUEST_RETENTION_DAYS) }
             .onFailure { Logger.w(TAG) { "purge unlock requests failed: $it" } }
+
+        // 日志保留天数（security.logRetentionDays）此前只下发不执行：本地库只增不减。
+        // 随上报周期跑，只删已上传记录，未上报数据不受影响。
+        runCatching { policyEngine.purgeExpiredLogs() }
+            .onFailure { Logger.w(TAG) { "purge expired logs failed: $it" } }
     }
 
     /**

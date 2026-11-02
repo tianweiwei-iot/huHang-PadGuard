@@ -319,7 +319,9 @@ private fun InstalledAppItem(
                     )
                 }
                 if (!selectionMode) {
-                    // 使用权限开关：开启=授权（孩子可正常使用）；关闭=取消授权（打开需家长密码）。
+                    // 使用权限开关：开启=授权（孩子可正常使用）；关闭=取消授权（应用从孩子端桌面隐藏）。
+                    // 语义是"隐藏"而不是"打开时要密码"——服务端走 SET_APP_HIDDEN，桌面图标直接消失；
+                    // 写成"需密码"会让家长以为应用还在，找不到时误判成被误删。
                     // 这是应用管控最核心、也最需要"能反复拨"的操作，做成显式开关而非藏进菜单。
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Switch(
@@ -327,7 +329,7 @@ private fun InstalledAppItem(
                             onCheckedChange = { onToggleAllowed() }
                         )
                         Text(
-                            if (app.allowed) "已授权" else "取消授权",
+                            if (app.allowed) "已授权" else "已隐藏",
                             style = MaterialTheme.typography.labelSmall,
                             color = if (app.allowed) PadGuardColors.SuccessGreen else PadGuardColors.WarningRed
                         )

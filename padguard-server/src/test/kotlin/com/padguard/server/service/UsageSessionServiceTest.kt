@@ -1,6 +1,7 @@
 package com.padguard.server.service
 
 import com.padguard.server.common.SERVER_ZONE_ID
+import com.padguard.server.domain.DeviceSetting
 import com.padguard.server.domain.UsageSession
 import com.padguard.server.dto.UsageSessionDto
 import com.padguard.server.repository.DeviceSettingRepository
@@ -161,6 +162,28 @@ class UsageSessionServiceTest {
         assertThat(ids.last()).isEqualTo("r20") // 保留最近写入
         // 每条不同 restId 均为首次计入，累计 = 20 * 1000ms
         assertThat(entity.restAccumulatedMs).isEqualTo(20 * 1_000L)
+    }
+
+    // ============ 时间管控总开关下发 ============
+
+    @Test
+    @DisplayName("未配置 DeviceSetting 时 timeControlEnabled 默认为 true（不能误判成已关闭）")
+    fun `timeControlEnabled defaults to true without setting`() {
+        val dto = service.get("device-1")
+        assertThat(dto.timeControlEnabled).isTrue()
+    }
+
+    @Test
+    @DisplayName("家长关闭「时间管控」后，会话 DTO 必须带 timeControlEnabled=false —— 孩子端据此不再锁屏")
+    fun `timeControlEnabled reflects disabled setting`() {
+        val setting = DeviceSetting(deviceId = "device-1").apply { timeControlEnabled = false }
+        `when`(deviceSettingRepo.findById("device-1")).thenReturn(Optional.of(setting))
+
+        val dto = service.get("device-1")
+
+        assertThat(dto.timeControlEnabled).isFalse()
+        // 计时数据本身仍照常返回：重新开启总开关时不能丢掉当日已用时长
+        assertThat(dto.active).isTrue()
     }
 }
 

@@ -348,7 +348,11 @@ class AppManageViewModel @Inject constructor(
                         apps = _uiState.value.apps.map {
                             if (it.packageName == app.packageName) it.copy(hidden = !allowed) else it
                         },
-                        toast = if (allowed) "已授权：${app.appName}" else "已取消授权：${app.appName}（打开需家长密码）"
+                        // 文案必须是"隐藏/恢复显示"而不是"打开需家长密码"：
+                        // 服务端执行的是 SET_APP_HIDDEN + 策略包隐藏名单，孩子端桌面上直接看不到该应用，
+                        // 家长按"要密码"理解就会以为应用还在、只是被拦住，找不到图标时容易误判成被误删。
+                        toast = if (allowed) "已恢复授权：${app.appName}（孩子端桌面重新显示）"
+                        else "已取消授权：${app.appName}（将从孩子端桌面隐藏，数据保留）"
                     )
                 }
                 .onFailure { e ->

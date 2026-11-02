@@ -258,7 +258,16 @@ data class UsageSessionDto(
      * 孩子端据此展示"已提交，等待家长审核"，家长端据此在计时卡片上提示"有审核中的申请"。
      * 与 [extendedMinutes] 解耦：只有被 APPROVED 的才会计入真正额度。
      */
-    val pendingDelayMinutes: Int = 0
+    val pendingDelayMinutes: Int = 0,
+    /**
+     * 家长是否开启了「时间管控」总开关。
+     *
+     * 必须单独下发而不是让两端各自去读 DeviceSetting：孩子端只有这个 DTO，
+     * 没有设备设置接口，于是关闭总开关后孩子端仍按会话 remaining 判到期并锁屏 ——
+     * 家长把总开关关掉、平板照样锁，属于"关不掉的管控"。
+     * false 时孩子端不得挂 DAILY_LIMIT，家长端应展示"时间管控已关闭"而不是倒计时。
+     */
+    val timeControlEnabled: Boolean = true
 )
 
 /** 延时申请请求：minutes 必须落在 delayOptions 内 */

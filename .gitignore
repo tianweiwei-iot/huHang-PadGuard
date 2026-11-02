@@ -63,7 +63,10 @@ _*.jpg
 # 明文 JWT 签名密钥等凭据，泄露即高危安全事件（public 仓库尤其禁止）
 config/
 # 本地 H2 数据库与运行产物，非源码
-data/
+# 必须写成 `/data/`（锚定仓库根）：裸写 `data/` 会连带匹配源码目录
+# `护航控制端/app/src/main/java/com/padguard/parent/data/`，
+# 该目录下的新增文件会被静默排除在提交之外（已跟踪文件不受影响，所以问题很隐蔽）。
+/data/
 .rectask
 padguard-server/data/
 

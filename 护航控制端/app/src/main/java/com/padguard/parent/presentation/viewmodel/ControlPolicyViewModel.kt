@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import java.util.UUID
 
 /**
  * 管控策略 ViewModel
@@ -37,6 +38,15 @@ data class ControlPolicyUiState(
     /** 孩子端实际生效的每日时长上限（未成年人模式开启时被分龄上限覆盖，可能小于 [dailyLimitMinutes]） */
     val effectiveDailyLimitMinutes: Int = 120,
     val timeRestrictions: List<TimeRestriction> = emptyList(),
+    /**
+     * 时段列表是否已从服务端读到。
+     *
+     * 空列表有两种含义："还没读到"和"确实一条都没配"。此前都渲染成空白，
+     * 家长既看不到空态提示，也找不到新增入口 —— 新设备的分时段限制等于不存在。
+     */
+    val timeRestrictionsLoaded: Boolean = false,
+    /** 时段列表读取失败的原因；与 [timeRestrictionsLoaded] 一起把"空/失败/加载中"三态分开 */
+    val timeRestrictionsError: String? = null,
     val installedApps: List<AppPolicy> = emptyList(),
     val webPolicy: WebPolicy? = null,
     val templates: List<PolicyTemplate> = emptyList(),
@@ -88,9 +98,22 @@ class ControlPolicyViewModel @Inject constructor(
             deviceRepository.getDeviceDetail(deviceId).onSuccess { device ->
                 _uiState.value = _uiState.value.copy(device = device)
             }
-            policyRepository.getTimeRestrictions(deviceId).onSuccess { list ->
-                _uiState.value = _uiState.value.copy(timeRestrictions = list)
-            }
+            policyRepository.getTimeRestrictions(deviceId)
+                .onSuccess { list ->
+                    _uiState.value = _uiState.value.copy(
+                        timeRestrictions = list,
+                        timeRestrictionsLoaded = true,
+                        timeRestrictionsError = null
+                    )
+                }
+                .onFailure { e ->
+                    // 读取失败不能渲染成"暂无时段"：家长会以为自己没配过，
+                    // 而实际是网络/服务异常，已有的时段仍在孩子端生效。
+                    _uiState.value = _uiState.value.copy(
+                        timeRestrictionsLoaded = true,
+                        timeRestrictionsError = e.message ?: "读取失败"
+                    )
+                }
             policyRepository.getInstalledApps(deviceId).onSuccess { list ->
                 _uiState.value = _uiState.value.copy(installedApps = list)
             }
@@ -102,9 +125,17 @@ class ControlPolicyViewModel @Inject constructor(
                 // 于是每次进页面都会把家长已经开启的护眼"显示"回退成关闭，
                 // 家长再点一次保存又把这个 false 写回服务端 —— 开关反复失效且无从察觉。
                 //
-                // 根治要服务端补出 GET /policies/{deviceId}/eye-protection；
-                // 在那之前先停止用常量覆盖，保留本会话内 UI 侧的真实操作结果。
+                // 服务端已补出 GET /policies/{deviceId}/eye-protection，见下方单独读取。
                 _uiState.value = _uiState.value.copy(webPolicy = wp)
+            }
+            // 护眼状态是独立字段（device_settings），必须单独读：
+            // 不读就只能用常量兜底，家长每次重进页面都会看到"已关闭"，
+            // 再点一次开关又把这个关闭写回服务端 —— 开关看起来生效、实际每次都被自己关掉。
+            policyRepository.getEyeProtection(deviceId).onSuccess { eye ->
+                _uiState.value = _uiState.value.copy(
+                    eyeProtectionEnabled = eye.enabled,
+                    eyeProtectionLevel = eye.level.coerceIn(1, 5)
+                )
             }
             // 家长端「时间管控」页设置（平板使用时间，权威来源：weekday/weekend 额度）
             val tablet = policyRepository.getTabletUsageSettings(deviceId).getOrNull()
@@ -182,6 +213,78 @@ class ControlPolicyViewModel @Inject constructor(
                 .onFailure { e -> fail("时段限制保存失败", e) }
         }
     }
+
+    /**
+     * 新增或编辑一条时段限制。
+     *
+     * 服务端 PUT 是 upsert：带 id 且命中则更新，否则新建。
+     * 保存后整表回读而不是本地拼装 —— 新建时 id 由服务端生成，
+     * 本地塞一个假 id 会让下一次编辑/删除作用不到真实记录。
+     *
+     * @return 校验失败的文案（由 UI 就地提示）；通过校验则返回 null，写操作异步进行。
+     */
+    fun saveTimeRestriction(
+        id: String?,
+        dayOfWeek: Int,
+        startTime: String,
+        endTime: String,
+        maxMinutes: Int?,
+        isEnabled: Boolean
+    ): String? {
+        val start = startTime.trim()
+        val end = endTime.trim()
+        if (!isValidClock(start) || !isValidClock(end)) return "时间格式应为 HH:mm，例如 21:30"
+        if (start == end) return "开始时间与结束时间不能相同"
+        if (maxMinutes != null && maxMinutes !in 1..1440) return "该时段限时应在 1~1440 分钟之间"
+
+        val restriction = TimeRestriction(
+            id = id ?: UUID.randomUUID().toString(),
+            deviceId = deviceId,
+            dayOfWeek = dayOfWeek,
+            startTime = start,
+            endTime = end,
+            maxMinutes = maxMinutes,
+            isEnabled = isEnabled
+        )
+        viewModelScope.launch {
+            policyRepository.setTimeRestriction(restriction)
+                .onSuccess {
+                    refreshTimeRestrictions()
+                    _uiState.value = _uiState.value.copy(
+                        toast = if (id == null) "已新增时段限制" else "已保存时段限制"
+                    )
+                }
+                .onFailure { e -> fail("时段限制保存失败", e) }
+        }
+        return null
+    }
+
+    fun deleteTimeRestriction(restrictionId: String) {
+        viewModelScope.launch {
+            // deviceId 必须一起带：服务端按 (deviceId, id) 校验归属
+            policyRepository.deleteTimeRestriction(deviceId, restrictionId)
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        timeRestrictions = _uiState.value.timeRestrictions.filterNot { it.id == restrictionId },
+                        toast = "已删除该时段限制"
+                    )
+                }
+                .onFailure { e -> fail("删除时段限制失败", e) }
+        }
+    }
+
+    private suspend fun refreshTimeRestrictions() {
+        policyRepository.getTimeRestrictions(deviceId)
+            .onSuccess { list ->
+                _uiState.value = _uiState.value.copy(
+                    timeRestrictions = list,
+                    timeRestrictionsLoaded = true,
+                    timeRestrictionsError = null
+                )
+            }
+    }
+
+    private fun isValidClock(v: String): Boolean = Regex("^([01]\\d|2[0-3]):[0-5]\\d$").matches(v)
 
     fun applyPreset(preset: FamilyPreset) {
         viewModelScope.launch {

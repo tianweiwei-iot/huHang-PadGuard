@@ -23,6 +23,18 @@ interface PolicyApi {
         @Body request: EyeProtectionRequest
     ): Response<ApiResponse<EyeProtectionDto>>
 
+    /**
+     * 读取护眼状态。
+     *
+     * 缺这个 getter 的直接后果：护眼状态存在独立的 device_settings 里，不在 getWebPolicy 的返回中，
+     * 页面只能拿常量 false 兜底 —— 家长每次重进管控页，已经开着的护眼都显示成"关闭"，
+     * 再点一下开关又把这个 false 写回服务端，开关反复失效且无从察觉。
+     */
+    @GET("policies/{deviceId}/eye-protection")
+    suspend fun getEyeProtection(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<EyeProtectionDto>>
+
     // === 使用时长 ===
     @GET("policies/{deviceId}/time-restrictions")
     suspend fun getTimeRestrictions(
@@ -35,9 +47,17 @@ interface PolicyApi {
         @Body request: TimeRestrictionDto
     ): Response<ApiResponse<TimeRestrictionDto>>
 
+    /**
+     * 删除一条时段限制。
+     *
+     * deviceId 必传：服务端按 (deviceId, id) 双条件删除，用于校验设备归属，
+     * 只带 id 会直接 400「Required request parameter 'deviceId' is not present」——
+     * 这个参数此前漏了，删除功能一旦接上 UI 就是必炸。
+     */
     @DELETE("policies/time-restrictions/{restrictionId}")
     suspend fun deleteTimeRestriction(
-        @Path("restrictionId") restrictionId: String
+        @Path("restrictionId") restrictionId: String,
+        @Query("deviceId") deviceId: String
     ): Response<ApiResponse<Unit>>
 
     /** 读取设备每日总时长上限（分钟），后端以 DeviceSetting.dailyLimitMinutes 为唯一来源 */

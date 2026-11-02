@@ -97,6 +97,10 @@ fun ControlPolicyScreen(
 
 @Composable
 private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolicyViewModel) {
+    // 编辑态必须提到 LazyColumn 之外：LazyListScope 里不能直接放可组合项（Dialog），
+    // 且条目滚出屏幕被回收时，正在编辑的草稿会一起丢掉。
+    var editing by remember { mutableStateOf<TimeRestrictionDraft?>(null) }
+    Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -178,17 +182,219 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
             }
         }
 
-        item { SectionTitle("分时段限制") }
+        // 服务端 POST/PUT/DELETE 早已齐备，而新设备没有任何种子数据 ——
+        // 原先只有列表 + 开关（无新增/编辑/删除），这块区域对绝大多数家长永远是空的，
+        // "分时段锁机"实际等于不存在。现补出完整 CRUD 入口（编辑态见函数头部）。
 
-        items(uiState.timeRestrictions) { tr ->
-            TimeRestrictionItem(
-                dayLabel = dayLabel(tr.dayOfWeek),
-                timeRange = "${TimeFormat.formatClock(tr.startTime)} - ${TimeFormat.formatClock(tr.endTime)}",
-                maxMinutes = tr.maxMinutes,
-                enabled = tr.isEnabled
-            ) { viewModel.toggleTimeRestriction(tr) }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.weight(1f)) { SectionTitle("分时段限制") }
+                TextButton(onClick = { editing = TimeRestrictionDraft() }) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("新增时段")
+                }
+            }
+        }
+
+        when {
+            // 三态：读取中 / 读取失败 / 读到（可能为空）
+            !uiState.timeRestrictionsLoaded -> item {
+                Text(
+                    "正在读取时段限制…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+                )
+            }
+            uiState.timeRestrictionsError != null -> item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "读取失败：${uiState.timeRestrictionsError}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { viewModel.load() }) { Text("重试") }
+                }
+            }
+            uiState.timeRestrictions.isEmpty() -> item {
+                SoftCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "还没有任何时段限制",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "例如「周一至周五 21:00-22:00 只能玩 30 分钟」，未添加时该时段不受额外限制。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(onClick = { editing = TimeRestrictionDraft() }) { Text("添加第一条") }
+                    }
+                }
+            }
+            else -> items(uiState.timeRestrictions) { tr ->
+                TimeRestrictionItem(
+                    dayLabel = dayLabel(tr.dayOfWeek),
+                    timeRange = "${TimeFormat.formatClock(tr.startTime)} - ${TimeFormat.formatClock(tr.endTime)}",
+                    maxMinutes = tr.maxMinutes,
+                    enabled = tr.isEnabled,
+                    onToggle = { viewModel.toggleTimeRestriction(tr) },
+                    onEdit = {
+                        editing = TimeRestrictionDraft(
+                            id = tr.id,
+                            dayOfWeek = tr.dayOfWeek,
+                            start = tr.startTime,
+                            end = tr.endTime,
+                            limitEnabled = tr.maxMinutes != null,
+                            limitMinutes = (tr.maxMinutes ?: 60).toString(),
+                            enabled = tr.isEnabled
+                        )
+                    }
+                )
+            }
         }
     }
+
+    editing?.let { draft ->
+        TimeRestrictionEditor(
+            draft = draft,
+            onDraftChange = { editing = it },
+            onDismiss = { editing = null },
+            onSave = {
+                val err = viewModel.saveTimeRestriction(
+                    id = draft.id,
+                    dayOfWeek = draft.dayOfWeek,
+                    startTime = draft.start,
+                    endTime = draft.end,
+                    maxMinutes = if (draft.limitEnabled) draft.limitMinutes.toIntOrNull() else null,
+                    isEnabled = draft.enabled
+                )
+                if (err == null) editing = null else editing = draft.copy(error = err)
+            },
+            onDelete = draft.id?.let { id ->
+                {
+                    viewModel.deleteTimeRestriction(id)
+                    editing = null
+                }
+            }
+        )
+    }
+    }
+}
+
+/** 时段编辑草稿：只在本地保存，点保存才写服务端（避免每个按键一次网络写）。 */
+private data class TimeRestrictionDraft(
+    val id: String? = null,
+    val dayOfWeek: Int = 1,
+    val start: String = "21:00",
+    val end: String = "22:00",
+    val limitEnabled: Boolean = true,
+    val limitMinutes: String = "60",
+    val enabled: Boolean = true,
+    val error: String? = null
+)
+
+@Composable
+private fun TimeRestrictionEditor(
+    draft: TimeRestrictionDraft,
+    onDraftChange: (TimeRestrictionDraft) -> Unit,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+    onDelete: (() -> Unit)?
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (draft.id == null) "新增时段限制" else "编辑时段限制") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text("重复日", style = MaterialTheme.typography.labelLarge)
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    (1..7).forEach { day ->
+                        FilterChip(
+                            selected = draft.dayOfWeek == day,
+                            onClick = { onDraftChange(draft.copy(dayOfWeek = day, error = null)) },
+                            label = { Text(dayLabel(day).removePrefix("周")) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = draft.start,
+                        onValueChange = { onDraftChange(draft.copy(start = it, error = null)) },
+                        label = { Text("开始") },
+                        placeholder = { Text("21:00") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                    OutlinedTextField(
+                        value = draft.end,
+                        onValueChange = { onDraftChange(draft.copy(end = it, error = null)) },
+                        label = { Text("结束") },
+                        placeholder = { Text("22:00") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("该时段限时", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "开启后，该时段最多可用指定分钟数；关闭则只限制在时段内使用。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                        )
+                    }
+                    Switch(
+                        checked = draft.limitEnabled,
+                        onCheckedChange = { onDraftChange(draft.copy(limitEnabled = it, error = null)) }
+                    )
+                }
+                if (draft.limitEnabled) {
+                    OutlinedTextField(
+                        value = draft.limitMinutes,
+                        onValueChange = { onDraftChange(draft.copy(limitMinutes = it.filter(Char::isDigit), error = null)) },
+                        label = { Text("分钟数（1~1440）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("启用该时段", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Switch(
+                        checked = draft.enabled,
+                        onCheckedChange = { onDraftChange(draft.copy(enabled = it, error = null)) }
+                    )
+                }
+                draft.error?.let {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onSave) { Text("保存") } },
+        dismissButton = {
+            Row {
+                onDelete?.let { del ->
+                    TextButton(onClick = del) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        }
+    )
 }
 
 @Composable
@@ -207,9 +413,11 @@ private fun TimeRestrictionItem(
     timeRange: String,
     maxMinutes: Int?,
     enabled: Boolean,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    onEdit: () -> Unit
 ) {
-    SoftCard(modifier = Modifier.fillMaxWidth()) {
+    // 整卡可点进入编辑：原先只有开关，家长想改时间/时长/星期几都无从下手。
+    SoftCard(modifier = Modifier.fillMaxWidth().clickable { onEdit() }) {
         Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(dayLabel, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
@@ -338,10 +546,10 @@ private fun WebPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolicy
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // 如实降级：上网过滤（网址黑名单 / 禁用浏览器）依赖孩子端「上网防护」VPN 通道，
-        // 该通道本版本尚未启用 —— 配置会保存到服务端，但孩子端没有任何 URL 判定通道，
-        // 不会真正拦截。不下架入口（待 VPN 通道上线即生效），但必须让家长知道当前不生效，
-        // 避免「加了黑名单以为拦住了」的虚假安全感（见 E1 上网管控 gap）。
+        // 生效前提如实说明：上网过滤走孩子端「上网防护」VPN 通道（域名级拦截）。
+        // 该通道已落地，但非设备所有者（无 DO）的机器需要孩子端完成一次系统 VPN 授权，
+        // 否则家长配了规则也不会拦 —— 必须把"为什么没生效、去哪儿补授权"讲清楚，
+        // 而不是像旧文案那样一句"本版本未启用"（通道上线后已不成立，会让家长以为功能不存在）。
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -358,16 +566,16 @@ private fun WebPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolicy
                     Spacer(modifier = Modifier.width(8.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            "上网过滤暂未生效",
+                            "上网过滤需孩子端授权后生效",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.SemiBold,
                             color = PadGuardColors.WarningRed
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            "网址黑名单、禁用浏览器需在孩子端开启「上网防护」通道（VPN）后才会真正拦截。" +
-                                "当前版本该通道尚未启用：您添加的网址会保存但不会实际拦截。" +
-                                "定时锁机、应用管控、使用时长等其余策略不受影响、照常生效。",
+                            "网址黑名单、禁用浏览器由孩子端「上网防护」通道（VPN）执行域名级拦截。" +
+                                "已部署为设备所有者的平板会自动授权；其余设备需孩子在「我的 → 权限引导 → 上网防护」完成一次系统授权，" +
+                                "未授权时这些规则不会拦截。定时锁机、应用管控、使用时长不依赖该通道，照常生效。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
                         )

@@ -8,6 +8,7 @@ import com.padguard.parent.data.model.AppListPolicyDto
 import com.padguard.parent.data.model.AppListPolicyRequest
 import com.padguard.parent.data.model.DeviceImportRequestDto
 import com.padguard.parent.data.model.DeviceImportRowDto
+import com.padguard.parent.data.model.EyeProtectionDto
 import com.padguard.parent.data.model.EyeProtectionRequest
 import com.padguard.parent.data.model.LanBindRequestDto
 import com.padguard.parent.data.model.OrderDto
@@ -842,8 +843,8 @@ class ApiDataSource @Inject constructor(
         exec { policyApi.setTimeRestriction(restriction.deviceId, restriction.toDto()) }
             .map { it.data?.toDomain() ?: throw Exception("保存时段限制失败") }
 
-    override suspend fun deleteTimeRestriction(restrictionId: String): Result<Unit> =
-        exec { policyApi.deleteTimeRestriction(restrictionId) }.map { Unit }
+    override suspend fun deleteTimeRestriction(deviceId: String, restrictionId: String): Result<Unit> =
+        exec { policyApi.deleteTimeRestriction(restrictionId, deviceId) }.map { Unit }
 
     override suspend fun setGlobalDailyLimit(deviceId: String, minutes: Int): Result<Unit> =
         exec { policyApi.setGlobalDailyLimit(deviceId, DailyLimitRequest(minutes)) }.map { Unit }
@@ -1047,6 +1048,10 @@ class ApiDataSource @Inject constructor(
 
     override suspend fun setEyeProtection(deviceId: String, enabled: Boolean, filterLevel: Int): Result<Unit> =
         exec { policyApi.setEyeProtection(deviceId, EyeProtectionRequest(enabled, filterLevel)) }.map { Unit }
+
+    override suspend fun getEyeProtection(deviceId: String): Result<EyeProtectionDto> =
+        exec { policyApi.getEyeProtection(deviceId) }
+            .map { it.data ?: throw Exception("读取护眼状态失败") }
 
     override suspend fun unlock(deviceId: String): Result<Unit> =
         execRaw { policyApi.unlock(deviceId) }
