@@ -65,6 +65,17 @@ class SystemLockEnforcer @Inject constructor(
             }
         }
 
+        // ---------- 1b. 时区篡改（与自动对时同源，但策略里是独立字段） ----------
+        // 改时区就能把「21:00 锁机」平移成「现在还没到」，是绕过时段管控最便宜的手段。
+        // 早期只处理 autoTime，`systemLock.autoTimeZone` 这个字段从来没落到系统 ——
+        // 家长把它设成 DISABLE（允许孩子改时区）也照样被自动对时的取值覆盖。
+        if (admin.can(Capability.GLOBAL_SETTINGS)) {
+            report.record(
+                "systemLock.autoTimeZone=${policy.autoTimeZone}",
+                admin.setAutoTimeZoneEnforced(policy.autoTimeZone == PolicySwitch.FORCE_ON)
+            )
+        }
+
         if (!admin.can(Capability.USER_RESTRICTIONS)) {
             report.markUnsupported("systemLock.*", "需要 Device Owner / Profile Owner，系统设置锁定整体不可用")
             return report

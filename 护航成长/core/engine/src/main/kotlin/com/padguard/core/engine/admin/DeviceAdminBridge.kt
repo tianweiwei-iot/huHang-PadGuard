@@ -486,6 +486,34 @@ class DeviceAdminBridge @Inject constructor(
         }
     }
 
+    /**
+     * 自动时区开关（独立于自动对时）。
+     *
+     * ## 为什么单独一个方法
+     * [setAutoTimeEnforced] 会把「自动对时」与「自动时区」一起设置，但策略包里这两项是
+     * **两个独立字段**（`systemLock.autoTime` / `systemLock.autoTimeZone`）。若只调前者，
+     * 家长把「允许孩子改时区」关掉或打开时都会被自动对时的取值覆盖 —— 配置被静默忽略。
+     *
+     * 安全性上时区同样关键：改时区可以把"21:00 该锁机"平移成"现在还没到"，
+     * 是绕过时段管控最低成本的手段之一，因此默认 FORCE_ON。
+     */
+    fun setAutoTimeZoneEnforced(enforced: Boolean): OpResult = guarded("setAutoTimeZone=$enforced") {
+        val admin = requireAdmin()
+        require(can(Capability.GLOBAL_SETTINGS)) { "requires Device Owner" }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            dpm.setAutoTimeZoneEnabled(admin, enforced)
+        } else {
+            dpm.setGlobalSetting(
+                admin,
+                android.provider.Settings.Global.AUTO_TIME_ZONE,
+                if (enforced) "1" else "0"
+            )
+        }
+        // 关闭自动时区时必须同时解除"禁止手改日期时间"里针对时区的那一半是做不到的
+        // （该用户限制是日期/时间/时区共用的），故仅在强制时补限制，放开时不动它，
+        // 由 autoTime 分支统一决定日期时间限制的增删。
+    }
+
     fun setGlobalSetting(key: String, value: String): OpResult = guarded("globalSetting:$key=$value") {
         val admin = requireAdmin()
         require(can(Capability.GLOBAL_SETTINGS)) { "requires Device Owner" }
