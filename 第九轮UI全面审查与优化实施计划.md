@@ -136,6 +136,30 @@ Manifest 未注册 `WebGuardVpnService`、`WebGuardVpnController.start()` 零调
 
 **仍未覆盖（如实声明）**：仅域名级拦截，URL 路径 / 页面正文 / 关键词看不到（无 MITM）；DoH/DoT 可绕过；VPN 通道必须真机验证。
 
+### 7.2 同批次的其余修复
+
+| 端 | 问题 | 改动 |
+|---|---|---|
+| 家长端 | 首页把"加载中/加载失败"都渲染成「还没有绑定的孩子设备」 | `HomeUiState.hasLoadedOnce` + 三态渲染（加载中 / 失败可重试 / 真空态）；非空列表刷新失败改挂窄提示"显示上次数据" |
+| 家长端 | `UnlockRequestCard` 从未被调用（解锁已改根层全局弹窗），`pendingUnlockTicket` 每次刷新白打一次接口 | 删除组件 + 传参 + VM 的 ticket 加载/忽略逻辑 |
+| 孩子端 | `ProtectionLevelCard` 硬编码浅绿/浅黄底，深色模式下是"发光"浅卡 | 改 `primaryContainer` / `errorContainer` |
+| 引擎 | `systemLock.autoTimeZone` 无执行点（被 autoTime 取值覆盖） | 新增 `setAutoTimeZoneEnforced()` 并在 `SystemLockEnforcer` 单独对齐 |
+
 ## 八、后续（仍未开始）
 
-sceneMode / Kiosk `isAllowed` / autoTimeZone / screenshotIntervalSec 执行点、家长端首页与订阅页三态、解锁工单死代码清理、孩子端深色（Profile 等级卡浅底、Unlock 状态色）、后台 rbac/审计竞态与剩余转义、i18n、God class 拆分。
+### sceneMode 的现状（核实结论，不做臆测实现）
+
+`sceneMode`（NORMAL / LEARNING / FOCUS）由家长端切换、服务端 `applyMode` 落库并随策略下发，
+但**两端都没有派生任何管控动作**：服务端只改字符串，孩子端把它原样反序列化后再没人读。
+也就是说「正常 / 学习 / 专注」三个 chip 目前是纯装饰。
+
+不本轮硬做的原因：孩子端没有任何"应用分类"数据源，LEARNING 无法确定性判定"哪些算学习应用"；
+FOCUS 若拍成"仅白名单可开"，在家长未配白名单时会直接变成开不了任何应用（变砖风险）。
+这属于产品语义决策，不适合由实现方替产品拍板。**建议**在服务端把 sceneMode 派生为具体策略
+（FOCUS → app.mode=WHITELIST 且名单非空才生效；LEARNING → 提高时长/屏蔽娱乐分类），
+再让孩子端只做执行，避免两端各自解释。
+
+### 其余待办
+
+Kiosk `isAllowed` 死函数（`KioskEnforcer.isAllowed` 无调用点，非 DO 下 Kiosk 仅上报 UNSUPPORTED）、
+家长端订阅页之外的列表三态、孩子端 UnlockRequest 状态色（深色下对比度）、后台 rbac/审计竞态与剩余转义、i18n、God class 拆分。
