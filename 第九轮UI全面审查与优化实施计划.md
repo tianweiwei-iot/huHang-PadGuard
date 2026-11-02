@@ -163,3 +163,53 @@ FOCUS 若拍成"仅白名单可开"，在家长未配白名单时会直接变成
 
 Kiosk `isAllowed` 死函数（`KioskEnforcer.isAllowed` 无调用点，非 DO 下 Kiosk 仅上报 UNSUPPORTED）、
 家长端订阅页之外的列表三态、孩子端 UnlockRequest 状态色（深色下对比度）、后台 rbac/审计竞态与剩余转义、i18n、God class 拆分。
+
+## 九、第三批（2026-11-02 深夜）：剩余 P2 清理
+
+本轮只做「不改产品语义、可静态验证」的项；需要真机或需要产品拍板的仍然留空并注明原因。
+
+### 9.1 孩子端
+
+| 问题 | 改动 | 为什么值得修 |
+|---|---|---|
+| `EnforceReport.unsupported` 从不上行（家长看不到"本机不支持"） | 新增 `RiskType.POLICY_DEGRADED` + `PolicyEngine.applyAll` 在 `hasDegradation` 时 `raiseOnce`；服务端 `EVENT_TITLES` 补映射；级别用 **INFO** 不用 WARNING | 报告里"降级"只进本地日志，家长只能看到"已下发/在线"。但降级不能与失败同级：无 DO 的存量机天天一条 WARNING，会让真正的 HIGH（锁屏失效/权限被撤销）一起被无视。去重键用「降级项签名」而非策略版本，否则家长每改一次策略就重报一次 |
+| 霸屏倒计时按**总时长**数，不按截止时刻 | `MessageActivity` 增 `deadlineMs` 状态，`beginSession`/`extendSession`/`onNewIntent` 同步；`BlockingFooter` 改按墙钟截止时刻计算 | re-arm 与进程重建复用同一会话，`beginSession` 返回的是剩余时间；音视频延长后差距更大（显示 30 秒、实际 3 分钟）。显示与真实关闭时机必须同源 |
+| 消息页首帧闪「没有新消息」 | `MessageListUiState.loaded`；未读完显示 `CircularProgressIndicator` | 空列表有两种含义（还没读到 / 确实没有），此前都渲染成空态 |
+| 我的页首帧闪「未绑定 + 软管控（可被卸载）」 | `ProfileUiState.loaded`；`ProtectionLevelCard` 未读完时给中性「正在检测…」，`SoftControlRiskBanner` 加 `loaded` 前置 | DO 设备冷启动会先红一下再翻牌成硬管控，属于吓人的误报 |
+| 解锁申请状态色在浅色主题下对比度不足 | `StatusPill` 改 `tertiary/primary/error/onSurfaceVariant` + 12% 同色底胶囊 | 原写死 Amber300/Green400/Red300/Gray500 是"为深色背景调的亮色"，浅色卡片上仅 2.5~2.8:1 |
+| 授权页 `DONE`/`NEED_MANUAL` 写死 green800/amber800 | 改 `primary` / `tertiary` | green800 在深色主题上几乎与背景同深浅 |
+| `screenshotIntervalSec` 配了完全没执行 | `MonitoringEnforcer` 在 `screenshot > 0` 时 `markUnsupported` | 本端确实没有周期截屏执行器（只有家长主动"看屏"），静默空转比如实告知更糟 |
+| `collectUrlHistory` 零执行 | 仅补文档（`PolicyModels`）：本端无 `URL_VISIT` 生产者，且家长端没有"上网记录"页面 | 默认值 true，若据此报降级会给每台设备刷无用告警；当前不存在"界面有、数据无"的欺骗性展示，故不伪造 |
+| Kiosk 白名单在非 DO 机型无任何应用层兜底 | `KioskRuntime.userAppCount` + `PolicyEngine.decideKioskBlock`（纯函数）+ `tick` 接入；新增 6 条单测 | 非 DO 时 LockTask 与常驻桌面都不可用，Kiosk 只剩一句"已开启"。三个前置条件锁死防变砖：未开启 / 非降级态 / 白名单 0 个应用 → 一律不拦 |
+
+### 9.2 管理后台
+
+| 问题 | 改动 |
+|---|---|
+| 服务端监控页字段未转义、可选数组直接取 `.length` | `server.js`：`num()` 归一化 + `instances/qpmHistory/logs` 做 `Array.isArray` 兜底 + 等待失败时给「加载失败/重试」 |
+| 设置页数值输入静默吞 0 | `settings.js`：套餐价 `parseInt(v) || 0` → 显式整数域校验（0~1e8），试用期 `|| 14` → 0~365 校验（**填 0 不再被悄悄改成 14**） |
+| 设置页 `plans`/`features` 缺失即 TypeError | `settings.js`：数组兜底 + 空态行 + 转义 |
+| 审计页筛选竞态 | `audit.js`：`draw(area)` 加 `seq` 序号，慢响应不覆盖新筛选 |
+| RBAC 页三 tab 空白无解释 | `rbac.js`：schema/roles/privileges 归一化；`show()` try/catch + 重试；管理员列表改 `await`（此前异常成为未捕获 rejection） |
+
+### 9.3 家长端
+
+| 问题 | 改动 |
+|---|---|
+| 设备详情加载失败时只剩半张空页 | `DeviceDetailScreen`：非 loading 且 `device == null` → 「加载失败 + 原因 + 重试」 |
+| 订阅页首屏失败只有一条 Snackbar，页面剩「选择套餐」标题 + 空白 | `SubscriptionUiState.firstLoadFailed`（订阅与套餐**双双**失败才置位）+ 整页错误态与重试 |
+| `usesCleartextTraffic=true` 无任何说明 | Manifest 补注释（与孩子端同口径：局域网部署必须允许明文；公网走 Nginx TLS），避免后续被"顺手修"成连不上 |
+
+### 9.4 本轮明确不做
+
+- **sceneMode 派生**：属产品语义（LEARNING 无分类数据源、FOCUS 空名单会变砖），需服务端先行派生，客户端只做执行。
+- **周期截屏执行器**：涉及 MediaProjection 常驻与隐私成本，需独立授权与真机验证。
+- **`collectUrlHistory` 采集器**：无障碍读地址栏极脆弱，且家长端无消费页面。
+- **i18n / God class 拆分**：结构性改造，与 UI 缺陷不同批次。
+
+### 9.5 验证
+
+- 孩子端：`:core:engine:testDebugUnitTest` 通过（含新增 `PolicyEngineKioskBlockTest` 6 例）、`:app:compileDebugKotlin` BUILD SUCCESSFUL
+- 家长端：`:app:compileDebugKotlin` BUILD SUCCESSFUL
+- 管理后台：11 个 JS 文件 `node --check` 全通过
+- 服务端：`testDirect` 全量回归

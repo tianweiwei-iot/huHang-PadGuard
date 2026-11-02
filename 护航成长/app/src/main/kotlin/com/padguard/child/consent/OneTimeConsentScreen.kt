@@ -253,7 +253,9 @@ private fun ConsentRow(item: ConsentItem, currentKey: String? = null) {
                         item.state == ConsentItem.State.SKIPPED ->
                             MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
                         waiting -> MaterialTheme.colorScheme.primary
-                        else -> Color(0xFFF9A825)
+                        // 走 tertiary 而不是写死 amber800：amber800 在深色主题上对比度不足，
+                        // 且主题换肤后完全跟不上
+                        else -> MaterialTheme.colorScheme.tertiary
                     }
                 )
             }
@@ -264,9 +266,10 @@ private fun ConsentRow(item: ConsentItem, currentKey: String? = null) {
 @Composable
 private fun indicatorFor(state: ConsentItem.State): Pair<Color, androidx.compose.ui.graphics.vector.ImageVector> =
     when (state) {
-        ConsentItem.State.DONE -> Color(0xFF2E7D32) to Icons.Filled.CheckCircle
+        // DONE 用 primary 而不是写死 green800：后者在深色主题上几乎与背景同深浅
+        ConsentItem.State.DONE -> MaterialTheme.colorScheme.primary to Icons.Filled.CheckCircle
         ConsentItem.State.RUNNING -> MaterialTheme.colorScheme.primary to Icons.Filled.RadioButtonUnchecked
-        ConsentItem.State.NEED_MANUAL -> Color(0xFFF9A825) to Icons.Filled.RadioButtonUnchecked
+        ConsentItem.State.NEED_MANUAL -> MaterialTheme.colorScheme.tertiary to Icons.Filled.RadioButtonUnchecked
         ConsentItem.State.SKIPPED ->
             MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f) to Icons.Filled.RadioButtonUnchecked
         ConsentItem.State.PENDING ->

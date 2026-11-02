@@ -12,6 +12,13 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
+    <!--
+      明文传输开关保持 true —— 与孩子端同一决策，不是遗漏：
+      家庭/校园局域网部署时服务端跑在内网（http + tcp），关掉会让家长端直接连不上；
+      公网部署由 Nginx 终止 TLS，填 https:// 域名即走加密，本开关不影响其安全性。
+      唯一的风险是"用户误把公网地址写成 http://"，那属于配置错误而非本开关造成。
+      若将来只支持云部署，可改为 networkSecurityConfig 按域名白名单放开。
+    -->
     <application
         android:name=".PadGuardApplication"
         android:allowBackup="false"

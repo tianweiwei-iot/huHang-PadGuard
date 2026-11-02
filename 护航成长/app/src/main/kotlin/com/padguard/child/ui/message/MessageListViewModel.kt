@@ -32,6 +32,9 @@ class MessageListViewModel @Inject constructor(
             messageRepository.observeAll()
                 .map { items ->
                     MessageListUiState(
+                        // 首次发射即视为完成首轮读取：数据库空表是真的"没有消息"，
+                        // 而默认构造出的空列表只是"还没读到"，两者不能都渲染成"暂无消息"
+                        loaded = true,
                         messages = items.map { entity ->
                             MessageItemUi(
                                 id = entity.serverMsgId,
@@ -63,6 +66,8 @@ class MessageListViewModel @Inject constructor(
 }
 
 data class MessageListUiState(
+    /** 是否已完成首轮读取；false 时列表为空只代表"还没读到"，不能显示"暂无消息" */
+    val loaded: Boolean = false,
     val messages: List<MessageItemUi> = emptyList()
 )
 

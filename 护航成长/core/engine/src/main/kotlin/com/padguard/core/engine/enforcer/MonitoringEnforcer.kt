@@ -73,6 +73,15 @@ class MonitoringEnforcer @Inject constructor() {
                 "请求 ${policy.locationIntervalSec}s 超出允许区间，实际按 ${location}s 执行"
             )
         }
+        // 周期截屏在本端**没有执行器**：截屏只在家长主动「实时看屏」时经 MediaProjection 进行。
+        // 家长把间隔配成 600s 后，界面上看不出任何区别——这正是"配了没生效"的典型。
+        // 如实记一条降级（随后由 PolicyEngine 上报 POLICY_DEGRADED），比静默空转诚实。
+        if (screenshot > 0) {
+            report.markUnsupported(
+                "monitor.screenshot",
+                "本端未实现周期自动截屏，家长可在「实时看屏」按需查看"
+            )
+        }
 
         runtime = MonitoringRuntime(
             heartbeatIntervalSec = heartbeat,

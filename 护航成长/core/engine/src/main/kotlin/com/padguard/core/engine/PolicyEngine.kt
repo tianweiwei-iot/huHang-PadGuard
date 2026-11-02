@@ -184,6 +184,31 @@ class PolicyEngine @Inject constructor(
                 )
             }
 
+            // 能力性降级也必须让家长看见。
+            // 去重键按"降级项签名"而不是策略版本：家长每改一次策略版本号就 +1，
+            // 按版本去重会让同一批"本机做不到"的项每天反复弹告警；
+            // 反过来只要降级集合没变，同一天内只报一次。
+            //
+            // 级别用 INFO 而不是 NORMAL：降级是"这台机器本来就这样"，不是故障。
+            // 用 WARNING 会让没有 DO 的存量设备天天占一条告警，家长很快学会无视告警 ——
+            // 那时真正的 HIGH（锁屏失效 / 权限被撤销）也会被一起无视。
+            if (report.hasDegradation) {
+                val signature = report.unsupported
+                    .map { it.substringBefore(':') }
+                    .sorted()
+                    .joinToString(",")
+                raiseOnce(
+                    key = "degraded:${signature.hashCode()}",
+                    type = RiskType.POLICY_DEGRADED,
+                    level = RiskLevel.INFO,
+                    detail = mapOf(
+                        "version" to policy.version.toString(),
+                        "unsupportedCount" to report.unsupported.size.toString(),
+                        "unsupported" to report.unsupported.joinToString("; ").take(MAX_DETAIL_CHARS)
+                    )
+                )
+            }
+
             Logger.i(TAG) { "policy v${policy.version} applied: ${report.summary()}" }
             report
         }
@@ -341,6 +366,24 @@ class PolicyEngine @Inject constructor(
                         "mode" to policy.app.mode.name
                     )
                 )
+            }
+        }
+
+        // ---------- 2.6 Kiosk 降级态的应用层兜底 ----------
+        // 无 Device Owner 时 LockTask 与常驻桌面都不可用，Kiosk 只剩一句"已开启"的空话：
+        // 家长配了白名单，孩子照样能开任何应用。这里在采样点做最后一道拦截，
+        // 让"纯净桌面"在非 DO 机型上至少是"能拦住"而不是"完全没作用"。
+        if (foregroundPackage != null && blockedPackage == null) {
+            val kioskRuntimes = kioskEnforcer.runtime()
+            if (decideKioskBlock(
+                    foregroundPackage = foregroundPackage,
+                    kiosk = kioskRuntimes,
+                    tempUnlocked = lockController.isTempUnlockActive(foregroundPackage)
+                )
+            ) {
+                blockedPackage = foregroundPackage
+                silentClose = false
+                blockedReason = "当前为纯净桌面模式，仅可使用家长允许的应用"
             }
         }
 
@@ -505,6 +548,28 @@ class PolicyEngine @Inject constructor(
         private const val TAG = "PolicyEngine"
         private const val NOT_APPLIED = -1
         private const val MAX_DETAIL_CHARS = 500
+
+        /**
+         * Kiosk 降级态下的前台拦截判定（纯函数，便于 JVM 单测）。
+         *
+         * 三个前提缺一不可，每一个都对应一种"拦了会出事"的场景：
+         * 1. `enabled`：家长没开 Kiosk 就不能拦；
+         * 2. `degraded`：DO 机型由 LockTask 真锁定，应用层再拦属于重复且会误伤
+         *    （例如系统桌面切换的瞬间）；
+         * 3. `userAppCount > 0`：白名单没配任何应用时若照拦，设备只剩桌面 → 变砖。
+         *    [com.padguard.core.engine.enforcer.KioskRuntime.allowedPackages] 恒含 self/桌面/必备包，
+         *    不能拿它判空。
+         */
+        internal fun decideKioskBlock(
+            foregroundPackage: String,
+            kiosk: com.padguard.core.engine.enforcer.KioskRuntime,
+            tempUnlocked: Boolean
+        ): Boolean {
+            if (!kiosk.enabled || !kiosk.degraded) return false
+            if (kiosk.userAppCount <= 0) return false
+            if (tempUnlocked) return false
+            return foregroundPackage !in kiosk.allowedPackages
+        }
 
         /**
          * 黑名单前台拦截判定（纯函数，便于 JVM 单测）。

@@ -90,6 +90,7 @@ class ProfileViewModel @Inject constructor(
                 val adminState = detectAdminState()
                 val appPolicy = policy.app
                 ProfileUiState(
+                    loaded = true,
                     studentName = name,
                     childNickname = nickname,
                     childAvatar = avatar,
@@ -319,6 +320,14 @@ class ProfileViewModel @Inject constructor(
 }
 
 data class ProfileUiState(
+    /**
+     * 是否已完成首轮真实状态读取。
+     *
+     * 默认值里的 `isBound=false` / `adminState=NONE` 是"还没读到"，不是"确实没有"。
+     * 缺这个标志时首帧会先渲染「未绑定 + 软管控 + 可被卸载」的红色告警，
+     * 几十毫秒后才跳成「已绑定 + 设备所有者硬管控」——家长看到的是一次吓人的误报闪动。
+     */
+    val loaded: Boolean = false,
     val studentName: String = "",
     val childNickname: String = "",
     val childAvatar: String = "",

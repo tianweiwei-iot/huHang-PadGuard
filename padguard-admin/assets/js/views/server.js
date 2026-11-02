@@ -9,31 +9,57 @@
       <div id="s-body"><div class="empty">加载中…</div></div>`,
     mount: async (root) => {
       root.querySelector("#s-refresh").onclick = () => PG.views.server.mount(root);
-      const s = await PG.api.serverMetrics();
+      let s;
+      try {
+        s = await PG.api.serverMetrics();
+      } catch (e) {
+        // 探针失败必须给出口：此前异常直接冒泡，页面永久停在"加载中…"
+        root.querySelector("#s-body").innerHTML =
+          '<div class="empty">监控数据加载失败：' + U.esc((e && e.message) || "服务端未响应") +
+          '<div style="margin-top:12px"><button class="btn" id="s-retry">重试</button></div></div>';
+        const rt = root.querySelector("#s-retry");
+        if (rt) rt.onclick = () => PG.views.server.mount(root);
+        return;
+      }
+      if (!s || typeof s !== "object") s = {};
+      // 指标字段可能缺失或为字符串（老版本服务端 / 探针降级），一律先归一化成有限数字。
+      // 此前直接拼进 innerHTML 与 style 宽度：字符串 "80%" 会让进度条失效，
+      // 非数字则显示 NaN%；同时这也是 innerHTML 注入面（值进了属性上下文）。
+      const num = (v, d = 0) => {
+        const n = typeof v === "number" ? v : Number(v);
+        return Number.isFinite(n) ? n : d;
+      };
       const up = (s.status === "UP");
+      const instances = Array.isArray(s.instances) ? s.instances : [];
+      const qpmHistory = Array.isArray(s.qpmHistory) ? s.qpmHistory : [];
+      const logs = Array.isArray(s.logs) ? s.logs : [];
+      const heapMax = num(s.jvmHeapMaxMb);
+      const heapUsed = num(s.jvmHeapUsedMb);
       // 第八轮 P2：jvmHeapMaxMb 为 0/缺失时（虚拟机未设上限）除零得 NaN，页面显示 "NaN%"
-      const heapPct = s.jvmHeapMaxMb > 0 ? Math.round(s.jvmHeapUsedMb / s.jvmHeapMaxMb * 100) : 0;
-      const uptimeH = Math.round(s.uptimeMs / 3600000);
+      const heapPct = heapMax > 0 ? Math.round(heapUsed / heapMax * 100) : 0;
+      const uptimeH = Math.round(num(s.uptimeMs) / 3600000);
+      const errorRate = num(s.errorRate);
+      const qpm = num(s.requestsPerMin);
       root.querySelector("#s-body").innerHTML = `
       <div class="grid grid-4">
         ${kpi("状态", up ? "运行正常" : "异常", '<span class="dot ' + (up ? "green" : "red") + '"></span>', "DB " + U.esc(s.db), up ? "up" : "down")}
         ${kpi("运行时长", uptimeH + " h", "自 " + U.esc(s.startedAt), "up", "")}
-        ${kpi("堆内存", s.jvmHeapUsedMb + "MB", "上限 " + s.jvmHeapMaxMb + "MB", "up", "")}
-        ${kpi("每分钟请求", s.requestsPerMin, "错误率 " + U.esc(s.errorRate) + "% · 平均响应 " + (s.avgLatencyMs || 0) + "ms", "up", U.sparkline(s.qpmHistory || []))}
+        ${kpi("堆内存", heapUsed + "MB", "上限 " + heapMax + "MB", "up", "")}
+        ${kpi("每分钟请求", qpm, "错误率 " + errorRate + "% · 平均响应 " + num(s.avgLatencyMs) + "ms", "up", U.sparkline(qpmHistory))}
       </div>
 
       <div class="grid grid-2" style="margin-top:16px">
         <div class="card">
-          <div class="card-head"><h3>实例状态</h3><span class="sub">${s.instances.length} 个节点</span></div>
-          ${s.instances.map(i => `<div class="stat-line"><span><span class="dot ${i.status === "UP" ? "green" : "red"}"></span> ${U.esc(i.name)}</span><span>${U.esc(i.host)} · 堆内存 ${U.esc(i.mem)}</span></div>`).join("")}
+          <div class="card-head"><h3>实例状态</h3><span class="sub">${instances.length} 个节点</span></div>
+          ${instances.length ? instances.map(i => `<div class="stat-line"><span><span class="dot ${i && i.status === "UP" ? "green" : "red"}"></span> ${U.esc(i && i.name)}</span><span>${U.esc(i && i.host)} · 堆内存 ${U.esc(i && i.mem)}</span></div>`).join("") : '<div class="muted">暂无节点信息（单机部署时由本进程自报）</div>'}
           <div class="stat-line"><span>数据库连接</span><span>${U.esc(s.dbConnections)}</span></div>
           <div class="stat-line"><span>活跃线程</span><span>${U.esc(s.threads)}</span></div>
         </div>
         <div class="card">
           <div class="card-head"><h3>资源占用</h3></div>
           <div style="margin-bottom:14px"><div class="between" style="font-size:12px;margin-bottom:6px"><span>JVM 堆内存</span><span>${heapPct}%</span></div><div class="progress"><i style="width:${heapPct}%"></i></div></div>
-          <div style="margin-bottom:14px"><div class="between" style="font-size:12px;margin-bottom:6px"><span>错误率</span><span>${s.errorRate}%</span></div><div class="progress"><i style="width:${Math.min(100, s.errorRate * 20)}%"></i></div></div>
-          <div><div class="between" style="font-size:12px;margin-bottom:6px"><span>每分钟请求峰值</span><span>${s.requestsPerMin}</span></div><div class="progress"><i style="width:${Math.min(100, s.requestsPerMin / 6)}%"></i></div></div>
+          <div style="margin-bottom:14px"><div class="between" style="font-size:12px;margin-bottom:6px"><span>错误率</span><span>${errorRate}%</span></div><div class="progress"><i style="width:${Math.min(100, errorRate * 20)}%"></i></div></div>
+          <div><div class="between" style="font-size:12px;margin-bottom:6px"><span>每分钟请求峰值</span><span>${qpm}</span></div><div class="progress"><i style="width:${Math.min(100, qpm / 6)}%"></i></div></div>
           <div class="row" style="margin-top:16px;gap:10px">
             <button class="btn btn-ghost" id="s-logs">↻ 刷新日志</button>
           </div>
@@ -45,9 +71,9 @@
       </div>
 
       <div class="card" style="margin-top:16px">
-        <div class="card-head"><h3>实时日志</h3><span class="sub" id="s-logcount">最近 ${s.logs.length} 条</span></div>
+        <div class="card-head"><h3>实时日志</h3><span class="sub" id="s-logcount">最近 ${logs.length} 条</span></div>
         <div id="s-logbox" style="font-family:monospace;font-size:12.5px;background:var(--bg-2);border-radius:10px;padding:12px 14px;max-height:240px;overflow:auto">
-          ${renderLogs(s.logs)}
+          ${renderLogs(logs)}
         </div>
       </div>`;
       // 拉取服务端进程内环形缓冲的真实日志（WARN/ERROR + 本服务 INFO 业务事件）

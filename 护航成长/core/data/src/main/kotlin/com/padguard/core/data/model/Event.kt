@@ -94,6 +94,21 @@ enum class RiskType {
     TIME_LIMIT_EXCEEDED,
     PERMISSION_REVOKED,
     POLICY_APPLY_FAILED,
+
+    /**
+     * 部分管控项因**本机能力不足**未能生效（预期内降级，非故障）。
+     *
+     * 与 [POLICY_APPLY_FAILED] 的区别必须分清，否则家长会被误导：
+     * - `POLICY_APPLY_FAILED` = 该做的没做成（权限被拒、ROM 异常），需要排查；
+     * - `POLICY_DEGRADED` = 这台机器本来就做不到（无设备所有者 → 不能隐藏/挂起应用、
+     *   不能锁死设置；系统版本低 → 无对应 API）。策略本身没问题，换台机器就能生效。
+     *
+     * 为什么必须上行：`EnforceReport.unsupported` 此前只在本地日志里打一行，
+     * 家长看到的是"策略已下发、设备在线"，实际有若干项一条都没执行，
+     * 于是反复投诉"我明明禁了应用，孩子照样能开"而无从判断原因。
+     * payload 约定：{ version, unsupportedCount, unsupported }
+     */
+    POLICY_DEGRADED,
     INVALID_SIGNATURE,
     HEARTBEAT_TIMEOUT,
 

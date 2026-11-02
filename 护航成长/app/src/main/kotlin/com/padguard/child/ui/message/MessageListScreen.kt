@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -65,7 +66,10 @@ private fun MessageListContent(
                 .systemBarsPadding()
         ) {
             Header(title = "消息", subtitle = subtitleFor(state.messages.size))
-            if (state.messages.isEmpty()) {
+            if (!state.loaded) {
+                // 首帧尚未读到：显示加载中，避免闪一下"暂无消息"再跳成列表
+                LoadingState()
+            } else if (state.messages.isEmpty()) {
                 EmptyState()
             } else {
                 LazyColumn(
@@ -161,6 +165,18 @@ private fun EmptyState() {
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
             )
         }
+    }
+}
+
+@Composable
+private fun LoadingState() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        CircularProgressIndicator(strokeWidth = 2.dp)
     }
 }
 

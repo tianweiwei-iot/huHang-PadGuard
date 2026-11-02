@@ -113,6 +113,37 @@ fun SubscriptionScreen(
                 return@Scaffold
             }
 
+            // 订阅与套餐双双失败：整页错误态 + 重试。
+            // 否则页面只剩"选择套餐"标题与空白区域，家长会以为"这账号就没有套餐可选"。
+            if (state.firstLoadFailed) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "订阅信息加载失败",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "请检查网络后重试。若持续失败，可联系客服查询账号订阅状态。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { viewModel.refresh() }) { Text("重试") }
+                }
+                return@Scaffold
+            }
+
             state.subscription?.let { StatusCard(it) }
 
             Text(

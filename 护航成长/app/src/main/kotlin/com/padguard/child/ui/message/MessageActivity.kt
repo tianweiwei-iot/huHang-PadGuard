@@ -43,6 +43,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -117,6 +118,17 @@ class MessageActivity : ComponentActivity() {
      */
     private val contentRevision = mutableIntStateOf(0)
 
+    /**
+     * 霸屏截止时刻（墙钟毫秒，0 表示不自动关闭）。
+     *
+     * 为什么要单独持有它而不是让倒计时从 [durationSec] 往下数：
+     * re-arm（被系统弹窗打断后重新拉起）与进程重建都复用同一会话，`beginSession` 返回的是
+     * **剩余**时间。此前脚注仍按总时长从头发数，于是出现"屏幕显示还要 60 秒、实际 20 秒就关了"
+     * （音视频延长后更明显：显示 30 秒倒计时，实际又续到 3 分钟）。
+     * 统一按截止时刻算，显示与真实关闭时机必然一致。
+     */
+    private val deadlineMs = mutableLongStateOf(0L)
+
     /** 霸屏返回键拦截：常驻注册、按 blocking 启停，便于新消息到达时切换 */
     private val blockBackCallback = object : OnBackPressedCallback(false) {
         override fun handleOnBackPressed() {
@@ -135,6 +147,7 @@ class MessageActivity : ComponentActivity() {
         // 否则只要来一个系统弹窗，霸屏就永远数不完（实测踩过）。
         val remainMs = beginSession(sessionKey(), durationSec)
         armClose(remainMs)
+        deadlineMs.longValue = if (remainMs > 0) System.currentTimeMillis() + remainMs else 0L
 
         // 霸屏期间拦截返回键
         blockBackCallback.isEnabled = blocking
@@ -149,6 +162,7 @@ class MessageActivity : ComponentActivity() {
                     body = bodyText,
                     blocking = blocking,
                     durationSec = durationSec,
+                    deadlineMs = deadlineMs.longValue,
                     contentType = contentType,
                 mediaUrl = mediaUrl,
                 mediaName = mediaName,
@@ -191,7 +205,9 @@ class MessageActivity : ComponentActivity() {
         applyIntent(intent)
         // 新消息 = 新会话：旧消息的截止时间必须作废，否则 B 会被 A 的剩余时间提前关掉
         endSession()
-        armClose(beginSession(sessionKey(), durationSec))
+        val remainMs = beginSession(sessionKey(), durationSec)
+        armClose(remainMs)
+        deadlineMs.longValue = if (remainMs > 0) System.currentTimeMillis() + remainMs else 0L
         blockBackCallback.isEnabled = blocking
         if (blocking) LockTaskSupport.start(this) else LockTaskSupport.stop(this)
         contentRevision.intValue = contentRevision.intValue + 1
@@ -280,6 +296,8 @@ class MessageActivity : ComponentActivity() {
         if (mediaRemain > currentRemain) {
             deadlineAt = now + mediaRemain
             armClose(mediaRemain)
+            // 倒计时脚注同步骤到新截止时刻，否则画面还在数原来的秒数、实际已被延长
+            deadlineMs.longValue = deadlineAt
         }
     }
 
@@ -496,6 +514,7 @@ private fun MessageContent(
     body: String,
     blocking: Boolean,
     durationSec: Int,
+    deadlineMs: Long,
     contentType: String,
     mediaUrl: String,
     mediaName: String,
@@ -642,6 +661,7 @@ private fun MessageContent(
                 // 霸屏：不给任何按钮，只倒计时，到点自动关闭
                 BlockingFooter(
                     durationSec = durationSec,
+                    deadlineMs = deadlineMs,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 40.dp)
@@ -688,7 +708,7 @@ private fun MessageCard(
 
 /** 霸屏倒计时脚注：让"还要等多久"可见，避免孩子反复尝试操作。 */
 @Composable
-private fun BlockingFooter(durationSec: Int, modifier: Modifier = Modifier) {
+private fun BlockingFooter(durationSec: Int, deadlineMs: Long, modifier: Modifier = Modifier) {
     if (durationSec <= 0) {
         Text(
             text = "信息发布中，请稍候…",
@@ -698,11 +718,23 @@ private fun BlockingFooter(durationSec: Int, modifier: Modifier = Modifier) {
         )
         return
     }
-    var remain by remember(durationSec) { mutableIntStateOf(durationSec) }
-    LaunchedEffect(durationSec) {
-        while (remain > 0) {
+    // 以**截止时刻**为唯一基准：显示值与真正关闭的时刻同源，
+    // 中途 re-arm 或音视频延长后不会出现"数完了还没关"或"没数完就关了"。
+    var remain by remember(deadlineMs) {
+        mutableIntStateOf(
+            if (deadlineMs > 0) {
+                ((deadlineMs - System.currentTimeMillis()) / 1000L).toInt().coerceAtLeast(0)
+            } else durationSec
+        )
+    }
+    LaunchedEffect(deadlineMs) {
+        while (true) {
+            val left = if (deadlineMs > 0) {
+                ((deadlineMs - System.currentTimeMillis()) / 1000L).toInt().coerceAtLeast(0)
+            } else 0
+            remain = left
+            if (left <= 0) break
             kotlinx.coroutines.delay(1000)
-            remain--
         }
     }
     Text(

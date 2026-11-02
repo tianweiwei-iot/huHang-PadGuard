@@ -71,7 +71,14 @@
       const tabs = root.querySelectorAll(".tab");
       const load = async () => {
         const [schema, roles] = await Promise.all([PG.api.permissionSchema(), PG.api.listRoles()]);
-        SCHEMA = schema; ROLES = roles;
+        // 归一化：areas / roles / privileges 任一缺失都会让后面的 .map / Object.keys 抛
+        // TypeError，表现为三个 tab 全空白且没有任何说明
+        SCHEMA = (schema && typeof schema === "object")
+          ? { areas: Array.isArray(schema.areas) ? schema.areas : [], lockedRoles: Array.isArray(schema.lockedRoles) ? schema.lockedRoles : [] }
+          : { areas: [], lockedRoles: [] };
+        ROLES = (Array.isArray(roles) ? roles : []).map((r) => Object.assign({}, r, {
+          privileges: (r && r.privileges && typeof r.privileges === "object") ? r.privileges : {},
+        }));
         if (!ROLES.some((r) => r.id === currentId)) {
           // 默认落在第一个**可编辑**的角色上：超级管理员整张矩阵是禁用的，
           // 若默认选中它，用户进入页面的第一印象仍是"什么都改不了"。
@@ -81,14 +88,24 @@
       };
       const show = async (t) => {
         tabs.forEach((b) => b.classList.toggle("btn-primary", b.dataset.tab === t));
-        await load();
+        try {
+          await load();
+        } catch (e) {
+          root.querySelector("#r-tab").innerHTML =
+            '<div class="empty">权限数据加载失败：' + U.esc((e && e.message) || "服务端未响应") +
+            '<div style="margin-top:12px"><button class="btn" id="r-retry">重试</button></div></div>';
+          const rt = root.querySelector("#r-retry");
+          if (rt) rt.onclick = () => PG.views.rbac.mount(root);
+          return;
+        }
         if (t === "matrix") drawMatrix(root);
         else if (t === "overview") drawOverview(root);
-        else renderAdmins(root);
+        // 必须 await：管理员列表是异步拉取的，不等待则异常成为未捕获 rejection，
+        // 表现就是"点第三个 tab 一片空白"
+        else await renderAdmins(root);
       };
       tabs.forEach((b) => (b.onclick = () => show(b.dataset.tab)));
-      await load();
-      drawMatrix(root); tabs.forEach(b => b.classList.toggle("btn-primary", b.dataset.tab === "matrix"));
+      await show("matrix");
     },
   });
 
@@ -406,7 +423,19 @@
   async function renderAdmins(root) {
     const el = root.querySelector("#r-tab");
     root.querySelector("#r-newrole").onclick = () => newAdmin(root);
-    const [admins, roles] = await Promise.all([PG.api.listAdmins(), PG.api.listRoles()]);
+    let admins;
+    let roles;
+    try {
+      const res = await Promise.all([PG.api.listAdmins(), PG.api.listRoles()]);
+      admins = Array.isArray(res[0]) ? res[0] : [];
+      roles = Array.isArray(res[1]) ? res[1] : [];
+    } catch (e) {
+      el.innerHTML = '<div class="empty">管理员列表加载失败：' + U.esc((e && e.message) || "服务端未响应") +
+        '<div style="margin-top:12px"><button class="btn" id="ra-retry">重试</button></div></div>';
+      const rt = el.querySelector("#ra-retry");
+      if (rt) rt.onclick = () => renderAdmins(root);
+      return;
+    }
     el.innerHTML = `<div class="table-wrap"><table class="tbl"><thead><tr>
         <th>账号</th><th>姓名</th><th>角色</th><th>状态</th><th>最近登录</th><th>操作</th>
       </tr></thead><tbody>

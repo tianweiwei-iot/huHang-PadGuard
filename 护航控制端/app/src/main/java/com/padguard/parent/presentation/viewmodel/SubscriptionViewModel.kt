@@ -22,6 +22,14 @@ data class SubscriptionUiState(
     val plans: List<PlanDto> = emptyList(),
     val subscription: SubscriptionDto? = null,
     val orders: List<OrderDto> = emptyList(),
+    /**
+     * 首屏关键数据（订阅状态 + 套餐）双双失败。
+     *
+     * 只有 error 不足以驱动整页错误态：error 同时被下单/支付失败复用，
+     * 且 Snackbar 消费后会清空，页面只剩"选择套餐"标题和一片空白。
+     * 单独一个布尔量，页面才能稳定地给出「加载失败 + 重试」。
+     */
+    val firstLoadFailed: Boolean = false,
     /** 正在下单的套餐 key */
     val orderingPlan: String? = null,
     /** 最近一次下单结果：展示订单号给家长，便于联系客服核对 */
@@ -90,6 +98,8 @@ class SubscriptionViewModel @Inject constructor(
                 subscription = sub.getOrNull(),
                 plans = plans.getOrDefault(emptyList()),
                 orders = orders.getOrDefault(emptyList()),
+                // 整页错误态只在"订阅与套餐都没拿到"时出现；只要有一项成功就照常渲染
+                firstLoadFailed = sub.isFailure && plans.isFailure,
                 error = sub.exceptionOrNull()?.message
             )
         }

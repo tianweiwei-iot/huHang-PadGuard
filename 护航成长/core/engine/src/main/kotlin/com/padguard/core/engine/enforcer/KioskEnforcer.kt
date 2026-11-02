@@ -65,6 +65,7 @@ class KioskEnforcer @Inject constructor(
                 degraded = true,
                 mode = policy.mode,
                 allowedPackages = withEssentials(policy),
+                userAppCount = policy.allowedPackages.size,
                 watermark = policy.watermark.toRuntime()
             )
             return report
@@ -96,6 +97,7 @@ class KioskEnforcer @Inject constructor(
             degraded = false,
             mode = policy.mode,
             allowedPackages = allowed,
+            userAppCount = policy.allowedPackages.size,
             singleAppPackage = policy.allowedPackages.firstOrNull().orEmpty()
                 .takeIf { policy.mode == KioskMode.SINGLE_APP }.orEmpty(),
             watermark = policy.watermark.toRuntime()
@@ -203,6 +205,13 @@ data class KioskRuntime(
     val enabled: Boolean = false,
     /** 无 Device Owner 时的降级态：只能近似模拟，需在 UI 上如实提示 */
     val degraded: Boolean = false,
+    /**
+     * 家长实际勾选的应用数量（不含 self / 桌面 / 系统必备包）。
+     *
+     * 应用层兜底拦截**必须**据此判空：白名单为空时若照拦，设备就只剩桌面可用（变砖）。
+     * 而 [allowedPackages] 因含必备包永远非空，不能拿它当"是否配了应用"的判据。
+     */
+    val userAppCount: Int = 0,
     val mode: KioskMode = KioskMode.MULTI_APP,
     val allowedPackages: Set<String> = emptySet(),
     val singleAppPackage: String = "",

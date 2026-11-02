@@ -277,7 +277,8 @@ private fun ProfileContent(
                 }
             }
             // 非设备所有者（软管控）：如实告知防护边界 + 升级入口
-            if (state.adminState != AdminState.OWNER) {
+            // 首轮状态未读完前不渲染：此时 adminState 恒为默认 NONE，会把 DO 设备也报成"软管控"
+            if (state.loaded && state.adminState != AdminState.OWNER) {
                 item {
                     SoftControlRiskBanner(onUpgrade = { onPermissionGuide("device_admin") })
                 }
@@ -961,6 +962,39 @@ private data class LevelVisual(
 
 @Composable
 private fun ProtectionLevelCard(state: ProfileUiState) {
+    // 首轮状态未读完：给中性"检测中"，不要先按软管控申报一遍再翻牌
+    if (!state.loaded) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.VerifiedUser,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(28.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "正在检测本机防护等级…",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+        return
+    }
     val isHard = state.adminState == AdminState.OWNER
     // 配色走主题容器色而不是硬编码浅绿/浅黄：硬编码浅底在深色模式下会变成
     // 一块"发光"的浅色卡片（文字仍是深色，虽可读但与整页割裂），

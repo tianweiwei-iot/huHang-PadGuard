@@ -52,17 +52,22 @@
       <div id="al-note" class="cell-sub" style="margin-bottom:8px"></div>
       <div class="table-wrap"><table class="tbl"><thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>领域</th><th>对象</th><th>来源IP</th><th>结果</th></tr></thead><tbody id="al-body"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody></table></div>`;
 
+    // 竞态防护：连续切换领域下拉时，慢的旧响应不得覆盖新筛选结果
+    let seq = 0;
     const draw = async (area) => {
+      const my = ++seq;
       const body = root.querySelector("#al-body");
       const note = root.querySelector("#al-note");
       let page;
       try {
         page = await PG.api.audit(area ? { area } : {});
       } catch (e) {
+        if (my !== seq) return;
         note.textContent = "";
         body.innerHTML = '<tr><td colspan="7" class="empty">加载失败：' + U.esc(e && e.message ? e.message : e) + '</td></tr>';
         return;
       }
+      if (my !== seq) return;
       const items = (page && page.items) || [];
       // 截断必须显式告知，否则运营会把"最近 N 条"读成"全部历史"。
       note.textContent = page && page.truncated

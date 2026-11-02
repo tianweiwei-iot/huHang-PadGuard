@@ -509,6 +509,16 @@ data class MonitoringPolicy(
     /** 0 表示关闭定时定位上报 */
     @SerialName("locationIntervalSec") val locationIntervalSec: Int = 0,
     @SerialName("collectAppUsage") val collectAppUsage: Boolean = true,
+
+    /**
+     * 采集网址访问历史。
+     *
+     * **现状（2026-11-02 核实）：本端尚无 URL_VISIT 采集器**，字段收得下、存得下，但没有任何
+     * 数据源产出该类事件 —— 无障碍服务只做「拦截判定」不读地址栏，也没有浏览器扩展通道。
+     * 之所以不按 `false` 静默处理：默认值就是 true，若据此上报"降级"会给每台设备刷一条无用告警。
+     * 若将来接入采集（无障碍解析地址栏 / 自建浏览器上报），消费点应放在 `URL_VISIT` 的写入处，
+     * 而不是这里。家长端目前也没有"上网记录"页面，因此不存在"界面有、数据无"的欺骗性展示。
+     */
     @SerialName("collectUrlHistory") val collectUrlHistory: Boolean = true,
     @SerialName("collectHardware") val collectHardware: Boolean = true
 )

@@ -92,6 +92,37 @@ fun DeviceDetailScreen(
             return@Scaffold
         }
 
+        // 加载失败（非 loading 且没有设备）：此前直接落到下方 Column，
+        // 设备卡片全被 `?.let` 跳过，只剩指令网格与统计——家长看到半张空页，
+        // 误以为"这设备没有信息"，而真正原因是接口失败。
+        if (uiState.device == null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "设备信息加载失败",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = uiState.error ?: "网络异常或设备不存在，请重试",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { viewModel.loadDeviceDetail() }) { Text("重试") }
+                }
+            }
+            return@Scaffold
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()

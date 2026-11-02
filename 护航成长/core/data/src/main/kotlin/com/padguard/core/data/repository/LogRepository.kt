@@ -254,6 +254,7 @@ class LogRepository @Inject constructor(
         RiskType.USB_DEBUG_ENABLED -> "检测到 USB 调试被打开"
         RiskType.PERMISSION_REVOKED -> "管控权限被削弱"
         RiskType.POLICY_APPLY_FAILED -> "部分管控项需重新下发"
+        RiskType.POLICY_DEGRADED -> "本机不支持部分管控项"
         RiskType.ACCESSIBILITY_DISABLED -> "无障碍服务被关闭"
         RiskType.USAGE_ACCESS_LOST -> "使用情况权限被关闭"
         RiskType.GUARD_PASSWORD_NOT_SET -> "操作密码尚未设置"

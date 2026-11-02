@@ -365,16 +365,27 @@ private fun HistoryRow(item: UnlockRequestItemUi) {
 
 @Composable
 private fun StatusPill(status: UnlockRequest.Status) {
+    // 状态色必须走主题令牌：原先是写死的 Amber300 / Green400 / Red300 / Gray500，
+    // 这四档都是"为深色背景调的亮色"，铺在浅色卡片上对比度只有 2.5~2.8:1（低于 WCAG AA 4.5:1），
+    // 家长在明亮环境下几乎看不清"已同意/已过期"。
+    // 换成 primary / error / onSurfaceVariant 后，两套主题都自带通过校验的前景色，
+    // 再用 12% 同色底做胶囊，弱视觉用户也能靠形状+底色区分状态。
     val (label, color) = when (status) {
-        UnlockRequest.Status.PENDING -> "申请中" to Color(0xFFFFB74D)
-        UnlockRequest.Status.APPROVED -> "已同意" to Color(0xFF66BB6A)
-        UnlockRequest.Status.REJECTED -> "已拒绝" to Color(0xFFE57373)
-        UnlockRequest.Status.EXPIRED -> "已过期" to Color(0xFF9E9E9E)
+        UnlockRequest.Status.PENDING -> "申请中" to MaterialTheme.colorScheme.tertiary
+        UnlockRequest.Status.APPROVED -> "已同意" to MaterialTheme.colorScheme.primary
+        UnlockRequest.Status.REJECTED -> "已拒绝" to MaterialTheme.colorScheme.error
+        UnlockRequest.Status.EXPIRED -> "已过期" to MaterialTheme.colorScheme.onSurfaceVariant
     }
-    Text(
-        text = label,
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.Bold,
-        color = color
-    )
+    Surface(
+        color = color.copy(alpha = 0.12f),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(50),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = color,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+        )
+    }
 }
