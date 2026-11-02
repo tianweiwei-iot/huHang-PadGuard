@@ -156,7 +156,8 @@
   function drawMatrix(root) {
     const el = root.querySelector("#r-tab");
     el.innerHTML = matrixShell();
-    root.querySelector("#r-newrole").onclick = () => newRole(root);
+    // 「新建角色」受 rbac:write 控制，只读角色拿到 null，必须判空
+    U.bind(root, "#r-newrole", () => newRole(root));
     if (!ROLES.length) {
       root.querySelector("#r-detail").innerHTML = '<p class="muted">暂无角色。</p>';
       paintRoleList(false);
@@ -175,15 +176,27 @@
     return confirmP("放弃未保存的修改", "当前角色的权限已修改但尚未保存，切换角色将丢失这些改动。", true);
   }
 
-  /** 渲染右侧：选中角色的权限矩阵 */
-  function drawDetail() {
+  /**
+   * 渲染右侧：选中角色的权限矩阵。
+   *
+   * [keepWorking] 为 true 时**保留**未保存的勾选状态，只重绘界面。
+   * 批量操作（一键只读 / 全选 / 行内全选清空）都是「改 working → 重绘」，
+   * 而重绘若又从 role.privileges 重新初始化 working，改动会被立刻抹掉 ——
+   * 界面弹出"已设为全领域只读"的成功提示，矩阵却一格未变（假成功）。
+   */
+  function drawDetail(keepWorking) {
     const detail = document.querySelector("#r-detail");
     const role = ROLES.find((r) => r.id === currentId);
     if (!detail || !role) return;
 
-    baseline = JSON.parse(JSON.stringify(role.privileges || {}));
-    working = JSON.parse(JSON.stringify(role.privileges || {}));
+    if (!keepWorking || !working) {
+      baseline = JSON.parse(JSON.stringify(role.privileges || {}));
+      working = JSON.parse(JSON.stringify(role.privileges || {}));
+    }
     const locked = isLocked(role);
+    // 无 rbac:write 时矩阵必须是只读的：服务端 saveRole 强制校 write，
+    // 否则只有 read 的角色能勾选、能点保存，最后收到 403。
+    const canWrite = !locked && PG.can("rbac", "write");
 
     // 表头：取全部动作并集（各领域未登记的动作渲染为占位，保证列对齐）
     const acts = [];
@@ -202,7 +215,7 @@
         if (!allowed) return '<td style="text-align:center;color:var(--border)">·</td>';
         const has = (working[area.key] || []).indexOf(act) >= 0;
         return `<td style="text-align:center">
-          <input type="checkbox" data-area="${area.key}" data-act="${act}" ${has ? "checked" : ""} ${locked ? "disabled" : ""}>
+          <input type="checkbox" data-area="${area.key}" data-act="${act}" ${has ? "checked" : ""} ${canWrite ? "" : "disabled"}>
         </td>`;
       }).join("");
       const n = (working[area.key] || []).length;
@@ -210,9 +223,9 @@
         <td class="cell-strong" style="white-space:nowrap">${U.esc(area.name)}
           <span class="muted" style="font-size:12px">${n}/${area.actions.length}</span></td>
         ${cells}
-        <td style="white-space:nowrap">${locked ? "" : `
+        <td style="white-space:nowrap">${canWrite ? `
           <button class="btn btn-xs" data-row-all="${area.key}">全选</button>
-          <button class="btn btn-xs" data-row-none="${area.key}">清空</button>`}</td>
+          <button class="btn btn-xs" data-row-none="${area.key}">清空</button>` : ""}</td>
       </tr>`;
     }).join("");
 
@@ -225,7 +238,7 @@
             : `${PG.guard("rbac", "write", '<button class="btn btn-sm" id="r-readonly">一键只读</button>')}
                ${PG.guard("rbac", "write", '<button class="btn btn-sm" id="r-selectall">全选</button>')}
                ${role.overridden ? PG.guard("rbac", "write", '<button class="btn btn-sm btn-ghost" id="r-reset">还原默认</button>') : ''}
-               ${role.isSystem ? '' : PG.guard("rbac", "delete", '<button class="btn btn-sm btn-danger" id="r-del">删除角色</button>')}`}
+               ${role.isSystem ? '' : PG.guard("rbac", "write", '<button class="btn btn-sm btn-danger" id="r-del">删除角色</button>')}`}
         </div>
       </div>
       ${locked
@@ -299,8 +312,8 @@
       const def = areaDef(area);
       row.querySelector(".cell-strong .muted").textContent = `${n}/${def.actions.length}`;
     }
-    /** 重绘整张明细（用于全选/清空/还原等批量变更） */
-    function redraw() { drawDetail(); paintSaveBar(); }
+    /** 重绘整张明细（用于全选/清空等批量变更）；必须保留 working，见 drawDetail 的说明 */
+    function redraw() { drawDetail(true); paintSaveBar(); }
     paintSaveBar();
   }
 
@@ -315,7 +328,7 @@
       <div class="row" style="gap:10px;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--border-soft)">
         <span class="muted" style="font-size:13px">共 <strong>${n}</strong> 项权限${d ? ' · <span style="color:var(--warn)">有未保存的修改</span>' : " · 已与服务端同步"}</span>
         <div style="margin-left:auto" class="row-actions">
-          ${d ? '<button class="btn btn-ghost btn-sm" id="r-cancel">放弃修改</button><button class="btn btn-primary btn-sm" id="r-save">保存权限</button>' : ""}
+          ${d && PG.can("rbac", "write") ? '<button class="btn btn-ghost btn-sm" id="r-cancel">放弃修改</button><button class="btn btn-primary btn-sm" id="r-save">保存权限</button>' : ""}
         </div>
       </div>`;
     const c = bar.querySelector("#r-cancel");
@@ -375,7 +388,9 @@
         if (src && src.privileges) privileges = JSON.parse(JSON.stringify(src.privileges));
       }
       try {
-        await PG.api.createRole({ id, name, desc: m.el.querySelector("#nr-desc").value.trim(), privileges });
+        // 服务端 AdminRoleCreateRequest 的字段名是 description（不是 desc）：
+        // 用 desc 会被 Jackson 静默丢弃，运营填的职责说明永远存空。
+        await PG.api.createRole({ id, name, description: m.el.querySelector("#nr-desc").value.trim(), privileges });
         m.close(); U.toast("ok", "角色已创建", name);
         await reload(); currentId = id; paintRoleList(true);
       } catch (e) {
@@ -388,7 +403,7 @@
 
   function drawOverview(root) {
     const el = root.querySelector("#r-tab");
-    root.querySelector("#r-newrole").onclick = () => newRole(root);
+    U.bind(root, "#r-newrole", () => newRole(root));
     const head = ROLES.map((r) =>
       `<th style="text-align:center">${U.esc(r.name)}${r.memberCount ? ` <span class="muted" style="font-size:11px">${r.memberCount}人</span>` : ""}</th>`).join("");
     const rows = SCHEMA.areas.map((area) => {
@@ -422,7 +437,9 @@
 
   async function renderAdmins(root) {
     const el = root.querySelector("#r-tab");
-    root.querySelector("#r-newrole").onclick = () => newAdmin(root);
+    // 页头的 #r-newrole 文案是「＋ 新建角色」，不能在这里改绑成"新建管理员"：
+    // 那样在管理员 tab 点"新建角色"弹出的会是新建管理员表单，且界面里根本没有新建管理员的入口。
+    U.bind(root, "#r-newrole", () => newRole(root));
     let admins;
     let roles;
     try {
@@ -436,7 +453,11 @@
       if (rt) rt.onclick = () => renderAdmins(root);
       return;
     }
-    el.innerHTML = `<div class="table-wrap"><table class="tbl"><thead><tr>
+    el.innerHTML = `
+      <div class="row" style="justify-content:flex-end;margin-bottom:10px">
+        ${PG.guard("rbac", "write", '<button class="btn btn-primary btn-sm" id="ra-new">＋ 新建管理员</button>')}
+      </div>
+      <div class="table-wrap"><table class="tbl"><thead><tr>
         <th>账号</th><th>姓名</th><th>角色</th><th>状态</th><th>最近登录</th><th>操作</th>
       </tr></thead><tbody>
       ${admins.map((a) => `<tr>
@@ -452,6 +473,7 @@
           ${PG.guard("rbac", "delete", '<button class="btn btn-xs btn-danger" data-del="' + U.esc(a.id) + '">删除</button>')}
         </div></td></tr>`).join("")}
     </tbody></table></div>`;
+    U.bind(el, "#ra-new", () => newAdmin(root));
     el.querySelectorAll("[data-assign]").forEach((b) => (b.onclick = () => assignRole(b.dataset.assign, roles, root)));
     el.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => editAdmin(b.dataset.edit, roles, root)));
     el.querySelectorAll("[data-reset]").forEach((b) => (b.onclick = () => resetAdminPwd(b.dataset.reset)));

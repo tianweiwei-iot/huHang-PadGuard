@@ -76,17 +76,21 @@ class UnlockService(
     /** 家长同意 -> 下发 TEMP_UNLOCK（带 packageName / durationMinutes） */
     fun approve(userId: String, deviceId: String, ticketId: String, req: UnlockApproveRequest) {
         val t = ownedOpen(userId, deviceId, ticketId)
-        t.status = "APPROVED"
-        t.durationMinutes = req.durationMinutes ?: t.durationMinutes
-        t.resolvedAt = System.currentTimeMillis()
-        unlockTicketRepository.save(t)
+        val duration = req.durationMinutes ?: t.durationMinutes
+        // 原子抢占，避免"双击同意 / 超时重试"下发两条 TEMP_UNLOCK。
+        // 两条 HIGH 优先级指令孩子端都会执行，若两次时长不同还会互相覆盖
+        // （家长批 30 分钟，设备被放开 60 分钟）。
+        val claimed = unlockTicketRepository.claimApprove(ticketId, duration, System.currentTimeMillis())
+        if (claimed == 0) {
+            throw BizException(ParentErr.PARAM_ERROR, "该申请已被处理，请刷新后查看", Audience.PARENT)
+        }
         auditService.record(userId, deviceId, AuditAction.UNLOCK_APPROVE, targetType = "ticket", targetId = ticketId,
-            detail = "package=${req.packageName ?: t.packageName ?: ""} duration=${t.durationMinutes}")
+            detail = "package=${req.packageName ?: t.packageName ?: ""} duration=${duration}")
         commandService.issueCommand(
             deviceId, CommandType.TEMP_UNLOCK,
             mapOf(
                 CommandKey.PACKAGE_NAME to (req.packageName ?: t.packageName ?: ""),
-                CommandKey.DURATION_MINUTES to (t.durationMinutes ?: 30)
+                CommandKey.DURATION_MINUTES to (duration ?: 30)
             ),
             priority = "HIGH"
         )

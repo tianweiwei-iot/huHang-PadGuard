@@ -97,6 +97,22 @@
     };
   }
 
+  // ---------- 事件绑定 ----------
+  /**
+   * 给可能不存在的元素绑定 click。找不到就静默跳过。
+   *
+   * 后台所有写操作按钮都由 `PG.guard(area, action, html)` 按权限渲染 ——
+   * 低权限角色（客服/财务/审计等只有 read）拿到的 HTML 里根本没有这个节点。
+   * 此前各页一律写 `root.querySelector("#x").onclick = ...`，于是这些账号
+   * **一打开页面就抛 TypeError**，被 router 的 mountSafely 捕获后整页替换成
+   * 「加载失败」：连只读查看都做不到，权限设计本意完全落空。
+   */
+  function bind(root, sel, fn) {
+    const el = root && root.querySelector ? root.querySelector(sel) : null;
+    if (el) el.onclick = fn;
+    return el;
+  }
+
   // ---------- 状态徽章 ----------
   const PARENT_STATUS = { active: ["green", "正常"], suspended: ["red", "已冻结"], pending: ["amber", "待激活"] };
   const SUB_STATUS = { active: ["green", "生效中"], expired: ["gray", "已过期"], trial: ["amber", "试用"] };
@@ -125,6 +141,8 @@
 
   function line(series, opts) {
     opts = opts || {};
+    // 空序列必须提前返回：Math.max(...[]) 得到 -Infinity，下面会画出退化路径和 NaN 坐标
+    if (!Array.isArray(series) || !series.length) return '<div class="empty">暂无数据</div>';
     const W = 520, H = opts.h || 200, pad = 34;
     const max = Math.max(...series, 1) * 1.15, min = 0;
     const n = series.length;
@@ -191,7 +209,7 @@
   }
 
   PG.ui = {
-    esc, money, moneyK, pct, fmtMinutes, toast, modal, drawer, confirm,
+    esc, money, moneyK, pct, fmtMinutes, toast, modal, drawer, confirm, bind,
     badge, PARENT_STATUS, SUB_STATUS, ORDER_STATUS,
     donut, line, bar, sparkline, pager,
   };

@@ -127,7 +127,9 @@
 
     // 这两个按钮此前只渲染、从不绑定事件：抽屉里点「远程锁屏」毫无反应，
     // 而列表页的同类按钮是正常的 —— 同一个操作在两处表现不一致，最容易被当成"功能坏了"。
-    dl.el.querySelector("#dl-lock").onclick = async () => {
+    // 另外 #dl-lock 只在有 devices:lock / unlock 时渲染，必须用 bind 判空，
+    // 否则只读设备角色一开抽屉就抛 TypeError，连带下面 #dl-parent 的绑定一起中断。
+    U.bind(dl.el, "#dl-lock", async () => {
       const locked = d.remoteLocked;
       const rootNow = document.getElementById("view");
       try {
@@ -138,12 +140,12 @@
       } catch (err) {
         PG.ui.toast("err", "操作失败", err.message);
       }
-    };
-    dl.el.querySelector("#dl-parent").onclick = () => {
+    });
+    U.bind(dl.el, "#dl-parent", () => {
       dl.close();
       PG.state.search = d.parentPhone || d.parentName || "";
       PG.router.go("parents");
-    };
+    });
     const dlUnbind = dl.el.querySelector("#dl-unbind");
     if (dlUnbind) dlUnbind.onclick = () => PG.ui.confirm("解绑设备", "确认解绑 " + U.esc(d.deviceId) + "？解绑后设备归属清除、设备令牌作废，孩子端将失去管控，操作不可恢复。", async () => {
       await PG.api.unbindDevice(d.deviceId);

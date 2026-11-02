@@ -144,6 +144,24 @@ interface UnlockTicketRepository : JpaRepository<UnlockTicket, String> {
     @Modifying
     @Query("delete from UnlockTicket t where t.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+
+    /**
+     * 原子抢占：把"仍可处理"的工单一次性改成 APPROVED。
+     *
+     * 为什么不能只靠 `ownedOpen()` 的检查：那是 check-then-act。家长双击"同意"、
+     * 或客户端超时重试，两次请求都会先读到 PENDING，随后各自下发一条 TEMP_UNLOCK
+     * （HIGH 优先级，孩子端两条都执行），durationMinutes 不同时还会互相覆盖。
+     * 条件 UPDATE 把"判断 + 落库"压成一条语句，只有一个请求能影响 1 行；
+     * 影响 0 行的那次直接放弃，不再下发指令。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UnlockTicket t set t.status = 'APPROVED', t.durationMinutes = :duration, t.resolvedAt = :now
+        where t.id = :id and t.status in ('PENDING', 'IGNORED')
+        """
+    )
+    fun claimApprove(@Param("id") id: String, @Param("duration") duration: Int?, @Param("now") now: Long): Int
 }
 
 @Repository
@@ -163,6 +181,22 @@ interface UsageDelayRepository : JpaRepository<UsageDelayTicket, String> {
         """
     )
     fun sumEffectiveMinutes(@Param("deviceId") deviceId: String): Int
+
+    /**
+     * 原子抢占延时工单（同 [UnlockTicketRepository.claimApprove]）。
+     *
+     * 这里的重复后果更直接：`approve` 会给孩子端累加额度，
+     * 并发两次 = 凭空多一笔使用时长（额度直接决定锁机时间），
+     * 而工单记录里只有一条 APPROVED，事后完全看不出多发了。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UsageDelayTicket t set t.status = 'APPROVED', t.resolvedAt = :now
+        where t.id = :id and t.status in ('PENDING', 'IGNORED')
+        """
+    )
+    fun claimApprove(@Param("id") id: String, @Param("now") now: Long): Int
 
     /** 易主 / 解绑时连同设备一起作废未结工单。 */
     @Modifying
@@ -204,6 +238,26 @@ interface UsageSessionRepository : JpaRepository<UsageSession, String> {
     @Modifying
     @Query("delete from UsageSession u where u.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+
+    /**
+     * 额度原子累加（`extended_minutes = extended_minutes + ?`）。
+     *
+     * 读出来 +1 再 save 的写法在并发下会丢更新：两个事务读到同一个旧值，
+     * 后者覆盖前者，家长批了两次只延长一次。交给数据库做自增就没有这个窗口。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UsageSession u set u.extendedMinutes = u.extendedMinutes + :minutes,
+            u.lastDelayEpoch = :now, u.updatedAt = :now
+        where u.deviceId = :deviceId
+        """
+    )
+    fun addExtendedMinutes(
+        @Param("deviceId") deviceId: String,
+        @Param("minutes") minutes: Int,
+        @Param("now") now: Long
+    ): Int
 }
 
 @Repository

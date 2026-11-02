@@ -25,7 +25,7 @@
       <div class="grid grid-3" style="margin-top:16px">
         <div class="card">
           <div class="card-head"><h3>近 6 月营收趋势</h3><span class="sub">单位：元</span></div>
-          ${U.line(d.revenueSeries, { h: 200 })}
+          ${U.line((d.revenueSeries || []).map((v) => Math.round(v / 100)), { h: 200 })}
         </div>
         <div class="card">
           <div class="card-head"><h3>套餐分布</h3></div>
@@ -91,7 +91,13 @@
   }
 
   async function alertsMini() {
-    const list = await PG.api.alerts();
+    // 告警接口要 audit:read，而仪表盘主体只要 server:read。
+    // 只勾了 server:read 的自定义角色此前会让整页抛 403 变「加载失败」——
+    // 明明有权限看 KPI 却打不开首页。这里降级成一块局部提示。
+    let list;
+    try { list = await PG.api.alerts(); }
+    catch (e) { return '<div class="empty">无权查看告警（需要“审计”读权限）</div>'; }
+    list = Array.isArray(list) ? list : [];
     return list.filter(a => a.status !== "closed").slice(0, 5).map(a => {
       const c = { high: "red", mid: "amber", low: "gray" }[a.level] || "gray";
       return '<div class="tl-item"><div class="tl-time">' + U.esc(a.time) + ' · <span class="badge ' + c + '">' + U.esc({ high: "高", mid: "中", low: "低" }[a.level] || a.level || "未知") + '</span> ' + U.esc(a.type) + '</div><div class="tl-text">' + U.esc(a.message) + '</div></div>';

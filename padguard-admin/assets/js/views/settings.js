@@ -23,7 +23,8 @@
       // 套餐数组与权益数组都可能是缺省/空值：直接 .map/.join 会抛 TypeError，
       // 页面永久停在"加载中…"（与计费页那次契约断裂同源）
       const plans = Array.isArray(s.plans) ? s.plans : [];
-      root.querySelector("#st-save").onclick = async () => save(root);
+      // 「保存」按钮只在有 settings:write 时渲染，无写权限的角色拿到的是 null
+      U.bind(root, "#st-save", async () => save(root));
       root.querySelector("#st-body").innerHTML = `
       <div class="grid grid-2">
         <div class="card">

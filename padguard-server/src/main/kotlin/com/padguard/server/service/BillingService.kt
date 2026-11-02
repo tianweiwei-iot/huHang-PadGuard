@@ -80,12 +80,29 @@ class BillingService(
 
     // ------------------------------------------------------------------ 套餐
 
-    fun amountFenOf(plan: Plan): Int = when (plan) {
-        Plan.MONTHLY -> priceMonthly
-        Plan.QUARTERLY -> priceQuarterly
-        Plan.YEARLY -> priceYearly
-        Plan.TRIAL -> 0
-        Plan.PERMANENT -> 0
+    /**
+     * 套餐单价（分）。
+     *
+     * **以后台「系统设置 → 套餐定价」写入的值优先，配置文件只作兜底。**
+     * 此前这里只读 `@Value` 常量，于是运营在后台改价会看到"保存成功"，
+     * 实际下单仍按旧价收款 —— 页面报价与实际扣款不一致，是最直接的资损/客诉来源。
+     * 同页 `/v1/admin/settings` 读的是 DB 价、`/v1/admin/billing/plans` 读的是配置价，
+     * 三处口径当时互不相同；现在统一收敛到本方法。
+     */
+    fun amountFenOf(plan: Plan): Int {
+        val fromConfig = when (plan) {
+            Plan.MONTHLY -> priceMonthly
+            Plan.QUARTERLY -> priceQuarterly
+            Plan.YEARLY -> priceYearly
+            Plan.TRIAL -> 0
+            Plan.PERMANENT -> 0
+        }
+        if (plan == Plan.TRIAL || plan == Plan.PERMANENT) return 0
+        val override = runCatching {
+            loadSettingsStore(systemSettingRepository, objectMapper).planPrices[plan.key.uppercase()]
+        }.getOrNull()
+        // 0 / 负数视为"未配置"：宁可回落配置价，也不能出现 0 元套餐被直接下单。
+        return if (override != null && override > 0) override else fromConfig
     }
 
     fun deviceLimitOf(plan: Plan): Int = when (plan) {
@@ -98,9 +115,12 @@ class BillingService(
 
     /** 供家长端展示的可购买套餐列表 */
     fun plans(): List<PlanDto> = Plan.purchasable().map { p ->
+        // amountFenOf 会读一次设置（DB 覆盖价），先算一次再复用，
+        // 避免同一个套餐为了 priceText 再查一遍库。
+        val fen = amountFenOf(p)
         PlanDto(
             key = p.key, label = p.label, months = p.months,
-            amountFen = amountFenOf(p), priceText = fenToText(amountFenOf(p)),
+            amountFen = fen, priceText = fenToText(fen),
             deviceLimit = deviceLimitOf(p)
         )
     }

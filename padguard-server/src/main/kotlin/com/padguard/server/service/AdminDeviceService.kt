@@ -56,7 +56,9 @@ class AdminDeviceService(
                 model = d.model, osVersion = d.osVersion, controlMode = d.controlMode,
                 online = online(d), lastOnlineAt = fmt(d.lastOnlineAt),
                 remoteLocked = d.remoteLocked ?: false, minorMode = d.ageBand != null,
-                todayUsageMinutes = usedMinutes[d.id] ?: 0, region = owner?.region ?: "",
+                // 不要用 `?: 0` 兜底：DTO 约定 null 表示"今日尚未开始计时"，
+                // 填 0 会把"没有数据"粉饰成"今天一分钟都没用"，运营据此判断活跃度必然失真。
+                todayUsageMinutes = usedMinutes[d.id], region = owner?.region ?: "",
                 boundAt = fmt(d.createdAt)
             )
         }

@@ -100,6 +100,8 @@ class BillingServiceTest {
         override fun findByUserId(userId: String): List<Device> = emptyList()
         override fun findByDeviceSn(deviceSn: String): List<Device> = emptyList()
         override fun countByOnlineStatus(onlineStatus: String): Long = 0L
+        override fun findByOnlineStatus(onlineStatus: String): List<Device> = emptyList()
+        override fun findByOnlineStatusAndLastOnlineAtLessThan(onlineStatus: String, ts: Long): List<Device> = emptyList()
         override fun findByLastActiveAtGreaterThan(since: Long): List<Device> = emptyList()
     }
 
@@ -128,7 +130,8 @@ class BillingServiceTest {
         trialDevices: Int = 3,
         mockPayEnabled: Boolean = true,
         payTimeoutMinutes: Long = 30,
-        verifier: PaymentVerifier = ConfigurablePaymentVerifier(true, FakeSystemSettingRepo(), ObjectMapper(), listOf())
+        verifier: PaymentVerifier = ConfigurablePaymentVerifier(true, FakeSystemSettingRepo(), ObjectMapper(), listOf()),
+        settings: FakeSystemSettingRepo = FakeSystemSettingRepo()
     ): Fixture {
         val subRepo = FakeSubscriptionRepo()
         val orderRepo = FakeOrderRepo()
@@ -142,7 +145,7 @@ class BillingServiceTest {
             trialDays, trialDevices,
             3800, 9800, 29800,   // 月 / 季 / 年（分）
             3, 3, 5,             // 各档设备上限
-            payTimeoutMinutes, mockPayEnabled, verifier, FakeSystemSettingRepo(), ObjectMapper()
+            payTimeoutMinutes, mockPayEnabled, verifier, settings, ObjectMapper()
         )
         return Fixture(svc, subRepo, orderRepo, deviceRepo)
     }
@@ -573,5 +576,51 @@ class BillingServiceTest {
             "PENDING 订单不能被退款标记（未收到钱就退款 = 单边账）"
         )
         assertEquals(OrderStatus.PENDING.name, f.orders.table.values.first().status)
+    }
+
+    // ------------------------------------------------------------ 后台改价
+
+    /**
+     * 后台「系统设置 → 套餐定价」写入的价格必须真正参与计价。
+     *
+     * 此前 `amountFenOf` 只读 `@Value` 常量：运营改价看到"保存成功"，
+     * 家长下单仍按旧价扣款；而设置页读 DB 价、套餐列表读配置价，
+     * 同一套餐在同一后台里显示两个价格。
+     */
+    @Test
+    fun `admin price override wins over config when creating an order`() {
+        val settings = FakeSystemSettingRepo()
+        settings.save(
+            com.padguard.server.domain.SystemSetting(
+                key = "admin.settings",
+                valueJson = """{"brand":"PadGuard","currency":"CNY","trialDays":30,"passwordPolicy":"medium","mfaRequired":false,"mockPay":false,"planPrices":{"MONTHLY":9900}}"""
+            )
+        )
+        val f = service(settings = settings)
+
+        assertEquals(9900, f.svc.amountFenOf(Plan.MONTHLY), "应优先采用后台改过的价格")
+
+        val orderNo = f.order("MONTHLY")
+        val order = f.orders.table.values.first { it.orderNo == orderNo }
+        assertEquals(9900, order.amountFen, "下单金额必须与改价后一致，否则就是资损")
+
+        // 未在后台改过的档位仍走配置价，不能被一起清空
+        assertEquals(9800, f.svc.amountFenOf(Plan.QUARTERLY))
+    }
+
+    @Test
+    fun `zero or negative override falls back to the configured price`() {
+        // 0 元套餐会被直接下单，宁可回落配置价也不能让"填错 0"变成免费发卡
+        val settings = FakeSystemSettingRepo()
+        settings.save(
+            com.padguard.server.domain.SystemSetting(
+                key = "admin.settings",
+                valueJson = """{"planPrices":{"MONTHLY":0,"QUARTERLY":-100}}"""
+            )
+        )
+        val f = service(settings = settings)
+
+        assertEquals(3800, f.svc.amountFenOf(Plan.MONTHLY))
+        assertEquals(9800, f.svc.amountFenOf(Plan.QUARTERLY))
     }
 }

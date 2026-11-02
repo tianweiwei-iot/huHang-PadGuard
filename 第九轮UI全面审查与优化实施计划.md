@@ -260,3 +260,73 @@ Kiosk `isAllowed` 死函数（`KioskEnforcer.isAllowed` 无调用点，非 DO �
 - 家长端 `:app:compileDebugKotlin` BUILD SUCCESSFUL
 - 孩子端 `:app:compileDebugKotlin` + `:core:engine:testDebugUnitTest` BUILD SUCCESSFUL
 - 服务端 `testDirect` **210/210**（原 208 + 新增 2 例）
+
+## 十一、第五批（2026-11-02 23:30 起）：服务端越权/并发/资损 + 后台低权限崩溃
+
+本轮换到「安全与资损」维度。两路并行审计（后台↔服务端契约、服务端健壮性），
+只修能用文件行号证明的问题。
+
+### 11.1 服务端：跨家庭越权（最高危）
+
+| 问题 | 根因 | 改动 |
+|---|---|---|
+| 任意家长可读他人孩子的当日用量 | `GET /v1/policies/{deviceId}/usage-session` 是全控制器**唯一**没做归属校验的端点，直接把 deviceId 透传给 service | 注入 `DeviceOwnershipGuard`，入口 `requireOwned` |
+| 任意家长可枚举全服设备 ID | `GET /v1/stream/metrics` 挂在家长 JWT 下，却返回所有正在推流设备的 deviceId 与带宽；同文件的 `live()`/`status()` 都有归属校验，只有它漏了 | 只返回 `deviceRepository.findByUserId(userId)` 命中的设备；运维看全局请走 `/v1/admin/server/metrics` |
+| **越权被映射成 HTTP 200** | `GlobalExceptionHandler` 只把 `FORBIDDEN(1003)` 映射成 403，而 `DeviceOwnershipGuard`/`GeofenceService`/`UnlockService`/`BillingService` 抛的是 `DEVICE_NOT_OWNED(2003)`、`GEOFENCE_NOT_FOUND(3003)` → 全落到 `else -> 200`。与同文件「越权必须落到 403」的注释直接矛盾 | `2003 → 403`；`2001/3003/3001/4003 → 404`，**仅对 PARENT** 生效 |
+| 越权 403 的边界 | 孩子端把 HTTP 403 映射为 `DEVICE_UNBOUND` 终态并清空本地凭据 | 映射条件显式带 `audience == PARENT`，并补一条单测钉住「孩子端 2003 必须仍是 200」 |
+
+### 11.2 服务端：并发重复发放
+
+| 问题 | 后果 | 改动 |
+|---|---|---|
+| 延时审批 `approve` 是 check-then-act | 家长双击/客户端重试 → 两次都读到 PENDING，`extendedMinutes` 被加两次，孩子凭空多一笔可用时长，而工单只有一条 APPROVED | `UsageDelayRepository.claimApprove` 条件 UPDATE 抢占（`status in (PENDING,IGNORED)`），影响 0 行即报「已被处理」；额度改用 `addExtendedMinutes` 数据库自增，消除读改写丢更新 |
+| 解锁审批 `approve` 同款 | 并发下发两条 HIGH 优先级 `TEMP_UNLOCK`；两次时长不同时互相覆盖（批 30 分钟被放开 60 分钟） | `UnlockTicketRepository.claimApprove` 同款抢占后再下发指令 |
+
+### 11.3 服务端：资损与契约
+
+| 问题 | 根因 | 改动 |
+|---|---|---|
+| 后台改价「保存成功、扣款不变」 | `AdminSettingsService` 把价格写进 `system_settings.planPrices`，但真正计价的 `BillingService.amountFenOf` 只读 `@Value` 常量，全仓无一处读该字段 | `amountFenOf` 改为 **DB 覆盖价优先、配置兜底**；`0/负数` 视为未配置（避免 0 元套餐被下单）；`plans()` 内复用同一次计算 |
+| 后台年卡比自助少 5 天 | 后台按「天数 × 86400000」算到期，自助走「自然月 + 当日 23:59:59.999」 | 新增 `expiryOf()`：套餐有月数且天数等于旧口径时按月推进，其余（如手工补 45 天）仍按天 |
+| 分页参数无上限 | `messages`/`screenshots` 的 `limit` 只做 `coerceAtLeast(1)`，客户端传 1000000 就全量拉回 | 统一 `coerceIn(1, 100)` |
+| 500 响应泄漏库结构 | `handleOther` 把 `e.message` 原样返回（JPA 会带表名/约束名/SQL 片段） | 对外改为「服务器内部错误（错误编号 xxxx）」，编号同时写日志，用 grep 对齐 |
+
+### 11.4 管理后台：低权限角色整页崩溃
+
+这一组是同一个根因：写操作按钮由 `PG.guard(...)` 按权限渲染，但绑定代码一律
+`root.querySelector("#x").onclick = ...`。低权限账号（客服/财务/审计只有 read）拿到 null →
+TypeError → `mountSafely` 把整页替换成「加载失败」，**连只读查看都做不到**。
+
+| 位置 | 改动 |
+|---|---|
+| `components.js` | 新增 `U.bind(root, sel, fn)`：找不到元素就跳过；11 个 JS 文件的 `node --check` 全过 |
+| `settings.js` `#st-save`、`parents.js` `#p-create`、`devices.js` `#dl-lock`/`#dl-parent`、`rbac.js` `#r-newrole`×3 | 全部改用 `U.bind` |
+| `server-profile.js` `#sp-save` | 保存按钮原先**完全没做权限判断**（服务端强制 `server:write`），改为 `PG.guard` + `U.bind` |
+| `rbac.js` 「一键只读 / 全选 / 行内全选」 | `drawDetail()` 每次都从 `role.privileges` 重置 `working`，批量改动被重绘立刻抹掉 → 弹「已设为全领域只读」却一格未变（假成功）。新增 `drawDetail(keepWorking)`，`redraw()` 传 true |
+| `rbac.js` 删除角色 | 按钮用 `rbac:delete` 判断，服务端校验 `rbac:write` → 有 write 无 delete 看不到按钮，有 delete 无 write 点了必 403。改为 `write` |
+| `rbac.js` 新建角色 | 提交 `desc`，服务端 DTO 字段是 `description` → 描述永远存空。改字段名 |
+| `rbac.js` 管理员 tab | `#r-newrole`（文案「＋ 新建角色」）在该 tab 被改绑成"新建管理员"，界面里根本没有新建管理员的入口。改为 tab 内新增 `#ra-new` |
+| `rbac.js` 权限矩阵 | 只有 read 权限的账号也能勾选并保存（必 403）。矩阵按 `PG.can("rbac","write")` 置灰，保存条同条件隐藏 |
+| `dashboard.js` 营收趋势 | 卡片标「单位：元」，数据是「分」→ 差 100 倍。除以 100 后再画 |
+| `dashboard.js` 告警块 | 主体只要 `server:read`，`alerts()` 要 `audit:read`；只勾 server:read 的角色整页 403。改为局部降级提示 |
+| `parents.js` 新建家长 | 下拉列出付费套餐，但开通需 `billing:manual`；无此权限时会造成「账号已建、订阅未开」的半成功。无权限时只给免费档并提示去计费页开通 |
+| `components.js` `line()` | 空序列时 `Math.max(...[])` 为 `-Infinity`，画出 NaN 坐标；改为提前返回空态 |
+
+### 11.5 新增测试
+
+- `GlobalExceptionHandlerTest`：`2003→403`、`2001→404`、孩子端 `2003` 仍为 200、500 不泄漏原始异常文本。
+- `BillingServiceTest`：后台改价参与下单计价、0/负数回落配置价。
+
+### 11.6 本轮未做（原因）
+
+- **营收 Int 溢出**（`RevenueMonth.amount` 超过 ¥2147 万翻负）：需要把 `Kpis.monthRevenue`、
+  `KpiTrend.series` 一起改 `Long`，波及首页多个 KPI 序列，留待与看板重构同批。
+- **审计/看板全表加载**：`AdminAuditService` 与 `AdminDashboardService` 都是 `findAll()` 后在内存过滤，
+  正确做法是下沉为分页查询 + 覆盖索引，属于独立优化批次（改动面在 repository 层）。
+- **`/v1/policies/{deviceId}/apply-template` 等服务层归属校验**：本轮只补了控制器层唯一漏网点，
+  其余端点已由 service 内部 `requireOwned` 覆盖（已逐个核对）。
+
+### 11.7 验证
+
+- 后台 11 个 JS `node --check` 全通过。
+- 服务端编译 + 全量测试：本轮进行中，受工作区另一路并发改动（presence/uninstall 新功能）阻塞，待其编译恢复后复跑。

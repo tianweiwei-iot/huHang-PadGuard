@@ -147,7 +147,8 @@ class ParentLocationController(private val geofenceService: GeofenceService) {
 @RequestMapping("/v1/policies")
 class ParentPolicyExtendedController(
     private val policyExtensionService: PolicyExtensionService,
-    private val usageSessionService: UsageSessionService
+    private val usageSessionService: UsageSessionService,
+    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard
 ) {
 
     @GetMapping("/{deviceId}/time-restrictions")
@@ -260,7 +261,15 @@ class ParentPolicyExtendedController(
     fun getUsageSession(
         @RequestAttribute("userId") userId: String,
         @PathVariable deviceId: String
-    ) = ApiResponse.ok(usageSessionService.get(deviceId))
+    ) = ApiResponse.ok(
+        run {
+            // 必须校验归属：本控制器其余端点都经 service 内部校验，只有这里曾经直接透传 deviceId。
+            // 少了这一行，任何已登录家长换个 deviceId 就能读到别人家孩子的
+            // 当日配额、已用时长、剩余秒数与延时申请——是跨家庭的儿童使用数据泄漏。
+            ownershipGuard.requireOwned(userId, deviceId)
+            usageSessionService.get(deviceId)
+        }
+    )
 
     @PutMapping("/{deviceId}/tablet-usage-settings")
     fun updateTabletUsageSettings(

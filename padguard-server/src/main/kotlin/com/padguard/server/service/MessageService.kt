@@ -68,8 +68,11 @@ class MessageService(
 
     fun listMessages(userId: String, deviceId: String, limit: Int): List<PublishedMessageDto> {
         requireOwned(userId, deviceId)
+        // limit 必须封顶：此前只做下限（coerceAtLeast(1)），客户端传 limit=1000000
+        // 就会把该设备全部历史消息一次拉回并整体序列化成 JSON（内存与带宽双双失控）。
+        // 与指令列表（coerceIn(1,50)、告警列表（coerceAtMost(100)）保持同一口径。
         return publishedMessageRepository
-            .findByDeviceIdOrderByPublishedAtDesc(deviceId, PageRequest.of(0, limit.coerceAtLeast(1)))
+            .findByDeviceIdOrderByPublishedAtDesc(deviceId, PageRequest.of(0, limit.coerceIn(1, 100)))
             .map { toDto(it) }
     }
 

@@ -228,6 +228,10 @@ class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
     override fun findByUserId(userId: String): List<Device> = table.values.filter { it.userId == userId }
     override fun countByUserId(userId: String): Long = findByUserId(userId).size.toLong()
     override fun countByOnlineStatus(onlineStatus: String): Long = table.values.count { it.onlineStatus == onlineStatus }.toLong()
+    override fun findByOnlineStatus(onlineStatus: String): List<Device> =
+        table.values.filter { it.onlineStatus == onlineStatus }
+    override fun findByOnlineStatusAndLastOnlineAtLessThan(onlineStatus: String, ts: Long): List<Device> =
+        table.values.filter { it.onlineStatus == onlineStatus && (it.lastOnlineAt ?: Long.MAX_VALUE) < ts }
     override fun findByDeviceSn(deviceSn: String): List<Device> = emptyList()
     override fun findByLastActiveAtGreaterThan(since: Long): List<Device> = emptyList()
 }
@@ -250,6 +254,15 @@ class FakeUsageDelayRepo : FakeJpaRepository<UsageDelayTicket, String>(), UsageD
         table.values.removeIf { it.deviceId == deviceId }
         return before - table.size
     }
+
+    // 对应条件 UPDATE：只有未决态能被抢占，影响 0 行表示已被别的请求处理过
+    override fun claimApprove(id: String, now: Long): Int {
+        val t = table[id] ?: return 0
+        if (t.status != "PENDING" && t.status != "IGNORED") return 0
+        t.status = "APPROVED"
+        t.resolvedAt = now
+        return 1
+    }
 }
 
 class FakeUsageSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionRepository {
@@ -261,5 +274,14 @@ class FakeUsageSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSes
         val before = table.size
         table.remove(deviceId)
         return before - table.size
+    }
+
+    // 对应 UsageSessionRepository.addExtendedMinutes 的条件自增（额度累加不再读改写）
+    override fun addExtendedMinutes(deviceId: String, minutes: Int, now: Long): Int {
+        val s = table[deviceId] ?: return 0
+        s.extendedMinutes += minutes
+        s.lastDelayEpoch = now
+        s.updatedAt = now
+        return 1
     }
 }

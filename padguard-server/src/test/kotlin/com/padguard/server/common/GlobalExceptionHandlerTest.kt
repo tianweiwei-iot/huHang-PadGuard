@@ -74,6 +74,67 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    fun `parent DEVICE_NOT_OWNED maps to HTTP 403`() {
+        // DeviceOwnershipGuard / GeofenceService / UnlockService / BillingService 抛的都是 2003，
+        // 而不是 1003。此前只映射了 FORBIDDEN，于是"设备不属于当前用户"回成
+        // HTTP 200 + body.code=2003 —— 网关与前端都当成成功，越权写变成"成功但没生效"。
+        val resp = MockHttpServletResponse()
+        val ex = BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+
+        val entity = handler.handleBiz(ex, resp)!!
+
+        assertEquals(HttpStatus.FORBIDDEN.value(), entity.statusCode.value())
+        assertEquals(ParentErr.DEVICE_NOT_OWNED, (entity.body as ApiResponse<*>).code)
+    }
+
+    @Test
+    fun `parent DEVICE_NOT_FOUND maps to HTTP 404`() {
+        val resp = MockHttpServletResponse()
+        val ex = BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+
+        val entity = handler.handleBiz(ex, resp)!!
+
+        assertEquals(HttpStatus.NOT_FOUND.value(), entity.statusCode.value(), "资源不存在不应回 200")
+    }
+
+    @Test
+    fun `child DEVICE_NOT_OWNED must NOT become 403`() {
+        // 孩子端把 HTTP 403 映射为 DEVICE_UNBOUND 终态并清空本地凭据。
+        // 若把归属类错误统一改成 403，一台正常绑定的设备会被踢回绑定页 ——
+        // 因此 2003/2001 的 403/404 映射只对 PARENT 生效。
+        val resp = MockHttpServletResponse()
+        val ex = BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.CHILD)
+
+        val entity = handler.handleBiz(ex, resp)!!
+
+        assertEquals(
+            HttpStatus.OK.value(), entity.statusCode.value(),
+            "孩子端越权必须保持 200 信封，否则会被误判为设备已解绑并清除凭据"
+        )
+    }
+
+    @Test
+    fun `unhandled exception never leaks the raw message to the client`() {
+        // JPA/Spring 的异常消息会带表名、列名、约束名甚至 SQL 片段。
+        // 对外只允许返回一个可对照日志的短编号。
+        val resp = MockHttpServletResponse()
+        val e = IllegalStateException("duplicate key value violates unique constraint \"uk_usage_logs_log_id\"")
+
+        val entity = handler.handleOther(e, resp)!!
+
+        val body = entity.body as ApiResponse<*>
+        assertEquals(ParentErr.SERVER_ERROR, body.code)
+        assertTrue(
+            body.message?.contains("uk_usage_logs_log_id") != true,
+            "不得把数据库约束名回传给客户端：${body.message}"
+        )
+        assertTrue(
+            body.message?.contains("错误编号") == true,
+            "必须给出可对照日志的编号，否则用户报障时无从定位：${body.message}"
+        )
+    }
+
+    @Test
     fun `other parent business errors still return 200 with the code in body`() {
         // 未被显式映射的业务错误（如设备离线）维持既有约定：200 + body code。
         // 显式映射（401/403/400/429）之外的错误码不应被波及。

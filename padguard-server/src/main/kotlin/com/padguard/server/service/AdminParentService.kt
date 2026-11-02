@@ -64,7 +64,8 @@ class AdminParentService(
         val devices = owned.map {
             DeviceMini(
                 name = it.name, deviceId = it.id, controlMode = it.controlMode,
-                online = online(it), todayUsageMinutes = usedMinutes[it.id] ?: 0
+                // 同 AdminDeviceService：null 才是"今日未开始计时"，不能填 0
+                online = online(it), todayUsageMinutes = usedMinutes[it.id]
             )
         }
         val subscription = sub?.let {

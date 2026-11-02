@@ -21,6 +21,7 @@ import com.padguard.server.ws.WebSocketPushService
 import org.mockito.Mockito
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -63,6 +64,10 @@ class AdminServiceTest {
         override fun findByUserId(userId: String) = table.values.filter { it.userId == userId }
         override fun countByUserId(userId: String) = table.values.count { it.userId == userId }.toLong()
         override fun countByOnlineStatus(onlineStatus: String) = table.values.count { it.onlineStatus == onlineStatus }.toLong()
+        override fun findByOnlineStatus(onlineStatus: String) =
+            table.values.filter { it.onlineStatus == onlineStatus }
+        override fun findByOnlineStatusAndLastOnlineAtLessThan(onlineStatus: String, ts: Long) =
+            table.values.filter { it.onlineStatus == onlineStatus && (it.lastOnlineAt ?: Long.MAX_VALUE) < ts }
         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
         override fun findByLastActiveAtGreaterThan(since: Long) =
             table.values.filter { (it.lastActiveAt ?: 0L) > since }
@@ -200,6 +205,15 @@ class AdminServiceTest {
             table.values.removeIf { it.deviceId == deviceId }
             return before - table.size
         }
+
+    // 对应 UsageSessionRepository.addExtendedMinutes 的条件自增（额度累加不再读改写）
+    override fun addExtendedMinutes(deviceId: String, minutes: Int, now: Long): Int {
+        val s = table[deviceId] ?: return 0
+        s.extendedMinutes += minutes
+        s.lastDelayEpoch = now
+        s.updatedAt = now
+        return 1
+    }
     }
 
     private class FakePolicyRepo : FakeJpaRepository<Policy, String>(), PolicyRepository {
@@ -265,7 +279,8 @@ class AdminServiceTest {
             Mockito.mock(PolicyService::class.java),
             ws, mqtt, users, policyRepo, auditService,
             30L, "", "", billing,
-            Mockito.mock(DeviceDataPurgeService::class.java)
+            Mockito.mock(DeviceDataPurgeService::class.java),
+            DevicePresenceRegistry()
         )
         // UsageSessionService 用真实实现驱动 B1/B2 的"今日用量"派生（走假 usageSessionRepo）。
         // usageDelayService 在 list 路径不触发，以 mock 占位。
@@ -731,14 +746,16 @@ class AdminServiceTest {
     }
 
     @Test
-    fun `device list falls back to empty region and zero usage when no session today`() {
+    fun `device list falls back to empty region and null usage when no session today`() {
         val f = fixture()
         f.users.save(User("p-b2", "13800000006", "h").also { it.status = "active" })
         f.devices.save(com.padguard.server.domain.Device("dev-b2").also { it.userId = "p-b2" })
         val rows = f.svc.listDevices("A-super", null, null).items
         val row = rows.first { it.deviceId == "dev-b2" }
         assertEquals("", row.region, "无区域时回退空串（前端对空串显示 —）")
-        assertEquals(0, row.todayUsageMinutes, "无今日会话时应为 0（前端显示 —）")
+        // null 而不是 0：DTO 明确约定 null = 今日尚未开始计时，前端据此显示「—」。
+        // 填 0 会把"没有数据"显示成"今天一分钟都没用"，运营据此判断活跃度必然失真。
+        assertNull(row.todayUsageMinutes, "无今日会话时应为 null（前端显示 —），不能是 0")
     }
 
     // ----------------------------- B3/B4：列表分页与带参筛选 -----------------------------

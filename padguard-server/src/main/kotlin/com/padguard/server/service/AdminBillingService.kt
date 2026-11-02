@@ -99,11 +99,32 @@ class AdminBillingService(
         sub.plan = planEnum.key
         sub.status = SubStatus.ACTIVE.name
         sub.deviceLimit = billingService.deviceLimitOf(planEnum)
-        sub.expiredAt = base + req.days * 86_400_000L
+        sub.expiredAt = expiryOf(base, planEnum, req.days)
         sub.updatedAt = now
         subscriptionRepository.save(sub)
         auditService.record(adminId, user.id, AdminAudit.BILLING_MANUAL, targetType = "subscription", targetId = sub.id, detail = "手动开通 ${planEnum.label} ${req.days}天 -> ${user.phone}")
         return mapOf("ok" to true, "status" to subStatusLower(sub.status), "expiredAt" to (fmt(sub.expiredAt) ?: ""))
+    }
+
+    /**
+     * 后台手动开通的到期时刻。
+     *
+     * 与家长自助购买必须同一套日历口径：自助走的是"自然月 + 当日 23:59:59.999 收尾"
+     * （[BillingService] 的 plusMonths）。后台此前用"天数 × 86400000"固定毫秒，
+     * 于是年卡 = 360 天（比自助少 5 天），到期时刻还落在开通那一刻的钟点，
+     * 家长端 remainDays 向上取整会显示得比实际少一天，最后一天中途就被锁机 —— 同一产品两种"一年"。
+     *
+     * 判定规则：套餐本身有月数、且调用方传的天数正好等于旧口径（months × 30）时按月推进；
+     * 其余（如运营手工补 45 天）仍按天，保留灵活度。
+     */
+    private fun expiryOf(base: Long, plan: Plan, days: Int): Long {
+        val months = plan.months
+        if (months > 0 && days == months * 30) {
+            val zone = com.padguard.server.common.SERVER_ZONE_ID
+            val date = java.time.Instant.ofEpochMilli(base).atZone(zone).toLocalDate().plusMonths(months.toLong())
+            return date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1
+        }
+        return base + days * 86_400_000L
     }
 
     @Transactional

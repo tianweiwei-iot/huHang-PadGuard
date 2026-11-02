@@ -170,6 +170,21 @@ class GlobalExceptionHandler {
             // 管理端 http() 在 !res.ok 时直接抛错、家长端 ApiDataSource 在 !isSuccessful 时走错误分支——
             // 两者都不会静默放行，但只有正确的 403 才能让"被拒绝"这一语义在链路各层一致。
             e.audience == Audience.PARENT && e.code == ParentErr.FORBIDDEN -> HttpStatus.FORBIDDEN
+            // 归属类拒绝（2003）此前落到 else -> 200，与上面几行注释的结论直接矛盾：
+            // DeviceOwnershipGuard / GeofenceService / UnlockService / BillingService.orderStatusOf
+            // 抛的都是 2003 / 3003，而不是 1003，于是"设备不属于当前用户"被回成
+            // HTTP 200 + body.code=2003 —— 网关、后台 api.js、家长端拦截器全部按"成功"处理，
+            // 越权读取会变成"成功但无数据"，越权写会变成"成功但没生效"。
+            // 只对 PARENT 生效：孩子端把 403 映射为 DEVICE_UNBOUND 终态并清本地凭据，
+            // 若设备已易主让孩子端收到 403，会把一台正常绑定的设备踢回绑定页。
+            e.audience == Audience.PARENT && e.code == ParentErr.DEVICE_NOT_OWNED -> HttpStatus.FORBIDDEN
+            // 资源不存在同类：404 既不泄漏归属，也能让客户端走"数据没了"而不是"操作成功"。
+            e.audience == Audience.PARENT && (
+                e.code == ParentErr.DEVICE_NOT_FOUND ||
+                    e.code == ParentErr.GEOFENCE_NOT_FOUND ||
+                    e.code == ParentErr.POLICY_NOT_FOUND ||
+                    e.code == ParentErr.ORDER_NOT_FOUND
+                ) -> HttpStatus.NOT_FOUND
             e.audience == Audience.CHILD && e.code == ChildErr.TOKEN_INVALID -> HttpStatus.UNAUTHORIZED
             e.audience == Audience.CHILD && e.code == ChildErr.DEVICE_UNBOUND -> HttpStatus.FORBIDDEN
             // 家长账号被冻结：孩子端是"已绑定设备想再绑/换绑"的场景，属终态拒绝（403），
@@ -344,10 +359,16 @@ class GlobalExceptionHandler {
             log.error("unhandled exception (response already committed)", e)
             return null
         }
-        log.error("unhandled exception", e)
+        // 对外只给一个可对照日志的短编号，绝不回传 e.message：
+        // JPA/Spring 的异常消息里带表名、列名、约束名甚至 SQL 片段
+        // （例如 `duplicate key value violates unique constraint "uk_usage_logs_log_id"`），
+        // 等于把库结构直接送给家长端 App 和抓包者。而"一律返回 server error"又会让
+        // 用户报障时无任何可定位信息，因此用 ref 把两侧接上：日志里 grep 同一个 ref 即可。
+        val ref = java.util.UUID.randomUUID().toString().take(8)
+        log.error("unhandled exception ref={}", ref, e)
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
             .contentType(MediaType.APPLICATION_JSON)
-            .body(ApiResponse<Any>(ParentErr.SERVER_ERROR, e.message ?: "server error"))
+            .body(ApiResponse<Any>(ParentErr.SERVER_ERROR, "服务器内部错误，请稍后重试（错误编号 $ref）"))
     }
 
     /**

@@ -7,7 +7,7 @@
     title: "服务器设置", icon: "🌐", group: "系统",
     render: () => `
       <div class="page-head"><div><h2>服务器基本信息</h2><p>配置服务端对外访问地址；IP 漂移后在此更新即可，无需改代码或重打包</p></div>
-      <div class="page-actions"><button class="btn" id="sp-refresh">↻ 刷新</button><button class="btn btn-primary" id="sp-save">保存</button></div></div>
+      <div class="page-actions"><button class="btn" id="sp-refresh">↻ 刷新</button>${PG.guard("server", "write", '<button class="btn btn-primary" id="sp-save">保存</button>')}</div></div>
       <div id="sp-body"><div class="empty">加载中…</div></div>`,
     mount: async (root) => {
       root.querySelector("#sp-refresh").onclick = () => PG.views.serverProfile.mount(root);
@@ -45,7 +45,9 @@
       });
       preview();
 
-      root.querySelector("#sp-save").onclick = async () => {
+      // 保存需要 server:write（服务端 ServerProfileService 强制校验），
+      // 因此按钮也按权限渲染；无写权限时节点为 null，必须判空。
+      U.bind(root, "#sp-save", async () => {
         const body = {
           publicHost: root.querySelector("#sp-host").value.trim(),
           port: parseInt(root.querySelector("#sp-port").value, 10),
@@ -60,7 +62,7 @@
           U.toast && U.toast("ok", "已保存", "服务器基本信息已更新");
           PG.views.serverProfile.mount(root);
         } catch (e) { U.toast && U.toast("err", "保存失败", e.message); }
-      };
+      });
     },
   });
 })(window.PG);

@@ -20,7 +20,9 @@
         <div id="p-pager"></div>
       </div>`,
     mount: async (root) => {
-      root.querySelector("#p-create").onclick = openCreate;
+      // 「新建家长」只在有 parents:create 时渲染；客服/财务/审计打开本页时该节点为 null，
+      // 判空后仍然能正常看列表（此前会整页「加载失败」）。
+      U.bind(root, "#p-create", openCreate);
       // 筛选条件变化（或顶栏搜索回填）应回到第 1 页，否则可能在已无数据的页码上停留
       const reloadReset = () => { curPage = 1; load(root); };
       // 顶栏全局搜索跳转过来时回填关键字（消费后立即清空，避免下次进页面误命中）
@@ -191,8 +193,17 @@
   async function openCreate() {
     // 套餐取自服务端真实可购套餐（Mock 已清空，用 PG.Mock.PLANS 会得到空下拉）
     const list = (await PG.api.listPlans()) || [];
+    // 付费套餐的开通需要 billing:manual（服务端 AdminParentService 强制校验）。
+    // 若运营没有该权限却仍能选付费套餐，结果会是"账号已建、订阅未开"的半成功状态，
+    // 界面只弹一句无权限 —— 因此这里直接不给选项，并说明去哪开通。
+    const canManual = PG.can("billing", "manual");
     const plans = '<option value="TRIAL">免费版（试用）</option>' +
-      list.map(p => '<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + (p.priceFen ? '（' + U.money(p.priceFen) + '/期）' : '') + '</option>').join("");
+      (canManual
+        ? list.map(p => '<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + (p.priceFen ? '（' + U.money(p.priceFen) + '/期）' : '') + '</option>').join("")
+        : "");
+    const planHint = canManual
+      ? ""
+      : '<p class="muted" style="font-size:12px;margin-top:6px">你当前没有「订阅与计费 → 手工开通」权限，只能先建免费账号；付费套餐请到「订阅与计费」页开通。</p>';
     const m = PG.ui.modal({
       title: "新建家长账号", width: 480,
       body: `<div class="field"><label>家长姓名</label><input id="c-name" placeholder="如 张伟"></div>
@@ -202,7 +213,7 @@
           <div class="field"><label>初始套餐</label><select id="c-plan">${plans}</select></div>
           <div class="field"><label>区域</label><input id="c-region" value="北京"></div>
         </div>
-        <div class="field"><label>备注</label><input id="c-remark" placeholder="渠道 / 来源等"></div>`,
+        <div class="field"><label>备注</label><input id="c-remark" placeholder="渠道 / 来源等"></div>${planHint}`,
       foot: '<button class="btn btn-ghost" id="c-cancel">取消</button><button class="btn btn-primary" id="c-ok">创建并开通</button>',
     });
     m.el.querySelector("#c-cancel").onclick = m.close;

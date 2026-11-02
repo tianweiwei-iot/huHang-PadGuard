@@ -199,4 +199,13 @@ class FakeSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionR
         table.remove(deviceId)
         return before - table.size
     }
+
+    // 对应 UsageSessionRepository.addExtendedMinutes 的条件自增（额度累加不再读改写）
+    override fun addExtendedMinutes(deviceId: String, minutes: Int, now: Long): Int {
+        val s = table[deviceId] ?: return 0
+        s.extendedMinutes += minutes
+        s.lastDelayEpoch = now
+        s.updatedAt = now
+        return 1
+    }
 }

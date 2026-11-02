@@ -110,16 +110,16 @@ class UsageDelayService(
     @Transactional
     fun approve(userId: String, deviceId: String, ticketId: String, req: UsageDelayApproveRequest) {
         val t = ownedOpen(userId, deviceId, ticketId)
-        val session = usageSessionRepository.findByDeviceId(deviceId)
-        if (session != null) {
-            session.extendedMinutes += t.minutes
-            session.lastDelayEpoch = System.currentTimeMillis()
-            session.updatedAt = System.currentTimeMillis()
-            usageSessionRepository.save(session)
+        val now = System.currentTimeMillis()
+        // 先抢占工单：并发/重试的第二次请求影响 0 行，直接退出。
+        // 不能只靠 ownedOpen 的检查 —— 那是 check-then-act，两个请求都会看到 PENDING，
+        // 于是额度被加两次（额度直接决定锁机时间），而工单只剩一条 APPROVED，事后无从追查。
+        val claimed = usageDelayRepository.claimApprove(ticketId, now)
+        if (claimed == 0) {
+            throw BizException(ParentErr.PARAM_ERROR, "该延时申请已被处理，请刷新后查看", Audience.PARENT)
         }
-        t.status = "APPROVED"
-        t.resolvedAt = System.currentTimeMillis()
-        usageDelayRepository.save(t)
+        // 额度用数据库自增而不是"读出来 +n 再 save"：后者在并发续批时会丢更新。
+        usageSessionRepository.addExtendedMinutes(deviceId, t.minutes, now)
         auditService.record(userId, deviceId, AuditAction.USAGE_DELAY_APPROVE, targetType = "ticket", targetId = ticketId,
             detail = "minutes=${t.minutes}")
         log.info("usage delay approved device={} ticket={} +{}min", deviceId, ticketId, t.minutes)

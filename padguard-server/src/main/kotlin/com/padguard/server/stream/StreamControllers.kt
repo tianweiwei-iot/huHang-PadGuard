@@ -220,8 +220,16 @@ class ParentStreamController(
      * 直接回答"服务端实时看屏到底占了多少带宽、并发高时会不会被打满"。
      */
     @GetMapping("/metrics")
-    fun metrics(): Any {
-        val devices = hub.publishersSnapshot()
+    fun metrics(@RequestAttribute("userId") userId: String): Any {
+        // 只返回**当前家长自己的**设备。
+        //
+        // 此前这里返回全服正在推流的 deviceId 清单，而它挂在家长 JWT 之下：
+        // 任何一个家长调一次就能拿到所有家庭正在被实时查看的设备 ID。
+        // deviceId 是其余家长端端点的路径参数，等同于一把可枚举的钥匙
+        // （配合 usage-session 那条越权即为完整的跨租户读取链）。
+        // 运维要看全局带宽请用服务端监控页（/v1/admin/server/metrics）。
+        val mine = deviceRepository.findByUserId(userId).map { it.id }.toSet()
+        val devices = hub.publishersSnapshot().filter { it in mine }
         var upSum = 0L
         var downSum = 0L
         val per = devices.map { d ->

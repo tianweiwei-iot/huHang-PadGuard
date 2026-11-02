@@ -89,8 +89,10 @@ class MonitorService(
 
     fun listScreenshots(userId: String, deviceId: String, limit: Int): List<ScreenshotDto> {
         requireOwned(userId, deviceId)
+        // 同 MessageService.listMessages：limit 必须有上限。截图是二进制缩略图 URL 列表，
+        // 一次拉回几千条既撑爆响应体，也会让家长端 LazyColumn 首帧卡死。
         return screenshotRepository
-            .findByDeviceIdOrderByCapturedAtDesc(deviceId, PageRequest.of(0, limit.coerceAtLeast(1)))
+            .findByDeviceIdOrderByCapturedAtDesc(deviceId, PageRequest.of(0, limit.coerceIn(1, 100)))
             .map { s ->
                 ScreenshotDto(
                     deviceId = s.deviceId, imageUrl = s.fileUrl, thumbnailUrl = s.thumbnailUrl,
