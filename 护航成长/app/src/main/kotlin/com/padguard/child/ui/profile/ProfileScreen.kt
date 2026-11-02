@@ -306,9 +306,11 @@ private fun ProfileContent(
                     deviceAdminActive = state.deviceAdminActive,
                     usageStatsGranted = state.usageStatsGranted,
                     batteryOptimizationWhitelisted = state.batteryOptimizationWhitelisted,
+                    webGuardActive = state.webGuardActive,
                     onClickDeviceAdmin = { onPermissionGuide("device_admin") },
                     onClickUsageStats = { onPermissionGuide("usage_stats") },
-                    onClickBatteryOptimization = { onPermissionGuide("battery_optimization") }
+                    onClickBatteryOptimization = { onPermissionGuide("battery_optimization") },
+                    onClickWebGuard = { onPermissionGuide("web_guard") }
                 )
             }
             item {
@@ -692,9 +694,11 @@ private fun SecurityCard(
     deviceAdminActive: Boolean,
     usageStatsGranted: Boolean,
     batteryOptimizationWhitelisted: Boolean,
+    webGuardActive: Boolean,
     onClickDeviceAdmin: () -> Unit,
     onClickUsageStats: () -> Unit,
-    onClickBatteryOptimization: () -> Unit
+    onClickBatteryOptimization: () -> Unit,
+    onClickWebGuard: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column {
@@ -721,6 +725,17 @@ private fun SecurityCard(
                 subtitle = "加入豁免名单，确保息屏后仍能正常管控（锁屏/定位/推送）",
                 active = batteryOptimizationWhitelisted,
                 onClick = onClickBatteryOptimization
+            )
+            HorizontalDivider()
+            // 上网防护（本地 DNS 过滤 VPN）—— 家长端「禁访问某网站 / 白名单上网 / 违规分类拦截」
+            // 在设备侧的唯一执行通道。第九轮修复前这一行还无从展示：服务没注册、控制器没人调用，
+            // 家长配了策略孩子端没有任何执行点，界面上也看不出来。active 取真实运行态，
+            // 未授权时点进去即可补授权（VpnService.prepare 系统确认框）。
+            PermissionRow(
+                title = "上网防护（网址拦截）",
+                subtitle = "家长端配置的违规网站拦截依赖它；未授权时这些策略不会生效",
+                active = webGuardActive,
+                onClick = onClickWebGuard
             )
         }
     }

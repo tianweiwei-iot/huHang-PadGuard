@@ -244,6 +244,31 @@ class DeviceAdminBridge @Inject constructor(
     fun setUserRestriction(key: String, restricted: Boolean): OpResult =
         if (restricted) addUserRestriction(key) else clearUserRestriction(key)
 
+    /**
+     * 设置 always-on VPN 包（仅 DO/PO）。
+     *
+     * ## 为什么上网管控必须有它
+     * `VpnService` 需要用户在一次系统确认框里授权；而管控类应用**无法从后台弹出那个框**，
+     * 一旦家长开启网站过滤时设备离手，通道就永远起不来。设备所有者可代用户授予：
+     * 设为 always-on 后系统直接认定该包已获 VPN 权限（`VpnService.prepare()` 返回 null），
+     * 配合 `DISALLOW_CONFIG_VPN` 还能让孩子无法在设置里关闭/替换 VPN。
+     *
+     * 非 DO/PO 返回 [OpResult.Unsupported]（预期内降级，上层引导用户手动授权）。
+     *
+     * @param packageName 目标 VPN 包名；传 null 表示解除（仅清除绑定，不影响用户限制）
+     * @param lockdown 是否开启"阻止无 VPN 时的网络"（本产品**传 false**：
+     *   宁可 VPN 掉了暂时失去过滤，也不能让孩子整台机器断网 —— 断网会被当成"平板坏了"）
+     */
+    fun setAlwaysOnVpn(packageName: String?, lockdown: Boolean): OpResult =
+        guarded("setAlwaysOnVpn=$packageName") {
+            val admin = requireAdmin()
+            require(can(Capability.USER_RESTRICTIONS)) { "requires DO/PO" }
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+                error("setAlwaysOnVpnPackage requires API 24+")
+            }
+            dpm.setAlwaysOnVpnPackage(admin, packageName, lockdown)
+        }
+
     fun hasUserRestriction(key: String): Boolean {
         val um = context.getSystemService(Context.USER_SERVICE) as? UserManager ?: return false
         return um.hasUserRestriction(key)

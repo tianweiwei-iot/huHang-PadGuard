@@ -66,6 +66,20 @@ fun PermissionGuideScreen(
     val context = LocalContext.current
     val vm: PermissionGuideViewModel = hiltViewModel()
     val mode by vm.controlMode.collectAsStateWithLifecycle()
+
+    // VPN 授权确认框：Intent 由 VpnService.prepare() 生成，只能原样交给系统。
+    // 结果一律以 isWebGuardPrepared() 复核（部分 ROM 已授权也回 CANCELED）。
+    val vpnLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) {
+        val ok = vm.isWebGuardPrepared()
+        Toast.makeText(
+            context,
+            if (ok) "已授权，网址拦截开始生效" else "未授权：家长端配置的网址拦截不会生效",
+            Toast.LENGTH_LONG
+        ).show()
+        if (ok) vm.syncWebGuardNow()
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -161,6 +175,51 @@ fun PermissionGuideScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(text = "前往设置（电池优化白名单）")
+                    }
+                }
+
+                // 上网防护（本地 DNS 过滤 VPN）授权。
+                // 这是「禁访问某网站 / 白名单上网 / 违规分类拦截」在设备侧唯一的执行通道：
+                // Android 要求全设备流量通道必须由用户在系统确认框里点「允许」，
+                // 而应用无法从后台弹出那个框。装机时没授权、家长后来又开启了过滤，
+                // 就必须回到这里补一次，否则策略永远不生效。
+                if (kind == "web_guard") {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = if (vm.isWebGuardPrepared()) {
+                                "已授权：网址拦截生效中。"
+                            } else {
+                                "尚未授权：家长端配置的「网址拦截」当前不会生效。"
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (vm.isWebGuardPrepared()) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            }
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            if (!vm.ensureGuardUnlocked()) return@Button
+                            val intent = vm.prepareVpnIntent()
+                            if (intent == null) {
+                                // 已授权（可能是设备所有者已代授权）：直接按策略对账一次
+                                vm.syncWebGuardNow()
+                                Toast.makeText(context, "已授权，正在开启网址过滤", Toast.LENGTH_SHORT).show()
+                            } else {
+                                runCatching { vpnLauncher.launch(intent) }
+                                    .onFailure { e ->
+                                        Toast.makeText(context, "无法打开 VPN 授权页：${e.message}", Toast.LENGTH_LONG).show()
+                                    }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(text = if (vm.isWebGuardPrepared()) "重新检查授权" else "去授权（上网防护）")
                     }
                 }
             }
@@ -315,6 +374,7 @@ private fun titleFor(kind: String): String = when (kind) {
     "device_admin" -> "设备管理员"
     "usage_stats" -> "使用情况访问"
     "battery_optimization" -> "电池优化白名单"
+    "web_guard" -> "上网防护"
     else -> "权限引导"
 }
 
@@ -326,6 +386,7 @@ private fun descriptionFor(kind: String, mode: ControlMode): String = when (kind
     }
     "usage_stats" -> "使用情况访问是 Android 提供的统计权限，授予后我们才能读取每个 App 的真实使用时长。"
     "battery_optimization" -> "为确保息屏后仍能正常管控（锁屏、定位、消息推送），请将本应用加入系统「电池优化」豁免名单。受 Android 政策限制，需在此手动设置。"
+    "web_guard" -> "上网防护用于拦截家长设置的违规网站（域名级过滤）。Android 要求这类「全设备网络过滤」必须由您亲手在系统确认框里允许一次，应用无法代您开启。"
     else -> "请按提示完成权限开启。"
 }
 
@@ -354,6 +415,12 @@ private fun stepsFor(kind: String, mode: ControlMode): List<String> = when (kind
         "在列表中找到「护航成长」",
         "选择「不优化 / 不受限制」",
         "返回本页面即可"
+    )
+    "web_guard" -> listOf(
+        "点击下方「去授权」",
+        "在系统弹窗中勾选「信任此应用」并点「确定」",
+        "返回本页面，卡片显示「已授权」即生效",
+        "过滤只作用于域名，无法看到页面内容（如实说明，不夸大）"
     )
     else -> emptyList()
 }

@@ -89,6 +89,12 @@ fun OneTimeConsentScreen(
         ActivityResultContracts.StartActivityForResult()
     ) { viewModel.onReturnedToApp() }
 
+    // VPN 授权：Intent 由 VpnService.prepare() 生成，结果不看 resultCode（部分 ROM 已授权也回 CANCELED），
+    // 一律由 ViewModel 以 isPrepared() 复核真实状态。
+    val vpnLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { viewModel.onVpnConsentResult() }
+
     // ViewModel 不持有 Activity 引用，跳转统一由事件驱动；只有一处分发，不会漏类型。
     LaunchedEffect(Unit) {
         viewModel.launch.collect { event ->
@@ -96,6 +102,7 @@ fun OneTimeConsentScreen(
                 is ConsentLaunch.Runtime -> runtimeLauncher.launch(event.permissions.toTypedArray())
                 is ConsentLaunch.Settings -> settingsLauncher.launch(event.intent)
                 is ConsentLaunch.DeviceAdmin -> adminLauncher.launch(event.intent)
+                is ConsentLaunch.VpnPrepare -> vpnLauncher.launch(event.intent)
                 ConsentLaunch.MediaProjection ->
                     captureLauncher.launch(CapturePermissionActivity.intent(context))
             }
@@ -285,6 +292,7 @@ private fun primaryActionLabel(
             ConsentItem.Source.DEVICE_ADMIN -> "去激活设备管理员"
             ConsentItem.Source.RUNTIME -> "去允许系统权限提示"
             ConsentItem.Source.MEDIA_PROJECTION -> "去开启屏幕采集"
+            ConsentItem.Source.VPN -> "去允许「上网防护」"
             ConsentItem.Source.MANUAL_SETTING -> "去开启「" + item.title + "」"
         }
     }

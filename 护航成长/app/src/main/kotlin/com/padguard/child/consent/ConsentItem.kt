@@ -33,7 +33,15 @@ data class ConsentItem(
         /** AppOps / 无障碍：必须进系统设置页手动打开 */
         MANUAL_SETTING,
         /** 屏幕采集：MediaProjection 系统弹窗 */
-        MEDIA_PROJECTION
+        MEDIA_PROJECTION,
+        /**
+         * VPN 授权：系统弹出的「允许此应用设置 VPN 连接」确认框。
+         *
+         * 与 MEDIA_PROJECTION 同属"一次性系统确认"，但发起 Intent 来自
+         * `VpnService.prepare()`，结果也走 ActivityResult，故单列一类：
+         * 混进 MANUAL_SETTING 会被当成"去设置页拨开关"，永远等不到那个框。
+         */
+        VPN
     }
 
     enum class State {
@@ -69,4 +77,13 @@ sealed interface ConsentLaunch {
 
     /** 申请屏幕采集（MediaProjection 系统弹窗） */
     data object MediaProjection : ConsentLaunch
+
+    /**
+     * 申请 VPN 授权（`VpnService.prepare()` 返回的确认框 Intent）。
+     *
+     * 必须是"由系统生成的 Intent 原样交给页面去 startActivityForResult"，
+     * App 无法伪造也无法跳过 —— 这是 Android 对全设备流量通道的硬性门槛。
+     * 设备所有者机型不走这里（控制器会先尝试 always-on 代授权，成功即无需弹窗）。
+     */
+    data class VpnPrepare(val intent: Intent) : ConsentLaunch
 }

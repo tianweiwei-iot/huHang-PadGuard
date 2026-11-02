@@ -372,6 +372,36 @@
             android:foregroundServiceType="dataSync" />
 
         <!--
+          上网防护（本地 DNS 过滤 VPN）—— 域名级网页拦截的执行体。
+
+          ## 为什么必须有这条声明（历史缺口）
+          WebGuardVpnService / WebGuardVpnController 的代码早已写好，但 **从未在本清单注册**，
+          且控制器 start() 全工程零调用。后果：家长端「禁止访问某网站 / 白名单上网 / 违规分类拦截」
+          配置得再完整，孩子端也没有任何执行通道，且**不报任何错误**（家长以为已生效）。
+          这是第九轮审查确认的唯一 P0。
+
+          ## 关键点
+          - `permission=BIND_VPN_SERVICE`：只有持该签名权限的系统可以绑定本服务，
+            exported=true 不会把通道暴露给第三方应用；
+          - `action=android.net.VpnService`：`VpnService.prepare()` 靠这个 action 找到候选服务，
+            缺了它系统永远认为"本机没有 VPN 客户端"，授权框都弹不出来；
+          - `foregroundServiceType=specialUse`：API 34+ 无类型的前台服务会直接崩，
+            VPN 没有专属类型，按 specialUse + 子类型理由声明（与 GuardService 同口径）。
+        -->
+        <service
+            android:name=".guard.WebGuardVpnService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="local dns filtering for parental-control web guard" />
+        </service>
+
+        <!--
           闹钟兜底通道：与 JobScheduler 看门狗并行的第二条系统调度路径（60s 窗口闹钟）。
           部分国产 ROM 会限制 JobScheduler 投递，AlarmManager 在多数 ROM 上更稳定。
           仅应用自身拉起（exported=false），无外部入口。

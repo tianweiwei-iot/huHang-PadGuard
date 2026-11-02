@@ -3,10 +3,15 @@ package com.padguard.child.permission
 import android.app.Application
 import com.padguard.child.guard.GuardGate
 import com.padguard.child.guard.GuardPasswordManager
+import com.padguard.child.guard.WebGuardVpnController
+import com.padguard.core.common.Logger
 import com.padguard.core.data.model.policy.ControlMode
+import com.padguard.core.data.repository.PolicyRepository
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import dagger.hilt.android.lifecycle.HiltViewModel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
@@ -22,7 +27,9 @@ class PermissionGuideViewModel @Inject constructor(
     private val app: Application,
     private val admin: DeviceAdminBridge,
     private val guardPassword: GuardPasswordManager,
-    private val deviceAdminRequest: DeviceAdminRequest
+    private val deviceAdminRequest: DeviceAdminRequest,
+    private val webGuardVpn: WebGuardVpnController,
+    private val policyRepository: PolicyRepository
 ) : androidx.lifecycle.ViewModel() {
 
     init {
@@ -39,4 +46,32 @@ class PermissionGuideViewModel @Inject constructor(
     fun ensureGuardUnlocked(): Boolean = GuardGate.ensureUnlocked(app, guardPassword)
 
     fun deviceAdminIntent(): android.content.Intent = deviceAdminRequest.intent(admin)
+
+    // ==================== 上网防护（VPN）====================
+
+    /** 系统是否已授予 VPN 权限（决定按钮文案与"已开启"标记）。 */
+    fun isWebGuardPrepared(): Boolean = webGuardVpn.isPrepared()
+
+    /** 拉起系统 VPN 确认框；已授权时返回 null。 */
+    fun prepareVpnIntent(): android.content.Intent? = webGuardVpn.prepareIntent()
+
+    /**
+     * 授权回来后立刻按当前策略对账一次，免等下一轮自检（最长要几分钟）。
+     *
+     * 家长刚点完"允许"，如果界面上"已开启"却要等几分钟才真正开始过滤，
+     * 会被当成"授权没生效"。这里主动拉一次，做到所见即所得。
+     */
+    fun syncWebGuardNow() {
+        viewModelScope.launch {
+            runCatching {
+                val web = policyRepository.getPolicy().web
+                val state = webGuardVpn.sync(web)
+                Logger.i(TAG) { "web guard vpn synced after consent: $state" }
+            }.onFailure { Logger.w(TAG, it) { "web guard vpn sync after consent failed" } }
+        }
+    }
+
+    companion object {
+        private const val TAG = "PermissionGuideVM"
+    }
 }

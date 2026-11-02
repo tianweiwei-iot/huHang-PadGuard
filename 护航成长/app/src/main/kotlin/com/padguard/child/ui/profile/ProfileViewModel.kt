@@ -51,7 +51,9 @@ class ProfileViewModel @Inject constructor(
     private val remote: RemoteDataSource,
     private val admin: DeviceAdminBridge,
     private val policyRepository: PolicyRepository,
-    private val guardPassword: GuardPasswordManager
+    private val guardPassword: GuardPasswordManager,
+    /** 上网防护通道运行态（真实状态，供「隐私与安全」展示） */
+    private val webGuardVpn: com.padguard.child.guard.WebGuardVpnController
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ProfileUiState())
@@ -106,6 +108,7 @@ class ProfileViewModel @Inject constructor(
                     isDeviceOwner = adminState == AdminState.OWNER,
                     usageStatsGranted = isUsageStatsGranted(),
                     batteryOptimizationWhitelisted = isBatteryOptimizationWhitelisted(),
+                    webGuardActive = webGuardVpn.isActive(),
                     // ---------- 应用管控自检 ----------
                     // 家长最常问的是"我禁了应用，孩子还是能打开"。答案其实由三件事共同决定，
                     // 缺一件就静默失效，而界面上原本一点提示都没有：
@@ -342,6 +345,13 @@ data class ProfileUiState(
      * 必须读真实状态 —— 写死 false 会让已加白名单的设备也显示"未开启"（假状态）。
      */
     val batteryOptimizationWhitelisted: Boolean = false,
+    /**
+     * 上网防护（本地 DNS 过滤 VPN）是否正在运行。
+     *
+     * 必须是真实运行态而不是"策略要求开启"：策略要求但没授权时这里是 false，
+     * 家长才能在「我的」里看到"网址拦截其实没生效"并点进去补授权。
+     */
+    val webGuardActive: Boolean = false,
     /** 当前生效的应用名单模式（黑名单 / 白名单） */
     val appListModeLabel: String = "黑名单",
     /** 名单条数；0 表示家长端还没有下发任何应用管控配置 */

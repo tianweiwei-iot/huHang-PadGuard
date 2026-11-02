@@ -118,4 +118,24 @@ Manifest 未注册 `WebGuardVpnService`、`WebGuardVpnController.start()` 零调
 
 ### 未纳入本轮（保持计划内独立迭代）
 
-A6 上网管控 VPN 全链路（需真机 + 一次性授权 + CONSENT 升版）、sceneMode / Kiosk `isAllowed` / autoTimeZone / screenshotIntervalSec 执行点、家长端首页与订阅页三态、解锁工单死代码清理、孩子端深色 30+ 处硬编码、后台 rbac/审计竞态与剩余转义、i18n、God class 拆分。
+## 七、追加迭代（2026-11-02 晚）：A6 上网管控 VPN 全链路落地
+
+原计划把 A6 列为"需真机 + 升版 CONSENT 的独立迭代"，本轮把**代码侧全部打通**（真机回归仍是上线前置条件）。
+
+| 环节 | 状态 | 实现 |
+|---|---|---|
+| 服务注册 | ✅ | `AndroidManifest` 新增 `.guard.WebGuardVpnService`：`BIND_VPN_SERVICE` 权限 + `android.net.VpnService` intent-filter（缺它 `prepare()` 永远找不到客户端）+ `specialUse` FGS 类型（API 34+ 无类型直接崩） |
+| 策略驱动启停 | ✅ | `WebGuardVpnController.sync(policy)` 幂等对账，`GuardService.reconcileWebGuard()` 在 5 个策略落地点调用（开机复位 / 外部 kick / 周期自检 / 策略刷新 / 启动初始化） |
+| "是否需要 VPN"口径 | ✅ | 按**实际规则**判定（分类/安全搜索/黑名单非空/白名单模式），不按 `mode != OFF` —— 服务端组包 `mode` 恒为 `BLACKLIST`，按 mode 判会让每台设备常驻一个空转 VPN |
+| DP 代授权 | ✅ | 新增 `DeviceAdminBridge.setAlwaysOnVpn()`：DO/PO 机型 `setAlwaysOnVpnPackage` 代授权（系统不弹框）+ `DISALLOW_CONFIG_VPN` 锁死设置，孩子无法关闭 |
+| 一次性授权 | ✅ | `ConsentItem.Source.VPN` + `ConsentLaunch.VpnPrepare` + `OneTimeConsentViewModel` 第 ③ 步（拒绝则记 SKIPPED 并如实告知"之后需补授权"） |
+| 补授权入口 | ✅ | 权限引导页新增 `web_guard` 类型；「我的 → 隐私与安全」新增「上网防护（网址拦截）」行，`active` 取**真实运行态** |
+| DNS 上行 | ✅ | 弃写死 `8.8.8.8`（国内不可达 → 起来就断网），改读系统 `LinkProperties.dnsServers`（排除隧道自身地址防环），60s 缓存，兜底 223.5.5.5 |
+| IP 校验和 | ✅ | 原 `IpPacket.build` 头部校验和填 0（注释"tun 一般不过校验"是错的），内核 `ip_rcv` 会丢弃 → 所有回灌应答被丢。已按 RFC1071 计算 |
+| 并发 | ✅ | DNS 处理从"读循环内同步转发（单条上游超时 5s 阻塞全部查询）"改为 8 线程有界池 + CallerRunsPolicy 反压 |
+
+**仍未覆盖（如实声明）**：仅域名级拦截，URL 路径 / 页面正文 / 关键词看不到（无 MITM）；DoH/DoT 可绕过；VPN 通道必须真机验证。
+
+## 八、后续（仍未开始）
+
+sceneMode / Kiosk `isAllowed` / autoTimeZone / screenshotIntervalSec 执行点、家长端首页与订阅页三态、解锁工单死代码清理、孩子端深色（Profile 等级卡浅底、Unlock 状态色）、后台 rbac/审计竞态与剩余转义、i18n、God class 拆分。

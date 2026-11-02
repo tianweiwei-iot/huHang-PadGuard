@@ -64,7 +64,15 @@ class OneTimeConsentViewModel @Inject constructor(
     private val authRepository: AuthRepository,
     private val deviceAdminRequest: DeviceAdminRequest,
     private val consentReturn: ConsentReturnPresenter,
-    private val gateSuspension: GuardGateSuspension
+    private val gateSuspension: GuardGateSuspension,
+    /**
+     * 上网防护（本地 DNS 过滤 VPN）控制器。
+     *
+     * 装机会在这里申请一次 VPN 授权：Android 对"全设备流量通道"强制要求用户确认，
+     * 而 App **无法从后台弹那个框**。若装机时不拿到，等到家长后来开启「网址拦截 / 白名单上网」，
+     * 通道就永远起不来（要孩子拿到平板手动点一次才行），策略等于空转。
+     */
+    private val webGuardVpn: com.padguard.child.guard.WebGuardVpnController
 ) : ViewModel() {
 
     enum class Phase {
@@ -162,6 +170,25 @@ class OneTimeConsentViewModel @Inject constructor(
     }
 
     /**
+     * VPN 授权确认框的结果。
+     *
+     * 家长点"取消"**不阻断装机**（这是隐私权限，拒绝是合理选择），
+     * 但必须明确告知后果并记为跳过：之后家长端开启「网址拦截」时，
+     * 设备侧不会静默假装在拦 —— 而是如实停在"未授权"态，等家长来补授权。
+     *
+     * 这里不看 result 参数，一律以真实的 `isPrepared()` 为准：
+     * 部分 ROM 在已授权时也回传 RESULT_CANCELED，以系统状态为唯一真相源。
+     */
+    fun onVpnConsentResult() {
+        if (!webGuardVpn.isPrepared()) {
+            skippedKeys += KEY_VPN
+            _message.value = "已跳过「上网防护」：家长端开启网址拦截后本项需补授权才会生效"
+            Logger.w(TAG) { "vpn consent denied/skipped" }
+        }
+        advance("vpn-consent-result")
+    }
+
+    /**
      * 页面回到前台（从系统设置页 / 设备管理员确认页 / 录屏授权页返回）。
      *
      * AppOps、无障碍开关的变更**没有任何系统回调**，只能靠页面重新可见来复检。
@@ -241,6 +268,17 @@ class OneTimeConsentViewModel @Inject constructor(
                 tryEmit(ConsentLaunch.MediaProjection)
                 consentReturn.watch({ ScreenCaptureSession.hasToken() }, "屏幕采集")
                 gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
+            }
+            KEY_VPN -> {
+                val intent = if (webGuardVpn.isPrepared()) null else webGuardVpn.prepareIntent()
+                if (intent == null) {
+                    // 已是授权态（或刚刚被 DO always-on 代授权）：直接续跑，不再弹框
+                    advance("vpn-already-prepared")
+                } else {
+                    tryEmit(ConsentLaunch.VpnPrepare(intent))
+                    consentReturn.watch({ webGuardVpn.isPrepared() }, "上网防护")
+                    gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
+                }
             }
             else -> SpecialPermission.fromKey(key)?.let { openAgain(it.key) }
         }
@@ -323,7 +361,20 @@ class OneTimeConsentViewModel @Inject constructor(
         }
         // 走到这里：权限已齐，或申请过一次仍缺（家长可能是故意拒绝）→ 不纠缠，降级继续
 
-        // ③ 必须由家长在系统设置页手动打开的项
+        // ③ 上网防护（VPN 授权）：系统确认框，一次点击
+        val vpnIntent = if (webGuardVpn.isPrepared()) null else webGuardVpn.prepareIntent()
+        if (vpnIntent != null && KEY_VPN !in requestedOnce) {
+            requestedOnce += KEY_VPN
+            _currentKey.value = KEY_VPN
+            _phase.value = Phase.WAITING_PARENT
+            tryEmit(ConsentLaunch.VpnPrepare(vpnIntent))
+            // 盯守授权：个别 ROM 点完"确定"不回调 ActivityResult，轮询 isPrepared 把页面接回来
+            consentReturn.watch({ webGuardVpn.isPrepared() }, "上网防护")
+            gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
+            return
+        }
+
+        // ④ 必须由家长在系统设置页手动打开的项
         val manual = missingManual()
         if (manual.isNotEmpty()) {
             val next = manual.first()
@@ -348,7 +399,7 @@ class OneTimeConsentViewModel @Inject constructor(
             return
         }
 
-        // ④ 屏幕采集：MediaProjection 令牌必须在真正用到之前拿到，
+        // ⑤ 屏幕采集：MediaProjection 令牌必须在真正用到之前拿到，
         //    否则家长第一次点"实时看屏"时孩子那边才弹确认框，场景直接失真。
         if (needsCapture() && KEY_CAPTURE !in requestedOnce) {
             requestedOnce += KEY_CAPTURE
@@ -432,6 +483,20 @@ class OneTimeConsentViewModel @Inject constructor(
                     )
                 )
             }
+            add(
+                ConsentItem(
+                    key = KEY_VPN,
+                    title = "上网防护（网站过滤）",
+                    impact = "家长端「禁访问某网站 / 只允许白名单上网 / 违规分类拦截」依赖它；" +
+                        "现在不授权，家长之后开启这些开关也不会生效，需要再拿平板补一次授权",
+                    source = ConsentItem.Source.VPN,
+                    state = when {
+                        webGuardVpn.isPrepared() -> ConsentItem.State.DONE
+                        KEY_VPN in skippedKeys -> ConsentItem.State.SKIPPED
+                        else -> ConsentItem.State.NEED_MANUAL
+                    }
+                )
+            )
             SpecialPermission.values().forEach { perm ->
                 add(
                     ConsentItem(
@@ -487,6 +552,8 @@ class OneTimeConsentViewModel @Inject constructor(
         const val KEY_DEVICE_ADMIN = "deviceAdmin"
         const val KEY_RUNTIME = "runtimePermissions"
         const val KEY_CAPTURE = "mediaProjection"
+        /** 上网防护 VPN 授权（VpnService.prepare 确认框） */
+        const val KEY_VPN = "webGuardVpn"
 
         /**
          * 每次发起设置页跳转时的闸门豁免窗口时长。

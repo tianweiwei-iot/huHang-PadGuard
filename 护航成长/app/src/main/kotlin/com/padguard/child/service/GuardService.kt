@@ -147,6 +147,14 @@ import javax.inject.Inject
 class GuardService : Service() {
 
     @Inject lateinit var policyEngine: PolicyEngine
+    /**
+     * 上网防护（本地 DNS 过滤 VPN）控制器。
+     *
+     * 第九轮修复：此前该控制器**全工程零调用**，家长端能配的黑名单/白名单/违规分类
+     * 在设备侧没有任何执行通道，且不报错（静默失效）。现在每次策略落地与周期自检都走
+     * [reconcileWebGuard] 对账一次。
+     */
+    @Inject lateinit var webGuardVpn: com.padguard.child.guard.WebGuardVpnController
     @Inject lateinit var remote: RemoteDataSource
     @Inject lateinit var transportSettings: TransportSettings
     @Inject lateinit var foregroundApp: ForegroundAppMonitor
@@ -513,14 +521,14 @@ class GuardService : Service() {
             bootstrap(reason)
         } else if (reason == REASON_BOOT) {
             // 极少见：进程未死但收到开机广播，仍需走一次开机复位
-            scope.launch { runSafely("onDeviceBoot") { policyEngine.onDeviceBoot(); reconcileWatermark() } }
+            scope.launch { runSafely("onDeviceBoot") { policyEngine.onDeviceBoot(); reconcileWatermark(); reconcileWebGuard() } }
         } else if (reason == REASON_FLUSH) {
             // 锁屏页刚提交了解锁申请：这类交互有时效，等下一个 60s 上报窗口太慢，
             // 家长可能要一分多钟后才看到，孩子会以为申请没发出去而反复提交。
             scope.launch { runSafely("flushNow") { uploadPending() } }
         } else {
             // 已在运行，外部只是想催一次策略对齐（如管理器刚激活、Kiosk 被意外退出）
-            scope.launch { runSafely("applyOnKick") { policyEngine.applyCurrent(force = true); reconcileWatermark() } }
+            scope.launch { runSafely("applyOnKick") { policyEngine.applyCurrent(force = true); reconcileWatermark(); reconcileWebGuard() } }
         }
 
         // START_STICKY：被系统回收后自动重建。
@@ -645,6 +653,7 @@ class GuardService : Service() {
                     policyEngine.applyCurrent(force = true)
                 }
                 reconcileWatermark()
+                reconcileWebGuard()
             }
         }
 
@@ -946,7 +955,7 @@ class GuardService : Service() {
                     // force = true：这里的目的就是把"被用户绕过去的限制"重新压回来，
                     // 版本没变也必须重下，否则自检等于空转。
                     if (boundNow.get()) {
-                        runSafely("selfCheck") { policyEngine.applyCurrent(force = true); reconcileWatermark() }
+                        runSafely("selfCheck") { policyEngine.applyCurrent(force = true); reconcileWatermark(); reconcileWebGuard() }
                     }
                     nextSelfCheck = now + SELF_CHECK_INTERVAL_MS
                 }
@@ -1535,6 +1544,7 @@ class GuardService : Service() {
                     val report = policyEngine.applyAll(saved, force = true)
                     Logger.i(TAG) { "policy v${saved.version} applied: ${report.summary()}" }
                     reconcileWatermark()
+                    reconcileWebGuard()
                     // 操作密码闸门：把服务端下发的密码哈希落到本地（明文永不出网）。
                     // 约定：clear 为真 → 清密码；passwordHash 非空 → 启用并落库；
                     // 两者皆空 → 不改动（避免策略合并时误清空）。
@@ -1590,6 +1600,36 @@ class GuardService : Service() {
             deviceId = deviceId
         )
         watermark.show(rendered, position = wm.position, alpha = wm.opacity)
+    }
+
+    /**
+     * 按策略对账「上网防护 VPN」通道（**幂等**，可在任意策略落地后安全重复调用）。
+     *
+     * ## 为什么需要它
+     * 见 [webGuardVpn] 字段注释：执行体（[com.padguard.child.guard.WebGuardVpnService]）
+     * 与控制器早就写好了，但没有任何调用点，等于家长配的网站过滤全是空转。
+     *
+     * ## 三种如实状态
+     * - `OFF`：策略没要求上网管控 → 通道停掉（并解除 always-on 锁定）；
+     * - `RUNNING`：通道在跑 → 域名级拦截生效；
+     * - `NEED_CONSENT`：策略要求但系统未授权 → 如实记录，由 UI 引导家长补授权。
+     *   绝不"假装在保护"：没授权就是没保护，日志里必须能看见。
+     */
+    private suspend fun reconcileWebGuard() {
+        // 读不到策略（数据库异常）时**什么都不做**：既不能贸然开，也不能贸然关，
+        // 保持现状比按默认值 OFF 把正在生效的通道关掉更安全。
+        val web = runSafely("readWebPolicy") { policyRepository.getPolicy().web } ?: return
+        val state = runSafely("webGuardSync") { webGuardVpn.sync(web) } ?: return
+        Logger.i(TAG) {
+            "web guard vpn: $state (mode=${web.mode}, black=${web.blacklist.size}, " +
+                "white=${web.whitelist.size}, cat=${web.blockedCategories.size})"
+        }
+        // 策略要求但没授权，是"家长以为在管、实际没管"的典型场景。
+        // 这里只记日志、**不抬风险事件**：自检每轮都会跑到，抬事件会造成告警刷屏；
+        // 家长侧的可见性由「我的 → 隐私与安全 → 上网防护」那一行的真实状态承担。
+        if (state == com.padguard.child.guard.WebGuardVpnController.SyncState.NEED_CONSENT) {
+            Logger.w(TAG) { "web filter configured but VPN unauthorized — 域名拦截当前不生效，等待家长补授权" }
+        }
     }
 
     /**

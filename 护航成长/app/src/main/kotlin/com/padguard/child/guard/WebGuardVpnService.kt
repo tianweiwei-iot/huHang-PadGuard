@@ -4,9 +4,12 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import androidx.core.app.ServiceCompat
 import com.padguard.core.common.Logger
 import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.data.model.RiskLevel
@@ -23,6 +26,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.nio.ByteBuffer
 import javax.inject.Inject
@@ -77,7 +81,14 @@ class WebGuardVpnService : VpnService() {
         // 防御式：已在运行则忽略重复启动
         if (fd != null) return START_STICKY
         try {
-            startForeground(NOTIF_ID, buildNotification())
+            // API 34+ 无类型的前台服务会直接抛 MissingForegroundServiceTypeException；
+            // VPN 没有专属 FGS 类型，按 manifest 里声明的 specialUse 走。
+            val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            }
+            ServiceCompat.startForeground(this, NOTIF_ID, buildNotification(), fgsType)
             val descriptor = buildVpn().establish()
             if (descriptor == null) {
                 Logger.e(TAG) { "vpn establish returned null (prepared?=${VpnService.prepare(this) == null})" }
@@ -88,7 +99,7 @@ class WebGuardVpnService : VpnService() {
             vpnController.markActive(true)
             running = true
             runLoop(descriptor)
-            Logger.i(TAG) { "web guard vpn started" }
+            Logger.i(TAG) { "web guard vpn started (upstream=${upstreamDns()})" }
         } catch (t: Throwable) {
             Logger.e(TAG, t) { "web guard vpn start failed, self-stopping to avoid dns stall" }
             stopVpn("start-exception")
@@ -108,8 +119,35 @@ class WebGuardVpnService : VpnService() {
         setMtu(MTU)
     }
 
+    /**
+     * DNS 处理线程池。
+     *
+     * ## 为什么必须并发（原实现是单线程串行）
+     * 放行一个查询要同步转发到上游并等应答（超时 5s），读循环是单线程：
+     * 只要有一个查询卡住（上游丢包 / 网络切换），**后面所有查询一起排队**，
+     * 一次浏览请求会打开多个域名，最终表现为"网页转圈几十秒"。
+     * 并发处理后，单个上游超时只影响它自己那一条。
+     *
+     * 用**有界队列 + CallerRunsPolicy**：极端情况下（DNS 洪水）让读线程自己跑，
+     * 形成反压，而不是无界排队把内存吃光。
+     */
+    /** DNS 处理线程池（懒建；stopVpn 时关闭，下次启动重建）。 */
+    @Volatile private var pool: java.util.concurrent.ThreadPoolExecutor? = null
+    private fun ensurePool(): java.util.concurrent.ThreadPoolExecutor {
+        pool?.let { if (!it.isShutdown) return it }
+        val created = java.util.concurrent.ThreadPoolExecutor(
+            DNS_THREADS, DNS_THREADS, 30, java.util.concurrent.TimeUnit.SECONDS,
+            java.util.concurrent.ArrayBlockingQueue(DNS_QUEUE),
+            { r -> Thread(r, "webguard-dns").apply { isDaemon = true; priority = Thread.NORM_PRIORITY } },
+            java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy()
+        )
+        pool = created
+        return created
+    }
+
     private fun runLoop(descriptor: ParcelFileDescriptor) {
         val buffer = ByteArray(MTU + 64)
+        val poolRef = ensurePool()
         loopThread = thread(name = "webguard-vpn") {
             val input = FileInputStream(descriptor.fileDescriptor)
             val output = FileOutputStream(descriptor.fileDescriptor)
@@ -121,7 +159,12 @@ class WebGuardVpnService : VpnService() {
                         continue
                     }
                     val pkt = buffer.copyOf(len)
-                    handlePacket(pkt, output)
+                    // 交给线程池：读循环只负责收包，绝不在 IO 上等待上游 DNS
+                    try {
+                        poolRef.execute { handlePacket(pkt, output) }
+                    } catch (_: java.util.concurrent.RejectedExecutionException) {
+                        // 池已关闭 = 通道正在停：安静丢弃，不刷日志
+                    }
                 } catch (t: Throwable) {
                     Logger.e(TAG, t) { "vpn read loop error, self-stopping" }
                     stopVpn("loop-exception")
@@ -150,6 +193,45 @@ class WebGuardVpnService : VpnService() {
         } else {
             forwardUpstream(output, ip, udp, dns)
         }
+    }
+
+    /**
+     * 上游 DNS 服务器地址。
+     *
+     * ## 为什么不能写死 8.8.8.8（原实现的真实缺陷）
+     * 国内网络环境下 8.8.8.8 大面积不可达/被劫持，一旦通道起来而转发全失败，
+     * 表现就是「平板连上了 Wi-Fi 但所有 App 都上不了网」——这比不做过滤更糟，
+     * 家长会直接判定"这软件把平板弄坏了"。
+     *
+     * ## 取值顺序
+     * 1. 当前活动网络（Wi-Fi/蜂窝）**系统配置的 DNS**，且要排除本隧道地址
+     *    （我们给网络加了 `addDnsServer(TUN_LOCAL)`，不排除就会自己转发给自己，形成死循环）；
+     * 2. 常见公共 DNS 兜底（阿里 223.5.5.5 / 腾讯 119.29.29.29），都是国内可达地址。
+     *
+     * 每次转发都重新取一次不划算（每包一次系统调用），缓存 [UPSTREAM_TTL_MS] 后刷新，
+     * 兼顾"切网络后能自动纠正"与"不要每包都查"。
+     */
+    @Volatile private var cachedUpstream: String? = null
+    @Volatile private var cachedAt: Long = 0L
+
+    private fun upstreamDns(): String {
+        val now = System.currentTimeMillis()
+        cachedUpstream?.let { if (now - cachedAt < UPSTREAM_TTL_MS) return it }
+        val resolved = runCatching { systemDns() }.getOrNull()
+        val chosen = resolved?.takeIf { it.isNotBlank() } ?: FALLBACK_DNS
+        cachedUpstream = chosen
+        cachedAt = now
+        return chosen
+    }
+
+    private fun systemDns(): String? {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return null
+        val network = cm.activeNetwork ?: return null
+        val props = cm.getLinkProperties(network) ?: return null
+        return props.dnsServers
+            .filterIsInstance<Inet4Address>()
+            .mapNotNull { it.hostAddress }
+            .firstOrNull { it != TUN_LOCAL && !it.startsWith("127.") }
     }
 
     /** 命中拦截：直接构造应答，A→0.0.0.0 / AAAA→::，让连接失败即「被拦」。 */
@@ -184,7 +266,8 @@ class WebGuardVpnService : VpnService() {
         socket.use { s ->
             try {
                 protect(s) // 关键：让转发流量走真实网络，不进隧道（避免回环）
-                val upstream = DatagramPacket(dns.raw, dns.raw.size, InetAddress.getByName(UPSTREAM_DNS), 53)
+                val upstreamAddr = upstreamDns()
+                val upstream = DatagramPacket(dns.raw, dns.raw.size, InetAddress.getByName(upstreamAddr), 53)
                 s.send(upstream)
                 val recvBuf = ByteArray(4096)
                 val recv = DatagramPacket(recvBuf, recvBuf.size)
@@ -196,6 +279,8 @@ class WebGuardVpnService : VpnService() {
                 val outIp = IpPacket.build(protocol = 17, src = ip.dst, dst = ip.src, payload = outUdp)
                 runCatching { output.write(outIp) }.onFailure { Logger.w(TAG, it) { "write forward response failed" } }
             } catch (t: Throwable) {
+                // 缓存的上游失效（换网络 / 热点关闭）：清掉缓存，下一个查询重新取系统 DNS
+                cachedUpstream = null
                 Logger.w(TAG, t) { "forward dns failed for ${dns.queryName}" }
             }
         }
@@ -244,6 +329,10 @@ class WebGuardVpnService : VpnService() {
         Logger.i(TAG) { "web guard vpn stopping: $reason" }
         loopThread?.interrupt()
         loopThread = null
+        // 先停线程池再关隧道：否则在跑的转发任务会继续往已关闭的 fd 写，
+        // 每轮都刷一条 write failed 日志，且可能持有 socket 到超时。
+        runCatching { pool?.shutdownNow() }
+        pool = null
         runCatching { fd?.close() }
         fd = null
         // running 必须在这里复位：它是跨进程/跨组件判断"VPN 是否还在跑"的唯一进程内标记，
@@ -275,7 +364,22 @@ class WebGuardVpnService : VpnService() {
         private const val TAG = "WebGuardVpn"
         private const val NOTIF_ID = 9051
         private const val TUN_LOCAL = "10.111.222.1"
-        private const val UPSTREAM_DNS = "8.8.8.8"
+
+        /**
+         * 系统 DNS 取不到时的兜底上游。
+         * 选国内可达的公共 DNS（阿里 223.5.5.5）；原实现写死 8.8.8.8，
+         * 在国内网络下大概率不可达 → 转发全失败 → 整机"连上 Wi-Fi 却上不了网"。
+         */
+        private const val FALLBACK_DNS = "223.5.5.5"
+
+        /** 上游 DNS 缓存时长：兼顾"切网络后尽快纠正"与"不必每包查一次系统" */
+        private const val UPSTREAM_TTL_MS = 60_000L
+
+        /** DNS 并发处理线程数：8 足以覆盖单机浏览行为，又不至于把 CPU 拉满 */
+        private const val DNS_THREADS = 8
+
+        /** 堆积上限：超过即由读线程自己执行（反压），避免无界排队吃内存 */
+        private const val DNS_QUEUE = 256
         private const val MTU = 1500
 
         /** 当前服务是否正在运行（进程内标记；跨进程以 WebGuardVpnController 心跳为准）。 */
@@ -327,11 +431,26 @@ private data class IpPacket(
             buf.putShort(0x4000.toShort())          // flags=DF
             buf.put(64)                            // TTL
             buf.put(protocol.toByte())              // protocol
-            buf.putShort(0)                         // header checksum (0; tun 一般不过校验)
+            buf.putShort(0)                         // header checksum 占位，下面回填
             buf.put(srcIp)
             buf.put(dstIp)
             buf.put(payload)
-            return buf.array()
+            val packet = buf.array()
+
+            // IPv4 头校验和**必须**正确：包被写入 tun 后由内核按"收到的报文"处理，
+            // ip_rcv 会校验头部校验和，错的直接丢弃。
+            // 原实现把校验和填 0（注释写"tun 一般不过校验"），结果所有回灌应答都被内核丢掉，
+            // 表现为 VPN 起来了、DNS 却全部超时 —— 整机"连了 Wi-Fi 但上不了网"。
+            var sum = 0
+            for (i in 0 until 20 step 2) {
+                sum += ((packet[i].toInt() and 0xFF) shl 8) or (packet[i + 1].toInt() and 0xFF)
+                // 折叠进位，防止长包时溢出（20 字节头其实不会溢出，但保持通用写法）
+                while (sum > 0xFFFF) sum = (sum and 0xFFFF) + (sum shr 16)
+            }
+            val checksum = sum.inv() and 0xFFFF
+            packet[10] = (checksum shr 8).toByte()
+            packet[11] = (checksum and 0xFF).toByte()
+            return packet
         }
 
         private fun inet4(raw: ByteArray, off: Int): String =
