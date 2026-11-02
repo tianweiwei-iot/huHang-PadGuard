@@ -75,21 +75,45 @@
   }
 
   async function renderAlert(root) {
-    const list = await PG.api.alerts();
+    let list;
+    try {
+      list = (await PG.api.alerts()) || [];
+    } catch (e) {
+      // 接口失败必须可见可重试，否则告警 tab 一片空白，运营会当成"没有告警"
+      const host = root.querySelector("#a-tab");
+      if (host) host.innerHTML = '<div class="empty">告警加载失败：' + U.esc((e && e.message) || "未知错误") + '</div>';
+      PG.ui.toast("err", "告警加载失败", (e && e.message) || "");
+      return;
+    }
     root.querySelector("#a-tab").innerHTML = `<div class="timeline" id="al-list"></div>`;
     const draw = () => {
       const el = root.querySelector("#al-list");
-      const open = list.filter(a => a.status !== "closed");
+      if (!el) return;
       el.innerHTML = list.map(a => {
         const c = { high: "red", mid: "amber", low: "gray" }[a.level] || "gray";
-        const lv = { high: "高", mid: "中", low: "低" }[a.level];
+        // 未映射级别不得渲染成 "undefined危"：服务端新增 critical 等值时，最需要可信的安全模块反而出洋相
+        const lv = { high: "高", mid: "中", low: "低" }[a.level] || (a.level ? String(a.level) : "未知");
         return `<div class="tl-item">
-          <div class="tl-time">${U.esc(a.time)} · <span class="badge ${c}">${lv}危</span> ${U.esc(a.type)} · ${a.status === "closed" ? "已处理" : "待处理"}</div>
+          <div class="tl-time">${U.esc(a.time)} · <span class="badge ${c}">${U.esc(lv)}危</span> ${U.esc(a.type)} · ${a.status === "closed" ? "已处理" : "待处理"}</div>
           <div class="tl-text">${U.esc(a.message)} <span class="cell-sub">（家长 ${U.esc(a.relatedParent)}）</span></div>
           ${a.status !== "closed" ? PG.guard("audit", "write", '<div style="margin-top:6px"><button class="btn btn-xs" data-close="' + U.esc(a.id) + '">标记为已处理</button></div>') : ""}
         </div>`;
-      }).join("");
-      el.querySelectorAll("[data-close]").forEach(b => b.onclick = async () => { await PG.api.closeAlert(b.dataset.close); PG.ui.toast("ok", "已处理", b.dataset.close); renderAlert(root); });
+      }).join("") || '<div class="empty">暂无告警</div>';
+      el.querySelectorAll("[data-close]").forEach(b => b.onclick = async () => {
+        try {
+          await PG.api.closeAlert(b.dataset.close);
+        } catch (e) {
+          PG.ui.toast("err", "处理失败", (e && e.message) || "");
+          return;
+        }
+        PG.ui.toast("ok", "已处理", b.dataset.close);
+        // 处理后顶栏角标必须同步刷新，否则未读数会一直挂着直到重新登录
+        if (typeof PG.refreshAlertBadge === "function") PG.refreshAlertBadge();
+        // 本地先置为已处理，避免整块重载导致滚动位置丢失
+        const target = list.find(x => String(x.id) === String(b.dataset.close));
+        if (target) target.status = "closed";
+        draw();
+      });
     };
     draw();
   }

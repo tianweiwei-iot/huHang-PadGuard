@@ -20,6 +20,11 @@
     mount: async (root) => {
       const reload = () => load(root);
       const reloadReset = () => { curPage = 1; load(root); };
+      // 全局搜索跳转过来：回填关键字并清空全局态（此前设备页不消费，搜索设备永远落在家长页）
+      if (PG.state && PG.state.search) {
+        root.querySelector("#d-kw").value = PG.state.search;
+        PG.state.search = "";
+      }
       root.querySelector("#d-reset").onclick = () => { root.querySelector("#d-kw").value = ""; root.querySelector("#d-on").value = ""; reloadReset(); };
       root.querySelector("#d-kw").oninput = debounce(reloadReset, 300);
       root.querySelector("#d-on").onchange = reloadReset;
@@ -65,9 +70,19 @@
       </div></td>
     </tr>`).join("");
     tb.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => openDetail(b.dataset.detail));
-    tb.querySelectorAll("[data-act='lock']").forEach(b => b.onclick = () => PG.ui.confirm("远程锁屏", "确认向 " + b.dataset.id + " 下发锁屏指令？", async () => { await PG.api.lockDevice(b.dataset.id); PG.ui.toast("ok", "锁屏指令已下发", b.dataset.id); load(root); }, true));
-    tb.querySelectorAll("[data-act='unlock']").forEach(b => b.onclick = async () => { await PG.api.unlockDevice(b.dataset.id); PG.ui.toast("ok", "解锁指令已下发", b.dataset.id); load(root); });
-    tb.querySelectorAll("[data-act='unbind']").forEach(b => b.onclick = () => PG.ui.confirm("解绑设备", "确认解绑 " + b.dataset.id + "？解绑后设备归属清除、设备令牌作废，孩子端将失去管控，操作不可恢复。", async () => { await PG.api.unbindDevice(b.dataset.id); PG.ui.toast("ok", "已解绑", b.dataset.id); load(root); }, true));
+    tb.querySelectorAll("[data-act='lock']").forEach(b => b.onclick = () => PG.ui.confirm("远程锁屏", "确认向 " + b.dataset.id + " 下发锁屏指令？", async () => {
+      try { await PG.api.lockDevice(b.dataset.id); } catch (e) { PG.ui.toast("err", "锁屏失败", (e && e.message) || ""); return; }
+      PG.ui.toast("ok", "锁屏指令已下发", b.dataset.id); load(root);
+    }, true));
+    // 解锁会解除对孩子的管控，危险性不低于锁屏（锁屏反而有二次确认、解锁没有）——对齐为二次确认
+    tb.querySelectorAll("[data-act='unlock']").forEach(b => b.onclick = () => PG.ui.confirm("远程解锁", "确认解除 " + b.dataset.id + " 的锁屏？孩子端将立即恢复可用。", async () => {
+      try { await PG.api.unlockDevice(b.dataset.id); } catch (e) { PG.ui.toast("err", "解锁失败", (e && e.message) || ""); return; }
+      PG.ui.toast("ok", "解锁指令已下发", b.dataset.id); load(root);
+    }));
+    tb.querySelectorAll("[data-act='unbind']").forEach(b => b.onclick = () => PG.ui.confirm("解绑设备", "确认解绑 " + b.dataset.id + "？解绑后设备归属清除、设备令牌作废，孩子端将失去管控，操作不可恢复。", async () => {
+      try { await PG.api.unbindDevice(b.dataset.id); } catch (e) { PG.ui.toast("err", "解绑失败", (e && e.message) || ""); return; }
+      PG.ui.toast("ok", "已解绑", b.dataset.id); load(root);
+    }, true));
     // 分页器（B3/B4）
     const pagerEl = root.querySelector("#d-pager");
     pagerEl.innerHTML = U.pager(resp.page, resp.totalPages);

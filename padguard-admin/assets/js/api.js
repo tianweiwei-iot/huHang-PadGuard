@@ -110,6 +110,16 @@
       // 服务端统一返回 { code, message }，优先透传业务 message（如「密码错误」）。
       // 这类 HTTP 错误如实抛出（不可降级）。
       const msg = (j && (j.message || j.error)) || ("HTTP " + res.status);
+      // 401 = 令牌过期/被吊销。此前被当普通错误抛给各调用方：管理员困在坏页面，
+      // 每个动作弹一次 "HTTP 401"，永远回不到登录屏（唯一的出路是手动刷新）。
+      // 这里做唯一出口：清本地令牌 + 通知外壳回登录。只对"带着令牌发出去的请求"生效，
+      // 避免登录接口本身密码错误（同为 401）时反而把人踢来踢去。
+      if (res.status === 401 && config.token) {
+        config.token = "";
+        if (typeof PG !== "undefined" && typeof PG.onUnauthorized === "function") {
+          try { PG.onUnauthorized(msg); } catch (e) { /* 兜底：外壳异常不影响错误上抛 */ }
+        }
+      }
       throw new Error(msg);
     }
     // 校验业务码。服务端统一信封 { code, message, data }，
@@ -398,7 +408,7 @@
     async serverProfile() {
       return liveOrMock(
         () => http("GET", "/v1/admin/server-profile"),
-        () => ({ publicHost: "8.148.68.183", port: 8090, scheme: "http", serverName: "PadGuard 管控服务端", remark: "" })
+        () => ({ publicHost: "", port: 8090, scheme: "http", serverName: "PadGuard 管控服务端", remark: "" })
       );
     },
     async saveServerProfile(body) {

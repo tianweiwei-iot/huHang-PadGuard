@@ -5,7 +5,7 @@
     title: "订阅与计费", icon: "💎", group: "运营",
     render: () => `
       <div class="page-head"><div><h2>订阅与计费</h2><p>套餐定价、订阅生命周期、订单与退款、营收报表</p></div>
-      <div class="page-actions"><button class="btn btn-primary" id="b-manual">＋ 手动开通订阅</button></div></div>
+      <div class="page-actions">${PG.guard("billing", "manual", '<button class="btn btn-primary" id="b-manual">＋ 手动开通订阅</button>')}</div></div>
       <div class="card">
         <div class="row" style="gap:8px;margin-bottom:14px;border-bottom:1px solid var(--border-soft);padding-bottom:10px">
           <button class="btn btn-xs btn-primary tab" data-tab="plans">套餐</button>
@@ -16,7 +16,9 @@
         <div id="b-tab"></div>
       </div>`,
     mount: async (root) => {
-      root.querySelector("#b-manual").onclick = openManual;
+      // 资金操作按后端 RBAC 隐藏：无 billing:manual 的账号连按钮都不该看见（点开吃 403 是更差的体验）。
+      const manualBtn = root.querySelector("#b-manual");
+      if (manualBtn) manualBtn.onclick = openManual;
       const tabs = root.querySelectorAll(".tab");
       const show = (t) => { tabs.forEach(b => b.classList.toggle("btn-primary", b.dataset.tab === t)); renderTab(root, t); };
       tabs.forEach(b => b.onclick = () => show(b.dataset.tab));
@@ -24,51 +26,110 @@
     },
   });
 
+  const PAGE_SIZE = 20;
+
   async function renderTab(root, t) {
     const el = root.querySelector("#b-tab");
-    if (t === "plans") {
-      const plans = await PG.api.listPlans();
-      el.innerHTML = '<div class="grid grid-3">' + plans.map(p => `<div class="card">
-        <div class="between"><h3 style="margin:0">${U.esc(p.name)}</h3>${p.id === "yearly" ? '<span class="badge purple">推荐</span>' : ""}</div>
-        <div style="font-size:26px;font-weight:800;margin:10px 0">${p.priceFen ? U.money(p.priceFen) + '<span class="muted" style="font-size:13px;font-weight:400"> / 期</span>' : "免费"}</div>
-        <div class="stat-line"><span>设备额度</span><span>${p.deviceLimit} 台</span></div>
-        <ul style="margin:10px 0 0;padding-left:18px;color:var(--text-2);font-size:13px">${p.features.map(f => "<li>" + U.esc(f) + "</li>").join("")}</ul>
-      </div>`).join("") + '</div>';
-    } else if (t === "subs") {
-      el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="s-st" class="btn" style="height:36px"><option value="">全部状态</option><option value="active">生效中</option><option value="trial">试用</option><option value="expired">已过期</option></select></div><div id="s-wrap"><div class="empty">加载中…</div></div>';
-      // 筛选走服务端（?status=）而非"拉全量 + 前端过滤"：
-      // 全量拉取会把整张订阅表灌进浏览器内存；更糟的是运营无从判断
-      // 眼前这批数据是"全部"还是"筛过的"，规模感失真。服务端本就支持该参数。
-      const load = async (st) => {
-        const subs = await PG.api.listSubscriptions(st ? { status: st } : {});
-        root.querySelector("#s-wrap").innerHTML = '<div class="table-wrap"><table class="tbl"><thead><tr><th>家长</th><th>套餐</th><th>状态</th><th>开始</th><th>到期</th><th>自动续费</th><th>渠道</th></tr></thead><tbody>' +
-          (subs.map(s => `<tr><td>${U.esc(s.parentName)}<div class="cell-sub">${U.esc(s.parentPhone)}</div></td><td>${U.esc(s.planName)}</td><td>${U.badge(U.SUB_STATUS, s.status)}</td><td class="cell-sub">${U.esc(s.startedAt)}</td><td class="cell-sub">${U.esc(s.expiredAt)}</td><td>${s.autoRenew ? "是" : "否"}</td><td class="muted">${U.esc(s.channel)}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">暂无数据</td></tr>') +
-          '</tbody></table></div>';
-      };
-      await load("");
-      root.querySelector("#s-st").onchange = (e) => load(e.target.value);
-    } else if (t === "orders") {
-      el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="o-st" class="btn" style="height:36px"><option value="">全部</option><option value="paid">已支付</option><option value="refunded">已退款</option><option value="unpaid">待支付</option></select></div><div id="o-wrap"><div class="empty">加载中…</div></div>';
-      // 同上：状态筛选交给服务端（?status=）
-      const load = async (st) => {
-        const orders = await PG.api.listOrders(st ? { status: st } : {});
-        root.querySelector("#o-wrap").innerHTML = '<div class="table-wrap"><table class="tbl"><thead><tr><th>订单号</th><th>家长</th><th>套餐</th><th>金额</th><th>状态</th><th>渠道</th><th>创建时间</th><th>操作</th></tr></thead><tbody>' +
-          (orders.map(o => `<tr><td class="cell-strong">${U.esc(o.orderNo)}</td><td>${U.esc(o.parentName)}<div class="cell-sub">${U.esc(o.parentPhone)}</div></td><td>${U.esc(o.planName)}</td><td class="cell-strong">${U.money(o.amountFen)}</td><td>${U.badge(U.ORDER_STATUS, o.status)}</td><td class="muted">${U.esc(o.channel)}</td><td class="cell-sub">${U.esc(o.createdAt)}</td><td>${o.status === "paid" ? '<button class="btn btn-xs" data-ref="' + U.esc(o.orderNo) + '">退款</button>' : "—"}</td></tr>`).join("") || '<tr><td colspan="8" class="empty">暂无数据</td></tr>') +
-          '</tbody></table></div>';
-        root.querySelectorAll("#o-wrap [data-ref]").forEach(b => b.onclick = () => PG.ui.confirm("订单退款", "确认对订单 " + b.dataset.ref + " 发起退款？", async () => { await PG.api.refund(b.dataset.ref); PG.ui.toast("ok", "已退款", b.dataset.ref); renderTab(root, "orders"); }, true));
-      };
-      await load("");
-      root.querySelector("#o-st").onchange = (e) => load(e.target.value);
-    } else if (t === "revenue") {
-      const rev = await PG.api.revenue();
-      const total = rev.reduce((s, r) => s + r.amount, 0);
-      const newSubs = rev.reduce((s, r) => s + r.newSubs, 0);
-      const paid = rev.filter(r => r.amount > 0).length;
-      el.innerHTML = `<div class="grid grid-4" style="margin-bottom:14px">
-        ${mini("累计营收", U.moneyK(total))}${mini("近 12 月新增订阅", newSubs + " 单")}${mini("月均营收", U.moneyK(total / 12))}${mini("付费月份", paid + " / 12")}
-      </div>
-      <div class="card" style="box-shadow:none"><div class="card-head"><h3>月度营收与新增订阅</h3><span class="sub">近 12 个月</span></div>${U.line(rev.map(r => r.amount), { h: 220 })}</div>
-      <div class="table-wrap" style="margin-top:14px"><table class="tbl"><thead><tr><th>月份</th><th>营收</th><th>新增订阅</th><th>流失</th></tr></thead><tbody>${rev.map(r => '<tr><td class="cell-strong">' + U.esc(r.month) + '</td><td>' + U.money(r.amount) + '</td><td>' + r.newSubs + '</td><td class="muted">' + r.churn + '</td></tr>').join("")}</tbody></table></div>`;
+    // 统一兜底：任何 tab 的加载失败都必须可见可重试，不能停在"加载中…"。
+    el.innerHTML = '<div class="empty">加载中…</div>';
+    try {
+      if (t === "plans") {
+        const plans = (await PG.api.listPlans()) || [];
+        if (!plans.length) { el.innerHTML = '<div class="empty">暂无套餐</div>'; return; }
+        el.innerHTML = '<div class="grid grid-3">' + plans.map(p => `<div class="card">
+          <div class="between"><h3 style="margin:0">${U.esc(p.name)}</h3>${U.esc(p.id) === "yearly" ? '<span class="badge purple">推荐</span>' : ""}</div>
+          <div style="font-size:26px;font-weight:800;margin:10px 0">${p.priceFen ? U.money(p.priceFen) + '<span class="muted" style="font-size:13px;font-weight:400"> / 期</span>' : "免费"}</div>
+          <div class="stat-line"><span>设备额度</span><span>${U.esc(p.deviceLimit)} 台</span></div>
+          <ul style="margin:10px 0 0;padding-left:18px;color:var(--text-2);font-size:13px">${(p.features || []).map(f => "<li>" + U.esc(f) + "</li>").join("")}</ul>
+        </div>`).join("") + '</div>';
+      } else if (t === "subs") {
+        el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="s-st" class="btn" style="height:36px"><option value="">全部状态</option><option value="active">生效中</option><option value="trial">试用</option><option value="expired">已过期</option></select></div><div id="s-wrap"><div class="empty">加载中…</div></div><div id="s-pager"></div>';
+        // 筛选走服务端（?status=）；分页同理 —— 拉全量灌浏览器内存且运营无法判断规模。
+        let page = 1, seq = 0;
+        const load = async () => {
+          const my = ++seq;
+          const st = root.querySelector("#s-st") ? root.querySelector("#s-st").value : "";
+          try {
+            const resp = await PG.api.listSubscriptions({ status: st || undefined, page, size: PAGE_SIZE });
+            if (my !== seq) return; // 竞态：慢的旧响应不得覆盖新筛选结果
+            const list = (resp && resp.items) || [];
+            const wrap = root.querySelector("#s-wrap");
+            if (!list.length) {
+              wrap.innerHTML = '<div class="empty">' + (st ? "该状态下暂无订阅" : "暂无订阅") + '</div>';
+              root.querySelector("#s-pager").innerHTML = "";
+              return;
+            }
+            wrap.innerHTML = '<div class="table-wrap"><table class="tbl"><thead><tr><th>家长</th><th>套餐</th><th>状态</th><th>开始</th><th>到期</th><th>自动续费</th><th>渠道</th></tr></thead><tbody>' +
+              list.map(s => `<tr><td>${U.esc(s.parentName)}<div class="cell-sub">${U.esc(s.parentPhone)}</div></td><td>${U.esc(s.planName)}</td><td>${U.badge(U.SUB_STATUS, s.status)}</td><td class="cell-sub">${U.esc(s.startedAt)}</td><td class="cell-sub">${U.esc(s.expiredAt)}</td><td>${s.autoRenew ? "是" : "否"}</td><td class="muted">${U.esc(s.channel)}</td></tr>`).join("") +
+              '</tbody></table></div>';
+            const pagerEl = root.querySelector("#s-pager");
+            pagerEl.innerHTML = U.pager(resp.page, resp.totalPages);
+            pagerEl.querySelectorAll("[data-pg]").forEach(b => b.onclick = () => { page = parseInt(b.dataset.pg, 10); load(); });
+          } catch (e) {
+            if (my !== seq) return;
+            root.querySelector("#s-wrap").innerHTML = '<div class="empty">加载失败：' + U.esc((e && e.message) || "未知错误") + '</div>';
+            root.querySelector("#s-pager").innerHTML = "";
+            PG.ui.toast("err", "订阅列表加载失败", (e && e.message) || "");
+          }
+        };
+        await load();
+        // 切换筛选必须回到第 1 页，否则会停在旧筛选的页码上显示空列表
+        root.querySelector("#s-st").onchange = () => { page = 1; load(); };
+      } else if (t === "orders") {
+        el.innerHTML = '<div class="row wrap" style="margin-bottom:12px;gap:8px"><select id="o-st" class="btn" style="height:36px"><option value="">全部</option><option value="paid">已支付</option><option value="refunded">已退款</option><option value="unpaid">待支付</option></select></div><div id="o-wrap"><div class="empty">加载中…</div></div><div id="o-pager"></div>';
+        let page = 1, seq = 0;
+        const load = async () => {
+          const my = ++seq;
+          const st = root.querySelector("#o-st") ? root.querySelector("#o-st").value : "";
+          try {
+            const resp = await PG.api.listOrders({ status: st || undefined, page, size: PAGE_SIZE });
+            if (my !== seq) return;
+            const list = (resp && resp.items) || [];
+            const wrap = root.querySelector("#o-wrap");
+            if (!list.length) {
+              wrap.innerHTML = '<div class="empty">' + (st ? "该状态下暂无订单" : "暂无订单") + '</div>';
+              root.querySelector("#o-pager").innerHTML = "";
+              return;
+            }
+            wrap.innerHTML = '<div class="table-wrap"><table class="tbl"><thead><tr><th>订单号</th><th>家长</th><th>套餐</th><th>金额</th><th>状态</th><th>渠道</th><th>创建时间</th><th>操作</th></tr></thead><tbody>' +
+              list.map(o => `<tr><td class="cell-strong">${U.esc(o.orderNo)}</td><td>${U.esc(o.parentName)}<div class="cell-sub">${U.esc(o.parentPhone)}</div></td><td>${U.esc(o.planName)}</td><td class="cell-strong">${U.money(o.amountFen)}</td><td>${U.badge(U.ORDER_STATUS, o.status)}</td><td class="muted">${U.esc(o.channel)}</td><td class="cell-sub">${U.esc(o.createdAt)}</td><td>${o.status === "paid" ? PG.guard("billing", "refund", '<button class="btn btn-xs" data-ref="' + U.esc(o.orderNo) + '">退款</button>') : "—"}</td></tr>`).join("") +
+              '</tbody></table></div>';
+            const pagerEl = root.querySelector("#o-pager");
+            pagerEl.innerHTML = U.pager(resp.page, resp.totalPages);
+            pagerEl.querySelectorAll("[data-pg]").forEach(b => b.onclick = () => { page = parseInt(b.dataset.pg, 10); load(); });
+            wrap.querySelectorAll("[data-ref]").forEach(b => b.onclick = () => PG.ui.confirm("订单退款", "确认对订单 " + b.dataset.ref + " 发起退款？退款将原路退回，不可撤销。", async () => {
+              try {
+                await PG.api.refund(b.dataset.ref);
+                PG.ui.toast("ok", "已退款", b.dataset.ref);
+                load();
+              } catch (e) {
+                PG.ui.toast("err", "退款失败", (e && e.message) || "");
+              }
+            }, true));
+          } catch (e) {
+            if (my !== seq) return;
+            root.querySelector("#o-wrap").innerHTML = '<div class="empty">加载失败：' + U.esc((e && e.message) || "未知错误") + '</div>';
+            root.querySelector("#o-pager").innerHTML = "";
+            PG.ui.toast("err", "订单列表加载失败", (e && e.message) || "");
+          }
+        };
+        await load();
+        root.querySelector("#o-st").onchange = () => { page = 1; load(); };
+      } else if (t === "revenue") {
+        const rev = (await PG.api.revenue()) || [];
+        if (!Array.isArray(rev) || !rev.length) { el.innerHTML = '<div class="empty">暂无营收数据</div>'; return; }
+        const total = rev.reduce((s, r) => s + (r.amount || 0), 0);
+        const newSubs = rev.reduce((s, r) => s + (r.newSubs || 0), 0);
+        const paid = rev.filter(r => (r.amount || 0) > 0).length;
+        el.innerHTML = `<div class="grid grid-4" style="margin-bottom:14px">
+          ${mini("累计营收", U.moneyK(total))}${mini("近 12 月新增订阅", newSubs + " 单")}${mini("月均营收", U.moneyK(total / 12))}${mini("付费月份", paid + " / 12")}
+        </div>
+        <div class="card" style="box-shadow:none"><div class="card-head"><h3>月度营收与新增订阅</h3><span class="sub">近 12 个月</span></div>${U.line(rev.map(r => r.amount || 0), { h: 220 })}</div>
+        <div class="table-wrap" style="margin-top:14px"><table class="tbl"><thead><tr><th>月份</th><th>营收</th><th>新增订阅</th><th>流失</th></tr></thead><tbody>${rev.map(r => '<tr><td class="cell-strong">' + U.esc(r.month) + '</td><td>' + U.money(r.amount || 0) + '</td><td>' + U.esc(r.newSubs || 0) + '</td><td class="muted">' + U.esc(r.churn || 0) + '</td></tr>').join("")}</tbody></table></div>`;
+      }
+    } catch (e) {
+      el.innerHTML = '<div class="empty">加载失败：' + U.esc((e && e.message) || "未知错误") + '</div>';
+      PG.ui.toast("err", "加载失败", (e && e.message) || "");
     }
   }
 
@@ -79,7 +140,14 @@
     // 免费档必须剔除：手工把付费家长降到"免费试用"是不可逆的资费损失。
     // 原来的过滤条件写的是 p.id !== "free"，而实际 key 是 TRIAL（见 BillingModels.kt），
     // 条件恒不成立＝免费试用一直留在下拉里。这里按 key 而不是按展示名匹配。
-    const list = ((await PG.api.listPlans()) || []).filter(p => !/^(TRIAL|FREE)$/i.test(String(p.id || "")));
+    let list = [];
+    try {
+      list = ((await PG.api.listPlans()) || []).filter(p => !/^(TRIAL|FREE)$/i.test(String(p.id || "")));
+    } catch (e) {
+      PG.ui.toast("err", "套餐加载失败", (e && e.message) || "");
+      return;
+    }
+    if (!list.length) { PG.ui.toast("err", "没有可开通的套餐", "请检查服务端套餐配置"); return; }
     const plans = list.map(p => '<option value="' + U.esc(p.id) + '">' + U.esc(p.name) + (p.priceFen ? '（' + U.money(p.priceFen) + '/期）' : '') + '</option>').join("");
     const m = PG.ui.modal({
       title: "手动开通 / 延长订阅", width: 460,
@@ -93,8 +161,14 @@
     m.el.querySelector("#m-ok").onclick = async () => {
       const phone = m.el.querySelector("#m-phone").value.trim();
       if (!/^1\d{10}$/.test(phone)) { PG.ui.toast("err", "手机号格式不正确"); return; }
+      // 显式范围校验：parseInt 静默吞 0/负数会把"输错"变成"送一年/送一万天"，都是资损
+      const days = parseInt(m.el.querySelector("#m-days").value, 10);
+      if (!Number.isFinite(days) || days < 1 || days > 3650) {
+        PG.ui.toast("err", "时长不合法", "请输入 1~3650 之间的天数");
+        return;
+      }
       try {
-        await PG.api.manualActivate(phone, m.el.querySelector("#m-plan").value, parseInt(m.el.querySelector("#m-days").value) || 365);
+        await PG.api.manualActivate(phone, m.el.querySelector("#m-plan").value, days);
       } catch (e) {
         PG.ui.toast("err", (e && e.message) ? e.message : "开通失败，请重试");
         return;

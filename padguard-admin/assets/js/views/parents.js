@@ -60,7 +60,7 @@
     root.querySelector("#p-empty").innerHTML = "";
     tb.innerHTML = list.map(p => `<tr>
       <td class="cell-strong">${U.esc(p.id)}</td>
-      <td><div class="cell-strong">${U.esc(p.name)}</div>${p.tags.map(t => '<span class="badge blue" style="margin-left:4px">' + U.esc(t) + '</span>').join("")}</td>
+      <td><div class="cell-strong">${U.esc(p.name)}</div>${(p.tags || []).map(t => '<span class="badge blue" style="margin-left:4px">' + U.esc(t) + '</span>').join("")}</td>
       <td>${U.esc(p.phone)}</td>
       <td>${U.badge(U.PARENT_STATUS, p.status)}</td>
       <td>${U.esc(p.planName)}</td>
@@ -78,7 +78,16 @@
     </tr>`).join("");
     tb.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => openDetail(b.dataset.detail));
     tb.querySelectorAll("[data-act='suspend']").forEach(b => b.onclick = () => PG.ui.confirm("冻结账号", "确认冻结 " + b.dataset.id + "？冻结后该家长无法登录、其下设备策略暂停下发。", async () => { await PG.api.suspendParent(b.dataset.id); PG.ui.toast("ok", "已冻结", b.dataset.id); load(root); }, true));
-    tb.querySelectorAll("[data-act='activate']").forEach(b => b.onclick = async () => { await PG.api.activateParent(b.dataset.id); PG.ui.toast("ok", "已激活", b.dataset.id); load(root); });
+    tb.querySelectorAll("[data-act='activate']").forEach(b => b.onclick = async () => {
+      try {
+        await PG.api.activateParent(b.dataset.id);
+      } catch (e) {
+        PG.ui.toast("err", "激活失败", (e && e.message) || "");
+        return;
+      }
+      PG.ui.toast("ok", "已激活", b.dataset.id);
+      load(root);
+    });
     tb.querySelectorAll("[data-act='edit']").forEach(b => b.onclick = () => openEdit(b.dataset.id));
     tb.querySelectorAll("[data-act='reset']").forEach(b => b.onclick = () => resetPwd(b.dataset.id));
     tb.querySelectorAll("[data-act='del']").forEach(b => b.onclick = () => delParent(b.dataset.id));
@@ -127,7 +136,13 @@
           region: m.el.querySelector("#e-region").value.trim(),
           remark: m.el.querySelector("#e-remark").value.trim(),
         };
-        await PG.api.updateParent(id, body);
+        // 保存失败必须留在弹窗里并说明原因：静默失败会让运营以为改成功了
+        try {
+          await PG.api.updateParent(id, body);
+        } catch (e) {
+          PG.ui.toast("err", "保存失败", (e && e.message) || "");
+          return;
+        }
         m.close(); PG.ui.toast("ok", "已保存", p.phone);
         PG.router.refresh();
       };
@@ -194,7 +209,14 @@
     m.el.querySelector("#c-ok").onclick = async () => {
       const phone = m.el.querySelector("#c-phone").value.trim();
       if (!/^1\d{10}$/.test(phone)) { PG.ui.toast("err", "手机号格式不正确"); return; }
-      const r = await PG.api.createParent({ name: m.el.querySelector("#c-name").value.trim() || "新家长", phone, email: m.el.querySelector("#c-email").value.trim(), plan: m.el.querySelector("#c-plan").value, region: m.el.querySelector("#c-region").value.trim(), remark: m.el.querySelector("#c-remark").value.trim() });
+      // 新建失败（如手机号已存在）必须显式提示，且弹窗保持打开以便修改重试
+      let r;
+      try {
+        r = await PG.api.createParent({ name: m.el.querySelector("#c-name").value.trim() || "新家长", phone, email: m.el.querySelector("#c-email").value.trim(), plan: m.el.querySelector("#c-plan").value, region: m.el.querySelector("#c-region").value.trim(), remark: m.el.querySelector("#c-remark").value.trim() });
+      } catch (e) {
+        PG.ui.toast("err", "创建失败", (e && e.message) || "");
+        return;
+      }
       m.close(); PG.ui.toast("ok", "账号已创建", phone);
       PG.router.refresh();
     };

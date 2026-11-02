@@ -17,17 +17,17 @@
       root.querySelector("#s-body").innerHTML = `
       <div class="grid grid-4">
         ${kpi("状态", up ? "运行正常" : "异常", '<span class="dot ' + (up ? "green" : "red") + '"></span>', "DB " + U.esc(s.db), up ? "up" : "down")}
-        ${kpi("运行时长", uptimeH + " h", "自 " + s.startedAt, "up", U.sparkline([1,2,2,3,3,4,5]))}
-        ${kpi("堆内存", s.jvmHeapUsedMb + "MB", "上限 " + s.jvmHeapMaxMb + "MB", "up", U.sparkline([20,28,26,34,40,38,heapPct]))}
-        ${kpi("每分钟请求", s.requestsPerMin, "错误率 " + s.errorRate + "% · 平均响应 " + (s.avgLatencyMs || 0) + "ms", "up", U.sparkline(s.qpmHistory || []))}
+        ${kpi("运行时长", uptimeH + " h", "自 " + U.esc(s.startedAt), "up", "")}
+        ${kpi("堆内存", s.jvmHeapUsedMb + "MB", "上限 " + s.jvmHeapMaxMb + "MB", "up", "")}
+        ${kpi("每分钟请求", s.requestsPerMin, "错误率 " + U.esc(s.errorRate) + "% · 平均响应 " + (s.avgLatencyMs || 0) + "ms", "up", U.sparkline(s.qpmHistory || []))}
       </div>
 
       <div class="grid grid-2" style="margin-top:16px">
         <div class="card">
           <div class="card-head"><h3>实例状态</h3><span class="sub">${s.instances.length} 个节点</span></div>
           ${s.instances.map(i => `<div class="stat-line"><span><span class="dot ${i.status === "UP" ? "green" : "red"}"></span> ${U.esc(i.name)}</span><span>${U.esc(i.host)} · 堆内存 ${U.esc(i.mem)}</span></div>`).join("")}
-          <div class="stat-line"><span>数据库连接</span><span>${s.dbConnections}</span></div>
-          <div class="stat-line"><span>活跃线程</span><span>${s.threads}</span></div>
+          <div class="stat-line"><span>数据库连接</span><span>${U.esc(s.dbConnections)}</span></div>
+          <div class="stat-line"><span>活跃线程</span><span>${U.esc(s.threads)}</span></div>
         </div>
         <div class="card">
           <div class="card-head"><h3>资源占用</h3></div>
@@ -67,8 +67,8 @@
     if (!logs || !logs.length) {
       return '<div class="muted">暂无日志记录（服务刚启动、或近期无 WARN/ERROR 与业务事件）。</div>';
     }
-    return logs.map(l => '<div style="padding:3px 0"><span class="muted">' + l.time + '</span> <span style="color:' +
-      ({ INFO: "var(--text-2)", WARN: "var(--warn)", ERROR: "var(--danger)" }[l.level] || "var(--text-2)") + '">[' + l.level + ']</span> ' +
+    return logs.map(l => '<div style="padding:3px 0"><span class="muted">' + U.esc(l.time) + '</span> <span style="color:' +
+      ({ INFO: "var(--text-2)", WARN: "var(--warn)", ERROR: "var(--danger)" }[l.level] || "var(--text-2)") + '">[' + U.esc(l.level) + ']</span> ' +
       U.esc(l.msg) + '</div>').join("");
   }
 

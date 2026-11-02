@@ -45,12 +45,15 @@
   };
 
   // 全局搜索 → 带关键字跳转到对应列表页（原实现丢弃了用户输入，是伪搜索）
+  // 按关键字形态分流：手机号去家长页（家长页支持姓名/手机号），其余（设备ID/SN）去设备页
+  // （设备页同时支持设备ID、家长手机号、家长名，是超集）。订单关键字后端无检索参数，不再承诺。
   $("global-search").addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     const kw = $("global-search").value.trim();
+    if (!kw) return;
     // 关键字先落到全局状态，由目标页 mount 时回填到自己的搜索框，避免值在跳转中丢失
     PG.state.search = kw;
-    PG.router.go("parents");
+    PG.router.go(/^1\d{10}$/.test(kw) ? "parents" : "devices");
   });
 
   // 通知铃 → 审计告警
@@ -125,6 +128,18 @@
     $("app-shell").classList.add("hidden");
     $("login-screen").classList.remove("hidden");
   }
+
+  /**
+   * 会话过期统一出口（由 api.js 的 http() 在收到 401 且带令牌时调用）。
+   * 已在登录屏时不重复处理——并发请求会同时 401，重复弹提示只会变成一片猩红。
+   */
+  function onUnauthorized(reason) {
+    const login = $("login-screen");
+    if (login && !login.classList.contains("hidden")) return;
+    leaveToLogin();
+    PG.ui.toast("warn", "登录已过期", "请重新登录" + (reason ? "（" + reason + "）" : ""));
+  }
+  PG.onUnauthorized = onUnauthorized;
 
   // 用户菜单（修改密码 / 退出登录）
   (function setupUserMenu() {

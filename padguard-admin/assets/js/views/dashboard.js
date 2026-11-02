@@ -94,7 +94,7 @@
     const list = await PG.api.alerts();
     return list.filter(a => a.status !== "closed").slice(0, 5).map(a => {
       const c = { high: "red", mid: "amber", low: "gray" }[a.level] || "gray";
-      return '<div class="tl-item"><div class="tl-time">' + U.esc(a.time) + ' · <span class="badge ' + c + '">' + ({ high: "高", mid: "中", low: "低" }[a.level]) + '</span> ' + U.esc(a.type) + '</div><div class="tl-text">' + U.esc(a.message) + '</div></div>';
+      return '<div class="tl-item"><div class="tl-time">' + U.esc(a.time) + ' · <span class="badge ' + c + '">' + U.esc({ high: "高", mid: "中", low: "低" }[a.level] || a.level || "未知") + '</span> ' + U.esc(a.type) + '</div><div class="tl-text">' + U.esc(a.message) + '</div></div>';
     }).join("") || '<div class="empty">暂无告警</div>';
   }
 })(window.PG);
