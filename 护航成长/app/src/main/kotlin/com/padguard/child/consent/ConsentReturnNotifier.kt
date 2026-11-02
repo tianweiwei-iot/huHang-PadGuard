@@ -30,8 +30,10 @@ import javax.inject.Singleton
  * 只展示一条悬浮通知而不 Launch 该 Intent**；息屏 / 锁屏态才会直接 Launch。
  * 也就是说授权场景（家长正盯着平板操作）下，它大概率以"可点的悬浮通知"形态出现 ——
  * 这依然比"按物理返回键"轻：点一下通知同样回到授权页并自动接续下一项。
- * Android 14+ 还需 `USE_FULL_SCREEN_INTENT` 特殊权限，用 [canUseFullScreenIntent]
- * 如实探测，不可用时由上层走通知点击 / 手动返回，不假装成功。
+ *
+ * Android 14+ 需 `USE_FULL_SCREEN_INTENT` 特殊权限，用 [canUseFullScreenIntent] 如实探测。
+ * **探测不通过不等于放弃兜底**：只是不做"自动弹起"，通知本身照发（点击即回），
+ * 否则"接不回前台 + 通知也没发"会让家长彻底卡在设置页、且不知道该点哪里。
  */
 @Singleton
 class ConsentReturnNotifier @Inject constructor(
@@ -51,7 +53,7 @@ class ConsentReturnNotifier @Inject constructor(
     }
 
     /**
-     * 发一条全屏通知，把授权页宿主（[MainActivity]）拉回前台。
+     * 发一条通知，把授权页宿主（[MainActivity]）拉回前台。
      *
      * @param label 刚被开启的权限名（如"悬浮窗"）。带上它，家长在通知栏能一眼看出
      *   "哪一项开好了、点下去继续哪一项"，而不是一条看不懂的通用提示。
@@ -59,10 +61,6 @@ class ConsentReturnNotifier @Inject constructor(
      */
     fun postReturnToConsent(label: String? = null): Boolean {
         val mgr = manager ?: return false
-        if (!canUseFullScreenIntent()) {
-            Logger.w(TAG) { "full screen intent not permitted: consent auto-return degrades to manual back" }
-            return false
-        }
         ensureChannel(mgr)
 
         val pi = runCatching {
@@ -82,13 +80,23 @@ class ConsentReturnNotifier @Inject constructor(
             )
         }.getOrNull() ?: return false
 
+        // 全屏 Intent 只是"多一次自动弹起"的机会，不是能否兜底的前提。
+        // 旧实现把两者绑在一起：Android 14+ 未授予 USE_FULL_SCREEN_INTENT 就整条通知都不发，
+        // 于是"接不回前台 + 也没有任何入口"= 家长彻底卡在设置页。现在降级为普通高优通知：
+        // 系统不会替我们弹，但通知栏里始终有一个一键回去的入口。
+        val fullScreen = canUseFullScreenIntent()
+        if (!fullScreen) {
+            Logger.w(TAG) { "full screen intent not permitted: degrade to tap-to-return notification" }
+        }
+
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle(label?.let { "「$it」已开启" } ?: "授权已开启")
-            .setContentText("点此返回护航守护，继续完成剩余授权…")
+            .setContentText("点此返回护航守护，继续完成下一项授权")
             .setSmallIcon(
                 context.applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_dialog_info
             )
-            .setFullScreenIntent(pi, true)
+            .setContentIntent(pi)
+            .apply { if (fullScreen) setFullScreenIntent(pi, true) }
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setOngoing(false)
@@ -97,7 +105,7 @@ class ConsentReturnNotifier @Inject constructor(
             .build()
 
         return runCatching { mgr.notify(NOTIFICATION_ID, notification) }
-            .onSuccess { Logger.i(TAG) { "consent return full-screen intent posted" } }
+            .onSuccess { Logger.i(TAG) { "consent return notification posted (fullScreen=$fullScreen)" } }
             .onFailure { Logger.e(TAG, it) { "failed to post consent return notification" } }
             .isSuccess
     }

@@ -104,6 +104,16 @@
         </intent>
     </queries>
 
+    <!--
+      授权向导"自动回前台"必需（普通权限，随安装授予，无需申报）：
+      家长在系统设置页拨完开关后，ConsentReturnPresenter 用
+      `ActivityManager.appTasks[].moveToFront()` 把授权页整体提回前台。
+      该接口只调任务栈顺序、不新建 Activity，因此不受 Android 10+「后台启动 Activity」
+      限制；缺了本权限 moveToFront 会抛 SecurityException，而 startActivity 在部分 ROM
+      上会被静默丢弃 —— 表现就是"开关开了，页面不回来，还得自己按返回"。
+    -->
+    <uses-permission android:name="android.permission.REORDER_TASKS" />
+
     <!-- 开机 / 覆盖安装后自启守护服务 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 

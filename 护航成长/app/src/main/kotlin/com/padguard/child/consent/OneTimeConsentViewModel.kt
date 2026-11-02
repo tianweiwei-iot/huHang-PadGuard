@@ -121,6 +121,27 @@ class OneTimeConsentViewModel @Inject constructor(
     private val skippedKeys = mutableSetOf<String>()
 
     /**
+     * 已经**带家长去过一次**的项。
+     *
+     * 与 [skippedKeys] 分开记：跳过是"家长明确不要了"，去过但没开成是"试过、没成功"。
+     * UI 据此把行状态从悬空的「待处理」改成如实的「未开启（可再次尝试）」——
+     * 否则家长看到一项永远停在灰点上，会以为是自己操作错了。
+     */
+    private val attemptedKeys = mutableSetOf<String>()
+
+    /**
+     * 设备管理员"已尽力但未激活"的标记是否已落库。
+     *
+     * 必须落库而不是只记在内存里：入口分流（[com.padguard.child.MainActivity]）是
+     * `!isAdminActive() && !daPromptAck` 就强制回到本页。若设备上根本点不了「激活」
+     * （ROM 阉割 / 已有其它管理员），这个条件会**每次都把家长弹回授权页**，
+     * 家长看到的就是"这一项怎么都授权不了，还退不出去"。
+     * 因此只要完整走完一趟仍未激活，就落一次"已知晓"，把决定权还给家长，
+     * 同时在清单里保留「去激活」入口，随时可以补开。
+     */
+    private var daGiveUpWritten = false
+
+    /**
      * 系统运行时权限弹窗序列进行中（结果回调尚未送达）。
      *
      * `RequestMultiplePermissions` 会按权限组一枚一枚地弹（定位 → 相机 → 麦克风 → 通知），
@@ -210,27 +231,28 @@ class OneTimeConsentViewModel @Inject constructor(
     }
 
     /**
-     * 家长在清单页点击某一项，重新去一次对应系统设置页。
+     * 家长在清单里点某一项：直接带他去办这一项（而不是"只能靠底部按钮猜下一步"）。
      *
-     * 只有在流水线因"回来仍是缺失态"而停下时才会用到，
-     * 属于兜底的手动通道，不影响主流程的自动性。
+     * 这一条是必要的：清单里同时存在多项待办时，家长想先办手上这件事很正常；
+     * 之前行完全不可点，点了没任何反应，读起来就是"这项授权选不中 / 授权不了"。
+     *
+     * @param key [ConsentItem.key]；未知 key 直接忽略，不做任何跳转
      */
-    fun openAgain(key: String) {
-        val perm = SpecialPermission.fromKey(key) ?: return
-        val intent = SpecialPermission.openSettings(app, perm)
-        if (intent == null) {
-            _message.value = "本机型未开放「${perm.label}」的设置入口"
-            skippedKeys += key
+    fun openItem(key: String) {
+        if (_phase.value == Phase.RUNNING) return
+        // 还没点过「同意并授权」：点任意一行等同于开始，不再要求家长先找按钮
+        if (!started) {
+            consent()
             return
         }
-        _currentKey.value = key
+        // 运行时权限那几行的 key 是权限名（如 android.permission.CAMERA），不是流水线 key。
+        // 不在这里归一化，点上去就会走进"未知 key"分支 → 界面停在等待态、按钮点了也没反应。
+        val target = if (key in permissionGranter.requiredPermissions) KEY_RUNTIME else key
+        Logger.i(TAG) { "open item by tap: $key -> $target" }
+        consentReturn.stop()
+        _currentKey.value = target
         _phase.value = Phase.WAITING_PARENT
-        tryEmit(ConsentLaunch.Settings(key, intent))
-        // 盯着这项：家长拨完开关，后台守护会自动把授权页拉回前台（免手动返回）
-        consentReturn.watch(setOf(perm))
-        // 豁免操作闸门对设置页的拦截：向导自己正带家长去设置页，
-        // 否则刚启用的无障碍闸门会把设置页 1 秒内弹回，装机卡死。
-        gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
+        launchFor(target)
     }
 
     /**
@@ -253,9 +275,28 @@ class OneTimeConsentViewModel @Inject constructor(
         }
         Logger.i(TAG) { "retry current step: $key" }
         _phase.value = Phase.WAITING_PARENT
+        launchFor(key)
+    }
+
+    /**
+     * 按项类型发起对应的系统交互。
+     *
+     * 所有跳转都走这里，保证「清单点什么」和「底部按钮点什么」落到完全相同的代码路径 ——
+     * 两条路各写一份是历史上"某项点了没反应"的固定来源。
+     */
+    private fun launchFor(key: String) {
         when (key) {
             KEY_DEVICE_ADMIN -> {
-                tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
+                attemptedKeys += KEY_DEVICE_ADMIN
+                val intent = deviceAdminIntentOrNull()
+                if (intent == null) {
+                    _message.value = DA_NO_ENTRY_HINT
+                    skippedKeys += KEY_DEVICE_ADMIN
+                    _currentKey.value = null
+                    advance("da-no-entry")
+                    return
+                }
+                tryEmit(ConsentLaunch.DeviceAdmin(intent))
                 // 与 advance 同口径：盯守激活，免去手动返回
                 consentReturn.watch({ admin.isAdminActive() }, "设备管理员")
                 gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
@@ -285,6 +326,50 @@ class OneTimeConsentViewModel @Inject constructor(
     }
 
     /**
+     * 家长在清单页点击某一项，重新去一次对应系统设置页。
+     *
+     * 只有在流水线因"回来仍是缺失态"而停下时才会用到，
+     * 属于兜底的手动通道，不影响主流程的自动性。
+     */
+    fun openAgain(key: String) {
+        val perm = SpecialPermission.fromKey(key) ?: return
+        val intent = SpecialPermission.openSettings(app, perm)
+        if (intent == null) {
+            _message.value = "本机型未开放「${perm.label}」的设置入口"
+            skippedKeys += key
+            return
+        }
+        _currentKey.value = key
+        _phase.value = Phase.WAITING_PARENT
+        attemptedKeys += key
+        tryEmit(ConsentLaunch.Settings(key, intent))
+        // 盯着这项：家长拨完开关，后台守护会自动把授权页拉回前台（免手动返回）
+        consentReturn.watch(setOf(perm))
+        // 豁免操作闸门对设置页的拦截：向导自己正带家长去设置页，
+        // 否则刚启用的无障碍闸门会把设置页 1 秒内弹回，装机卡死。
+        gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
+    }
+
+    /**
+     * 系统页面根本没打开（ROM 没有该 Activity / 被系统拦下）。
+     *
+     * 必须显式接住：`ActivityResultLauncher.launch()` 抛 ActivityNotFoundException
+     * 会把整个授权页打崩，家长看到的是"点了一下，界面闪没了"，
+     * 而清单还停在这一项——正是"这项授权点不动"的直接成因。
+     */
+    fun onLaunchFailed(key: String, reason: String) {
+        Logger.e(TAG) { "launch failed for $key: $reason" }
+        attemptedKeys += key
+        _message.value = when (key) {
+            KEY_DEVICE_ADMIN -> DA_NO_ENTRY_HINT
+            else -> "无法打开系统授权页面（$reason），可手动到系统设置里开启「$key」"
+        }
+        if (key == KEY_DEVICE_ADMIN) skippedKeys += KEY_DEVICE_ADMIN
+        _currentKey.value = null
+        _phase.value = Phase.WAITING_PARENT
+    }
+
+    /**
      * 剩余项不再办理，直接进入应用。
      *
      * 必须留这个出口：个别 ROM 压根不提供某些开关，
@@ -294,12 +379,7 @@ class OneTimeConsentViewModel @Inject constructor(
         // 家长在授权流程里跳过了设备管理员（管控基石）：记录已确认，
         // 避免下次冷启动又因「DA 未激活」强制弹回授权流程形成无限循环。
         // 已激活 DA 的出口（正常完成 DA 后跳过其余项）不受影响。
-        if (!admin.isAdminActive()) {
-            viewModelScope.launch {
-                runCatching { authRepository.setDeviceAdminPromptAck() }
-                    .onFailure { Logger.w(TAG) { "mark DA prompt ack failed" } }
-            }
-        }
+        if (!admin.isAdminActive()) markDeviceAdminGiveUp()
         // 走完（即使有跳过项）即清掉"需重新授权"标记，避免入口分流反复弹回
         viewModelScope.launch {
             runCatching { authRepository.clearReauthRequired() }
@@ -330,14 +410,39 @@ class OneTimeConsentViewModel @Inject constructor(
         //    且 Device Owner 能大幅简化后续步骤，所以放在最前面。
         if (admin.controlMode.value == ControlMode.LEGACY && KEY_DEVICE_ADMIN !in requestedOnce) {
             requestedOnce += KEY_DEVICE_ADMIN
+            attemptedKeys += KEY_DEVICE_ADMIN
             _currentKey.value = KEY_DEVICE_ADMIN
             _phase.value = Phase.WAITING_PARENT
-            tryEmit(ConsentLaunch.DeviceAdmin(deviceAdminIntent()))
+            val intent = deviceAdminIntentOrNull()
+            if (intent == null) {
+                // 本机没有可用的激活页（个别 ROM 阉割了 DeviceAdminAdd）：
+                // 硬 launch 会抛 ActivityNotFoundException 把页面打崩，这里先降级为
+                // 「跳过 + 明确告知手动路径」，保证后面 7 项照常自动走完。
+                Logger.w(TAG) { "no device-admin activation activity, degrade to manual path" }
+                _message.value = DA_NO_ENTRY_HINT
+                skippedKeys += KEY_DEVICE_ADMIN
+                _currentKey.value = null
+                advance("da-no-entry")
+                return
+            }
+            tryEmit(ConsentLaunch.DeviceAdmin(intent))
             // 盯守 DA 激活：部分 ROM 的确认页点完「激活」后既不自动回前台、也不回调 ActivityResult，
             // 这里轮询 isAdminActive，办妥即把授权页接回前台并自动接续下一项，免去手动返回。
             consentReturn.watch({ admin.isAdminActive() }, "设备管理员")
             gateSuspension.suspendFor(SETTINGS_GATE_SUSPEND_MS)
             return
+        }
+
+        // ① 已经带家长去过激活页、回来仍未激活 → 不再无限强制。
+        //
+        // 为什么必须落一次标记：入口分流（MainActivity）的条件是
+        // `consentDone == false || (!isAdminActive() && !daPromptAck)`。
+        // 若这台机器根本激活不了（ROM 阉割 / 已有其它管理员占用），家长会被
+        // **每一次冷启动都弹回本页**，也就是"设备管理员这项怎么都授权不了，还退不出去"。
+        // 落标记后：本页照常显示该项为可选未开启 + 保留「去激活」按钮，
+        // 但不再把整个装机流程扣在这里。
+        if (admin.controlMode.value == ControlMode.LEGACY && KEY_DEVICE_ADMIN in attemptedKeys) {
+            markDeviceAdminGiveUp()
         }
 
         // ② 运行时权限
@@ -377,15 +482,23 @@ class OneTimeConsentViewModel @Inject constructor(
         // ④ 必须由家长在系统设置页手动打开的项
         val manual = missingManual()
         if (manual.isNotEmpty()) {
-            val next = manual.first()
-            // 刚自动跳出去的就是它、回来还是没开 → 停止自动循环，交给家长决定，
+            // 刚带家长去的就是这一项、回来还是没开 → 停止自动循环，交给家长决定，
             // 否则在 ROM 不允许开启的机型上会陷入"返回→又跳回去"的无限循环。
-            if (_currentKey.value == next.key) return
+            if (_currentKey.value != null && manual.any { it.key == _currentKey.value }) return
+            // 接着**刚办完的那一项**往后排，而不是每次都从第一项重来：
+            // 家长从清单里点了第 4 项去开，开完却被拽去第 1 项，是很明显的"乱跳"。
+            // 当前项已就绪时它不在 missing 里，用它的序号作为游标即可。
+            val cursor = SpecialPermission.fromKey(_currentKey.value.orEmpty())?.ordinal ?: -1
+            val next = manual.firstOrNull { it.ordinal > cursor } ?: manual.first()
             _currentKey.value = next.key
+            attemptedKeys += next.key
             _phase.value = Phase.WAITING_PARENT
             val intent = SpecialPermission.openSettings(app, next)
             if (intent == null) {
                 Logger.w(TAG) { "no settings entry for ${next.key}, skipping" }
+                // 静默跳过 = 家长以为流程走完了，事后发现功能不生效。必须如实说一句
+                _message.value = "本机型未开放「${next.label}」的设置入口，已跳过；" +
+                    "该能力暂时不可用，其余授权继续"
                 skippedKeys += next.key
                 _currentKey.value = null
                 advance("settings-unavailable")
@@ -444,6 +557,22 @@ class OneTimeConsentViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 设备管理员"已尽力但未激活"→ 落一次"已知晓"，不再让入口分流把家长弹回本页。
+     *
+     * 只在**确实带家长去过激活页**之后调用（`attemptedKeys` 判定），
+     * 不会因为"还没走到这一步"就提前放弃。
+     */
+    private fun markDeviceAdminGiveUp() {
+        if (daGiveUpWritten) return
+        daGiveUpWritten = true
+        Logger.w(TAG) { "device admin still inactive after attempt, stop forcing consent flow" }
+        viewModelScope.launch {
+            runCatching { authRepository.setDeviceAdminPromptAck() }
+                .onFailure { Logger.w(TAG) { "mark DA prompt ack failed" } }
+        }
+    }
+
     // ==================== 清单状态 ====================
 
     /** 刷新每一项的状态。UI 只渲染，不做判定，避免两处口径不一致。 */
@@ -458,12 +587,22 @@ class OneTimeConsentViewModel @Inject constructor(
             add(
                 ConsentItem(
                     key = KEY_DEVICE_ADMIN,
-                    title = if (mode == ControlMode.LEGACY) "设备管理员" else "设备管理员（已激活）",
-                    impact = "锁屏、禁用相机、防止孩子卸载这些核心管控都依赖它",
+                    title = if (mode == ControlMode.LEGACY) "设备管理员（可选增强）" else "设备管理员",
+                    impact = if (mode == ControlMode.LEGACY) {
+                        "锁屏、禁用相机、防卸载这类加固依赖它。未激活不影响主要管控，" +
+                            "可在「我的 → 权限引导」随时补开"
+                    } else {
+                        "已激活：锁屏、禁用相机、防卸载等加固能力可用"
+                    },
                     source = ConsentItem.Source.DEVICE_ADMIN,
+                    optional = true,
                     state = when {
                         mode != ControlMode.LEGACY -> ConsentItem.State.DONE
                         current == KEY_DEVICE_ADMIN -> ConsentItem.State.NEED_MANUAL
+                        // 去过激活页仍未激活 / 本机没有入口：如实标"未开启"，不再悬空在 PENDING，
+                        // 否则家长会以为是流程卡住了，而实际上是他随时可以点回来补开
+                        KEY_DEVICE_ADMIN in skippedKeys ||
+                            KEY_DEVICE_ADMIN in attemptedKeys -> ConsentItem.State.SKIPPED
                         else -> ConsentItem.State.PENDING
                     }
                 )
@@ -539,7 +678,28 @@ class OneTimeConsentViewModel @Inject constructor(
     private fun needsCapture(): Boolean =
         !ScreenCaptureSession.hasToken() && CaptureConsent.shouldRequest(app)
 
-    private fun deviceAdminIntent(): Intent = deviceAdminRequest.intent(admin)
+    /**
+     * 拿一个**确实能被系统打开**的设备管理员意图。
+     *
+     * 两级：
+     * 1. 正常走 `ACTION_ADD_DEVICE_ADMIN`（系统确认页，点一次「激活」）；
+     * 2. 该页在本机不可解析（ROM 阉割 / 被系统策略隐藏）→ 退到「安全」设置页，
+     *    家长可在 设备管理器 里手动勾选；轮询判定用的是 `isAdminActive()`，
+     *    手动激活同样能被识别并自动接续下一项，不需要额外分支。
+     *
+     * 返回 null 表示两条路都不可用：调用方必须**跳过而不是硬 launch** ——
+     * `ActivityResultLauncher.launch()` 抛 ActivityNotFoundException 会直接打崩授权页。
+     */
+    private fun deviceAdminIntentOrNull(): Intent? {
+        val primary = deviceAdminRequest.intent(admin)
+        if (resolvable(primary)) return primary
+        Logger.w(TAG) { "ACTION_ADD_DEVICE_ADMIN unresolvable, fallback to security settings" }
+        val fallback = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
+        return if (resolvable(fallback)) fallback else null
+    }
+
+    private fun resolvable(intent: Intent): Boolean =
+        runCatching { intent.resolveActivity(app.packageManager) }.getOrNull() != null
 
     private fun tryEmit(value: ConsentLaunch) {
         if (!_launch.tryEmit(value)) {
@@ -554,6 +714,11 @@ class OneTimeConsentViewModel @Inject constructor(
         const val KEY_CAPTURE = "mediaProjection"
         /** 上网防护 VPN 授权（VpnService.prepare 确认框） */
         const val KEY_VPN = "webGuardVpn"
+
+        /** 设备管理员无入口 / 未激活时的统一提示（含手动路径，家长不必猜） */
+        const val DA_NO_ENTRY_HINT =
+            "「设备管理员」未激活：本机没有可用的激活页面。可到 设置 → 安全 → 设备管理器 手动开启，" +
+                "或在「我的 → 权限引导」补开。其余授权不受影响。"
 
         /**
          * 每次发起设置页跳转时的闸门豁免窗口时长。

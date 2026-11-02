@@ -170,6 +170,12 @@ private fun EntryRouter(
         //    实现「自动获取管理员权限」——激活页会自动拉起，家长点「激活」即生效（无需手动返回）。
         //    autoStart 仅在「已同意过协议但 DA 缺失」的补授权场景置 true，跳过「同意并授权」
         //    按钮直接拉起 DA 激活页；首次装机(consentDone==false)仍需家长主动点一次。
+        //
+        //    ⚠️ daPromptAck 不只由"家长点跳过"写入：授权流水线**带家长去过激活页仍未激活**
+        //    时也会落一次（见 OneTimeConsentViewModel.markDeviceAdminGiveUp）。
+        //    少了这条，在激活页点不了「激活」的机型（ROM 阉割 / 已被其它管理员占用）上，
+        //    这里会变成"每次冷启动都把家长弹回授权页"的死循环，体验上就是
+        //    "设备管理员这项怎么都授权不了，还退不出去"。
         consentDone == false || (!admin.isAdminActive() && !daPromptAck) ->
             OneTimeConsentScreen(autoStart = consentDone == true)
 

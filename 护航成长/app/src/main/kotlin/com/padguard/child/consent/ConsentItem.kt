@@ -22,7 +22,16 @@ data class ConsentItem(
     /** 缺失后果（家长看得懂的白话，不写技术名词） */
     val impact: String,
     val source: Source,
-    val state: State = State.PENDING
+    val state: State = State.PENDING,
+    /**
+     * 是否属于「可选增强」。
+     *
+     * 目前只有设备管理员是 true：没有它在多数机型上仍能正常管控（锁屏靠无障碍 + 前台服务，
+     * 应用管控靠门禁），只是少了防卸载 / 禁相机这类加固。UI 据此把文案从
+     * "未完成"改成"可选，可稍后补开"——把"没做完"和"做不到"区分开，
+     * 家长才不会以为流程卡住了。
+     */
+    val optional: Boolean = false
 ) {
     /** 取得方式，决定由谁往下推进。 */
     enum class Source {
