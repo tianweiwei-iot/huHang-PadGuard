@@ -1274,16 +1274,11 @@ class GuardService : Service() {
      * className 本端暂无数据源，留空（占位符原样保留，不影响其他占位符替换）。
      */
     private suspend fun reconcileWatermark() {
-        val wm = runSafely("readWatermark") { policyEngine.kioskRuntime().watermark } ?: return
-        if (wm.enabled && wm.content.isNotBlank()) {
-            val deviceId = runSafely("wmDeviceId") { authRepository.getDeviceId() }.orEmpty()
-            val deviceSn = runSafely("wmDeviceSn") { authRepository.deviceSn.first() }.orEmpty()
-            val studentName = runSafely("wmStudent") { authRepository.studentName.first() }.orEmpty()
-            // className 暂无数据源，留空
-            watermark.show(wm.render(deviceSn, studentName, "", deviceId))
-        } else {
-            watermark.hide()
-        }
+        // 统一走 syncWatermarkFromPolicy（唯一实现，含 position / opacity）：
+        // 此前这里用的是 watermark.show(render(...))，位置与透明度被丢弃，
+        // 而传了这两个参数的 syncWatermarkFromPolicy 全工程零调用 —— 家长把水印设成"底部/居中"、
+        // 调高透明度，孩子端永远显示在左上 + 固定 0.35。
+        runSafely("watermark") { syncWatermarkFromPolicy() }
     }
 
     // ==================== 心跳与上报 ====================

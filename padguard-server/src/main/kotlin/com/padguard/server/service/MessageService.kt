@@ -32,6 +32,15 @@ class MessageService(
         // 下发的载荷里 CONTENT 为空串时，旧版孩子端 / 历史日志里会看到一条"空消息"，
         // 用素材名兜底让任何一端的展示都至少有可读信息。
         if (content.isEmpty()) content = req.mediaName?.trim().orEmpty()
+        // 变砖防护：霸屏 + 时长为 0 时，孩子端页面无按钮、返回键被吞、关闭任务不排程，
+        // 设备会永久停在霸屏页（家长端滑块 5~300s，但老客户端/异常载荷可传 0）。
+        // 入口就拒绝，优于下发后把设备锁死。
+        if (req.fullScreen && req.displaySeconds <= 0) {
+            throw BizException(ParentErr.PARAM_ERROR, "霸屏消息必须设置展示时长（1~3600 秒）", Audience.PARENT)
+        }
+        if (req.displaySeconds !in 0..3600) {
+            throw BizException(ParentErr.PARAM_ERROR, "展示时长须在 0~3600 秒之间", Audience.PARENT)
+        }
         val now = System.currentTimeMillis()
         val msg = publishedMessageRepository.save(
             PublishedMessage(

@@ -111,21 +111,24 @@ class MessageActivity : ComponentActivity() {
     /** 已下载的本地素材文件（退出时清理，避免缓存目录堆积） */
     @Volatile private var downloadedMedia: File? = null
 
+    /**
+     * 内容版本号：onNewIntent 时自增，驱动 Compose 重组读取最新的 title/body/媒体字段。
+     * （这些字段是普通 var，不是 State；直接改不会触发重组，靠版本号显式触发。）
+     */
+    private val contentRevision = mutableIntStateOf(0)
+
+    /** 霸屏返回键拦截：常驻注册、按 blocking 启停，便于新消息到达时切换 */
+    private val blockBackCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            // 吞掉，不允许逃脱
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showOverLockScreen()
 
-        titleText = intent?.getStringExtra(EXTRA_TITLE).orEmpty()
-        bodyText = intent?.getStringExtra(EXTRA_BODY).orEmpty()
-        durationSec = intent?.getIntExtra(EXTRA_DURATION, 0) ?: 0
-        blocking = intent?.getBooleanExtra(EXTRA_BLOCKING, false) ?: false
-        contentType = intent?.getStringExtra(EXTRA_CONTENT_TYPE) ?: "TEXT"
-        mediaUrl = intent?.getStringExtra(EXTRA_MEDIA_URL).orEmpty()
-        mediaName = intent?.getStringExtra(EXTRA_MEDIA_NAME).orEmpty()
-
-        // 服务端默认返回相对路径（如 /v1/files/{id}），由 MediaUrlResolver 统一解析为绝对地址，
-        // 一次解析贯穿整条渲染链；解析失败会在下载层给出明确错误而非无限转圈。
-        if (mediaUrl.isNotBlank()) mediaUrl = mediaUrlResolver.resolve(mediaUrl)
+        applyIntent(intent)
 
         // 霸屏不提供任何关闭入口；非阻塞且有时长则到点自动关闭
         // 倒计时以「首次展示」为基准：被系统弹窗打断后 re-arm 重拉本页时不重置，
@@ -134,19 +137,13 @@ class MessageActivity : ComponentActivity() {
         armClose(remainMs)
 
         // 霸屏期间拦截返回键
-        if (blocking) {
-            onBackPressedDispatcher.addCallback(
-                this,
-                object : OnBackPressedCallback(true) {
-                    override fun handleOnBackPressed() {
-                        // 吞掉，不允许逃脱
-                    }
-                }
-            )
-        }
+        blockBackCallback.isEnabled = blocking
+        onBackPressedDispatcher.addCallback(this, blockBackCallback)
 
         setContent {
             PadGuardTheme {
+                // 读版本号：新消息到达后重组，参数从普通字段重新读取
+                contentRevision.intValue
                 MessageContent(
                     title = titleText,
                     body = bodyText,
@@ -161,6 +158,43 @@ class MessageActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    /** 解析消息 intent；onCreate 与 onNewIntent 共用同一路径 */
+    private fun applyIntent(i: Intent?) {
+        titleText = i?.getStringExtra(EXTRA_TITLE).orEmpty()
+        bodyText = i?.getStringExtra(EXTRA_BODY).orEmpty()
+        durationSec = i?.getIntExtra(EXTRA_DURATION, 0) ?: 0
+        blocking = i?.getBooleanExtra(EXTRA_BLOCKING, false) ?: false
+        contentType = i?.getStringExtra(EXTRA_CONTENT_TYPE) ?: "TEXT"
+        mediaUrl = i?.getStringExtra(EXTRA_MEDIA_URL).orEmpty()
+        mediaName = i?.getStringExtra(EXTRA_MEDIA_NAME).orEmpty()
+
+        // 变砖兜底：blocking=true 且时长<=0 时，页面无按钮、返回键被吞、关闭任务不排程 ——
+        // 设备将永久退不出。异常载荷一律按 30 秒处理，宁可少霸屏也不能锁死设备。
+        if (blocking && durationSec <= 0) durationSec = BLOCKING_FALLBACK_SEC
+
+        // 服务端默认返回相对路径（如 /v1/files/{id}），由 MediaUrlResolver 统一解析为绝对地址，
+        // 一次解析贯穿整条渲染链；解析失败会在下载层给出明确错误而非无限转圈。
+        if (mediaUrl.isNotBlank()) mediaUrl = mediaUrlResolver.resolve(mediaUrl)
+    }
+
+    /**
+     * singleTask 复用时系统不再走 onCreate。
+     * 此前缺这个方法：消息 A 正在霸屏时家长再发消息 B，屏幕继续显示 A 的标题/正文，
+     * B 的时长也不会重排——家长端显示"已发布"，孩子看到的是上一条。
+     * 这里刷新内容、重置倒计时（新消息重新计时）、同步霸屏状态。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        applyIntent(intent)
+        // 新消息 = 新会话：旧消息的截止时间必须作废，否则 B 会被 A 的剩余时间提前关掉
+        endSession()
+        armClose(beginSession(sessionKey(), durationSec))
+        blockBackCallback.isEnabled = blocking
+        if (blocking) LockTaskSupport.start(this) else LockTaskSupport.stop(this)
+        contentRevision.intValue = contentRevision.intValue + 1
     }
 
     private fun showOverLockScreen() {
@@ -293,6 +327,8 @@ class MessageActivity : ComponentActivity() {
         private const val EXTRA_MEDIA_NAME = "mediaName"
 
         private const val REARM_DELAY_MS = 1000L
+        /** blocking 消息时长异常（<=0）时的兜底展示秒数，避免设备永久锁在霸屏页 */
+        private const val BLOCKING_FALLBACK_SEC = 30
 
         @Volatile
         private var instance: MessageActivity? = null

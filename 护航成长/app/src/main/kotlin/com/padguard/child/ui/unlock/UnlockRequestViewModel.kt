@@ -48,6 +48,7 @@ class UnlockRequestViewModel @Inject constructor(
             reasonText = form.reasonText,
             submitting = form.submitting,
             justSubmitted = form.justSubmitted,
+            errorMessage = form.errorMessage,
             hasPending = hasPending,
             history = history.map { it.toUi() }
         )
@@ -102,9 +103,11 @@ class UnlockRequestViewModel @Inject constructor(
         if (form.reasonText.isBlank()) return
         if (state.value.hasPending) return
 
-        formState.value = form.copy(submitting = true)
+        formState.value = form.copy(submitting = true, errorMessage = null)
         viewModelScope.launch {
-            runCatching {
+            // 失败必须如实告知并保留理由：此前 runCatching 吞掉异常后照样切"等待家长审批"，
+            // 孩子以为提交成功在等，家长根本没收到任何申请。
+            val result = runCatching {
                 repository.submit(
                     packageName = form.targetPackage,
                     appLabel = form.targetLabel,
@@ -112,12 +115,22 @@ class UnlockRequestViewModel @Inject constructor(
                     durationMinutes = form.durationMinutes
                 )
             }
-            // 提交完成后清空理由并标记"刚提交"，让界面切到等待审批的说明
-            formState.value = formState.value.copy(
-                submitting = false,
-                justSubmitted = true,
-                reasonText = ""
-            )
+            if (result.isSuccess) {
+                // 提交完成后清空理由并标记"刚提交"，让界面切到等待审批的说明
+                formState.value = formState.value.copy(
+                    submitting = false,
+                    justSubmitted = true,
+                    reasonText = "",
+                    errorMessage = null
+                )
+            } else {
+                val reason = result.exceptionOrNull()?.message?.takeIf { it.isNotBlank() } ?: "网络或服务异常"
+                formState.value = formState.value.copy(
+                    submitting = false,
+                    justSubmitted = false,
+                    errorMessage = "提交失败：$reason"
+                )
+            }
         }
     }
 
@@ -141,7 +154,9 @@ class UnlockRequestViewModel @Inject constructor(
         val durationMinutes: Int = 30,
         val reasonText: String = "",
         val submitting: Boolean = false,
-        val justSubmitted: Boolean = false
+        val justSubmitted: Boolean = false,
+        /** 提交失败原因；非空时界面须展示，且不得显示"已提交" */
+        val errorMessage: String? = null
     )
 
     companion object {
@@ -167,6 +182,8 @@ data class UnlockRequestUiState(
     val reasonText: String = "",
     val submitting: Boolean = false,
     val justSubmitted: Boolean = false,
+    /** 提交失败原因（非空时界面展示错误，不显示"已提交"） */
+    val errorMessage: String? = null,
     /** 有在途申请时禁用提交，避免重复打扰家长 */
     val hasPending: Boolean = false,
     val history: List<UnlockRequestItemUi> = emptyList()

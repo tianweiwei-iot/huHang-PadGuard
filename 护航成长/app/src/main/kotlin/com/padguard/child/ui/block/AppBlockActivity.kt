@@ -61,25 +61,35 @@ class AppBlockActivity : ComponentActivity() {
      */
     private val showRequestForm = mutableStateOf(false)
 
+    /**
+     * 当前被拦的应用信息。
+     *
+     * 必须是可变状态而不是 onCreate 里的局部变量：本 Activity 由 GuardService 以
+     * CLEAR_TOP|SINGLE_TOP 反复拉起，第二次起走 onNewIntent。此前没有 onNewIntent，
+     * 拦截页会一直显示**上一个**应用的名字，孩子点「申请临时解锁」提交的也是上一个包——
+     * 家长批准了 A，实际被拦的 B 依然打不开。
+     */
+    private val blockedPkg = mutableStateOf("")
+    private val blockedReason = mutableStateOf("")
+    private val blockedLabel = mutableStateOf("")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
-        val pkg = intent?.getStringExtra(EXTRA_PACKAGE).orEmpty()
-        val reason = intent?.getStringExtra(EXTRA_REASON).orEmpty()
-        val label = resolveLabel(pkg)
+        applyIntent(intent)
 
         setContent {
             PadGuardTheme {
                 if (showRequestForm.value) {
                     UnlockRequestScreen(
                         onBack = { showRequestForm.value = false },
-                        prefillPackage = pkg,
-                        prefillLabel = label
+                        prefillPackage = blockedPkg.value,
+                        prefillLabel = blockedLabel.value
                     )
                 } else {
                     AppBlockContent(
-                        label = label,
-                        reason = reason,
+                        label = blockedLabel.value,
+                        reason = blockedReason.value,
                         onRequestUnlock = { showRequestForm.value = true },
                         onGoHome = { goHome() }
                     )
@@ -101,6 +111,25 @@ class AppBlockActivity : ComponentActivity() {
                 }
             }
         )
+    }
+
+    /** 解析 intent 到可变状态；onCreate 与 onNewIntent 共用同一路径 */
+    private fun applyIntent(i: Intent?) {
+        val pkg = i?.getStringExtra(EXTRA_PACKAGE).orEmpty()
+        blockedPkg.value = pkg
+        blockedReason.value = i?.getStringExtra(EXTRA_REASON).orEmpty()
+        blockedLabel.value = resolveLabel(pkg)
+    }
+
+    /**
+     * SINGLE_TOP 复用时系统不再走 onCreate —— 必须在这里刷新被拦应用。
+     * 同时收起申请表单：表单里预填的是上一个包，直接沿用会提交错解锁申请。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        showRequestForm.value = false
+        applyIntent(intent)
     }
 
     private fun resolveLabel(pkg: String): String {

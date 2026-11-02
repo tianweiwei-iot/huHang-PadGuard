@@ -85,9 +85,15 @@ class KidHomeViewModel @Inject constructor(
             // 下次点同一应用必须重新验证。无障碍服务只盯非自家包的前台变化，
             // 自家桌面这一侧必须由这里补上，否则孩子回桌面后再点就能免密进入。
             runCatching { guard.revokeAppAccess() }
-            val items = runCatching { buildAllowedApps() }.getOrElse { emptyList() }
-            // 二级兜底：万一上面仍异常，退化为显示全部已安装应用，绝不空白
-            val safe = if (items.isEmpty()) fallbackAllApps() else items
+            val items = runCatching { buildAllowedApps() }.getOrNull()
+            // 兜底口径必须区分"真异常"与"合法空名单"：
+            // 此前 items.isEmpty() 就平铺全部已安装应用 —— 家长把所有应用取消授权/白名单应用全被卸载时，
+            // 桌面反而列出所有应用，是可直接复现的管控绕过（家长越严、桌面越全）。
+            val safe = when {
+                items == null -> fallbackAllApps()                 // 读取本身异常：宁可显示全部也不能空白
+                items.isEmpty() && appGuard.decisions() == null -> fallbackAllApps() // 策略尚未镜像到本机
+                else -> items                                      // 合法空名单：保持为空
+            }
             _apps.clear()
             _apps.addAll(safe)
         }

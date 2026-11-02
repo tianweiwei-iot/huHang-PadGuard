@@ -91,6 +91,14 @@ fun UnlockRequestScreen(
                 } else if (state.justSubmitted) {
                     SubmittedNotice(onDismiss = viewModel::dismissSubmitted)
                 }
+                // 提交失败要看得见：不能让界面既不报错也不提示"已提交"，让孩子空等家长审批
+                state.errorMessage?.let { msg ->
+                    Text(
+                        text = msg,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
 
                 TargetCard(label = state.targetLabel)
 
