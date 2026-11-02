@@ -71,7 +71,6 @@ fun HomeScreen(
                     onNavigateToLocation: (String) -> Unit,
                     onNavigateToUsageDetail: (String) -> Unit = {},
     onNavigateToUsageSettings: (String) -> Unit = {},
-    onIgnoreUnlockTicket: (String) -> Unit = {},
     onRefresh: () -> Unit = {},
     onAddDevice: () -> Unit = {},
     /** 整机管控 暂停/恢复 主开关（跨页面共享态，详情页与首页读同一份，homeVm 负责下发指令） */
@@ -105,13 +104,28 @@ fun HomeScreen(
             // === 1. 顶部标题栏 ===
             item { HomeTopBar(userName = uiState.userName, unreadCount = unreadAlertCount, onBellClick = onNavigateToAlerts) }
 
-            // === 2. 空状态：尚未绑定任何孩子设备 ===
-            // HomeViewModel 在设备列表非空时会自动选中首个设备，故 devices 为空即代表「无绑定设备」。
-            // 此时看板与管控卡均无数据可展示，直接展示引导空态并隐藏失效卡片，
-            // 避免「卡片存在却点击无反应、看板消失」的脆弱体验。
+            // 刷新失败但仍有历史数据：不整页替换（会丢掉仍可用的看板），
+            // 只挂一条可重试的窄提示，说明"当前显示的是上次数据"。
+            if (uiState.error != null && devices.isNotEmpty()) {
+                item { InlineRefreshError(message = uiState.error, onRetry = onRefresh) }
+            }
+
+            // === 2. 空态 / 加载态 / 失败态：三者必须分开 ===
+            // 此前只有 `devices.isEmpty()` 一个分支，于是：
+            //   ① 冷启动首帧还没拿到列表 → 家长看到"还没有绑定设备"（假空态）；
+            //   ② 接口失败（断网 / 服务端 5xx）→ 同样看到"还没有绑定设备"，
+            //      家长会以为孩子设备被解绑了，而真实原因根本没显示。
+            // 现在按「未加载完 / 加载失败 / 确实没有设备」三态渲染。
             if (devices.isEmpty()) {
                 item {
-                    EmptyDeviceState(onAddDevice = onAddDevice)
+                    when {
+                        !uiState.hasLoadedOnce && uiState.error == null -> LoadingDeviceState()
+                        uiState.error != null -> DeviceLoadErrorState(
+                            message = uiState.error,
+                            onRetry = onRefresh
+                        )
+                        else -> EmptyDeviceState(onAddDevice = onAddDevice)
+                    }
                 }
             } else {
                 // === 3. 孩子/设备切换 pill ===
@@ -345,78 +359,6 @@ private fun OfflineAlertBanner(deviceName: String) {
                 color = PadGuardColors.WarningRed,
                 style = MaterialTheme.typography.bodyMedium
             )
-        }
-    }
-}
-
-/**
- * 孩子端解锁申请卡（首页置顶）。
- *
- * 孩子在锁屏页点了「申请解锁」并填了理由，这条申请会以工单形式上到这里。
- * 家长两个选择：
- * - **忽略**：关闭工单，设备保持锁定，不给孩子任何反馈（避免"闹就有用"的负向强化）；
- * - **去处理**：跳转管控策略页，在那里一键解锁 / 限时解锁 / 调整每日可用时长。
- *
- * 之所以跳转到策略页而不是在这里直接放行：家长看到申请后的常见决策其实是
- * "今天是不是该多给半小时"，这属于策略调整而不是一次性的放行操作，
- * 放在策略页能一次性改完并立即生效。
- */
-@Composable
-private fun UnlockRequestCard(
-    ticket: com.padguard.parent.domain.repository.UnlockTicket,
-    deviceName: String,
-    onIgnore: (String) -> Unit,
-    onHandle: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = PadGuardColors.Amber.copy(alpha = 0.12f))
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.LockOpen,
-                    contentDescription = null,
-                    tint = PadGuardColors.Amber,
-                    modifier = Modifier.size(20.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "$deviceName 申请解锁",
-                    color = PadGuardColors.Amber,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "申请对象：${ticket.targetLabel}" +
-                    (ticket.durationMinutes?.let { " · 期望 $it 分钟" } ?: ""),
-                style = MaterialTheme.typography.bodyMedium,
-                color = PadGuardColors.TextPrimary
-            )
-            if (!ticket.reason.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "理由：${ticket.reason}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = PadGuardColors.TextSecondary
-                )
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = { onIgnore(ticket.id) }) {
-                    Text("忽略", color = PadGuardColors.TextSecondary)
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = onHandle,
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = PadGuardColors.Amber)
-                ) { Text("去处理") }
-            }
         }
     }
 }
@@ -848,6 +790,100 @@ private fun LatestActivityCard(activityText: String, modifier: Modifier = Modifi
  * 设计取舍：无设备时看板与管控卡均无数据，与其渲染「存在却点击无反应」的失效卡片，
  * 不如直接给出明确的引导入口（跳转设备页生成绑定码），消除隐性空操作陷阱。
  */
+/** 刷新失败但仍有缓存数据时的窄提示（带重试）。 */
+@Composable
+private fun InlineRefreshError(message: String, onRetry: () -> Unit) {
+    Surface(
+        modifier = Modifier
+            .padding(horizontal = 16.dp)
+            .fillMaxWidth(),
+        color = MaterialTheme.colorScheme.errorContainer,
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.CloudOff,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "刷新失败，当前显示上次数据（$message）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onRetry) { Text("重试") }
+        }
+    }
+}
+
+/** 首次加载中：不展示"还没有绑定设备"，避免把加载态谎报成空态。 */
+@Composable
+private fun LoadingDeviceState() {
+    SoftCard(modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(28.dp),
+                strokeWidth = 2.5.dp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "正在加载设备…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = PadGuardColors.TextSecondary
+            )
+        }
+    }
+}
+
+/**
+ * 加载失败态。
+ *
+ * 必须与空态区分：断网时显示"还没有绑定设备"会让家长误判设备被解绑，
+ * 进而重复绑定，产生多条设备记录（服务端会残留同一台平板的多条记录）。
+ */
+@Composable
+private fun DeviceLoadErrorState(message: String, onRetry: () -> Unit) {
+    SoftCard(modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(
+                imageVector = Icons.Default.CloudOff,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(32.dp)
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "设备列表加载失败",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = PadGuardColors.TextPrimary
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = PadGuardColors.TextSecondary,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            OutlinedButton(onClick = onRetry) { Text("重试") }
+        }
+    }
+}
+
 @Composable
 private fun EmptyDeviceState(onAddDevice: () -> Unit) {
     SoftCard(onClick = onAddDevice, modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth()) {

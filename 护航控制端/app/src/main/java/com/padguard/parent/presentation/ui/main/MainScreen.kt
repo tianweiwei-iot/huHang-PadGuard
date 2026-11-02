@@ -123,7 +123,6 @@ fun MainScreen(
                     onNavigateToLocation = { rootNavController.navigate(Screen.Location.create(it)) },
                     onNavigateToUsageDetail = { rootNavController.navigate(Screen.TabletUsageDetail.create(it)) },
                     onNavigateToUsageSettings = { rootNavController.navigate(Screen.TabletUsageSettings.create(it)) },
-                    onIgnoreUnlockTicket = homeVm::ignoreUnlockTicket,
                     onRefresh = homeVm::refreshData,
                     onSetManagementActive = homeVm::setManagementActive,
                     // 首页空状态「还没有绑定的孩子设备」：直接进入接入新设备流程，

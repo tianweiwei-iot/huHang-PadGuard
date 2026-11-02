@@ -12,7 +12,6 @@ import com.padguard.parent.domain.repository.DeviceRepository
 import com.padguard.parent.domain.repository.MinorMode
 import com.padguard.parent.domain.repository.PolicyRepository
 import com.padguard.parent.domain.repository.StatisticsRepository
-import com.padguard.parent.domain.repository.UnlockTicket
 import com.padguard.parent.data.remote.ParentPushClient
 import com.padguard.parent.data.remote.ParentPushMessage
 import com.padguard.parent.presentation.util.TimeFormat
@@ -65,10 +64,16 @@ data class HomeUiState(
     val ageBandDefaults: Map<AgeBand, AgeBandDefault> = emptyMap(),
     val todayUsage: UsageStats? = null,
     val latestActivity: String? = null,
-    /** 孩子端提交、等待家长处理的解锁申请（取最早一条展示，避免首页被刷屏） */
-    val pendingUnlockTicket: UnlockTicket? = null,
-    val unlockActionMessage: String? = null,
     val isRefreshing: Boolean = false,
+    /**
+     * 是否已完成**首次**加载（成功或失败都算）。
+     *
+     * 首页此前只有 `devices.isEmpty()` 一个判据，于是冷启动时的"还没加载完"
+     * 会被渲染成"还没有绑定的孩子设备"——家长看到的是**假的空态**，
+     * 甚至可能以为设备被解绑了。配合 [error] 才能区分
+     * 「加载中 / 加载失败 / 真的没有设备」三种情况。
+     */
+    val hasLoadedOnce: Boolean = false,
     /** 当前选中设备的整机管控是否生效：true=管控中，false=已释放（设备完全可用）。默认 true */
     val managementActive: Boolean = true,
     val error: String? = null
@@ -123,7 +128,6 @@ class HomeViewModel @Inject constructor(
         _uiState.value.selectedDeviceId?.let {
             loadTodayUsage(it)
             loadDailyLimit(it)
-            loadUnlockTickets(it)
         }
     }
 
@@ -134,12 +138,10 @@ class HomeViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(
             selectedDeviceId = deviceId,
             selectedDevice = device,
-            pendingUnlockTicket = null,
             managementActive = policyRepository.managementActiveFlow.value[deviceId] ?: true
         )
         loadTodayUsage(deviceId)
         loadDailyLimit(deviceId)
-        loadUnlockTickets(deviceId)
     }
 
     /**
@@ -156,42 +158,6 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    /** 忽略某条解锁申请：关闭工单，不下发任何消息给孩子 */
-    fun ignoreUnlockTicket(ticketId: String) {
-        val deviceId = _uiState.value.selectedDeviceId ?: return
-        viewModelScope.launch {
-            policyRepository.ignoreUnlockTicket(deviceId, ticketId)
-                .onSuccess {
-                    _uiState.value = _uiState.value.copy(
-                        pendingUnlockTicket = null,
-                        unlockActionMessage = "已忽略该申请"
-                    )
-                    loadUnlockTickets(deviceId)
-                }
-                .onFailure { e -> _uiState.value = _uiState.value.copy(error = e.message) }
-        }
-    }
-
-    fun clearUnlockMessage() {
-        _uiState.value = _uiState.value.copy(unlockActionMessage = null)
-    }
-
-    /**
-     * 拉取待处理的解锁申请。
-     * 首页只展示最早的一条：孩子可能连着提交好几次，全列出来既刷屏又容易让家长误点。
-     */
-    private fun loadUnlockTickets(deviceId: String) {
-        viewModelScope.launch {
-            policyRepository.getUnlockTickets(deviceId)
-                .onSuccess { tickets ->
-                    _uiState.value = _uiState.value.copy(
-                        pendingUnlockTicket = tickets.filter { it.isPending }.minByOrNull { it.createdAt }
-                    )
-                }
-                .onFailure { /* 申请列表是增值信息，失败不阻断首页渲染 */ }
-        }
-    }
-
     /**
      * 加载首页数据。
      * @param showRefreshing 是否处于下拉刷新（控制 isRefreshing 态）
@@ -200,9 +166,18 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             if (showRefreshing) _uiState.value = _uiState.value.copy(isRefreshing = true)
             deviceRepository.getDeviceList()
-                .onSuccess { applyDeviceList(it) }
+                .onSuccess {
+                    // 成功即清掉上一次的错误：否则"重试成功后仍显示错误条"，
+                    // 家长会以为还是坏的。
+                    _uiState.value = _uiState.value.copy(error = null)
+                    applyDeviceList(it)
+                }
                 .onFailure { e ->
-                    _uiState.value = _uiState.value.copy(error = e.message, isRefreshing = false)
+                    _uiState.value = _uiState.value.copy(
+                        error = e.message ?: "加载失败，请下拉重试",
+                        isRefreshing = false,
+                        hasLoadedOnce = true
+                    )
                 }
         }
     }
@@ -233,17 +208,16 @@ class HomeViewModel @Inject constructor(
             childName = selectedDevice?.childName?.takeIf { it.isNotBlank() }.orEmpty(),
             childNickname = selectedDevice?.childNickname?.takeIf { it.isNotBlank() }.orEmpty(),
             isRefreshing = false,
+            hasLoadedOnce = true,
             // 选中设备被解绑/已无可选项时，清空其用量数据：
             // 否则首页会残留一台已解绑设备的今日统计，看起来像"还在管控里"。
             todayUsage = if (sel == null) null else current.todayUsage,
-            latestActivity = if (sel == null) null else current.latestActivity,
-            pendingUnlockTicket = if (sel == null) null else current.pendingUnlockTicket
+            latestActivity = if (sel == null) null else current.latestActivity
         )
         if (selectionChanged) {
             sel?.let {
                 loadTodayUsage(it)
                 loadDailyLimit(it)
-                loadUnlockTickets(it)
             }
         }
     }

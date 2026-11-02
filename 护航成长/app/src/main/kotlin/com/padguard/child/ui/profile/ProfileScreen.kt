@@ -962,17 +962,20 @@ private data class LevelVisual(
 @Composable
 private fun ProtectionLevelCard(state: ProfileUiState) {
     val isHard = state.adminState == AdminState.OWNER
+    // 配色走主题容器色而不是硬编码浅绿/浅黄：硬编码浅底在深色模式下会变成
+    // 一块"发光"的浅色卡片（文字仍是深色，虽可读但与整页割裂），
+    // 且 MaterialTheme 换肤后完全跟不上。primaryContainer / errorContainer 两套主题都有定义。
     val v = if (isHard) {
         LevelVisual(
-            bg = Color(0xFFE8F5E9),
-            fg = Color(0xFF1B5E20),
+            bg = MaterialTheme.colorScheme.primaryContainer,
+            fg = MaterialTheme.colorScheme.onSurface,
             title = "防护等级：设备所有者硬管控",
             subtitle = "防卸载 / 防停止 / 防改时间 已由系统级锁定"
         )
     } else {
         LevelVisual(
-            bg = Color(0xFFFFF8E1),
-            fg = Color(0xFF8D6E00),
+            bg = MaterialTheme.colorScheme.errorContainer,
+            fg = MaterialTheme.colorScheme.onErrorContainer,
             title = "防护等级：软管控（非设备所有者）",
             subtitle = "计时/监控/资讯正常，但设置里可被卸载/停止/改时间"
         )
