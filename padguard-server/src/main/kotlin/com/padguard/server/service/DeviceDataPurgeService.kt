@@ -12,16 +12,21 @@ import com.padguard.server.repository.GeofenceZoneRepository
 import com.padguard.server.repository.InstalledAppRepository
 import com.padguard.server.repository.LocationTrackRepository
 import com.padguard.server.repository.MediaTaskRepository
+import com.padguard.server.repository.PolicyRepository
 import com.padguard.server.repository.PublishedMessageRepository
 import com.padguard.server.repository.ScreenshotRepository
 import com.padguard.server.repository.TimeRestrictionRepository
 import com.padguard.server.repository.UnlockTicketRepository
 import com.padguard.server.repository.UploadedFileRepository
+import com.padguard.server.repository.UsageDelayRepository
 import com.padguard.server.repository.UsageLogRepository
 import com.padguard.server.repository.UsageSessionRepository
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
+import java.io.File
 
 /**
  * 设备私有数据清理（唯一入口）。
@@ -68,7 +73,10 @@ class DeviceDataPurgeService(
     private val appPolicyRepository: AppPolicyRepository,
     private val timeRestrictionRepository: TimeRestrictionRepository,
     private val devicePermissionPolicyRepository: DevicePermissionPolicyRepository,
-    private val deviceFeaturePolicyRepository: DeviceFeaturePolicyRepository
+    private val deviceFeaturePolicyRepository: DeviceFeaturePolicyRepository,
+    private val usageDelayRepository: UsageDelayRepository,
+    private val policyRepository: PolicyRepository,
+    private val fileStorageService: FileStorageService
 ) {
 
     private val log = LoggerFactory.getLogger(DeviceDataPurgeService::class.java)
@@ -93,9 +101,16 @@ class DeviceDataPurgeService(
         removed += purgeOne("installed_apps", deviceId) { installedAppRepository.deleteByDeviceId(it) }
         removed += purgeOne("usage_sessions", deviceId) { usageSessionRepository.deleteByDeviceId(it) }
         removed += purgeOne("media_tasks", deviceId) { mediaTaskRepository.deleteByDeviceId(it) }
+        purgeDeviceFilesOnDisk(deviceId)
         removed += purgeOne("uploaded_files", deviceId) { uploadedFileRepository.deleteByDeviceId(it) }
         removed += purgeOne("published_messages", deviceId) { publishedMessageRepository.deleteByDeviceId(it) }
         removed += purgeOne("unlock_tickets", deviceId) { unlockTicketRepository.deleteByDeviceId(it) }
+        // 延时审批工单同样按设备归属：不清理则遗留的 PENDING 工单会让新家庭的
+        // 延时申请被"已有待审核的延时申请"永久拒绝，且旧家庭的分钟数会串进新家庭的额度计算。
+        removed += purgeOne("usage_delay_tickets", deviceId) { usageDelayRepository.deleteByDeviceId(it) }
+        // 策略包（历史版本）也随设备清除：旧包版本号更高，会在新家庭首次 rebuild 前
+        // 被"取最高版本"命中，把上任家庭的管控配置短暂下发给新孩子。
+        removed += purgeOne("policies", deviceId) { policyRepository.deleteByDeviceId(it) }
         removed += purgeOne("app_policies", deviceId) { appPolicyRepository.deleteByDeviceId(it) }
         removed += purgeOne("time_restrictions", deviceId) { timeRestrictionRepository.deleteByDeviceId(it) }
         removed += purgeOne("geofence_zones", deviceId) { geofenceRepository.deleteByDeviceId(it) }
@@ -118,4 +133,35 @@ class DeviceDataPurgeService(
      */
     private inline fun purgeOne(table: String, deviceId: String, block: (String) -> Int): Pair<String, Int> =
         table to block(deviceId)
+
+    /**
+     * 物理删除该设备上传到本地磁盘的文件（截图/录屏等，单个可达 90MB 级）。
+     *
+     * 之前只删 `uploaded_files` 记录：记录没了 `/v1/files/{id}` 固然 404（隐私面 OK），
+     * 但文件本体留在 uploads/ 且再无任何记录可循——RetentionCleanup 依赖记录定位文件，
+     * 这些"无记录孤儿"永远清不到，正是"50GiB 盘 6-18 个月写满"事故的盲区。
+     *
+     * 文件删除放在事务 afterCommit 执行：若本事务回滚（调用方会重试），磁盘文件原样保留，
+     * 不会出现"记录还在、文件没了"的半删状态。
+     */
+    private fun purgeDeviceFilesOnDisk(deviceId: String) {
+        val metas = uploadedFileRepository.findByDeviceId(deviceId)
+        if (metas.isEmpty()) return
+        val deleteFiles = {
+            metas.forEach { meta ->
+                runCatching {
+                    val file = File(File(fileStorageService.storageRoot().path), File(meta.storedPath).name)
+                    if (file.isFile && file.delete()) {
+                        log.debug("purge: deleted device file {} ({} bytes)", file.name, meta.size)
+                    }
+                }.onFailure { log.warn("purge: 删除设备文件失败 path={}", meta.storedPath, it) }
+            }
+        }
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {            TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+                override fun afterCommit() = deleteFiles()
+            })
+        } else {
+            deleteFiles()
+        }
+    }
 }

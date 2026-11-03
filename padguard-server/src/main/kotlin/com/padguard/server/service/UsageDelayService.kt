@@ -111,6 +111,16 @@ class UsageDelayService(
     fun approve(userId: String, deviceId: String, ticketId: String, req: UsageDelayApproveRequest) {
         val t = ownedOpen(userId, deviceId, ticketId)
         val now = System.currentTimeMillis()
+        // 跨日防线：额度自增打在会话行的 dayKey 上。昨天的工单今天批准，
+        // 分钟会加到昨天的会话里，孩子今天的会话重置后一分都拿不到（家长看到"已同意"却没生效）。
+        // 故非当日申请直接过期作废并如实告知。
+        val today = dayKey(now)
+        val session = usageSessionRepository.findByDeviceId(deviceId)
+        if (session == null || session.dayKey != today) {
+            usageDelayRepository.claimReject(ticketId, now)
+            log.info("usage delay expired (stale dayKey): device={} ticket={}", deviceId, ticketId)
+            throw BizException(ParentErr.PARAM_ERROR, "该延时申请已过期（非今日申请），请让孩子重新提交", Audience.PARENT)
+        }
         // 先抢占工单：并发/重试的第二次请求影响 0 行，直接退出。
         // 不能只靠 ownedOpen 的检查 —— 那是 check-then-act，两个请求都会看到 PENDING，
         // 于是额度被加两次（额度直接决定锁机时间），而工单只剩一条 APPROVED，事后无从追查。
@@ -141,9 +151,12 @@ class UsageDelayService(
     @Transactional
     fun reject(userId: String, deviceId: String, ticketId: String, req: UsageDelayRejectRequest) {
         val t = ownedOpen(userId, deviceId, ticketId)
-        t.status = "REJECTED"
-        t.resolvedAt = System.currentTimeMillis()
-        usageDelayRepository.save(t)
+        // 原子抢占（同 approve）：并发窗口内 reject 若走"读实体→改→save"，
+        // 可把刚被 claimApprove 的 APPROVED 覆盖回 REJECTED，家长再点同意就双倍加额度。
+        val claimed = usageDelayRepository.claimReject(ticketId, System.currentTimeMillis())
+        if (claimed == 0) {
+            throw BizException(ParentErr.PARAM_ERROR, "该延时申请已被处理，请刷新后查看", Audience.PARENT)
+        }
         auditService.record(userId, deviceId, AuditAction.USAGE_DELAY_REJECT, targetType = "ticket", targetId = ticketId,
             detail = "reason=${req.reason ?: "申请未通过"}")
         commandService.issueCommand(
@@ -172,10 +185,11 @@ class UsageDelayService(
      */
     @Transactional
     fun dismiss(userId: String, deviceId: String, ticketId: String) {
-        val t = ownedOpen(userId, deviceId, ticketId)
-        t.status = "IGNORED"
-        t.resolvedAt = System.currentTimeMillis()
-        usageDelayRepository.save(t)
+        ownedOpen(userId, deviceId, ticketId)
+        val claimed = usageDelayRepository.claimDismiss(ticketId, System.currentTimeMillis())
+        if (claimed == 0) {
+            throw BizException(ParentErr.PARAM_ERROR, "该延时申请已被处理，请刷新后查看", Audience.PARENT)
+        }
         auditService.record(userId, deviceId, AuditAction.USAGE_DELAY_DISMISS, targetType = "ticket", targetId = ticketId)
         log.info("usage delay dismissed device={} ticket={}", deviceId, ticketId)
 

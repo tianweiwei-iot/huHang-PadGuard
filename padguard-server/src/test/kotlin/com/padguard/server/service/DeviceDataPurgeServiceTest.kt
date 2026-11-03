@@ -12,11 +12,13 @@ import com.padguard.server.repository.GeofenceZoneRepository
 import com.padguard.server.repository.InstalledAppRepository
 import com.padguard.server.repository.LocationTrackRepository
 import com.padguard.server.repository.MediaTaskRepository
+import com.padguard.server.repository.PolicyRepository
 import com.padguard.server.repository.PublishedMessageRepository
 import com.padguard.server.repository.ScreenshotRepository
 import com.padguard.server.repository.TimeRestrictionRepository
 import com.padguard.server.repository.UnlockTicketRepository
 import com.padguard.server.repository.UploadedFileRepository
+import com.padguard.server.repository.UsageDelayRepository
 import com.padguard.server.repository.UsageLogRepository
 import com.padguard.server.repository.UsageSessionRepository
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -60,6 +62,8 @@ class DeviceDataPurgeServiceTest {
                         calls[interfaceClass] = args[0] as String
                         3
                     }
+                    // purge 先按 deviceId 取文件记录拿 storedPath 删磁盘文件（测试里恒空表）
+                    method.name == "findByDeviceId" -> emptyList<com.padguard.server.domain.UploadedFile>()
                     method.name == "toString" -> "Fake${interfaceClass.simpleName}"
                     method.name == "hashCode" -> System.identityHashCode(proxy)
                     method.name == "equals" -> proxy === args[0]
@@ -68,7 +72,7 @@ class DeviceDataPurgeServiceTest {
             } as T
     }
 
-    /** 19 张设备私有表 ↔ 仓储接口。purge 少任何一张，这条断言就会红。 */
+    /** 21 张设备私有表 ↔ 仓储接口。purge 少任何一张，这条断言就会红。 */
     private fun RecordingRepos.service(): DeviceDataPurgeService = DeviceDataPurgeService(
         usageLogRepository = fake(UsageLogRepository::class.java),
         screenshotRepository = fake(ScreenshotRepository::class.java),
@@ -88,7 +92,14 @@ class DeviceDataPurgeServiceTest {
         appPolicyRepository = fake(AppPolicyRepository::class.java),
         timeRestrictionRepository = fake(TimeRestrictionRepository::class.java),
         devicePermissionPolicyRepository = fake(DevicePermissionPolicyRepository::class.java),
-        deviceFeaturePolicyRepository = fake(DeviceFeaturePolicyRepository::class.java)
+        deviceFeaturePolicyRepository = fake(DeviceFeaturePolicyRepository::class.java),
+        usageDelayRepository = fake(UsageDelayRepository::class.java),
+        policyRepository = fake(PolicyRepository::class.java),
+        fileStorageService = FileStorageService(
+            storageDir = "./build/test-uploads-purge",
+            baseUrl = "",
+            uploadedFileRepository = fake(UploadedFileRepository::class.java)
+        )
     )
 
     /** W19 修复时补齐的三张表——当年正是漏了它们，隐私删除承诺才不可信。 */
@@ -99,11 +110,11 @@ class DeviceDataPurgeServiceTest {
     )
 
     @Test
-    fun `purge 覆盖全部 19 张设备私有表`() {
+    fun `purge 覆盖全部 21 张设备私有表`() {
         val repos = RecordingRepos()
         val removed = repos.service().purge("dev-42", "UNBIND")
 
-        assertEquals(19, repos.calls.size, "purge 必须清完全部 19 张设备私有表，漏一张就是隐私残留")
+        assertEquals(21, repos.calls.size, "purge 必须清完全部 21 张设备私有表，漏一张就是隐私残留")
         assertTrue(
             repos.calls.all { it.value == "dev-42" },
             "每张表都必须按传入的 deviceId 清理，实际调用：${repos.calls}"
@@ -113,7 +124,7 @@ class DeviceDataPurgeServiceTest {
             assertEquals("dev-42", repos.calls[iface], "漏清 ${iface.simpleName}：W19 修复表")
         }
         // 返回值必须含全部表 key 且行数来自各表 delete 的返回值
-        assertEquals(19, removed.size)
+        assertEquals(21, removed.size)
         assertTrue(removed.values.all { it == 3 }, "各表删除行数应取仓储返回值，实际：$removed")
     }
 

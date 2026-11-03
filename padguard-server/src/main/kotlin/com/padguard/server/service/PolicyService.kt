@@ -101,8 +101,10 @@ class PolicyService(
             // 显式传 0 仍然保留（家长真的要锁死设备）。
             "dailyLimitMinutes" to (req.dailyLimitMinutes ?: def.dailyLimitMinutes),
             "weekendLimitMinutes" to (req.weekendLimitMinutes ?: def.dailyLimitMinutes),
-            "continuousMinutes" to (req.continuousMinutes ?: 0),
-            "restMinutes" to (req.restMinutes ?: 0),
+            // 休息参数同理：未填回落分龄默认。写 0 的后果是"家长端展示每 20/30 分钟休息，
+            // 端上实际收到的 0 = 不强制休息"，展示与执行静默背离。
+            "continuousMinutes" to (req.continuousMinutes ?: def.continuousMinutes),
+            "restMinutes" to (req.restMinutes ?: def.restMinutes),
             // 豁免是"今晚"这类一次性动作，只在本次请求带 exemptMinutes 时写入。
             // 显式传 0（或负数）= **取消豁免**：家长改主意了要立刻收回，
             // 若只能等到期，"豁免发出去就收不回来"会让这个按钮没人敢点。

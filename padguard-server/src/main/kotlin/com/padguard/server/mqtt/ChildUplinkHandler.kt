@@ -59,12 +59,16 @@ class ChildUplinkHandler(
         val deviceId = segments[4]
         val type = segments[5]
         val json = String(message.payload, StandardCharsets.UTF_8)
-        when (type) {
-            "ack" -> handleAck(deviceId, json)
-            "heartbeat" -> handleHeartbeat(deviceId, json)
-            "event" -> handleEvent(deviceId, json)
-            "status" -> handleStatus(deviceId, json)
-        }
+        // 整体兜底：回调里抛出的任何异常都会被 Paho 视为致命错误并**断开与 broker 的唯一共享连接**
+        // （随后才重连），一条畸形报文就能让全部设备的上下行抖动。与 handleAck 的 runCatching 同口径。
+        runCatching {
+            when (type) {
+                "ack" -> handleAck(deviceId, json)
+                "heartbeat" -> handleHeartbeat(deviceId, json)
+                "event" -> handleEvent(deviceId, json)
+                "status" -> handleStatus(deviceId, json)
+            }
+        }.onFailure { log.warn("uplink dropped: topic={} err={}", topic, it.message) }
     }
 
     /**

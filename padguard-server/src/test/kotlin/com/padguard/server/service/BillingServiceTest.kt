@@ -56,6 +56,7 @@ class BillingServiceTest {
             table.values.firstOrNull { it.userId == userId }
         override fun countByStatus(status: String): Long = 0L
         override fun findAllByOrderByExpiredAtDesc(): List<Subscription> = emptyList()
+        override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
     }
 
     private class FakeOrderRepo : FakeJpaRepository<PaymentOrder, String>(), PaymentOrderRepository {
@@ -77,6 +78,12 @@ class BillingServiceTest {
             val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
             if (o.status != paidStatus) return 0
             o.status = refundedStatus
+            return 1
+        }
+        override fun claimTimeoutClose(orderNo: String, now: Long): Int {
+            val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
+            if (o.status != "PENDING" || o.payDeadline >= now) return 0
+            o.status = "CLOSED"
             return 1
         }
         override fun claimPendingOrder(
@@ -145,7 +152,8 @@ class BillingServiceTest {
             trialDays, trialDevices,
             3800, 9800, 29800,   // 月 / 季 / 年（分）
             3, 3, 5,             // 各档设备上限
-            payTimeoutMinutes, mockPayEnabled, verifier, settings, ObjectMapper()
+            payTimeoutMinutes, mockPayEnabled, verifier, settings, ObjectMapper(),
+            orderCloser = OrderTimeoutCloser(orderRepo)  // 超时关单走真实闭合器（断言 CLOSED 落库）
         )
         return Fixture(svc, subRepo, orderRepo, deviceRepo)
     }

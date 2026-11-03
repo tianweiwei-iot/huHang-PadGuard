@@ -263,6 +263,22 @@ class FakeUsageDelayRepo : FakeJpaRepository<UsageDelayTicket, String>(), UsageD
         t.resolvedAt = now
         return 1
     }
+
+    override fun claimReject(id: String, now: Long): Int {
+        val t = table[id] ?: return 0
+        if (t.status != "PENDING" && t.status != "IGNORED") return 0
+        t.status = "REJECTED"
+        t.resolvedAt = now
+        return 1
+    }
+
+    override fun claimDismiss(id: String, now: Long): Int {
+        val t = table[id] ?: return 0
+        if (t.status != "PENDING" && t.status != "IGNORED") return 0
+        t.status = "IGNORED"
+        t.resolvedAt = now
+        return 1
+    }
 }
 
 class FakeUsageSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionRepository {

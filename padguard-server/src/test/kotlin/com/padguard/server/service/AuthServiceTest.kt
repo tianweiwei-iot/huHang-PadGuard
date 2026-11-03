@@ -40,6 +40,7 @@ class AuthServiceTest {
         override fun findByUserId(userId: String): Subscription? = table.values.firstOrNull { it.userId == userId }
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
         override fun findAllByOrderByExpiredAtDesc() = table.values.sortedByDescending { it.expiredAt }
+        override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
     }
 
     private class FakeOrderRepo : FakeJpaRepository<PaymentOrder, String>(), PaymentOrderRepository {
@@ -65,6 +66,13 @@ class AuthServiceTest {
             order.status = paidStatus; order.paidAt = paidAt; order.transactionId = txId
             return 1
         }
+        override fun claimTimeoutClose(orderNo: String, now: Long): Int {
+            val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
+            if (o.status != "PENDING" || o.payDeadline >= now) return 0
+            o.status = "CLOSED"
+            return 1
+        }
+
     }
 
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {

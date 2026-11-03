@@ -6,6 +6,7 @@ import com.padguard.server.common.ParentErr
 import com.padguard.server.domain.Admin
 import com.padguard.server.dto.AdminLoginResponse
 import com.padguard.server.repository.AdminRepository
+import com.padguard.server.security.AdminPermissionService
 import com.padguard.server.security.JwtTokenProvider
 import com.padguard.server.security.Passwords
 import org.slf4j.LoggerFactory
@@ -17,7 +18,8 @@ import org.springframework.stereotype.Service
 @Service
 class AdminAuthService(
     private val adminRepository: AdminRepository,
-    private val jwt: JwtTokenProvider
+    private val jwt: JwtTokenProvider,
+    private val adminPerm: AdminPermissionService
 ) {
     private val log = LoggerFactory.getLogger(AdminAuthService::class.java)
 
@@ -33,7 +35,9 @@ class AdminAuthService(
         admin.lastLoginAt = System.currentTimeMillis()
         adminRepository.save(admin)
         val token = jwt.createAdminToken(admin.id, admin.tokenVersion)
-        return AdminLoginResponse(token, toAdminDto(admin))
+        // 必须带 adminPerm：前端 RBAC 完全依赖登录响应里的 AdminDto.privileges 渲染
+        // 侧边栏与操作按钮（PG.can），不传则恒为 emptyMap → 登录后零菜单、全站按钮隐藏。
+        return AdminLoginResponse(token, toAdminDto(admin, adminPerm))
     }
 
     /**

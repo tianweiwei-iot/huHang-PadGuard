@@ -32,11 +32,38 @@ import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.data.domain.Pageable
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.UUID
+
+/** 超时关闭接口：单测直构 BillingService 时可传 [OrderTimeoutCloser.NOOP]。 */
+interface OrderCloser {
+    fun closeExpired(orderNo: String, now: Long): Boolean
+}
+
+/**
+ * 订单超时关闭器：把 CLOSED 落库放在 **REQUIRES_NEW 独立事务**里执行。
+ *
+ * markPaid 的超时分支在落完 CLOSED 后要抛 BizException 提示家长重新下单——
+ * 而异常会让当前事务整体回滚。如果 CLOSE 和"抛异常"在同一事务里，
+ * CLOSED 状态永远落不了库（死代码），订单永久停在 PENDING，报表口径也不对。
+ */
+@Service
+class OrderTimeoutCloser(private val paymentOrderRepository: PaymentOrderRepository) : OrderCloser {
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    override fun closeExpired(orderNo: String, now: Long): Boolean =
+        paymentOrderRepository.claimTimeoutClose(orderNo, now) > 0
+
+    companion object {
+        val NOOP: OrderCloser = object : OrderCloser {
+            override fun closeExpired(orderNo: String, now: Long): Boolean = false
+        }
+    }
+}
 
 /**
  * 订阅与计费（SaaS 模式：服务端在云端，订阅状态由服务端强制校验）。
@@ -74,7 +101,8 @@ class BillingService(
     private val objectMapper: ObjectMapper,
     // 微信支付客户端/校验器：生产由 Spring 注入；单测手动构造时留空（置灰该渠道），保证测试不依赖微信配置。
     private val weChatPayClient: WeChatPayClient? = null,
-    private val weChatVerifier: WeChatPayVerifier? = null
+    private val weChatVerifier: WeChatPayVerifier? = null,
+    private val orderCloser: OrderCloser = OrderTimeoutCloser.NOOP
 ) {
     private val log = LoggerFactory.getLogger(BillingService::class.java)
 
@@ -458,8 +486,9 @@ class BillingService(
         // 这种单若直接关掉会变成"已付款却不开通"，是家长最难理解、最难安抚的一类投诉。
         // 而"超时且无凭证"的订单本来就不会收到任何回调，关掉让它重新下单是正确行为。
         if (order.payDeadline < now && transactionId.isNullOrBlank()) {
-            order.status = OrderStatus.CLOSED.name
-            paymentOrderRepository.save(order)
+            // 必须在独立事务里落 CLOSED：本方法随后抛 BizException 会让当前事务整体回滚，
+            // 若就地 save(CLOSED)，该状态永远落不了库（死代码），订单永久停在 PENDING。
+            orderCloser.closeExpired(orderNo, now)
             throw BizException(ParentErr.ORDER_STATE_INVALID, "订单已超时关闭，请重新下单", Audience.PARENT)
         }
 
@@ -536,7 +565,14 @@ class BillingService(
     @Transactional
     fun extend(userId: String, months: Int, planKey: String) {
         val now = System.currentTimeMillis()
-        val sub = subscriptionRepository.findByUserId(userId) ?: createTrial(userId)
+        // 悲观行锁读：两笔订单并发入账时（家长重复拉起支付各付一笔），都走同一行，
+        // 行锁把续费串行化——第二个事务读到的是第一个事务提交后的新 expiredAt，
+        // 不会出现"后提交者覆盖前者、付两笔钱只延长一个月"的丢更新。
+        val sub = subscriptionRepository.findByUserIdForUpdate(userId)
+            ?: synchronized(this) {
+                // 无行可锁（首单）：双重检查防止并发首单创建两条订阅（单实例部署口径）。
+                subscriptionRepository.findByUserId(userId) ?: createTrial(userId)
+            }
         val base = maxOf(sub.expiredAt, now)
         val newExpire = plusMonths(base, months)
         sub.plan = planKey

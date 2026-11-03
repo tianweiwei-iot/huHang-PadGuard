@@ -88,6 +88,16 @@ interface EnrollmentSessionRepository : JpaRepository<EnrollmentSession, String>
 @Repository
 interface PolicyRepository : JpaRepository<Policy, String> {
     fun findFirstByDeviceIdOrderByVersionDesc(deviceId: String): Policy?
+
+    /**
+     * 策略包按 deviceId 归属，易主 / 解绑时必须清除：
+     * 否则旧家庭的策略包（版本号更高）会在新家庭首次 rebuild 之前
+     * 被 findFirstByDeviceIdOrderByVersionDesc 命中，把上任家庭的管控配置
+     * （minorMode、curfew 等）短暂下发给新孩子。
+     */
+    @Modifying
+    @Query("delete from Policy p where p.deviceId = :deviceId")
+    fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
 
 @Repository

@@ -12,6 +12,7 @@ import com.padguard.server.repository.UnlockTicketRepository
 import com.padguard.server.service.AuditAction
 import com.padguard.server.service.AuditService
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
 
 @Service
@@ -65,15 +66,18 @@ class UnlockService(
      * 孩子此刻正在锁屏页盯着，一条拒绝对他是无谓的打击；而家长稍后改变主意时工单已死。
      * 因此单独引入 IGNORED 中间态：弹窗不再打扰，记录留在铃铛里随时可翻出来批准。
      */
+    @Transactional
     fun dismiss(userId: String, deviceId: String, ticketId: String) {
-        val t = ownedOpen(userId, deviceId, ticketId)
-        t.status = "IGNORED"
-        t.resolvedAt = System.currentTimeMillis()
-        unlockTicketRepository.save(t)
+        ownedOpen(userId, deviceId, ticketId)
+        val claimed = unlockTicketRepository.claimDismiss(ticketId, System.currentTimeMillis())
+        if (claimed == 0) {
+            throw BizException(ParentErr.PARAM_ERROR, "该申请已被处理，请刷新后查看", Audience.PARENT)
+        }
         auditService.record(userId, deviceId, AuditAction.UNLOCK_DISMISS, targetType = "ticket", targetId = ticketId)
     }
 
     /** 家长同意 -> 下发 TEMP_UNLOCK（带 packageName / durationMinutes） */
+    @Transactional
     fun approve(userId: String, deviceId: String, ticketId: String, req: UnlockApproveRequest) {
         val t = ownedOpen(userId, deviceId, ticketId)
         val duration = req.durationMinutes ?: t.durationMinutes
@@ -97,11 +101,15 @@ class UnlockService(
     }
 
     /** 家长拒绝 -> 下发 SHOW_MESSAGE（带 requestId + 拒因 body） */
+    @Transactional
     fun reject(userId: String, deviceId: String, ticketId: String, req: UnlockRejectRequest) {
         val t = ownedOpen(userId, deviceId, ticketId)
-        t.status = "REJECTED"
-        t.resolvedAt = System.currentTimeMillis()
-        unlockTicketRepository.save(t)
+        // 原子抢占（同 approve）：防止并发 reject 把刚 claimApprove 的 APPROVED 覆盖回 REJECTED，
+        // 继而让家长二次批准、下发第二条 TEMP_UNLOCK。
+        val claimed = unlockTicketRepository.claimReject(ticketId, System.currentTimeMillis())
+        if (claimed == 0) {
+            throw BizException(ParentErr.PARAM_ERROR, "该申请已被处理，请刷新后查看", Audience.PARENT)
+        }
         auditService.record(userId, deviceId, AuditAction.UNLOCK_REJECT, targetType = "ticket", targetId = ticketId,
             detail = "reason=${req.reason ?: "申请未通过"}")
         commandService.issueCommand(

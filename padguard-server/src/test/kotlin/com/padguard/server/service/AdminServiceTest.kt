@@ -77,6 +77,7 @@ class AdminServiceTest {
         override val table = LinkedHashMap<String, Subscription>()
         override fun idOf(e: Subscription) = e.id
         override fun findByUserId(userId: String): Subscription? = table.values.firstOrNull { it.userId == userId }
+        override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
         override fun findAllByOrderByExpiredAtDesc() = table.values.sortedByDescending { it.expiredAt }
     }
@@ -94,6 +95,12 @@ class AdminServiceTest {
             val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
             if (o.status != paidStatus) return 0
             o.status = refundedStatus
+            return 1
+        }
+        override fun claimTimeoutClose(orderNo: String, now: Long): Int {
+            val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
+            if (o.status != "PENDING" || o.payDeadline >= now) return 0
+            o.status = "CLOSED"
             return 1
         }
         override fun claimPendingOrder(
@@ -220,6 +227,7 @@ class AdminServiceTest {
         override val table = LinkedHashMap<String, Policy>()
         override fun idOf(e: Policy) = e.id
         override fun findFirstByDeviceIdOrderByVersionDesc(deviceId: String): Policy? = null
+        override fun deleteByDeviceId(deviceId: String): Int = 0
     }
 
     private class FakeDeviceSettingRepo : FakeJpaRepository<DeviceSetting, String>(), DeviceSettingRepository {
@@ -310,7 +318,7 @@ class AdminServiceTest {
 
         // W25：AdminService 已拆分为多个领域 @Service，门面仅做委托。测试直接构造各子服务，
         // 公开方法签名与原本一致（f.svc.* 调用无需改动）。
-        val authS = AdminAuthService(admins, jwt)
+        val authS = AdminAuthService(admins, jwt, adminPerm)
         val auditS = AdminAuditService(adminPerm, admins, users, auditLogs, alerts, auditService)
         val billingS = AdminBillingService(subs, orders, users, billing, adminPerm, auditService)
         val rbacS = AdminRbacService(admins, adminPerm, auditService, mailService, settings, objectMapper)

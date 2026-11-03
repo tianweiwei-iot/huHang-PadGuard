@@ -109,7 +109,14 @@ class AdminAuditService(
             val level = when (a.level.uppercase()) {
                 "ERROR" -> "high"; "WARN" -> "mid"; else -> "low"
             }
-            val status = if (a.status == "RESOLVED") "closed" else "open"
+            // 状态映射须覆盖告警实体的全部终结/中间态（见 AlertService）：
+            // CLOSED = 家长端关闭 / 孩子端自愈批量关闭；RESOLVED = 后台处理；这两类都算 closed。
+            // ACKNOWLEDGED = 家长已确认（未关闭），单独标 acknowledged，不能再渲染成"待处理"。
+            val status = when (a.status.uppercase()) {
+                "RESOLVED", "CLOSED" -> "closed"
+                "ACKNOWLEDGED" -> "acknowledged"
+                else -> "open"
+            }
             AlertItem(
                 id = a.id, level = level, type = a.title, message = a.message,
                 relatedParent = a.userId?.let { users[it]?.phone } ?: "",

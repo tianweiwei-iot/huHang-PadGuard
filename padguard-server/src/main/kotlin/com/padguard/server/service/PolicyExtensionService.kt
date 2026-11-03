@@ -567,8 +567,8 @@ class PolicyExtensionService(
                 // 它必须跟随家长在「时间管控」页设置的工作日额度，否则老设备缓存的策略包
                 // （早期种子包只含 dailyTotalMinutes、没有 weekday/weekend 字段）在未成年人模式
                 // 派生时会回落到分龄默认值（如 BAND_16_18=120 分钟），表现为"家长改了时长也没反应、平板始终 2 小时"。
-                // 这里与 weekdayTotalMinutes 同源，保证兜底值也是家长真实设置的每日额度。
-                "dailyTotalMinutes" to (settings.weekdayLimitMinutes ?: 0),
+                // 兜底必须与 weekdayTotalMinutes 同口径：写 0 会被孩子端当成"整天禁用"。
+                "dailyTotalMinutes" to (settings.weekdayLimitMinutes ?: DeviceSetting.DEFAULT_WEEKDAY_LIMIT_MINUTES),
                 "weekdayTotalMinutes" to (settings.weekdayLimitMinutes ?: DeviceSetting.DEFAULT_WEEKDAY_LIMIT_MINUTES),
                 "weekendTotalMinutes" to (settings.weekendLimitMinutes ?: DeviceSetting.DEFAULT_WEEKEND_LIMIT_MINUTES),
                 "restAfterMinutes" to (settings.restAfterMinutes ?: 60),

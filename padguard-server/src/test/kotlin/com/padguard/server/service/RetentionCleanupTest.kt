@@ -241,5 +241,8 @@ class RetentionCleanupTest {
 
         override fun findDeviceFilesCreatedBefore(ts: Long): List<UploadedFile> =
             table.values.filter { it.deviceId != null && it.createdAt < ts }
+
+        override fun findByDeviceId(deviceId: String): List<UploadedFile> =
+            table.values.filter { it.deviceId == deviceId }
     }
 }

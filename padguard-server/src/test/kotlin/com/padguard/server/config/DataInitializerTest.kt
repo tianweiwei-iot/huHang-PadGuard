@@ -107,6 +107,7 @@ class DataInitializerTest {
         override val table = LinkedHashMap<String, Subscription>()
         override fun idOf(e: Subscription) = e.id
         override fun findByUserId(userId: String): Subscription? = table.values.firstOrNull { it.userId == userId }
+        override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
         override fun findAllByOrderByExpiredAtDesc() = table.values.sortedByDescending { it.expiredAt }
     }
@@ -137,7 +138,9 @@ class DataInitializerTest {
         val guard = DeviceOwnershipGuard(devices)
         val contentFilter = ContentFilterService(
             devices, guard, FakeDeviceSettingRepo(), FakeUrlCategoryRepo(), FakeSensitiveWordRepo(),
-            AuditService(auditLogs, guard)
+            AuditService(auditLogs, guard),
+            // 本测试不触发策略重建；rebuildPolicy 依赖链太长，用 Mockito mock 满足构造
+            org.mockito.Mockito.mock(com.padguard.server.service.PolicyExtensionService::class.java)
         )
         return DataInitializer(
             users, FakePolicyTemplateRepo(), FakeSubscriptionRepo(), contentFilter, MockEnvironment(),

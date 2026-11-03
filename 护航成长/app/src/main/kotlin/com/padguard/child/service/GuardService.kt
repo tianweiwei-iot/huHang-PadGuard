@@ -629,8 +629,8 @@ class GuardService : Service() {
         // 杜绝"长按图标即可直接卸载、管控系统当场失效"——这是治本手段，先于任何密码门生效。
         // 非 DO 设备 can(BLOCK_UNINSTALL)=false，此处为 no-op，无副作用；幂等，重复调用安全。
         scope.launch { runSafely("uninstallBlock") { uninstallDefense.applyUninstallBlockIfSupported() } }
-        // 周期自检：服务长期存活但 App 未打开时，也能周期性发现授权掉失并拉回引导。
-        scope.launch { runSafely("authReconcileLoop") { authReconcileLoop() } }
+        // 周期自检：见下方 loadCredentials 协程内的启动点 —— 授权回退对账会发起服务端请求，
+        // 必须等凭据加载完成后再启动（此处曾与 678 行各起一份，导致两个 30min 对账循环并行）。
         // 周期性位置上报：策略里 locationIntervalSec 的落地执行者（策略为 0 时自动不采）。
         // 放在这里而不是某个界面：守护服务是唯一长期存活的宿主，
         // 放在界面里孩子一按 Home 就断，轨迹数据会大面积缺失。
@@ -1260,6 +1260,14 @@ class GuardService : Service() {
         silentClose: Boolean = false
     ) {
         if (blockedPackage == null) {
+            // ⚠️ 自家 UI（拦截页/锁屏/消息页）处于前台时，ForegroundAppMonitor 上报的是自家包名，
+            // 而判定链对自家包恒放行（无限额配置、不在黑名单、恒在 Kiosk 白名单）
+            // → tick.blockedPackage 必为 null。这是探针伪影，不是"家长已放行"。
+            // 若此时无条件 dismiss，拦截页会每轮 tick（≤15s）自毁一次、被拦应用随之回到前台可玩，
+            // 形成"玩 15 秒弹一下"的闪烁循环（P0：限额/黑名单/Kiosk 降级三道拦截全被击穿）。
+            // 正确语义：上一轮存在拦截目标且前台是自家包 → 维持现状，什么都不做；
+            // 真正的"家长放行"由 EngineEffect.DismissLockScreen 分支主动收掉拦截页。
+            if (foreground == packageName && lastBlockedPackage != null) return
             // 家长放行（或额度跨日重置）后必须主动收掉拦截页：
             // 它是盖在被拦应用之上的 Activity，不 finish 掉就一直停在那儿，
             // 孩子看到的是"同意了也没变化"。
@@ -2187,9 +2195,6 @@ class GuardService : Service() {
         when (val r = remote.pullCommands(lastCommandPullAtMs)) {
             is ApiResult.Success -> {
                 val resp = r.value
-                lastCommandPullAtMs = System.currentTimeMillis()
-                // 游标落盘：进程被回收后续接，杜绝"息屏期间下达的指令被永久跳过"
-                commandPollPrefs.edit().putLong(KEY_LAST_PULL_AT, lastCommandPullAtMs).apply()
                 // 指令轮询响应顺带回传最新策略版本号：这是家长改策略后最坏 3s 内生效的关键。
                 // 即便 MQTT 未启用、policy 推送必然丢失，3s 高频轮询也能立刻感知版本漂移并全量拉新，
                 // 不必苦等 30s 心跳（且长轮询挂起时本地往往拿不到心跳真实版本，对账会退化）。
@@ -2201,7 +2206,16 @@ class GuardService : Service() {
                     runSafely("policyRefreshOnDrift") { refreshPolicy() }
                 }
                 val list = resp.commands
-                if (list.isEmpty()) return
+                // 游标必须在**执行完本批**之后再推进落盘：这条兜底通道的存在意义是"补拉漏推的指令"，
+                // 若先推进游标、后执行，进程在执行中崩溃（或断电）时这批指令已被游标跳过、
+                // 服务端也因已回执而终态收敛（或下一次轮询不再返回），指令即静默丢失。
+                // 执行后再推进：崩溃时游标仍指旧值，重启后重拉 —— 幂等由 tryClaim+msgId 兜底，
+                // 重复拉取不会重复执行；已回执的指令在服务端已是终态、pendingForPolling 不会返回。
+                if (list.isEmpty()) {
+                    lastCommandPullAtMs = System.currentTimeMillis()
+                    commandPollPrefs.edit().putLong(KEY_LAST_PULL_AT, lastCommandPullAtMs).apply()
+                    return
+                }
                 Logger.w(TAG) {
                     "fallback pull: ${list.size} command(s) missed by push -> ${list.map { it.type.name }}"
                 }
@@ -2214,6 +2228,9 @@ class GuardService : Service() {
                             .onFailure { Logger.w(TAG) { "fallback ack ${cmd.msgId} failed: $it" } }
                     }
                 }
+                lastCommandPullAtMs = System.currentTimeMillis()
+                // 游标落盘：进程被回收后续接，杜绝"息屏期间下达的指令被永久跳过"
+                commandPollPrefs.edit().putLong(KEY_LAST_PULL_AT, lastCommandPullAtMs).apply()
             }
             is ApiResult.BizError ->
                 Logger.w(TAG) { "fallback pull rejected: ${r.code} ${r.message}" }

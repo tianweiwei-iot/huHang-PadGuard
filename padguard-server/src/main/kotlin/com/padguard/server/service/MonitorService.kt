@@ -31,6 +31,7 @@ class MonitorService(
     private val deviceSettingRepository: DeviceSettingRepository,
     private val webSocketPush: WebSocketPushService,
     private val hub: ScreenStreamHub,
+    private val policyExtensionService: PolicyExtensionService,
     @Value("\${padguard.stream.max-live-devices:1000}") private val maxLiveDevices: Int = 1000
 ) {
     private val log = LoggerFactory.getLogger(MonitorService::class.java)
@@ -324,6 +325,8 @@ class MonitorService(
         s.recordWithAudio = req.recordWithAudio
         s.allowRemoteLock = req.allowRemoteLock
         deviceSettingRepository.save(s)
+        // autoRefreshSeconds 会作为 monitoring.heartbeatIntervalSec 组进策略包，不 rebuild 则端上永远收不到。
+        policyExtensionService.rebuildPolicy(deviceId)
         return getScreenSettings(userId, deviceId)
     }
 

@@ -1,8 +1,10 @@
 package com.padguard.server.repository
 
 import com.padguard.server.domain.*
+import jakarta.persistence.LockModeType
 import org.springframework.data.domain.Pageable
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Lock
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
@@ -16,6 +18,9 @@ interface DeviceGroupRepository : JpaRepository<DeviceGroup, String> {
 
 @Repository
 interface UploadedFileRepository : JpaRepository<UploadedFile, String> {
+    /** 易主 / 解绑清理：先取记录拿 storedPath 删磁盘文件，再删记录（否则留下永远扫不到的孤儿文件）。 */
+    fun findByDeviceId(deviceId: String): List<UploadedFile>
+
     @Modifying
     @Query("delete from UploadedFile f where f.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
@@ -162,6 +167,35 @@ interface UnlockTicketRepository : JpaRepository<UnlockTicket, String> {
         """
     )
     fun claimApprove(@Param("id") id: String, @Param("duration") duration: Int?, @Param("now") now: Long): Int
+
+    /**
+     * 原子驳回：只允许把"仍可处理"的工单改成 REJECTED。
+     *
+     * 与 [claimApprove] 同理：reject 若走"读实体→改 status→save"，并发窗口内可把
+     * 刚被 claimApprove 抢占成功的 APPROVED 覆盖回 REJECTED —— 家长此时再点一次同意，
+     * 又会通过 claimApprove 再次命中并下发第二条 TEMP_UNLOCK（双倍时长）。
+     * 影响 0 行 = 工单已被并发请求处理，调用方放弃后续动作。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UnlockTicket t set t.status = 'REJECTED', t.resolvedAt = :now
+        where t.id = :id and t.status in ('PENDING', 'IGNORED')
+        """
+    )
+    fun claimReject(@Param("id") id: String, @Param("now") now: Long): Int
+
+    /**
+     * 原子忽略：幂等（IGNORED→IGNORED 仍影响 1 行），但绝不触碰 APPROVED/REJECTED 终态。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UnlockTicket t set t.status = 'IGNORED', t.resolvedAt = :now
+        where t.id = :id and t.status in ('PENDING', 'IGNORED')
+        """
+    )
+    fun claimDismiss(@Param("id") id: String, @Param("now") now: Long): Int
 }
 
 @Repository
@@ -197,6 +231,29 @@ interface UsageDelayRepository : JpaRepository<UsageDelayTicket, String> {
         """
     )
     fun claimApprove(@Param("id") id: String, @Param("now") now: Long): Int
+
+    /**
+     * 原子驳回（同 [UnlockTicketRepository.claimReject]）：防止并发 reject 把已
+     * claimApprove 的 APPROVED 覆盖回去、进而被二次批准双倍加额度。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UsageDelayTicket t set t.status = 'REJECTED', t.resolvedAt = :now
+        where t.id = :id and t.status in ('PENDING', 'IGNORED')
+        """
+    )
+    fun claimReject(@Param("id") id: String, @Param("now") now: Long): Int
+
+    /** 原子忽略：幂等，绝不触碰 APPROVED/REJECTED 终态。 */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UsageDelayTicket t set t.status = 'IGNORED', t.resolvedAt = :now
+        where t.id = :id and t.status in ('PENDING', 'IGNORED')
+        """
+    )
+    fun claimDismiss(@Param("id") id: String, @Param("now") now: Long): Int
 
     /** 易主 / 解绑时连同设备一起作废未结工单。 */
     @Modifying
@@ -308,6 +365,18 @@ interface InstalledAppRepository : JpaRepository<InstalledApp, String> {
 @Repository
 interface SubscriptionRepository : JpaRepository<Subscription, String> {
     fun findByUserId(userId: String): Subscription?
+
+    /**
+     * 续费专用：悲观行锁读。
+     *
+     * extend 的"读 expiredAt → 算新到期 → save"是 check-then-act：同一家长两笔订单
+     * 并发入账（重复拉起支付各付一笔）时两个事务都读到同一个旧 expiredAt，
+     * 后提交者覆盖前者 —— 付两笔钱只延长一个月。行锁把续费串行化，天然按最新值累加。
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select s from Subscription s where s.userId = :userId")
+    fun findByUserIdForUpdate(@Param("userId") userId: String): Subscription?
+
     /** 按订阅状态计数（看板指标：生效中 / 试用） */
     fun countByStatus(status: String): Long
     fun findAllByOrderByExpiredAtDesc(): List<Subscription>
@@ -341,6 +410,20 @@ interface PaymentOrderRepository : JpaRepository<PaymentOrder, String> {
         @Param("paidAt") paidAt: Long,
         @Param("txId") txId: String?
     ): Int
+
+    /**
+     * 原子超时关闭：仅当订单仍为 PENDING 且确已超时时置为 CLOSED。
+     * 调用方（markPaid 超时分支）在独立事务中执行——本方法与"抛 BizException 回滚主事务"
+     * 组合使用，CLOSED 才能真正落库（原先就地 save 后抛异常，回滚吞掉，状态永久停在 PENDING）。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update PaymentOrder o set o.status = 'CLOSED'
+        where o.orderNo = :orderNo and o.status = 'PENDING' and o.payDeadline < :now
+        """
+    )
+    fun claimTimeoutClose(@Param("orderNo") orderNo: String, @Param("now") now: Long): Int
 
     /**
      * 原子退款标记：仅当订单仍为 PAID 时置为 REFUNDED，返回受影响行数。

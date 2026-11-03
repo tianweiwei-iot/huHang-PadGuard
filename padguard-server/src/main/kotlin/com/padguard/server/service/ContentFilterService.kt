@@ -38,7 +38,10 @@ class ContentFilterService(
     private val deviceSettingRepository: DeviceSettingRepository,
     private val urlCategoryRepository: UrlCategoryRepository,
     private val sensitiveWordRepository: SensitiveWordRepository,
-    private val auditService: AuditService
+    private val auditService: AuditService,
+    // @Lazy 打破与 PolicyExtensionService 的构造循环（后者依赖本服务取分类/安全搜索配置）。
+    @org.springframework.context.annotation.Lazy
+    private val policyExtensionService: PolicyExtensionService
 ) {
 
     private val log = LoggerFactory.getLogger(ContentFilterService::class.java)
@@ -80,6 +83,9 @@ class ContentFilterService(
             userId, deviceId, AuditAction.CONTENT_SAFE_SEARCH_UPDATE,
             targetType = "device", targetId = deviceId, detail = "enabled=$enabled"
         )
+        // 写完必须 rebuild：safeSearch 只在策略包组装时读入，不 rebuild 则
+        // 设备端按 currentVersion 判断 upToDate、永远收不到变更（"保存成功但永不下发"）。
+        policyExtensionService.rebuildPolicy(deviceId)
     }
 
     @Transactional
@@ -94,6 +100,8 @@ class ContentFilterService(
             userId, deviceId, AuditAction.CONTENT_CATEGORY_BLOCK_UPDATE,
             targetType = "device", targetId = deviceId, detail = "categories=${valid.joinToString(",")}"
         )
+        // 同 setSafeSearch：不 rebuild 则分类屏蔽永远不下发。
+        policyExtensionService.rebuildPolicy(deviceId)
     }
 
     /**

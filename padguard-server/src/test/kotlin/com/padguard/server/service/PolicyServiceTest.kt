@@ -26,6 +26,11 @@ class PolicyServiceTest {
         override fun idOf(entity: Policy) = entity.id
         override fun findFirstByDeviceIdOrderByVersionDesc(deviceId: String): Policy? =
             table.values.filter { it.deviceId == deviceId }.maxByOrNull { it.version }
+        override fun deleteByDeviceId(deviceId: String): Int {
+            val before = table.size
+            table.values.removeIf { it.deviceId == deviceId }
+            return before - table.size
+        }
     }
 
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
