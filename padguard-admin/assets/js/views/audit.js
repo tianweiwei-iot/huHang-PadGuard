@@ -11,6 +11,8 @@
    */
   const AREA_CN = { parents: "家长账号", devices: "设备管理", billing: "订阅计费", rbac: "角色权限", server: "服务端", audit: "审计告警", settings: "系统设置" };
   const areaName = (k) => AREA_CN[k] || k;
+  /** 单次导出上限，与服务端 AdminAuditService.AUDIT_EXPORT_MAX_ROWS 对齐（服务端会自行夹逼） */
+  const EXPORT_LIMIT = 5000;
   PG.registerView("audit", {
     title: "审计日志", icon: "📝", group: "系统",
     render: () => `
@@ -48,7 +50,8 @@
     // 而不是"拉一次全量再本地筛"—— 后者只能筛到"最近 N 条里恰好属于该领域的记录"，
     // 与服务端先过滤后截断的语义不一致，会让"这个领域最近没动静"变成假象。
     root.querySelector("#a-tab").innerHTML = `<div class="row wrap" style="margin-bottom:12px;gap:8px">
-      <select id="al-area" class="btn" style="height:36px"><option value="">全部领域</option>${opts.map((o) => '<option value="' + U.esc(o.key) + '">' + U.esc(o.name) + '</option>').join("")}</select></div>
+      <select id="al-area" class="btn" style="height:36px"><option value="">全部领域</option>${opts.map((o) => '<option value="' + U.esc(o.key) + '">' + U.esc(o.name) + '</option>').join("")}</select>
+      <button id="al-export" class="btn" style="height:36px">导出 CSV</button></div>
       <div id="al-note" class="cell-sub" style="margin-bottom:8px"></div>
       <div class="table-wrap"><table class="tbl"><thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>领域</th><th>对象</th><th>来源IP</th><th>结果</th></tr></thead><tbody id="al-body"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody></table></div>`;
 
@@ -70,13 +73,50 @@
       if (my !== seq) return;
       const items = (page && page.items) || [];
       // 截断必须显式告知，否则运营会把"最近 N 条"读成"全部历史"。
+      // 文案要与导出能力对齐：导出上限 5000 条，再早的记录只能按领域缩短时间跨度。
       note.textContent = page && page.truncated
-        ? `仅展示最近 ${page.maxRows} 条（该筛选条件下共 ${page.total} 条），更早记录需通过导出/检索查看`
+        ? `仅展示最近 ${page.maxRows} 条（该筛选条件下共 ${page.total} 条），更早记录请用下方「导出 CSV」按领域导出`
         : "";
       body.innerHTML = items.map(l => `<tr><td class="cell-sub">${U.esc(l.time)}</td><td>${U.esc(l.admin)}</td><td>${U.esc(l.actionName)}</td><td>${U.esc(nameOf(l.area))}</td><td class="cell-sub">${U.esc(l.target)}</td><td class="cell-sub">${U.esc(l.ip)}</td><td>${l.result === "success" ? '<span class="badge green">成功</span>' : '<span class="badge red">失败</span>'}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">暂无记录</td></tr>';
     };
     await draw("");
     root.querySelector("#al-area").onchange = (e) => draw(e.target.value);
+
+    // 导出：按**当前领域筛选**取最多 5000 条。
+    // 不做"翻页拉全量"——审计接口没有分页（全表扫描 + 内存过滤），
+    // 真要全量得先给服务端加索引与游标，那是另一件事；这里给到单次上限并如实标注。
+    const exportBtn = root.querySelector("#al-export");
+    if (exportBtn) exportBtn.onclick = async () => {
+      // 防重复点击：一次导出要拉 5000 条并序列化，双击会同时压两份在服务端
+      if (exportBtn.disabled) return;
+      const area = root.querySelector("#al-area").value;
+      const label = exportBtn.textContent;
+      exportBtn.disabled = true;
+      exportBtn.textContent = "导出中…";
+      try {
+        const page = await PG.api.audit(area ? { area, limit: EXPORT_LIMIT } : { limit: EXPORT_LIMIT });
+        const items = (page && page.items) || [];
+        if (!items.length) { U.toast("err", "当前筛选下没有可导出的记录"); return; }
+        const stamp = new Date().toISOString().slice(0, 10);
+        U.downloadCsv(
+          `审计日志_${area ? nameOf(area) : "全部领域"}_${stamp}.csv`,
+          ["时间", "操作人", "动作", "领域", "对象", "来源IP", "结果"],
+          items.map((l) => [
+            l.time, l.admin, l.actionName, nameOf(l.area),
+            l.target, l.ip, l.result === "success" ? "成功" : "失败",
+          ])
+        );
+        U.toast(
+          "ok", `已导出 ${items.length} 条`,
+          page && page.truncated ? `已达单次导出上限 ${EXPORT_LIMIT} 条，更早记录请按领域分批导出` : ""
+        );
+      } catch (e) {
+        U.toast("err", "导出失败", (e && e.message) || "请稍后重试");
+      } finally {
+        exportBtn.disabled = false;
+        exportBtn.textContent = label;
+      }
+    };
   }
 
   async function renderAlert(root) {

