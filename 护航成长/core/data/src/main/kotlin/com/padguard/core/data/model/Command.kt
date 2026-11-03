@@ -25,7 +25,47 @@ data class Command(
     /** 参与签名的规范化字符串，字段顺序必须与服务端一致 */
     fun signingPayload(): String = "$msgId|$type|$timestamp|${canonicalJson()}"
 
+    /**
+     * 旧签名格式（不含转义）。**仅用于验签回退**，不得用于签发。
+     *
+     * 服务端与终端曾经都用"直接拼 `"k":"v"`、不做任何转义"的方式构造 canonical 串。
+     * 这种格式有歧义：值里含 `"` 或 `\` 时，不同 payload 可以拼出同一个 canonical 串
+     * （例如值 `a","b` 与两个键拼出的结果撞车），签名因此不再是 payload 的函数。
+     *
+     * 现在两端都改为 [canonicalJson] 的转义版本。但两端**不可能同时升级**：
+     *   服务端先升 → 旧 APK 按旧格式算，签名对不上，全部指令被拒（含锁屏）；
+     *   终端先升  → 服务端仍按旧格式签，同样全拒。
+     * 这条链路一旦断，家长看到的是"设备不响应"而非报错，排障代价极高。
+     * 所以保留本方法一个版本周期：验签失败时按旧格式再试一次，成功后正常执行并记日志。
+     */
+    fun signingPayloadLegacy(): String = "$msgId|$type|$timestamp|${legacyCanonicalJson()}"
+
+    /**
+     * 规范化 payload：按键升序、值字符串化、标准 JSON 字符串转义。
+     *
+     * 与服务端 `CommandService.canonicalPayload` **逐字符一致**，任一侧改动都必须同步另一侧，
+     * 否则所有指令的签名都对不上（见 [signingPayloadLegacy] 的说明）。
+     */
     private fun canonicalJson(): String =
+        payload.entries.sortedBy { it.key }
+            .joinToString(",", "{", "}") { "\"${escape(it.key)}\":\"${escape(it.value)}\"" }
+
+    /** 转义规则（两端一致）：`\` → `\\`，`"` → `\"`，控制字符 → `\u00xx`（小写四位十六进制） */
+    internal fun escape(raw: String): String {
+        if (raw.none { it == '\\' || it == '"' || it.code < 0x20 }) return raw
+        return buildString(raw.length + 8) {
+            raw.forEach { ch ->
+                when {
+                    ch == '\\' -> append("\\\\")
+                    ch == '"' -> append("\\\"")
+                    ch.code < 0x20 -> append("\\u").append(ch.code.toString(16).padStart(4, '0'))
+                    else -> append(ch)
+                }
+            }
+        }
+    }
+
+    private fun legacyCanonicalJson(): String =
         payload.entries.sortedBy { it.key }.joinToString(",", "{", "}") { "\"${it.key}\":\"${it.value}\"" }
 
     fun payloadString(key: String, default: String = ""): String = payload[key] ?: default

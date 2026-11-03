@@ -186,8 +186,15 @@ class GuardPasswordManager @Inject constructor(
         }
     }
 
-    /** 本端直接按明文设置（本地/调试/家长端同设备回落用）：PBKDF2 慢哈希 + Keystore 加密存储。 */
+    /**
+     * 本端直接按明文设置（本地/调试/家长端同设备回落用）：PBKDF2 慢哈希 + Keystore 加密存储。
+     *
+     * 长度下限与服务端 GuardPasswords.MIN_LENGTH、家长端 GuardPasswordCard 同口径（6 位）。
+     * 本端此前没有校验：调试入口或回落路径可以设出 1 位密码，而 verifyWithLimit 的
+     * "错 5 次锁定"对 1 位密码毫无意义（第一次就能猜中），等于把闸门关掉。
+     */
     suspend fun setPasswordPlain(plain: String) {
+        require(plain.length >= MIN_LENGTH) { "操作密码至少 $MIN_LENGTH 位" }
         val enc = HashCipher.safeEncrypt(pbkdf2Hash(plain)) ?: pbkdf2Hash(plain).also {
             Logger.w(TAG) { "Keystore 不可用，操作密码哈希以明文存储（降级）" }
         }
@@ -425,6 +432,12 @@ class GuardPasswordManager @Inject constructor(
 
     companion object {
         private const val TAG = "GuardPasswordManager"
+
+        /**
+         * 操作密码最小长度。三端口径一致：服务端 GuardPasswords.MIN_LENGTH、
+         * 家长端 GuardPasswordCard、本文件 [setPasswordPlain]。
+         */
+        const val MIN_LENGTH = 6
 
         /** 连续输错多少次后锁定。4~6 位数字密码不限次等同于敞开 */
         const val MAX_ATTEMPTS = 5

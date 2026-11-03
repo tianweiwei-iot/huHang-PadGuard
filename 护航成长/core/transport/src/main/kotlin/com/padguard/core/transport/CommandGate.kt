@@ -74,7 +74,7 @@ class CommandGate @Inject constructor(
                 raiseInvalidSignature(command, reason)
                 return Verdict.Rejected(command, AckStatus.REJECTED, reason)
             }
-        } else if (!Crypto.verifyHmac(command.signingPayload(), command.signature, secret)) {
+        } else if (!verifySignature(command, secret)) {
             val reason = "HMAC signature mismatch"
             Logger.e(TAG) { "reject ${command.msgId}: $reason" }
             raiseInvalidSignature(command, reason)
@@ -89,6 +89,28 @@ class CommandGate @Inject constructor(
         }
 
         return Verdict.Accepted(command)
+    }
+
+    /**
+     * 验签，兼容旧 canonical 格式。
+     *
+     * 先按新格式（JSON 转义）验；不匹配再按旧格式（不转义）验一次。
+     * 只有当 payload 里真的含 `"` / `\` / 控制字符时两种格式才会不同 —— 此时若服务端尚未升级，
+     * 旧格式会命中，指令仍能执行，只记一条 warn 提示"服务端该升级了"。
+     * 这层回退只为让"服务端与 APK 不能同时发布"这一现实不变成线上事故；
+     * 一个版本周期后应连同 [Command.signingPayloadLegacy] 一并删除。
+     */
+    private fun verifySignature(command: Command, secret: String): Boolean {
+        if (Crypto.verifyHmac(command.signingPayload(), command.signature, secret)) return true
+        val legacyOk = runCatching {
+            Crypto.verifyHmac(command.signingPayloadLegacy(), command.signature, secret)
+        }.getOrDefault(false)
+        if (legacyOk) {
+            Logger.w(TAG) {
+                "signature accepted via LEGACY canonical format (server not upgraded?) msgId=${command.msgId} type=${command.type}"
+            }
+        }
+        return legacyOk
     }
 
     private suspend fun raiseInvalidSignature(command: Command, reason: String) {
