@@ -250,8 +250,12 @@ private fun PlanCard(
             Column(Modifier.weight(1f)) {
                 Text(plan.label, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                 Text(
+                    // 折合月价必须保留两位小数：整数除法会把 ¥7.66 截成 ¥7（收银台旁的价格
+                    // 展示错误最容易引发价格投诉）。分 → 元，四舍五入到分。
                     "可绑定 ${plan.deviceLimit} 台设备" +
-                        if (plan.months > 1) " · 折合 ¥${plan.amountFen / plan.months / 100}/月" else "",
+                        if (plan.months > 1)
+                            " · 折合 ¥${"%.2f".format(plan.amountFen.toDouble() / plan.months / 100)}/月"
+                        else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )

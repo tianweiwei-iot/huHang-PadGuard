@@ -196,6 +196,16 @@ class DeviceDetailViewModel @Inject constructor(
     }
 
     /**
+     * 远程揭示管理控制台。
+     *
+     * 孩子端图标隐藏后家长进不去管理台时的远程通道：下发 REVEAL_MANAGEMENT_UI，
+     * 孩子端点亮图标并拉起管理台（配置结束自动重新隐藏）。与悬浮卡密码闸互为备份。
+     */
+    fun revealConsole() {
+        issueTracked("揭示管理台", "显示管理台") { policyRepository.revealConsole(deviceId) }
+    }
+
+    /**
      * 整机管控 暂停 / 恢复（家长端「释放 / 恢复对平板的全部管控」主开关）。
      *
      * 家长一键把平板整体交还（active=false）或收回（active=true）。
@@ -302,7 +312,11 @@ class DeviceDetailViewModel @Inject constructor(
                     toast = describeCommandResult(actionName, doneWord, finalResult)
                 )
             }.onFailure {
-                _uiState.value = _uiState.value.copy(toast = "${actionName}指令下发失败：${it.message}")
+                // 失败路径也必须走 onSettled：它负责把开关类 busy 标志复位（如 watermarkBusy）。
+                // 只写 toast 不回调的话，一次网络失败就会让水印开关/保存按钮永久禁用，重进页面才能恢复。
+                _uiState.value = onSettled(CommandResult(status = "FAILED")).copy(
+                    toast = "${actionName}指令下发失败：${it.message}"
+                )
             }
         }
     }

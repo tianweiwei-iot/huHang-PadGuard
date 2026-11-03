@@ -91,11 +91,20 @@ class WeChatPayLauncher @Inject constructor(
 
     private val payResults = MutableSharedFlow<Int>(replay = 0, extraBufferCapacity = 4)
 
-    private fun ensureApi(appId: String): IWXAPI =
-        api ?: WXAPIFactory.createWXAPI(context.applicationContext, appId, true).also {
-            it.registerApp(appId)
-            api = it
-        }.also { lastAppId = appId }
+    private fun ensureApi(appId: String): IWXAPI {
+        val existing = api
+        if (existing != null && lastAppId == appId) return existing
+        // appId 变化（服务端切换商户号）必须重建 IWXAPI：复用旧 appId 的实例去调起新 appId
+        // 的 PayReq，回调会因注册的 appId 不匹配而解析不出 errCode，支付必然 5 分钟超时。
+        synchronized(this) {
+            if (api != null && lastAppId == appId) return api!!
+            val fresh = WXAPIFactory.createWXAPI(context.applicationContext, appId, true)
+            fresh.registerApp(appId)
+            api = fresh
+            lastAppId = appId
+            return fresh
+        }
+    }
 
     /** 用户操作结果码（透传微信 BaseResp.ErrCode 语义） */
     object PayResult {

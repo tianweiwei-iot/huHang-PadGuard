@@ -214,11 +214,13 @@ class HomeViewModel @Inject constructor(
             todayUsage = if (sel == null) null else current.todayUsage,
             latestActivity = if (sel == null) null else current.latestActivity
         )
-        if (selectionChanged) {
-            sel?.let {
-                loadTodayUsage(it)
-                loadDailyLimit(it)
-            }
+        if (selectionChanged && sel != null) {
+            // 切到另一台设备后必须先清空旧用量：A→B 切换后的一个 RTT 内，
+            // B 的名字下若还挂着 A 的今日统计（跨孩子数据串台），家长会读出错误结论。
+            // 空值态交给随后的 loadTodayUsage 填充；加载失败显示"—"比显示别人的数据安全。
+            _uiState.value = _uiState.value.copy(todayUsage = null, latestActivity = null)
+            loadTodayUsage(sel)
+            loadDailyLimit(sel)
         }
     }
 
@@ -226,6 +228,9 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             statisticsRepository.getTodayUsage(deviceId)
                 .onSuccess { stats ->
+                    // 弱网乱序防线：响应回来时选中的可能已是另一台设备。
+                    // 不校验的话，慢的旧设备响应会覆盖新设备看板（快速切换 A→B 场景）。
+                    if (_uiState.value.selectedDeviceId != deviceId) return@onSuccess
                     val topApp = stats.appUsages.firstOrNull()
                     _uiState.value = _uiState.value.copy(
                         todayUsage = stats,
@@ -235,6 +240,7 @@ class HomeViewModel @Inject constructor(
                     )
                 }
                 .onFailure { e ->
+                    if (_uiState.value.selectedDeviceId != deviceId) return@onFailure
                     _uiState.value = _uiState.value.copy(error = e.message)
                 }
         }

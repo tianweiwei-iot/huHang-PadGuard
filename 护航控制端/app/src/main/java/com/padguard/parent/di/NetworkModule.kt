@@ -217,6 +217,11 @@ object NetworkModule {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
+        // WS 心跳（必须）：Wi-Fi↔蜂窝切换 / NAT 表项超时 / 路由器重启会造成 TCP 半开连接，
+        // 此时 read 超时为 0 的连接既不会读出错也不会回调 onFailure —— 推送通道静默死亡，
+        // 秒级上下线/实时看板/审批弹窗全部退化为轮询直至重启 App。pingInterval 让 OkHttp
+        // 主动发 ping、超时未收到 pong 即判定连接死亡并触发重连，服务端 Spring WS 自动回 pong。
+        .pingInterval(30, TimeUnit.SECONDS)
         .dispatcher(Dispatcher().apply { maxRequestsPerHost = 8 })
         .build()
 }

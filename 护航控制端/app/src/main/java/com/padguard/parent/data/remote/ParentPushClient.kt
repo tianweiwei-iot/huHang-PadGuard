@@ -99,6 +99,9 @@ class ParentPushClient @Inject constructor(
 
     private suspend fun connect() = connectMutex.withLock {
         if (webSocket != null) return
+        // 拿到锁后复查 active：登出（disconnect）与退避重连竞态时，
+        // 不复查会在登出后仍建立一条已认证连接且无人持有引用去关它。
+        if (!active) return
         // token 拿不到（登录态刚被清 / 刷新尚未完成）→ 不连也不排重连：
         // 登录态 collector（isLoggedInFlow）在重新登录时会再次驱动 connect()，
         // 在这里硬排重连只会对着空 token 无限空转。
@@ -219,12 +222,19 @@ class ParentPushClient @Inject constructor(
         override fun onMessage(webSocket: WebSocket, text: String) = handleText(text)
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            scheduleReconnect()
+            // 身份比对：reconnect() 关旧连 A、建新连 B 后，A 的 onClosed/onFailure 会异步迟到。
+            // 无差别置空会把 B 也清掉并再排一次重连（B、C 并存，事件双份，滚雪球）。
+            // 只有"死掉的 socket 仍是当前连接"时才清理并排重连。
+            val isCurrent = synchronized(this@ParentPushClient) {
+                (this@ParentPushClient.webSocket === webSocket).also {
+                    if (it) this@ParentPushClient.webSocket = null
+                }
+            }
+            if (isCurrent && active) scheduleReconnect()
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            synchronized(this@ParentPushClient) { this@ParentPushClient.webSocket = null }
-            if (active) scheduleReconnect()
+            onFailure(webSocket, java.io.IOException("closed: $code $reason"), null)
         }
     }
 }

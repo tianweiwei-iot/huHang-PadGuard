@@ -179,12 +179,20 @@ class ControlPolicyViewModel @Inject constructor(
         viewModelScope.launch {
             // 改走「时间管控」权威来源（tablet-usage-settings），与服务端 buildPolicyPackage 下发的 appLimit 一致；
             // 旧 setGlobalDailyLimit 写入的 DeviceSetting.dailyLimitMinutes 服务端根本不读，是无效写入。
+            // ⚠️ 读取失败必须中止写入：拿出厂默认值当"现状"提交，会把服务端真实配置
+            // （家长已关闭时间管控 / 自定义时段与额度）整体覆盖成默认值并立即下发到孩子端 ——
+            // 这是"家长没做的管控变更被静默执行"，属于管控产品最危险的误操作。
             val current = policyRepository.getTabletUsageSettings(deviceId).getOrNull()
-                ?: TabletUsageSettings(deviceId = deviceId)
+            if (current == null) {
+                _uiState.value = _uiState.value.copy(
+                    error = "读取当前时间管控设置失败，请检查网络后重试（已放弃本次修改，避免覆盖孩子端现有配置）"
+                )
+                return@launch
+            }
+            // 只改家长意图改的字段：顺带把周末额度也改成同值，会覆盖家长为周末单独设置的额度。
             policyRepository.updateTabletUsageSettings(
                 current.copy(
                     weekdayLimitMinutes = minutes,
-                    weekendLimitMinutes = minutes,
                     syncToDevice = true
                 )
             ).onSuccess {
@@ -297,13 +305,16 @@ class ControlPolicyViewModel @Inject constructor(
             }
             val limitMinutes = preset.dailyLimitMinutes
             if (limitMinutes != null) {
-                // 同样走「时间管控」权威来源，避免写入服务端不读的旧字段
+                // 同样走「时间管控」权威来源，避免写入服务端不读的旧字段。
+                // 读取失败必须中止：拿默认值当现状会把服务端真实配置整体覆盖成默认值并下发（同 setDailyLimit）。
                 val current = policyRepository.getTabletUsageSettings(deviceId).getOrNull()
-                    ?: TabletUsageSettings(deviceId = deviceId)
+                if (current == null) {
+                    fail("应用预设失败（读取当前时间管控设置失败）", IllegalStateException("get tablet-usage-settings failed"))
+                    return@launch
+                }
                 val limitResult = policyRepository.updateTabletUsageSettings(
                     current.copy(
                         weekdayLimitMinutes = limitMinutes,
-                        weekendLimitMinutes = limitMinutes,
                         syncToDevice = true
                     )
                 )

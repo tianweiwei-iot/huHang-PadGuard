@@ -56,6 +56,9 @@ class AppUsageHistoryViewModel @Inject constructor(
         )
         viewModelScope.launch {
             val result = statisticsRepository.getAppUsageHistory(deviceId, packageName, period)
+            // 乱序防线：快速在 日/周/月 间切换时，慢的旧周期响应回来会覆盖新周期数据，
+            // 且此时页面标题已是新周期（数据与标题错位）。非本次请求的响应一律丢弃。
+            if (loadedKey != key) return@launch
             _uiState.value = if (result.isSuccess) {
                 _uiState.value.copy(
                     entries = result.getOrDefault(emptyList()),
