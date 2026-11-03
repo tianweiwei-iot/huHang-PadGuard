@@ -11,6 +11,7 @@ import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.AdminPermissionService
 import com.padguard.server.security.WeChatPayClient
 import org.slf4j.LoggerFactory
+import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
@@ -44,38 +45,54 @@ class AdminBillingService(
 
     fun listSubscriptions(adminId: String, status: String?, page: Int = 1, size: Int = 20): PageResult<SubRow> {
         requireRead(adminPerm, adminId, "billing")
-        var subs = subscriptionRepository.findAllByOrderByExpiredAtDesc()
-        if (!status.isNullOrBlank()) subs = subs.filter { subStatusLower(it.status) == status.lowercase() }
-        val userMap = userRepository.findAll().associateBy { it.id }
-        val rows = subs.map { s ->
-            val owner = userMap[s.userId]
-            SubRow(
-                parentPhone = owner?.phone ?: s.userId, parentName = owner?.nickname ?: (owner?.phone?.let { "家长" + it.takeLast(4) } ?: ""),
-                plan = planCategory(s.plan), planName = planLabel(s.plan),
-                status = subStatusLower(s.status), startedAt = fmt(s.startedAt), expiredAt = fmt(s.expiredAt),
-                autoRenew = s.autoRenew, channel = ""
-            )
-        }
-        return paginate(rows, page, size)
+        val p = clampPage(page)
+        val s = clampSize(size)
+        val statusFilter = status?.trim()?.lowercase()?.takeIf { it.isNotBlank() } ?: ""
+        /*
+         * 过滤与分页下推数据库。
+         *
+         * 改造前：`findAllByOrderByExpiredAtDesc()` 全表 → 内存过滤 → 内存分页，
+         * 再加上 `userRepository.findAll()` 建全量家长映射 —— 只为了显示一页 20 行里的姓名和手机号。
+         * 订阅表与家长表都只增不减，运营每翻一页都要把两张表读进堆里。
+         */
+        val result = subscriptionRepository.searchSubscriptions(statusFilter, PageRequest.of(p - 1, s))
+        val users = usersOf(result.content.map { it.userId })
+        return toPageResult(result, p, s) { sub -> toSubRow(sub, users[sub.userId]) }
     }
 
     fun listOrders(adminId: String, status: String?, page: Int = 1, size: Int = 20): PageResult<OrderRow> {
         requireRead(adminPerm, adminId, "billing")
-        var orders = paymentOrderRepository.findAllByOrderByCreatedAtDesc()
-        if (!status.isNullOrBlank()) orders = orders.filter { orderStatusLower(it.status) == status.lowercase() }
-        val userMap = userRepository.findAll().associateBy { it.id }
-        val rows = orders.map { o ->
-            val owner = userMap[o.userId]
-            OrderRow(
-                orderNo = o.orderNo, parentPhone = owner?.phone ?: o.userId,
-                parentName = owner?.nickname ?: (owner?.phone?.let { "家长" + it.takeLast(4) } ?: ""),
-                plan = planCategory(o.plan), planName = planLabel(o.plan),
-                amountFen = o.amountFen, status = orderStatusLower(o.status), channel = o.channel,
-                createdAt = fmt(o.createdAt)
-            )
-        }
-        return paginate(rows, page, size)
+        val p = clampPage(page)
+        val s = clampSize(size)
+        val statusFilter = status?.trim()?.lowercase()?.takeIf { it.isNotBlank() } ?: ""
+        // 同上：订单表是流水表，只增不减，全表读进来只为翻一页的代价随运营时间线性变差。
+        val result = paymentOrderRepository.searchOrders(statusFilter, PageRequest.of(p - 1, s))
+        val users = usersOf(result.content.map { it.userId })
+        return toPageResult(result, p, s) { order -> toOrderRow(order, users[order.userId]) }
     }
+
+    /** 只补当前页涉及的家长（一页最多 200 个 id），而不是把整张用户表读进内存 */
+    private fun usersOf(userIds: Collection<String>): Map<String, User> {
+        val ids = userIds.filter { it.isNotBlank() }.distinct()
+        if (ids.isEmpty()) return emptyMap()
+        return userRepository.findAllById(ids).associateBy { it.id }
+    }
+
+    private fun toSubRow(s: Subscription, owner: User?): SubRow = SubRow(
+        parentPhone = owner?.phone ?: s.userId,
+        parentName = owner?.nickname ?: (owner?.phone?.let { "家长" + it.takeLast(4) } ?: ""),
+        plan = planCategory(s.plan), planName = planLabel(s.plan),
+        status = subStatusLower(s.status), startedAt = fmt(s.startedAt), expiredAt = fmt(s.expiredAt),
+        autoRenew = s.autoRenew, channel = ""
+    )
+
+    private fun toOrderRow(o: PaymentOrder, owner: User?): OrderRow = OrderRow(
+        orderNo = o.orderNo, parentPhone = owner?.phone ?: o.userId,
+        parentName = owner?.nickname ?: (owner?.phone?.let { "家长" + it.takeLast(4) } ?: ""),
+        plan = planCategory(o.plan), planName = planLabel(o.plan),
+        amountFen = o.amountFen, status = orderStatusLower(o.status), channel = o.channel,
+        createdAt = fmt(o.createdAt)
+    )
 
     @Transactional
     fun manualActivate(adminId: String, req: AdminManualSubscriptionRequest): Map<String, Any> {

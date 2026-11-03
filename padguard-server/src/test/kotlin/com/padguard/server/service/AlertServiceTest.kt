@@ -22,6 +22,7 @@ import org.mockito.Mockito.verify
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Pageable
 import java.util.LinkedHashMap
+import org.springframework.data.domain.Page
 
 /**
  * 风险告警链路的单元测试（D7 完整版的家长端消费面底座）。
@@ -69,7 +70,14 @@ class AlertServiceTest {
         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
         override fun findByLastActiveAtGreaterThan(since: Long) =
             table.values.filter { (it.lastActiveAt ?: 0L) > since }
-    }
+    
+        override fun countOnlineSince(staleCut: Long): Long = table.values.count {
+            it.onlineStatus == "ONLINE" && it.lastOnlineAt != null && it.lastOnlineAt!! >= staleCut
+        }.toLong()
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     /**
      * 与 AdminServiceTest 里那个"一律返回空列表"的 FakeAlertRepo 不同：

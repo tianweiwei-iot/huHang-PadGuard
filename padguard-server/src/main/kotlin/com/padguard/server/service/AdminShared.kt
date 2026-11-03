@@ -155,6 +155,32 @@ fun <T> paginate(all: List<T>, page: Int, size: Int): PageResult<T> {
     return PageResult(all.subList(from, to), p, s, total, totalPages)
 }
 
+/** 与 [paginate] 相同的钳制规则（page 从 1 起、size 1..200），供 SQL 分页路径复用。 */
+fun clampPage(page: Int): Int = if (page < 1) 1 else page
+fun clampSize(size: Int): Int = when {
+    size < 1 -> 20
+    size > 200 -> 200
+    else -> size
+}
+
+/**
+ * 把 Spring Data 的 [org.springframework.data.domain.Page] 转成本项目的 [PageResult]。
+ *
+ * 两个细节与 [paginate] 严格对齐，否则"内存分页"与"SQL 分页"两条路径会给前端不同的信封：
+ * ① 总数为 0 时 totalPages 返回 1（`Page.getTotalPages()` 返回 0，前端会据此画出"第 0 页"）；
+ * ② size 用调用方钳制后的值，而不是 `Page.getSize()`（它反映的是请求值）。
+ */
+fun <T, R> toPageResult(
+    page: org.springframework.data.domain.Page<T>,
+    pageNo: Int,
+    size: Int,
+    transform: (T) -> R
+): PageResult<R> {
+    val total = page.totalElements.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    val totalPages = if (total == 0) 1 else (total + size - 1) / size
+    return PageResult(page.content.map(transform), pageNo, size, total, totalPages)
+}
+
 /**
  * 读操作的权限闸门。早期服务端只对写操作 require，全系统没有任何一处校验过 read —— 因此
  * 在 RBAC 矩阵里给某角色勾选或取消「查看」在服务端毫无区别。现在所有返回业务列表的方法都在首行过这道闸门。
@@ -225,14 +251,53 @@ fun isDevProfile(env: Environment): Boolean =
  * 容器未锁 TZ 时按月边界会整体偏移，月末最后一天与月初第一天的订单会被算进相邻月份，
  * 表现为"后台月收入与订单明细对不上"，且这类差异只在月末出现，极难复现。
  */
-private fun monthKey(ts: Long): String =
+internal fun monthKey(ts: Long): String =
     Instant.ofEpochMilli(ts).atZone(SERVER_ZONE_ID).toLocalDate().let { "%04d-%02d".format(it.year, it.monthValue) }
 
-fun monthPaidSum(paymentOrderRepository: PaymentOrderRepository): Int {
-    val thisMonth = monthKey(System.currentTimeMillis())
-    return paymentOrderRepository.findAllByOrderByCreatedAtDesc()
-        .filter { it.status == OrderStatus.PAID.name && monthKey(it.createdAt) == thisMonth }
-        .sumOf { it.amountFen }
+/**
+ * 营收分桶的输入单元：只有创建时间与金额。
+ *
+ * 存在的意义是不必为了画一根曲线把整张订单表的实体读进内存 ——
+ * 见 [PaymentOrderRepository.findPaidAmountsSince]。
+ */
+data class PaidOrder(val createdAt: Long, val amountFen: Int)
+
+/**
+ * 近 [months] 个月窗口的起点时刻（含最早那个月的 1 日 00:00）。
+ *
+ * 取整月起点而不是 `now - 30*months` 天：后者会在月末把本该算进窗口首月的订单切出去，
+ * 曲线最左端凭空少一截。
+ */
+private fun windowStart(months: Int, now: Long): Long {
+    val zone = SERVER_ZONE_ID
+    val firstMonth = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+        .minusMonths((months - 1).coerceAtLeast(0).toLong())
+        .withDayOfMonth(1)
+    return firstMonth.atStartOfDay(zone).toInstant().toEpochMilli()
+}
+
+/**
+ * 读出近 [months] 个月内已支付的订单（只查两列）。
+ *
+ * 调用方通常是"本月收入 + 近 N 月曲线"一起要 —— 务必**只调一次**再分别聚合。
+ * 分两次查会让两个数字来自不同快照：两次查询之间有订单入账时，
+ * 页面就会显示"本月营收 ¥X，但营收曲线最后一点是 ¥Y"。
+ */
+fun paidOrdersSince(
+    paymentOrderRepository: PaymentOrderRepository,
+    months: Int,
+    now: Long = System.currentTimeMillis()
+): List<PaidOrder> {
+    val since = windowStart(months, now)
+    return paymentOrderRepository.findPaidAmountsSince(OrderStatus.PAID.name, since).map { row ->
+        PaidOrder(createdAt = (row[0] as Number).toLong(), amountFen = (row[1] as Number).toInt())
+    }
+}
+
+/** 本月已支付金额（分）。传入的必须是同一批 [PaidOrder]，窗口需覆盖本月。 */
+fun monthPaidSumOf(orders: List<PaidOrder>, now: Long): Int {
+    val thisMonth = monthKey(now)
+    return orders.filter { monthKey(it.createdAt) == thisMonth }.sumOf { it.amountFen }
 }
 
 fun inMonth(ts: Long, y: Int, m: Int): Boolean {
@@ -240,12 +305,16 @@ fun inMonth(ts: Long, y: Int, m: Int): Boolean {
     return monthKey(ts) == "%04d-%02d".format(y, m + 1)
 }
 
-fun lastMonthsRevenue(paymentOrderRepository: PaymentOrderRepository, n: Int): List<RevenueMonth> {
-    val orders = paymentOrderRepository.findAllByOrderByCreatedAtDesc().filter { it.status == OrderStatus.PAID.name }
+/** 近 [n] 个月的营收序列。传入的必须是同一批 [PaidOrder]，窗口需覆盖 n 个月。 */
+fun lastMonthsRevenueOf(
+    orders: List<PaidOrder>,
+    n: Int,
+    now: Long = System.currentTimeMillis()
+): List<RevenueMonth> {
     val buckets = TreeMap<String, RevenueMonthAccum>()
-    val now = Instant.ofEpochMilli(System.currentTimeMillis()).atZone(SERVER_ZONE_ID).toLocalDate()
+    val today = Instant.ofEpochMilli(now).atZone(SERVER_ZONE_ID).toLocalDate()
     for (i in (n - 1) downTo 0) {
-        val d = now.minusMonths(i.toLong())
+        val d = today.minusMonths(i.toLong())
         val key = "%04d-%02d".format(d.year, d.monthValue)
         buckets[key] = RevenueMonthAccum(key)
     }
@@ -258,33 +327,59 @@ fun lastMonthsRevenue(paymentOrderRepository: PaymentOrderRepository, n: Int): L
     return buckets.values.map { RevenueMonth(it.month, it.amount, it.newSubs, 0) }
 }
 
+fun lastMonthsRevenue(paymentOrderRepository: PaymentOrderRepository, n: Int): List<RevenueMonth> {
+    val now = System.currentTimeMillis()
+    return lastMonthsRevenueOf(paidOrdersSince(paymentOrderRepository, n, now), n, now)
+}
+
 data class RevenueMonthAccum(var month: String, var amount: Int = 0, var newSubs: Int = 0)
 
-/** 审计动作 → （领域, 中文名），覆盖后台操作与常见家长端动作 */
-fun resolveAuditAction(action: String): Pair<String, String> = when (action) {
-    AdminAudit.PARENTS_SUSPEND -> "parents" to "冻结家长账号"
-    AdminAudit.PARENTS_ACTIVATE -> "parents" to "激活家长账号"
-    AdminAudit.PARENTS_RESET_PWD -> "parents" to "重置家长密码"
-    AdminAudit.PARENTS_CREATE -> "parents" to "新建家长账号"
-    AdminAudit.PARENTS_UPDATE -> "parents" to "修改家长资料"
-    AdminAudit.PARENTS_DELETE -> "parents" to "删除家长账号"
-    AdminAudit.DEVICES_LOCK -> "devices" to "远程锁屏"
-    AdminAudit.DEVICES_UNLOCK -> "devices" to "远程解锁"
-    AdminAudit.BILLING_MANUAL -> "billing" to "手动开通订阅"
-    AdminAudit.BILLING_REFUND -> "billing" to "订单退款"
-    AdminAudit.RBAC_ASSIGN -> "rbac" to "变更管理员角色"
-    AdminAudit.RBAC_CREATE -> "rbac" to "新建管理员"
-    AdminAudit.RBAC_UPDATE -> "rbac" to "修改管理员"
-    AdminAudit.RBAC_DELETE -> "rbac" to "删除管理员"
-    AdminAudit.RBAC_RESET_PWD -> "rbac" to "重置管理员密码"
-    "RBAC_ROLE_SAVE" -> "rbac" to "保存角色权限"
-    AdminAudit.SETTINGS_WRITE -> "settings" to "修改系统配置"
-    "DEVICE_BIND" -> "devices" to "设备绑定"
-    "DEVICE_UNBIND" -> "devices" to "设备解绑"
-    "POLICY_WEB_UPDATE" -> "parents" to "策略变更(网页)"
-    "POLICY_APP_UPDATE" -> "parents" to "策略变更(应用)"
-    "UNLOCK_APPROVE" -> "devices" to "解锁审批通过"
-    "UNLOCK_REJECT" -> "devices" to "解锁审批拒绝"
-    "COMMAND_ISSUE" -> "devices" to "指令下发"
-    else -> "" to action
-}
+/**
+ * 审计动作 →（领域, 中文名）的**唯一事实源**。
+ *
+ * 曾经是一个 `when` 表达式。改成表驱动不是为了好看，而是为了能反查：
+ * 后台审计页按"领域"筛选时，必须先把领域映射成一组 action 才能下推到 SQL
+ * （`where action in (...)`）。如果正向是 when、反向另写一份列表，两份必然漂移 ——
+ * 新加一个动作、正向识别得到、反向漏掉，表现为"该动作只在不筛选时出现，一按领域筛就消失"。
+ * 现在正反查都从这张表派生，物理上不可能不一致。
+ */
+val AUDIT_ACTION_META: Map<String, Pair<String, String>> = mapOf(
+    AdminAudit.PARENTS_SUSPEND to ("parents" to "冻结家长账号"),
+    AdminAudit.PARENTS_ACTIVATE to ("parents" to "激活家长账号"),
+    AdminAudit.PARENTS_RESET_PWD to ("parents" to "重置家长密码"),
+    AdminAudit.PARENTS_CREATE to ("parents" to "新建家长账号"),
+    AdminAudit.PARENTS_UPDATE to ("parents" to "修改家长资料"),
+    AdminAudit.PARENTS_DELETE to ("parents" to "删除家长账号"),
+    AdminAudit.DEVICES_LOCK to ("devices" to "远程锁屏"),
+    AdminAudit.DEVICES_UNLOCK to ("devices" to "远程解锁"),
+    AdminAudit.DEVICES_UNBIND to ("devices" to "解绑设备"),
+    AdminAudit.BILLING_MANUAL to ("billing" to "手动开通订阅"),
+    AdminAudit.BILLING_REFUND to ("billing" to "订单退款"),
+    AdminAudit.RBAC_ASSIGN to ("rbac" to "变更管理员角色"),
+    AdminAudit.RBAC_CREATE to ("rbac" to "新建管理员"),
+    AdminAudit.RBAC_UPDATE to ("rbac" to "修改管理员"),
+    AdminAudit.RBAC_DELETE to ("rbac" to "删除管理员"),
+    AdminAudit.RBAC_RESET_PWD to ("rbac" to "重置管理员密码"),
+    "RBAC_ROLE_SAVE" to ("rbac" to "保存角色权限"),
+    AdminAudit.SETTINGS_WRITE to ("settings" to "修改系统配置"),
+    "DEVICE_BIND" to ("devices" to "设备绑定"),
+    "POLICY_WEB_UPDATE" to ("parents" to "策略变更(网页)"),
+    "POLICY_APP_UPDATE" to ("parents" to "策略变更(应用)"),
+    "UNLOCK_APPROVE" to ("devices" to "解锁审批通过"),
+    "UNLOCK_REJECT" to ("devices" to "解锁审批拒绝"),
+    "COMMAND_ISSUE" to ("devices" to "指令下发")
+)
+
+/**
+ * 某领域下的全部动作。
+ *
+ * 未知领域返回**空集合**，而不是"全部动作"：调用方据此返回空列表。
+ * 这条区别很重要 —— 若把空集合当成"不过滤"，前端传一个拼错的 area
+ * 就会静默退化成全量列表，运营以为筛过了，实际看的是全领域数据。
+ */
+fun auditActionsOf(area: String): List<String> =
+    AUDIT_ACTION_META.entries.filter { it.value.first == area }.map { it.key }
+
+/** 未登记的动作归入空领域：仍会出现在"不筛选"的列表里，但不会被任何领域筛选命中。 */
+fun resolveAuditAction(action: String): Pair<String, String> =
+    AUDIT_ACTION_META[action] ?: ("" to action)

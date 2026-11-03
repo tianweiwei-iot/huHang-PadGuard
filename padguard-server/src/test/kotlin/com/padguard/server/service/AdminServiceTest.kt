@@ -31,6 +31,7 @@ import org.springframework.mail.javamail.JavaMailSenderImpl
 import com.padguard.server.observability.RequestMetrics
 import com.padguard.server.observability.RuntimeLogRing
 import java.util.LinkedHashMap
+import org.springframework.data.domain.Page
 
 /**
  * 管控后台写操作 + RBAC 越权拦截的单元测试。
@@ -84,7 +85,17 @@ class AdminServiceTest {
             val content = if (from >= sorted.size) emptyList<User>() else sorted.subList(from, to)
             return org.springframework.data.domain.PageImpl(content, pageable, sorted.size.toLong())
         }
-    }
+    
+        override fun countByStatusOrNullAsActive(status: String): Long =
+            table.values.count { (it.status ?: "active") == status }.toLong()
+
+        override fun countGroupedByRegion(): List<Array<Any?>> =
+            table.values.groupBy { it.region }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any?> }
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
         override val table = LinkedHashMap<String, Device>()
@@ -113,7 +124,14 @@ class AdminServiceTest {
         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
         override fun findByLastActiveAtGreaterThan(since: Long) =
             table.values.filter { (it.lastActiveAt ?: 0L) > since }
-    }
+    
+        override fun countOnlineSince(staleCut: Long): Long = table.values.count {
+            it.onlineStatus == "ONLINE" && it.lastOnlineAt != null && it.lastOnlineAt!! >= staleCut
+        }.toLong()
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     private class FakeSubRepo : FakeJpaRepository<Subscription, String>(), SubscriptionRepository {
         override val table = LinkedHashMap<String, Subscription>()
@@ -124,7 +142,21 @@ class AdminServiceTest {
             table.values.filter { it.userId in userIds }
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
         override fun findAllByOrderByExpiredAtDesc() = table.values.sortedByDescending { it.expiredAt }
-    }
+    
+        override fun countGroupedByPlan(): List<Array<Any?>> =
+            table.values.groupBy { it.plan }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any?> }
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+
+        override fun searchSubscriptions(status: String, pageable: Pageable): Page<Subscription> {
+            val matched = table.values
+                .filter { status.isBlank() || it.status.lowercase() == status }
+                .sortedByDescending { it.expiredAt }
+            return pageOf(matched, pageable)
+        }
+}
 
     private class FakeOrderRepo : FakeJpaRepository<PaymentOrder, String>(), PaymentOrderRepository {
         override val table = LinkedHashMap<String, PaymentOrder>()
@@ -155,7 +187,18 @@ class AdminServiceTest {
             order.status = paidStatus; order.paidAt = paidAt; order.transactionId = txId
             return 1
         }
-    }
+    
+        override fun searchOrders(status: String, pageable: Pageable): Page<PaymentOrder> {
+            val matched = table.values
+                .filter { status.isBlank() || it.status.lowercase() == status }
+                .sortedByDescending { it.createdAt }
+            return pageOf(matched, pageable)
+        }
+
+        override fun findPaidAmountsSince(paidStatus: String, since: Long): List<Array<Any?>> =
+            table.values.filter { it.status == paidStatus && it.createdAt >= since }
+                .map { arrayOf(it.createdAt, it.amountFen) as Array<Any?> }
+}
 
     private class FakeAdminRepo : FakeJpaRepository<Admin, String>(), AdminRepository {
         override val table = LinkedHashMap<String, Admin>()
@@ -201,7 +244,15 @@ class AdminServiceTest {
         override fun findByDeviceIdAndActionOrderByCreatedAtDesc(deviceId: String, action: String, pageable: Pageable) = emptyList<AuditLog>()
         override fun findByUserIdOrderByCreatedAtDesc(userId: String, pageable: Pageable) = emptyList<AuditLog>()
         override fun findByUserIdAndActionOrderByCreatedAtDesc(userId: String, action: String, pageable: Pageable) = emptyList<AuditLog>()
-    }
+    
+        override fun findAllByOrderByCreatedAtDesc(pageable: Pageable): Page<AuditLog> =
+            pageOf(table.values.sortedByDescending { it.createdAt }, pageable)
+
+        override fun findByActionInOrderByCreatedAtDesc(
+            actions: Collection<String>, pageable: Pageable
+        ): Page<AuditLog> =
+            pageOf(table.values.filter { it.action in actions }.sortedByDescending { it.createdAt }, pageable)
+}
 
     private class FakeSystemSettingRepo : FakeJpaRepository<SystemSetting, String>(), SystemSettingRepository {
         override val table = LinkedHashMap<String, SystemSetting>()

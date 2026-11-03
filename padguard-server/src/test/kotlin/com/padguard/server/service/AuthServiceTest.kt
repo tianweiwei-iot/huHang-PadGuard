@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test
 import org.springframework.data.domain.Pageable
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.util.LinkedHashMap
+import org.springframework.data.domain.Page
 
 /**
  * 家长端手机号自助注册的单元测试。
@@ -41,7 +42,17 @@ class AuthServiceTest {
             pageable: org.springframework.data.domain.Pageable
         ): org.springframework.data.domain.Page<User> =
             org.springframework.data.domain.PageImpl(emptyList(), pageable, 0)
-    }
+    
+        override fun countByStatusOrNullAsActive(status: String): Long =
+            table.values.count { (it.status ?: "active") == status }.toLong()
+
+        override fun countGroupedByRegion(): List<Array<Any?>> =
+            table.values.groupBy { it.region }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any?> }
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     private class FakeSubRepo : FakeJpaRepository<Subscription, String>(), SubscriptionRepository {
         override val table = LinkedHashMap<String, Subscription>()
@@ -52,7 +63,21 @@ class AuthServiceTest {
         override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
         override fun findByUserIdIn(userIds: Collection<String>): List<Subscription> =
             table.values.filter { it.userId in userIds }
-    }
+    
+        override fun countGroupedByPlan(): List<Array<Any?>> =
+            table.values.groupBy { it.plan }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any?> }
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+
+        override fun searchSubscriptions(status: String, pageable: Pageable): Page<Subscription> {
+            val matched = table.values
+                .filter { status.isBlank() || it.status.lowercase() == status }
+                .sortedByDescending { it.expiredAt }
+            return pageOf(matched, pageable)
+        }
+}
 
     private class FakeOrderRepo : FakeJpaRepository<PaymentOrder, String>(), PaymentOrderRepository {
         override val table = LinkedHashMap<String, PaymentOrder>()
@@ -84,7 +109,18 @@ class AuthServiceTest {
             return 1
         }
 
-    }
+    
+        override fun searchOrders(status: String, pageable: Pageable): Page<PaymentOrder> {
+            val matched = table.values
+                .filter { status.isBlank() || it.status.lowercase() == status }
+                .sortedByDescending { it.createdAt }
+            return pageOf(matched, pageable)
+        }
+
+        override fun findPaidAmountsSince(paidStatus: String, since: Long): List<Array<Any?>> =
+            table.values.filter { it.status == paidStatus && it.createdAt >= since }
+                .map { arrayOf(it.createdAt, it.amountFen) as Array<Any?> }
+}
 
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
         override val table = LinkedHashMap<String, Device>()
@@ -113,7 +149,14 @@ class AuthServiceTest {
         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
         override fun findByLastActiveAtGreaterThan(since: Long) =
             table.values.filter { (it.lastActiveAt ?: 0L) > since }
-    }
+    
+        override fun countOnlineSince(staleCut: Long): Long = table.values.count {
+            it.onlineStatus == "ONLINE" && it.lastOnlineAt != null && it.lastOnlineAt!! >= staleCut
+        }.toLong()
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     private fun fixture(): Triple<AuthService, FakeUserRepo, FakeSubRepo> {
         val users = FakeUserRepo()

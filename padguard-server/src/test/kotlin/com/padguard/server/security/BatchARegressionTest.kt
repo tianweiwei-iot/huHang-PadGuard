@@ -31,6 +31,7 @@ import org.mockito.Mockito.verify
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Pageable
 import java.util.LinkedHashMap
+import org.springframework.data.domain.Page
 
 /**
  * 批次 A 验收门禁的回归测试（docs/上线修复实施方案.md 第四节）。
@@ -76,7 +77,14 @@ class BatchARegressionTest {
         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
         override fun findByLastActiveAtGreaterThan(since: Long) =
             table.values.filter { (it.lastActiveAt ?: 0L) > since }
-    }
+    
+        override fun countOnlineSince(staleCut: Long): Long = table.values.count {
+            it.onlineStatus == "ONLINE" && it.lastOnlineAt != null && it.lastOnlineAt!! >= staleCut
+        }.toLong()
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     private class FakeCommandRepo : FakeJpaRepository<Command, String>(), CommandRepository {
         override val table = LinkedHashMap<String, Command>()

@@ -1,8 +1,6 @@
 package com.padguard.server.service
 
 import com.padguard.server.common.SERVER_ZONE_ID
-import com.padguard.server.domain.Device
-import com.padguard.server.domain.Subscription
 import com.padguard.server.domain.SubStatus
 import com.padguard.server.dto.DashboardResponse
 import com.padguard.server.dto.DashboardTrends
@@ -45,29 +43,55 @@ class AdminDashboardService(
     fun dashboard(adminId: String): DashboardResponse {
         // S13：仪表盘是跨领域聚合（含服务器状态），统一挂 server:read。
         adminPerm.require(adminId, "server", "read")
-        val users = userRepository.findAll()
-        val parentsTotal = users.size.toLong()
-        val parentsActive = users.count { (it.status ?: "active") == "active" }.toLong()
-        val parentsSuspended = users.count { (it.status ?: "active") == "suspended" }.toLong()
+        val now = System.currentTimeMillis()
 
-        val allDevices = deviceRepository.findAll()
+        /*
+         * 这里所有数字都是聚合结果，没有一处需要实体本身 —— 全部下推成 count / group by。
+         *
+         * 改造前是一次请求 6 次全表扫描：`userRepository.findAll()` 被调了两次
+         * （总量一次、区域分布又一次）、设备一次、订阅一次，外加营收的两次订单全表
+         * （本月收入一遍、近 6 月曲线又一遍）。后台首页是运营停留最久、刷新最频繁的一页，
+         * 而家长 / 设备 / 订单三张表都只增不减 —— 这个页面会随业务增长稳定地越来越慢，
+         * 且慢得毫无征兆（不是某个功能坏了，是整个后台开始发卡）。
+         *
+         * 顺带修掉一个只有并发时才会暴露的不一致：营收的两个数字原来分两次查询，
+         * 期间若有订单入账，首页会显示"本月营收 ¥X，但营收曲线最后一点是 ¥Y"。
+         * 现在两者出自同一次查询的同一批数据。
+         */
+        val parentsTotal = userRepository.count()
+        // 注意用 coalesce 版本：status 是后加的列，存量行为 NULL，派生查询 countByStatus 不计入它们。
+        val parentsActive = userRepository.countByStatusOrNullAsActive("active")
+        val parentsSuspended = userRepository.countByStatusOrNullAsActive("suspended")
+
         val devicesTotal = deviceRepository.count()
-        val devicesOnline = allDevices.count { online(it) }.toLong()
+        val devicesOnline = deviceRepository.countOnlineSince(now - ONLINE_STALE_MS)
 
-        val subs = subscriptionRepository.findAll()
-        val subsActive = subs.count { it.status == SubStatus.ACTIVE.name }.toLong()
-        val subsTrial = subs.count { it.status == SubStatus.TRIAL.name }.toLong()
+        val subsActive = subscriptionRepository.countByStatus(SubStatus.ACTIVE.name)
+        val subsTrial = subscriptionRepository.countByStatus(SubStatus.TRIAL.name)
 
-        val monthRevenue = monthPaidSum(paymentOrderRepository)
         val serverStatus = if (dbUp(dataSource)) "UP" else "DOWN"
 
-        val revenueSeries = lastMonthsRevenue(paymentOrderRepository, 6).map { it.amount }
-        val planDist = subs.groupBy { planCategory(it.plan) }
-            .map { (cat, list) -> NameCount(planLabel(if (cat == "free") "TRIAL" else cat.uppercase()), list.size) }
+        val paidOrders = paidOrdersSince(paymentOrderRepository, 6, now)
+        val monthRevenue = monthPaidSumOf(paidOrders, now)
+        val revenueSeries = lastMonthsRevenueOf(paidOrders, 6, now).map { it.amount }
+
+        val planDist = subscriptionRepository.countGroupedByPlan()
+            .groupBy { planCategory(it[0] as String?) }
+            .map { (cat, rows) ->
+                NameCount(
+                    planLabel(if (cat == "free") "TRIAL" else cat.uppercase()),
+                    rows.sumOf { (it[1] as Number).toInt() }
+                )
+            }
         // users.region 字段存在（V13 起可维护），早期恒返回空数组导致首页柱状图永远空白。
-        val regionDist = userRepository.findAll()
-            .groupBy { it.region?.takeIf { r -> r.isNotBlank() } ?: "未填写" }
-            .map { (region, list) -> NameCount(region, list.size) }
+        // 归并仍在内存里做：分组数等于区域数（个位数），把 NULL/空串合并成"未填写"
+        // 用 SQL 表达反而要依赖 nullif 之类各家方言不一的东西。
+        val regionDist = userRepository.countGroupedByRegion()
+            .map { row ->
+                ((row[0] as String?)?.takeIf { it.isNotBlank() } ?: "未填写") to (row[1] as Number).toInt()
+            }
+            .groupBy({ it.first }, { it.second })
+            .map { (region, counts) -> NameCount(region, counts.sum()) }
             .sortedByDescending { it.count }
 
         val alertsOpen = alertRepository.countByStatus("ACTIVE")
@@ -75,6 +99,7 @@ class AdminDashboardService(
         // 首页最近操作：必须尊重 audit:read —— 没有审计查看权限的角色不应在首页看到操作流。
         val recent = if (adminPerm.can(adminId, "audit", "read")) adminAuditService.audit(adminId, null).take(6) else emptyList()
 
+        val trendSince = trendWindowStart(TREND_DAYS)
         return DashboardResponse(
             kpis = Kpis(
                 parentsTotal, parentsActive, parentsSuspended, devicesTotal, devicesOnline,
@@ -85,11 +110,23 @@ class AdminDashboardService(
             regionDist = regionDist,
             alertsOpen = alertsOpen,
             recent = recent,
-            trends = buildTrends(users, allDevices, subs, revenueSeries)
+            trends = DashboardTrends(
+                parent = growthTrend(dailyCounts(userRepository.findCreatedAtSince(trendSince), TREND_DAYS)),
+                device = growthTrend(dailyCounts(deviceRepository.findCreatedAtSince(trendSince), TREND_DAYS)),
+                subscription = growthTrend(dailyCounts(subscriptionRepository.findCreatedAtSince(trendSince), TREND_DAYS)),
+                revenue = revenueTrend(revenueSeries)
+            )
         )
     }
 
     // ---------- KPI 趋势 ----------
+
+    /** 趋势窗口的起点：含最早那一天 00:00（北京时间），与 [dailyCounts] 的分桶边界一致。 */
+    private fun trendWindowStart(days: Int): Long {
+        val zone = SERVER_ZONE_ID
+        val start = java.time.LocalDate.now(zone).minusDays((days - 1).toLong())
+        return start.atStartOfDay(zone).toInstant().toEpochMilli()
+    }
 
     /**
      * 近 7 天，按服务端时区（Asia/Shanghai）自然日分桶的每日新增计数。
@@ -125,7 +162,7 @@ class AdminDashboardService(
             delta = if (series.isEmpty()) null else delta,
             unit = "count",
             direction = if (series.isEmpty()) null else direction,
-            label = "近 7 天"
+            label = "近 $TREND_DAYS 天"
         )
     }
 
@@ -153,15 +190,8 @@ class AdminDashboardService(
         return KpiTrend(series = series, delta = delta, unit = "fen", direction = direction, label = "较上月")
     }
 
-    private fun buildTrends(
-        users: List<com.padguard.server.domain.User>,
-        devices: List<Device>,
-        subs: List<Subscription>,
-        revenueSeries: List<Int>
-    ): DashboardTrends = DashboardTrends(
-        parent = growthTrend(dailyCounts(users.map { it.createdAt }, 7)),
-        device = growthTrend(dailyCounts(devices.map { it.createdAt }, 7)),
-        subscription = growthTrend(dailyCounts(subs.map { it.createdAt }, 7)),
-        revenue = revenueTrend(revenueSeries)
-    )
+    private companion object {
+        /** KPI 趋势的天数窗口。改这里时记得同步 [growthTrend] 的 label 文案。 */
+        const val TREND_DAYS = 7
+    }
 }

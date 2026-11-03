@@ -165,7 +165,10 @@ fun ProfileScreen(
                 Text("退出登录")
             }
             Text(
-                text = "退出后需重新登录才能查看被控设备",
+                // 服务端在登出时会把该账号的令牌版本 +1，**所有**已签发令牌（含其他手机）同时失效。
+                // 说明文字必须把这一点讲清楚：家长往往在多台手机上登录过，
+                // 不提前说明就会在另一台手机上遇到"莫名其妙要重新登录"，进而怀疑账号被盗。
+                text = "退出后本机需重新登录，其他设备上的登录状态也会一并失效",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 modifier = Modifier.fillMaxWidth(),
@@ -180,7 +183,13 @@ fun ProfileScreen(
         AlertDialog(
             onDismissRequest = { showLogoutConfirm = false },
             title = { Text("退出登录？") },
-            text = { Text("退出后需要重新输入账号密码才能查看被控设备。") },
+            text = {
+                Text(
+                    "退出后需要重新输入账号密码才能查看被控设备。" +
+                        "该账号在其他手机上也会退出登录，但不会解绑任何设备，" +
+                        "孩子的管控规则照常生效。"
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     showLogoutConfirm = false

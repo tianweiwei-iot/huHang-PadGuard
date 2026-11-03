@@ -32,6 +32,7 @@ import org.springframework.data.domain.Pageable
 import org.springframework.mock.env.MockEnvironment
 import java.io.File
 import java.util.LinkedHashMap
+import org.springframework.data.domain.Page
 
 /**
  * W16 出厂弱口令强重置的门禁测试。
@@ -67,7 +68,17 @@ class DataInitializerTest {
             pageable: org.springframework.data.domain.Pageable
         ): org.springframework.data.domain.Page<User> =
             org.springframework.data.domain.PageImpl(emptyList(), pageable, 0)
-    }
+    
+        override fun countByStatusOrNullAsActive(status: String): Long =
+            table.values.count { (it.status ?: "active") == status }.toLong()
+
+        override fun countGroupedByRegion(): List<Array<Any?>> =
+            table.values.groupBy { it.region }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any?> }
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
         override val table = LinkedHashMap<String, Device>()
@@ -97,7 +108,14 @@ class DataInitializerTest {
         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
         override fun findByLastActiveAtGreaterThan(since: Long) =
             table.values.filter { (it.lastActiveAt ?: 0L) > since }
-    }
+    
+        override fun countOnlineSince(staleCut: Long): Long = table.values.count {
+            it.onlineStatus == "ONLINE" && it.lastOnlineAt != null && it.lastOnlineAt!! >= staleCut
+        }.toLong()
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     private class FakeDeviceSettingRepo : FakeJpaRepository<DeviceSetting, String>(), DeviceSettingRepository {
         override val table = LinkedHashMap<String, DeviceSetting>()
@@ -135,7 +153,21 @@ class DataInitializerTest {
             table.values.filter { it.userId in userIds }
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
         override fun findAllByOrderByExpiredAtDesc() = table.values.sortedByDescending { it.expiredAt }
-    }
+    
+        override fun countGroupedByPlan(): List<Array<Any?>> =
+            table.values.groupBy { it.plan }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any?> }
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+
+        override fun searchSubscriptions(status: String, pageable: Pageable): Page<Subscription> {
+            val matched = table.values
+                .filter { status.isBlank() || it.status.lowercase() == status }
+                .sortedByDescending { it.expiredAt }
+            return pageOf(matched, pageable)
+        }
+}
 
     private class FakeAuditLogRepo : FakeJpaRepository<AuditLog, String>(), AuditLogRepository {
         override val table = LinkedHashMap<String, AuditLog>()
@@ -147,7 +179,15 @@ class DataInitializerTest {
         override fun findByDeviceIdAndActionOrderByCreatedAtDesc(deviceId: String, action: String, pageable: Pageable) = emptyList<AuditLog>()
         override fun findByUserIdOrderByCreatedAtDesc(userId: String, pageable: Pageable) = emptyList<AuditLog>()
         override fun findByUserIdAndActionOrderByCreatedAtDesc(userId: String, action: String, pageable: Pageable) = emptyList<AuditLog>()
-    }
+    
+        override fun findAllByOrderByCreatedAtDesc(pageable: Pageable): Page<AuditLog> =
+            pageOf(table.values.sortedByDescending { it.createdAt }, pageable)
+
+        override fun findByActionInOrderByCreatedAtDesc(
+            actions: Collection<String>, pageable: Pageable
+        ): Page<AuditLog> =
+            pageOf(table.values.filter { it.action in actions }.sortedByDescending { it.createdAt }, pageable)
+}
 
     // ----------------------------- 夹具 -----------------------------
 

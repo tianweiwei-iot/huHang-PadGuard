@@ -30,6 +30,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import org.springframework.data.domain.Page
 
 /**
  * 订阅与计费的单元测试。
@@ -56,7 +57,17 @@ class BillingServiceTest {
             pageable: org.springframework.data.domain.Pageable
         ): org.springframework.data.domain.Page<User> =
             org.springframework.data.domain.PageImpl(emptyList(), pageable, 0)
-    }
+    
+        override fun countByStatusOrNullAsActive(status: String): Long =
+            table.values.count { (it.status ?: "active") == status }.toLong()
+
+        override fun countGroupedByRegion(): List<Array<Any?>> =
+            table.values.groupBy { it.region }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any?> }
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     private class FakeSubscriptionRepo : FakeJpaRepository<Subscription, String>(), SubscriptionRepository {
         override val table = LinkedHashMap<String, Subscription>()
@@ -68,7 +79,21 @@ class BillingServiceTest {
         override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
         override fun findByUserIdIn(userIds: Collection<String>): List<Subscription> =
             table.values.filter { it.userId in userIds }
-    }
+    
+        override fun countGroupedByPlan(): List<Array<Any?>> =
+            table.values.groupBy { it.plan }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any?> }
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+
+        override fun searchSubscriptions(status: String, pageable: Pageable): Page<Subscription> {
+            val matched = table.values
+                .filter { status.isBlank() || it.status.lowercase() == status }
+                .sortedByDescending { it.expiredAt }
+            return pageOf(matched, pageable)
+        }
+}
 
     private class FakeOrderRepo : FakeJpaRepository<PaymentOrder, String>(), PaymentOrderRepository {
         override val table = LinkedHashMap<String, PaymentOrder>()
@@ -107,7 +132,18 @@ class BillingServiceTest {
             order.transactionId = txId
             return 1
         }
-    }
+    
+        override fun searchOrders(status: String, pageable: Pageable): Page<PaymentOrder> {
+            val matched = table.values
+                .filter { status.isBlank() || it.status.lowercase() == status }
+                .sortedByDescending { it.createdAt }
+            return pageOf(matched, pageable)
+        }
+
+        override fun findPaidAmountsSince(paidStatus: String, since: Long): List<Array<Any?>> =
+            table.values.filter { it.status == paidStatus && it.createdAt >= since }
+                .map { arrayOf(it.createdAt, it.amountFen) as Array<Any?> }
+}
 
     /** 设备台账：BillingService 只关心数量，无需构造完整 Device 实体。 */
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
@@ -135,7 +171,14 @@ class BillingServiceTest {
         override fun findByOnlineStatus(onlineStatus: String): List<Device> = emptyList()
         override fun findByOnlineStatusAndLastOnlineAtLessThan(onlineStatus: String, ts: Long): List<Device> = emptyList()
         override fun findByLastActiveAtGreaterThan(since: Long): List<Device> = emptyList()
-    }
+    
+        override fun countOnlineSince(staleCut: Long): Long = table.values.count {
+            it.onlineStatus == "ONLINE" && it.lastOnlineAt != null && it.lastOnlineAt!! >= staleCut
+        }.toLong()
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     /** 一套内存依赖，各用例独立构造。 */
     private class Fixture(

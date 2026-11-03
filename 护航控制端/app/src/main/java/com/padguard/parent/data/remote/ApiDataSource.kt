@@ -18,6 +18,7 @@ import com.padguard.parent.data.model.SubscriptionDto
 import com.padguard.parent.data.model.SmartShutdownRequest
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import com.padguard.parent.data.api.AlertApi
@@ -384,8 +385,27 @@ class ApiDataSource @Inject constructor(
     override suspend fun sendSmsCode(phone: String): Result<Unit> =
         exec { authApi.sendSmsCode(SendSmsRequest(phone)) }.map { Unit }
 
+    /**
+     * 退出登录。
+     *
+     * 顺序很重要：**先通知服务端，再清本地令牌**。
+     * 服务端收到后会将该账号的 token_version +1，使所有已签发令牌（含其他设备上的）立即失效 ——
+     * 只清本地令牌而不通知服务端，等于"退出登录"只是把钥匙从自己口袋掏出来扔掉，
+     * 那串被记录下来的令牌在过期前依然能开门。
+     *
+     * 但服务端调用是**尽力而为**：网络不通时不能把用户困在登录态里（他可能就是想换账号）。
+     * 因此失败只记日志、仍完成本地登出 —— 这种情况下服务端未吊销，是已知的降级，
+     * 不能因为一次网络抖动就让用户无法退出。
+     */
     override suspend fun logout(): Result<Unit> {
-        runCatching { authApi.logout() } // 尽力通知服务端，失败不影响本地登出
+        try {
+            val resp = authApi.logout()
+            if (!resp.isSuccessful) {
+                Log.w(TAG, "logout: 服务端返回 ${resp.code()}，本地仍继续登出（服务端未吊销令牌）")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "logout: 通知服务端失败，本地仍继续登出（服务端未吊销令牌）", e)
+        }
         tokenManager.clear()
         _deviceListFlow.value = emptyList()
         return Result.success(Unit)
@@ -1367,6 +1387,9 @@ class ApiDataSource @Inject constructor(
 
         private const val POLL_INTERVAL_MS = 10_000L
         private const val ALERT_POLL_INTERVAL_MS = 15_000L
+
+        /** 日志标签（登出时服务端吊销失败只告警，不影响本地登出） */
+        private const val TAG = "ApiDataSource"
     }
 
     // ------------------------------------------------------------------ 订阅与计费

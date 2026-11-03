@@ -2,6 +2,7 @@ package com.padguard.server.repository
 
 import com.padguard.server.domain.*
 import jakarta.persistence.LockModeType
+import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Lock
@@ -403,6 +404,30 @@ interface SubscriptionRepository : JpaRepository<Subscription, String> {
     /** 按订阅状态计数（看板指标：生效中 / 试用） */
     fun countByStatus(status: String): Long
     fun findAllByOrderByExpiredAtDesc(): List<Subscription>
+
+    /** 套餐分布：按 plan 分组计数（仪表盘饼图；原来读全表到内存里 groupBy） */
+    @Query("select s.plan, count(s) from Subscription s group by s.plan")
+    fun countGroupedByPlan(): List<Array<Any?>>
+
+    /** 指定时刻之后创建的订阅，只取创建时间（仪表盘趋势分桶用） */
+    @Query("select s.createdAt from Subscription s where s.createdAt >= :since")
+    fun findCreatedAtSince(@Param("since") since: Long): List<Long>
+
+    /**
+     * 后台订阅列表：状态过滤与分页下推。
+     *
+     * 改造前是 `findAllByOrderByExpiredAtDesc()` 全表 → 内存过滤 → 内存分页，
+     * 订阅表随家长增长只增不减，翻一页要把整表读进堆。
+     * 状态参数用空串表示"不过滤"（与 [UserRepository.searchParents] 同口径）。
+     */
+    @Query(
+        """
+        select s from Subscription s
+        where (:status = '' or lower(s.status) = :status)
+        order by s.expiredAt desc
+        """
+    )
+    fun searchSubscriptions(@Param("status") status: String, pageable: Pageable): Page<Subscription>
 }
 
 @Repository
@@ -412,6 +437,41 @@ interface PaymentOrderRepository : JpaRepository<PaymentOrder, String> {
     fun findByUserIdAndStatus(userId: String, status: String): List<PaymentOrder>
     /** 全量订单（后台计费报表用），按创建时间倒序 */
     fun findAllByOrderByCreatedAtDesc(): List<PaymentOrder>
+
+    /**
+     * 后台订单列表：状态过滤与分页下推。
+     *
+     * 改造前 `findAllByOrderByCreatedAtDesc()` 全表 → 内存过滤 → 内存分页。
+     * 订单表是只增不减的流水表，运营每翻一页都要把历史全部订单读进堆。
+     */
+    @Query(
+        """
+        select o from PaymentOrder o
+        where (:status = '' or lower(o.status) = :status)
+        order by o.createdAt desc
+        """
+    )
+    fun searchOrders(@Param("status") status: String, pageable: Pageable): Page<PaymentOrder>
+
+    /**
+     * 指定时刻之后入账的**已支付**订单，只取（创建时间, 金额）两列。
+     *
+     * 仪表盘与计费页原来各自把订单全表拉进内存：一次 dashboard 请求甚至要拉两遍
+     * （本月收入一遍、近 6 月序列又一遍）。两遍之间若有订单入账，
+     * 页面就会出现"本月营收 ¥X，但营收曲线最后一点是 ¥Y"的自相矛盾 ——
+     * 合并为一次窗口查询后，两个数字必然出自同一快照。
+     *
+     * 只取两列而不是实体：分桶在 Kotlin 侧按月做（时区口径必须服务端说了算，
+     * 而 H2/MySQL/PostgreSQL 的按月日期函数互不兼容），但不需要订单的其余二十个字段。
+     */
+    @Query(
+        "select o.createdAt, o.amountFen from PaymentOrder o " +
+            "where o.status = :paidStatus and o.createdAt >= :since"
+    )
+    fun findPaidAmountsSince(
+        @Param("paidStatus") paidStatus: String,
+        @Param("since") since: Long
+    ): List<Array<Any?>>
 
     /**
      * 原子抢占：仅当订单仍为 PENDING 时置为 PAID，返回受影响行数（1=抢占成功，0=已被处理）。

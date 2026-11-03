@@ -15,6 +15,7 @@ import com.padguard.server.repository.AuditLogRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.AdminPermissionService
 import org.slf4j.LoggerFactory
+import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
@@ -89,31 +90,62 @@ class AdminAuditService(
     fun auditPage(adminId: String, area: String?, limit: Int? = null): AuditPageDto {
         requireRead(adminPerm, adminId, "audit")
         val effectiveLimit = (limit ?: AUDIT_MAX_ROWS).coerceIn(1, AUDIT_EXPORT_MAX_ROWS)
-        val admins = adminRepository.findAll().associateBy { it.id }
-        val users = userRepository.findAll().associateBy { it.id }
-        val rows = auditLogRepository.findAllByOrderByCreatedAtDesc()
-        // 领域派生依赖 action 解析，无法下推到 SQL，只能在内存里判定；
-        // 由于 findAll 已按时间倒序，先过滤再 take 得到的仍是"该领域最近的记录"。
-        val matched = rows.mapNotNull { log ->
-            val meta = resolveAuditAction(log.action)
-            if (!area.isNullOrBlank() && meta.first != area) return@mapNotNull null
+
+        /*
+         * 领域过滤、排序、截断全部下推数据库。
+         *
+         * 改造前是 `findAllByOrderByCreatedAtDesc()` 整表 + 内存过滤 + 内存 take，
+         * 外加 `userRepository.findAll()` 把**全部家长**读进内存，只为给这一页里的
+         * 最多 200 行补一个显示名。审计表是全项目增长最快的表之一：
+         * 这个页面的内存占用会随运营时间线性上升，而它看上去只是"一个列表页"。
+         *
+         * 领域在库里没有独立列（由 action 派生），所以先把领域反查成 action 集合
+         * 再下推 `action in (...)`。这样"先过滤再截断"的语义仍成立：
+         * 拿到的是该领域最近的 N 条，而不是"最近 N 条里恰好属于该领域的几条"。
+         */
+        val areaKey = area?.trim()?.takeIf { it.isNotBlank() }
+        val actions = areaKey?.let { auditActionsOf(it) }
+        if (actions != null && actions.isEmpty()) {
+            // 未知领域：如实返回空，不能退化成"不过滤"
+            log.warn("auditPage: unknown area '{}', returning empty page", areaKey)
+            return AuditPageDto(emptyList(), truncated = false, maxRows = effectiveLimit, total = 0)
+        }
+
+        val pageable = PageRequest.of(0, effectiveLimit)
+        val page = if (actions == null) {
+            auditLogRepository.findAllByOrderByCreatedAtDesc(pageable)
+        } else {
+            auditLogRepository.findByActionInOrderByCreatedAtDesc(actions, pageable)
+        }
+        val total = page.totalElements.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
+        // 只为这一页涉及的 actor 补显示名：manager 表很小，家长表可能很大，都不该整表读。
+        val actorIds = page.content.mapNotNull { it.userId }.distinct()
+        val admins = if (actorIds.isEmpty()) emptyMap() else
+            adminRepository.findAllById(actorIds).associateBy { it.id }
+        val parentIds = actorIds.filter { !admins.containsKey(it) }
+        val users = if (parentIds.isEmpty()) emptyMap() else
+            userRepository.findAllById(parentIds).associateBy { it.id }
+
+        val items = page.content.map { logRow ->
+            val meta = resolveAuditAction(logRow.action)
             val actorName = when {
-                log.userId != null && admins.containsKey(log.userId) -> admins[log.userId]!!.username
-                log.userId != null && users.containsKey(log.userId) -> users[log.userId]!!.phone
-                else -> log.userId ?: "system"
+                logRow.userId != null && admins.containsKey(logRow.userId) -> admins[logRow.userId]!!.username
+                logRow.userId != null && users.containsKey(logRow.userId) -> users[logRow.userId]!!.phone
+                else -> logRow.userId ?: "system"
             }
             AuditItem(
-                id = log.id, time = fmt(log.createdAt) ?: "", admin = actorName,
-                action = log.action, actionName = meta.second, area = meta.first,
-                target = log.targetId ?: log.detail?.take(40) ?: "",
-                ip = log.ip, result = log.result.lowercase()
+                id = logRow.id, time = fmt(logRow.createdAt) ?: "", admin = actorName,
+                action = logRow.action, actionName = meta.second, area = meta.first,
+                target = logRow.targetId ?: logRow.detail?.take(40) ?: "",
+                ip = logRow.ip, result = logRow.result.lowercase()
             )
         }
         return AuditPageDto(
-            items = matched.take(effectiveLimit),
-            truncated = matched.size > effectiveLimit,
+            items = items,
+            truncated = total > effectiveLimit,
             maxRows = effectiveLimit,
-            total = matched.size
+            total = total
         )
     }
 

@@ -78,6 +78,32 @@ interface UserRepository : JpaRepository<User, String> {
         @Param("planMode") planMode: String,
         pageable: Pageable
     ): Page<User>
+
+    /**
+     * 按状态计数，**NULL 视作 active**。
+     *
+     * 仪表盘原来是把全表读进内存后 `count { (it.status ?: "active") == ... }`。
+     * 迁移到这里时最容易被忽略的一点：派生查询 `countByStatus("active")` 与内存口径**不等价** ——
+     * `status` 是后加的列，存量行是 NULL，SQL 里 `status = 'active'` 不会命中 NULL。
+     * 直接用会得到"家长总数 1000、正常 980、冻结 0"这种自相矛盾的看板
+     * （差的 20 个既不算正常也不算冻结），且只在有历史数据的库上出现。
+     */
+    @Query("select count(u) from User u where coalesce(u.status, 'active') = :status")
+    fun countByStatusOrNullAsActive(@Param("status") status: String): Long
+
+    /** 区域分布：按 region 分组计数（NULL / 空串由调用方归并为"未填写"） */
+    @Query("select u.region, count(u) from User u group by u.region")
+    fun countGroupedByRegion(): List<Array<Any?>>
+
+    /**
+     * 指定时刻之后创建的账号，**只取创建时间这一列**。
+     *
+     * 仪表盘的"近 7 天新增"在 Kotlin 侧按自然日分桶（时区口径必须服务端说了算，
+     * 不能交给数据库的日期函数），但只需要时间戳本身。拉整行实体比拉一个 bigint 宽十几倍，
+     * 而这些行随即被丢弃。
+     */
+    @Query("select u.createdAt from User u where u.createdAt >= :since")
+    fun findCreatedAtSince(@Param("since") since: Long): List<Long>
 }
 
 @Repository
@@ -169,6 +195,23 @@ interface DeviceRepository : JpaRepository<Device, String> {
         @Param("staleCut") staleCut: Long,
         pageable: Pageable
     ): Page<Device>
+
+    /**
+     * 在线设备数（与 [com.padguard.server.service.online] 同一口径）。
+     *
+     * 仪表盘原来读全表设备再逐条比对心跳，只为得到这一个数字。
+     * `lastOnlineAt is not null` 不能省：NULL 在 SQL 里参与 `>=` 比较恒为 UNKNOWN，
+     * 不加也恰好不会命中，但显式写出来是为了让"离线设备一定不计入"这件事可被审查。
+     */
+    @Query(
+        "select count(d) from Device d where d.onlineStatus = 'ONLINE' " +
+            "and d.lastOnlineAt is not null and d.lastOnlineAt >= :staleCut"
+    )
+    fun countOnlineSince(@Param("staleCut") staleCut: Long): Long
+
+    /** 指定时刻之后创建的设备，只取创建时间（仪表盘趋势分桶用，见 UserRepository 同名方法） */
+    @Query("select d.createdAt from Device d where d.createdAt >= :since")
+    fun findCreatedAtSince(@Param("since") since: Long): List<Long>
 }
 
 @Repository
@@ -377,8 +420,31 @@ interface UsageLogRepository : JpaRepository<UsageLog, String> {
 interface AuditLogRepository : JpaRepository<AuditLog, String> {
     fun findByUserIdAndCreatedAtBetween(userId: String, start: Long, end: Long): List<AuditLog>
     fun findByDeviceIdAndCreatedAtBetween(deviceId: String, start: Long, end: Long): List<AuditLog>
-    /** 后台审计视图：全量按时间倒序（数据量可控，取前 N 在 Service 层截断） */
+    /**
+     * 后台审计视图：全量按时间倒序。
+     *
+     * **仅用于确实需要全部记录的场景**。后台列表请走下面的分页重载 ——
+     * 审计日志是全项目增长最快的表之一，把它整表读进内存只为了展示最近 200 条，
+     * 会让后台在运营一段时间后越来越慢，且慢得没有任何征兆。
+     */
     fun findAllByOrderByCreatedAtDesc(): List<AuditLog>
+
+    /**
+     * 后台审计列表：数据库侧倒序 + LIMIT，只取回要展示的那一页。
+     *
+     * 返回 [Page] 而不是 [List]：`AuditPageDto` 要如实告诉前端"总共匹配多少条、
+     * 是不是被截断了"，这需要 count，而 count 必须在过滤条件下算，不能拿"页大小"充数。
+     */
+    fun findAllByOrderByCreatedAtDesc(pageable: Pageable): Page<AuditLog>
+
+    /**
+     * 按动作集合过滤 + 倒序 + LIMIT。
+     *
+     * 领域（parents / devices / ...）在库里没有单独一列，它是由 action 派生的。
+     * 想在 SQL 里按领域过滤，只能把领域反向展开成 action 列表（见 `auditActionsOf`）。
+     * 这正是把 `resolveAuditAction` 从 when 改成表驱动的原因：正反查同源，不会漂移。
+     */
+    fun findByActionInOrderByCreatedAtDesc(actions: Collection<String>, pageable: Pageable): Page<AuditLog>
 
     /**
      * 分页查询（倒序 + 可选 action 过滤），供家长端审计页面使用。

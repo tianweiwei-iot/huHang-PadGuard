@@ -63,6 +63,18 @@ abstract class FakeJpaRepository<T : Any, ID : Any> : JpaRepository<T, ID> {
 
     override fun findAll(pageable: Pageable): Page<T> = PageImpl(findAll(), pageable, count())
 
+    /**
+     * 内存分页：假仓储实现"SQL 分页"方法时复用。
+     *
+     * 刻意与真实数据库的 LIMIT/OFFSET 语义对齐（含 offset 越界返回空页、total 为过滤后总数），
+     * 否则测试里的分页断言会与线上行为不一致 —— 那种测试通过等于没测。
+     */
+    protected fun <R : T> pageOf(matched: List<R>, pageable: Pageable): Page<R> {
+        val from = pageable.offset.coerceAtMost(matched.size.toLong()).toInt()
+        val to = (from + pageable.pageSize).coerceAtMost(matched.size)
+        return PageImpl(matched.subList(from, to), pageable, matched.size.toLong())
+    }
+
     override fun <S : T> saveAndFlush(entity: S): S = save(entity)
 
     override fun <S : T> saveAllAndFlush(entities: MutableIterable<S>): MutableList<S> = saveAll(entities)

@@ -19,6 +19,8 @@ import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.verify
 import java.time.Instant
+import org.springframework.data.domain.Page
+import org.springframework.data.domain.Pageable
 
 /**
  * 延时审批服务单元测试（根因修复：申请≠生效，必须家长审批）。
@@ -248,6 +250,13 @@ class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
         table.values.filter { it.onlineStatus == onlineStatus && (it.lastOnlineAt ?: Long.MAX_VALUE) < ts }
     override fun findByDeviceSn(deviceSn: String): List<Device> = emptyList()
     override fun findByLastActiveAtGreaterThan(since: Long): List<Device> = emptyList()
+
+    override fun countOnlineSince(staleCut: Long): Long = table.values.count {
+        it.onlineStatus == "ONLINE" && it.lastOnlineAt != null && it.lastOnlineAt!! >= staleCut
+    }.toLong()
+
+    override fun findCreatedAtSince(since: Long): List<Long> =
+        table.values.map { it.createdAt }.filter { it >= since }
 }
 
 class FakeUsageDelayRepo : FakeJpaRepository<UsageDelayTicket, String>(), UsageDelayRepository {

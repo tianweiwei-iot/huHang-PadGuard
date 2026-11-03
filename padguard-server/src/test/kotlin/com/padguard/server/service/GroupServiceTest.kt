@@ -10,6 +10,8 @@ import com.padguard.server.repository.DeviceRepository
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
+import org.springframework.data.domain.Page
+import org.springframework.data.domain.Pageable
 
 /**
  * 设备分组服务的单元测试。
@@ -54,7 +56,14 @@ class GroupServiceTest {
         override fun findByOnlineStatusAndLastOnlineAtLessThan(onlineStatus: String, ts: Long): List<Device> = emptyList()
         override fun findByDeviceSn(deviceSn: String): List<Device> = emptyList()
         override fun findByLastActiveAtGreaterThan(since: Long): List<Device> = emptyList()
-    }
+    
+        override fun countOnlineSince(staleCut: Long): Long = table.values.count {
+            it.onlineStatus == "ONLINE" && it.lastOnlineAt != null && it.lastOnlineAt!! >= staleCut
+        }.toLong()
+
+        override fun findCreatedAtSince(since: Long): List<Long> =
+            table.values.map { it.createdAt }.filter { it >= since }
+}
 
     private fun svc(): GroupService {
         return GroupService(FakeDeviceGroupRepo(), FakeDeviceRepo())
