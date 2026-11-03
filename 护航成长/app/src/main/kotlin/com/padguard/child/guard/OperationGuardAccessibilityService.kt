@@ -3,6 +3,7 @@ package com.padguard.child.guard
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import com.padguard.child.capture.AccessibilityScreenshot
@@ -32,11 +33,12 @@ import javax.inject.Inject
 /**
  * 操作闸门无障碍服务（软拦截核心）。
  *
- * ## 它现在拦三类界面
+ * ## 它现在拦四类界面
  * | 类别 | 判定依据 | 是否可关闭 |
  * |---|---|---|
  * | 改系统设置 | 各 ROM 设置包名 | 不可（否则孩子关掉无障碍即解除管控） |
  * | 安装 / 卸载应用 | `packageinstaller` 子串 + 各 ROM 安全中心 | 可（家长端开关「安装/卸载确认需密码」，默认拦截） |
+ * | 桌面长按卸载入口 | 默认桌面包名 + 非主页窗口类名（[UninstallEntryDetector]） | 可（同上开关） |
  * | 打开受管控应用 | [AppGuardPolicyStore] 的白/黑名单 | 可（家长端开关，默认只拦前两类） |
  * | 非 DO 防卸载(自检) | 设置包 + 应用详情页类名，且设备管理员已激活 | 不可（非 DO 设备靠设备管理员 + onDisableRequested 兜底，与操作密码无关） |
  *
@@ -145,9 +147,22 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     /** 锁屏看门狗是否已启动（onServiceConnected 可能多次调用，防重复起协程）。 */
     private var watchdogStarted = false
 
+    /**
+     * 当前默认桌面的包名与 HOME Activity 类名（用于识别「桌面长按弹出的卸载菜单」）。
+     *
+     * 动态解析而不是硬编码包名：华为/小米/OPPO 的桌面包名各不相同，硬编码必然漏，
+     * 而漏一个就等于"这台机器上长按卸载可以绕过密码"（本次事故正是这条）。
+     * 解析不到时保持 null，[UninstallEntryDetector] 会退化为只按类名判，绝不误拦整个桌面。
+     */
+    private var launcherPackage: String? = null
+    private var launcherHomeClass: String? = null
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         Logger.i(TAG) { "operation guard accessibility service connected" }
+        // 解析默认桌面：长按图标弹出的"卸载"菜单属于桌面包的另一个窗口，
+        // 闸门必须能认出"这是桌面在弹浮层"，否则这条最常用的卸载通路会被直接放行。
+        refreshLauncherInfo()
         // 写入存活心跳：供 GuardA11y.isAlive / TamperDetector 区分「进程被系统杀掉」与「用户手动关闭」，
         // 避免误报「操作闸门被人为关闭」。
         GuardA11y.markAlive(this)
@@ -315,7 +330,16 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 当前前台不在管控范围 → 放行。
         // S11：判定提前到密码闸状态检查之前 —— 拦不拦是「这个界面是否要保护」的问题，
         // 怎么拦是「密码闸处于什么状态」的问题，两者解耦后，密码未设置时设置页仍有兜底拦截。
-        val reason = decide(pkg) ?: return
+        val className = event.className?.toString().orEmpty()
+        val reason = decide(pkg, className) ?: return
+
+        // 拦截到「装/卸载入口」时立刻给家长留痕：孩子尝试卸载是最需要家长介入的信号之一，
+        // 只在行为流水里记一笔等于没人看得见（与 PadGuardDeviceAdminReceiver 同口径）。
+        if (reason == REASON_INSTALLER || reason == REASON_UNINSTALL_ENTRY) {
+            uninstallDefense.reportUninstallAttempt(
+                if (reason == REASON_UNINSTALL_ENTRY) "launcher:$pkg/$className" else "installer:$pkg"
+            )
+        }
 
         // ---- 非 DO 防卸载兜底（不依赖操作密码）----
         // 设备管理器已激活时，系统会在卸载本应用前先要求「取消设备管理员」，
@@ -393,10 +417,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             lastTriggerAt = now
             lastTriggerPkg = pkg
             Logger.i(TAG) { "guarded foreground: $pkg reason=$reason, guard password not set, bouncing back" }
-            // 设置页用 BACK（部分 ROM 用 HOME 会卡在最近任务）；受管控应用 / 安装器用 HOME。
-            performGlobalAction(
-                if (reason == REASON_SETTINGS) GLOBAL_ACTION_BACK else GLOBAL_ACTION_HOME
-            )
+            // 设置页 / 桌面卸载浮层用 BACK（关掉浮层本身；HOME 会留下那个弹窗）；
+            // 受管控应用 / 安装器用 HOME。
+            performGlobalAction(bounceActionFor(reason))
             // 家长要求「卸载需密码」却尚未设密码时，把这条"仅顶回、不告警"的盲区升级为高危告警，
             // 让"密码形同虚设"这一最危险状态在家长端可见（节流 1h，避免刷屏）。
             if (appGuard.uninstallNeedsPassword()) uninstallDefense.reportUninstallGateMissing()
@@ -422,9 +445,7 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             // 锁定态没有可弹的验证框，此时才需要把应用顶回桌面，避免"浮层下应用仍可用"的错觉
             if (lockedOut) performGlobalAction(GLOBAL_ACTION_HOME)
         } else {
-            performGlobalAction(
-                if (reason == REASON_SETTINGS) GLOBAL_ACTION_BACK else GLOBAL_ACTION_HOME
-            )
+            performGlobalAction(bounceActionFor(reason))
         }
         // 2) 仅在未锁定时拉起验证界面，让家长可以放行（锁定态跳过，避免狂点弹框）
         if (!lockedOut) {
@@ -509,11 +530,60 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * 各类被拦界面该用哪个全局动作"顶回"。
+     *
+     * 设置页与桌面浮层用 BACK：前者部分 ROM 用 HOME 会卡在最近任务，
+     * 后者需要把弹窗本身收起来（HOME 只是回到桌面，弹窗可能还在）。
+     * 安装器与受管控应用用 HOME：BACK 之后能经最近任务回跳。
+     */
+    private fun bounceActionFor(reason: String): Int =
+        if (reason == REASON_SETTINGS || reason == REASON_UNINSTALL_ENTRY) {
+            GLOBAL_ACTION_BACK
+        } else {
+            GLOBAL_ACTION_HOME
+        }
+
+    /**
+     * 解析当前默认桌面（包名 + HOME Activity 类名）。
+     *
+     * 用 `resolveActivity(HOME)` 而不是 `getHomeActivities`（API 33 已移除）；
+     * 解析失败或桌面就是本应用（KidHome）时置 null —— 此时判定器只按类名识别卸载界面，
+     * 宁可少拦一层浮层，也绝不把整个桌面当成卸载入口反复弹密码框（那会让设备没法用）。
+     */
+    private fun refreshLauncherInfo() {
+        runCatching {
+            val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            // 首选"默认桌面"：MATCH_DEFAULT_ONLY 在设置了默认桌面时必然命中。
+            var info = packageManager
+                .resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY)
+                ?.activityInfo
+            // 兜底：设备没设默认桌面时 resolve 返回 null（部分定制 ROM 装好后一直弹选择框），
+            // 此时取唯一候选桌面。仍解析不到就放弃识别（宁可不拦，也不能把桌面误判成卸载入口）。
+            if (info == null) {
+                info = packageManager
+                    .queryIntentActivities(homeIntent, PackageManager.MATCH_ALL)
+                    .mapNotNull { it.activityInfo }
+                    .firstOrNull { !it.packageName.startsWith(OWN_PACKAGE_PREFIX) }
+            }
+            if (info != null && !info.packageName.startsWith(OWN_PACKAGE_PREFIX)) {
+                launcherPackage = info.packageName
+                launcherHomeClass = info.name
+                Logger.i(TAG) { "uninstall-entry detection armed for launcher=${info.packageName}/${info.name}" }
+            } else {
+                launcherPackage = null
+                launcherHomeClass = null
+            }
+        }.onFailure { Logger.w(TAG, it) { "resolve default launcher failed" } }
+    }
+
+    /**
      * 判定当前前台包名是否需要拦截。
      *
+     * @param pkg 前台包名
+     * @param className 前台窗口类名（仅用于识别「桌面弹出的卸载浮层」，不读取任何界面内容）
      * @return 拦截原因；`null` 表示放行。
      */
-    private fun decide(pkg: String): String? = runCatching {
+    private fun decide(pkg: String, className: String): String? = runCatching {
         // 1) 改系统设置 —— 不可关闭：这里能禁用本无障碍服务，放开等于管控自毁
         if (pkg in GUARDED_SETTINGS_PACKAGES) return@runCatching REASON_SETTINGS
         // 2) 安装 / 卸载确认 —— 家长可在控制端开关「安装/卸载确认需密码」；
@@ -521,6 +591,14 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         if (AppGuardPolicyStore.isInstallerPackage(pkg) &&
             (appGuard.installNeedsPassword() || appGuard.uninstallNeedsPassword())
         ) return@runCatching REASON_INSTALLER
+        // 2b) 「桌面长按图标 → 卸载」—— 2026-11-02 事故的真实入口。
+        //     这条路径的窗口事件包名是**桌面启动器**，既不是设置也不是安装器，
+        //     旧判定直接放行 → 孩子长按一次就把管控删干净，全程没有密码框。
+        //     判定器只比对包名与窗口类名（见 UninstallEntryDetector 的类注释），
+        //     不读界面内容，因此不违反无障碍设置项里对外承诺的隐私口径。
+        if (appGuard.uninstallNeedsPassword() &&
+            UninstallEntryDetector.isUninstallSurface(pkg, className, launcherPackage, launcherHomeClass)
+        ) return@runCatching REASON_UNINSTALL_ENTRY
         // 3) 应用访问放行：家长刚在门禁里针对**这个包**验证通过 → 放行。
         //    这是"打开这一个应用"的授权，与设备操作解锁窗口（isUnlockedNow）无关：
         //    它不放行安装/卸载/改设置，也不放行其它应用，到期即失效。
@@ -579,6 +657,8 @@ class OperationGuardAccessibilityService : AccessibilityService() {
 
         private const val REASON_SETTINGS = "settings"
         private const val REASON_INSTALLER = "installer"
+        /** 桌面长按图标弹出的卸载浮层（包名是桌面，不是安装器）——事故入口，见 decide() 2b */
+        private const val REASON_UNINSTALL_ENTRY = "uninstall-entry"
         private const val REASON_CONTROLLED_APP = "controlled-app"
         /** 取消授权的应用（hidden）：无条件硬拦截，需家长密码门禁（最严） */
         private const val REASON_HIDDEN_APP = "hidden-app"

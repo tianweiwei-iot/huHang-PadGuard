@@ -887,6 +887,10 @@ class GuardService : Service() {
             // 自身常驻加固周期自愈：已绑定时把 DO/PO 下的系统级限制重新压回，
             // 对抗部分 ROM 在重启/省电策略下悄悄重置用户限制。
             var nextSelfProtect = 0L
+            // 卸载防护就绪度自检：把"卸载到底需不需要密码"周期算一遍，
+            // 三层（DO / 设备管理员 / 无障碍+密码）全空时报高危告警并通知栏明示。
+            // 首次立刻做：设备刚装好、孩子还没动手之前就该知道防护有没有生效。
+            var nextShieldCheck = 0L
             // 看屏中无障碍主路看门狗：会话活跃时高频静默核验，EMUI 杀服务即秒级自愈，
             // 从源头阻止"权限丢失 → 落回投影授权框"。无看屏会话时不触发，零额外开销。
             var nextA11yLiveHeal = 0L
@@ -983,6 +987,17 @@ class GuardService : Service() {
                 if (boundNow.get() && now >= nextSelfProtect) {
                     runSafely("selfProtect") { selfProtection.applyBaseline() }
                     nextSelfProtect = now + SELF_PROTECT_INTERVAL_MS
+                }
+
+                // ---------- 「卸载需密码」就绪度自检 ----------
+                // 2026-11-02 事故：DO 没有、设备管理员没激活、无障碍没连上，三条通道全空，
+                // 孩子长按桌面图标一次就把管控删掉，而家长端/孩子端没有任何一处显示"防护为 0"。
+                // 这里周期算一次真实防护强度：弱到需要家长介入时上报告警 + 置位重新授权，
+                // 并驱动通知栏文案（见 buildNotification）。只有已绑定时才有意义。
+                if (boundNow.get() && now >= nextShieldCheck) {
+                    runSafely("uninstallShield") { uninstallDefense.checkShield() }
+                    nextShieldCheck = now + UNINSTALL_SHIELD_CHECK_INTERVAL_MS
+                    updateNotification()
                 }
 
                 // ---------- 看屏中无障碍主路看门狗（权限钉死的根因预防） ----------
@@ -2113,9 +2128,18 @@ class GuardService : Service() {
             }
         )
 
+        // 防护未就绪时，通知栏要**明说**，不能让家长以为"守护中"就等于"卸载需要密码"。
+        // 事故现场就是这样：通知写着"护航成长守护中"，孩子长按图标一次就全删干净了。
+        val shield = uninstallDefense.shield
+        val text = if (shield != null && shield.needsParentAttention) {
+            getString(R.string.guard_notification_text_unguarded)
+        } else {
+            getString(R.string.guard_notification_text, modeText, admin.controlMode.value.name)
+        }
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.guard_notification_title))
-            .setContentText(getString(R.string.guard_notification_text, modeText, admin.controlMode.value.name))
+            .setContentText(text)
             .setSmallIcon(R.drawable.ic_guard_notification)
             .setContentIntent(tapIntent)
             .setOngoing(true)
@@ -2410,11 +2434,22 @@ class GuardService : Service() {
          * 原为 60s：远程锁屏 / 解锁 / 截屏 / 实时看屏首帧都要等这么久，
          * 是"实时性差"的第一根因。压到 3s：单次请求/响应仅几十字节，
          * 局域网 RTT <5ms、外网 <100ms，代价可忽略，最坏延迟从 60s 降到 ~3s。
+         *
+         * 这条循环现在**同时是服务端的"存活信号源"**：服务端把每次已鉴权的 HTTP 请求
+         * 都当作心跳等价信号（见服务端 DevicePresenceRegistry），据此做秒级上下线判定。
+         * 因此这个间隔就是家长端"设备离线"的检测粒度 —— 不要随手调大。
          */
         private const val COMMAND_PULL_INTERVAL_MS = 3_000L
 
-        /** 离线时的拉取间隔（放慢，避免断网期间高频失败刷日志） */
-        private const val COMMAND_PULL_IDLE_MS = 10_000L
+        /**
+         * 离线时的拉取间隔（放慢，避免断网期间高频失败刷日志）。
+         *
+         * 为什么是 5s 而不是更长：`online` 标记取自 MQTT 连接态，MQTT 掉线但 HTTP 正常时
+         * 会落到这条慢速分支。服务端把每次已鉴权 HTTP 请求当作存活信号，并以约 5.4s
+         * 无信号判离线；若这里仍是 10s，设备会被判离线、下一次拉取又拉回在线，
+         * 家长端就会看到"离线/在线"反复横跳。5s 保证降级态下存活信号仍然连续。
+         */
+        private const val COMMAND_PULL_IDLE_MS = 5_000L
 
         /** 策略自检间隔：把被绕过的限制重新压回来 */
         private const val SELF_CHECK_INTERVAL_MS = 5 * 60_000L
@@ -2429,6 +2464,13 @@ class GuardService : Service() {
          * 对抗部分 ROM 在重启 / 省电策略下悄悄重置用户限制；操作均为幂等 no-op，开销可忽略。
          */
         private const val SELF_PROTECT_INTERVAL_MS = 5 * 60_000L
+        /**
+         * 卸载防护就绪度自检间隔。
+         *
+         * 取 10 分钟：家长在设置里停用设备管理员、或 ROM 把无障碍服务关掉这类事件
+         * 没有广播可监听，只能靠轮询发现；再密就是无谓的 binder 调用（每次都要问 DPM）。
+         */
+        private const val UNINSTALL_SHIELD_CHECK_INTERVAL_MS = 10 * 60_000L
         /** 看屏中无障碍主路看门狗节拍：会话活跃时每 10s 静默核验并自愈一次 */
         private const val A11Y_LIVE_HEAL_INTERVAL_MS = 10_000L
 

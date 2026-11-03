@@ -14,6 +14,12 @@
     <string name="guard_notification_title">护航成长守护中</string>
     <!-- 参数 1：连接状态文案；参数 2：管控模式（FAMILY / CAMPUS 等） -->
     <string name="guard_notification_text">状态：%1$s · 模式：%2$s</string>
+    <!--
+      卸载防护未就绪时的通知文案（UninstallDefenseModule.checkShield 驱动）。
+      用途：事故现场通知栏写着"守护中"，孩子却长按图标一次就卸载成功 ——
+      文案必须把"防护没生效"这个事实摆出来，而不是继续声称在守护。
+    -->
+    <string name="guard_notification_text_unguarded">卸载防护未开启：请家长激活设备管理员或开启无障碍服务</string>
 
     <!-- 操作闸门无障碍服务描述（设置 → 无障碍 列表项展示，必须说清用途） -->
     <string name="guard_accessibility_description">护航成长「操作密码闸门」需要此服务：当孩子尝试进入系统设置、卸载应用或安装未知来源应用时，服务会弹出家长密码框要求输入密码，未输入正确密码无法继续。本服务仅读取前台应用包名用于判断是否需要拦截，不会读取任何界面内容或隐私数据。</string>
