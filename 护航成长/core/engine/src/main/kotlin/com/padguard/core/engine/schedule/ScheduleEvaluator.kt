@@ -50,6 +50,10 @@ class ScheduleEvaluator @Inject constructor(
         // 否则关掉开关后孩子端仍会在"可用时段"之外锁屏，与开关语义冲突。
         if (!policy.enabled) return ScheduleVerdict.Unlocked
         if (policy.rules.isEmpty()) return ScheduleVerdict.Unlocked
+        // 畸形规则（"HH:mm" 解析失败/越界）整条丢弃：若混进区间运算，
+        // -1/0 边界会把锁窗或开窗放大成全天（见 ScheduleRule.toMinutes 注释）。
+        val rules = policy.rules.filter { it.isWellFormed() }
+        if (rules.isEmpty()) return ScheduleVerdict.Unlocked
 
         val zone = runCatching { ZoneId.of(policy.timezone) }.getOrElse {
             Logger.w(TAG) { "invalid timezone ${policy.timezone}, fallback to system default" }
@@ -59,14 +63,14 @@ class ScheduleEvaluator @Inject constructor(
         val nowMinutes = now.hour * 60 + now.minute
 
         // UNLOCK 规则优先级高于 LOCK：用于"周末下午 2-4 点允许使用"这类白名单开窗
-        val unlockHit = policy.rules
+        val unlockHit = rules
             .filter { it.action == ScheduleAction.UNLOCK }
             .firstOrNull { matches(it, now.toLocalDate(), nowMinutes) }
         if (unlockHit != null) {
             return ScheduleVerdict.Unlocked
         }
 
-        val lockHit = policy.rules
+        val lockHit = rules
             .filter { it.action == ScheduleAction.LOCK }
             .firstOrNull { matches(it, now.toLocalDate(), nowMinutes) }
             ?: return ScheduleVerdict.Unlocked

@@ -26,10 +26,22 @@ class PolicyModelsTest {
 
     @Test
     fun toMinutesHandlesMalformedInput() {
-        assertEquals(0, ScheduleRule.toMinutes("bad"))
-        assertEquals(0, ScheduleRule.toMinutes(""))
+        // 畸形输入必须返回 -1（无效），不能返回 0：0 等价 00:00，会把 LOCK/UNLOCK 窗口放大成全天
+        assertEquals(-1, ScheduleRule.toMinutes("bad"))
+        assertEquals(-1, ScheduleRule.toMinutes(""))
         // "1:2" -> 1*60 + 2 = 62（无格式校验，仅做容错）
         assertEquals(62, ScheduleRule.toMinutes("1:2"))
+        // 越界值按畸形处理
+        assertEquals(-1, ScheduleRule.toMinutes("25:00"))
+        assertEquals(-1, ScheduleRule.toMinutes("12:60"))
+        // 合法边界
+        assertEquals(0, ScheduleRule.toMinutes("00:00"))
+        assertEquals(23 * 60 + 59, ScheduleRule.toMinutes("23:59"))
+        // 畸形规则可被 isWellFormed 识别并整条丢弃
+        assertFalse(ScheduleRule(start = "bad").isWellFormed())
+        assertTrue(ScheduleRule(start = "21:30", end = "06:30").isWellFormed())
+        // 畸形规则 crossesMidnight 恒 false（不参与跨零点运算）
+        assertFalse(ScheduleRule(start = "bad", end = "06:30").crossesMidnight())
     }
 
     // endregion

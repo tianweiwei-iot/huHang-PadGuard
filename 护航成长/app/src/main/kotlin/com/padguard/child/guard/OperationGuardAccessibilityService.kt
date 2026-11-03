@@ -25,6 +25,7 @@ import com.padguard.core.engine.guard.GuardMasterSwitch
 import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -144,7 +145,13 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     /** 最近一次前台包名（由无障碍窗口事件维护），供锁屏看门狗判断"是否已逃逸到非本应用"。 */
     private var lastForegroundPkg: String? = null
 
-    /** 锁屏看门狗是否已启动（onServiceConnected 可能多次调用，防重复起协程）。 */
+    /** 锁屏看门狗 Job（进程级单例）。 */
+    private var watchdogJob: Job? = null
+
+    /**
+     * 锁屏看门狗是否已启动（onServiceConnected 可能多次调用，防重复起协程）。
+     * 仅作快速短路；真正的防重由 [watchdogJob] 生命周期保证。
+     */
     private var watchdogStarted = false
 
     /**
@@ -218,7 +225,12 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     private fun startLockWatchdog() {
         if (watchdogStarted) return
         watchdogStarted = true
-        scope.launch {
+        // 循环跑在 @ApplicationScope（应用级）上，而本标志是实例级的：无障碍服务被系统
+        // 销毁重建（设置页开关、ROM 重绑、崩溃重启）后，旧循环永不退出、新实例再起一个，
+        // 多次重建后多个 500ms 循环并行轮询（白耗电且加剧锁屏重拉竞态）。
+        // 改为重建时先取消旧 Job 再起新的，任何时刻至多一个循环存活。
+        watchdogJob?.cancel()
+        watchdogJob = scope.launch {
             while (isActive) {
                 delay(LOCK_WATCH_INTERVAL_MS)
                 // 整机管控暂停时不重拉锁屏、不续系统锁：设备应完全可用

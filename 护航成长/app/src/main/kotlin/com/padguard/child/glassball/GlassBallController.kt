@@ -76,6 +76,9 @@ class GlassBallController @Inject constructor(
     private var sessionJob: Job? = null
     private var statusJob: Job? = null
 
+    /** 展示代计数：丢弃 hide() 之后才执行的排队 addView 回调。 */
+    private var generation = 0L
+
     /** 非激活会话的回退数据（UsageStatusProvider 分钟级） */
     @Volatile private var fallbackStatus: UsageStatus? = null
 
@@ -98,15 +101,30 @@ class GlassBallController @Inject constructor(
         // 增量回调：视图侧已完成基准换算，控制器只做窗口平移
         view.onDragDelta = { dx, dy -> onDragDelta(dx, dy) }
         view.onDragEnd = { onDragEnd() }
-        ball = view
 
         val layoutParams = buildLayoutParams()
-        params = layoutParams
+        // 代计数：hide() 发生在 addView 排队执行前后都要求可丢弃陈旧回调。
+        val gen = ++generation
         mainHandler.post {
-            runCatching { wm.addView(view, layoutParams) }
-                .onFailure { Logger.e(TAG, it) { "add glass ball failed" } }
+            synchronized(this@GlassBallController) {
+                if (gen != generation) return@post
+                // ball/params 只在 addView 真正成功后赋值：此前先赋值后加窗，
+                // 一旦 addView 抛异常（窗口 token 失效/ROM 限制/旋转竞态），ball 恒非 null，
+                // 此后所有 show() 在幂等短路处返回 —— 玻璃球（隐藏形态下家长唯一触点）永久消失。
+                runCatching { wm.addView(view, layoutParams) }
+                    .onSuccess {
+                        ball = view
+                        params = layoutParams
+                        startLoops()
+                    }
+                    .onFailure { Logger.e(TAG, it) { "add glass ball failed (will retry on next show())" } }
+            }
         }
+        Logger.i(TAG) { "glass ball show requested" }
+    }
 
+    /** 启动数据订阅与秒级心跳（调用前提：addView 已成功且处于 synchronized 内）。 */
+    private fun startLoops() {
         // 每次展示新建作用域：旧会话被 hide() 回收后，守护服务被系统回收再由看门狗重启时
         // 再次 show() 仍可安全重建（不会向已取消的作用域投递协程）。
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -127,12 +145,14 @@ class GlassBallController @Inject constructor(
                 delay(TICK_INTERVAL_MS)
             }
         }
-        Logger.i(TAG) { "glass ball shown" }
     }
 
     /** 移除玻璃球（幂等）。 */
     @Synchronized
     fun hide() {
+        // 先推进代计数：即使此刻 ball 为 null（addView 尚在排队），
+        // 排队中的展示回调也会因代不匹配被丢弃，不会出现"刚 hide 完球又冒出来"。
+        generation++
         if (ball == null) return
         val view = ball
         tickerJob?.cancel(); tickerJob = null

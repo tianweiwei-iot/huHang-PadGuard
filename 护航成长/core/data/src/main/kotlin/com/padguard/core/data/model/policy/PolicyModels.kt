@@ -69,11 +69,16 @@ data class PolicyPackage(
 ) {
 
     /**
-     * 局部合并：以 [incoming] 中显式提供的字段为准。
+     * 合并升级：版本更高时**整体替换**全部策略段（而非局部合并）。
      *
-     * 由于 kotlinx.serialization 在无默认值区分时无法判断"字段是否出现"，
-     * 这里约定：服务端若要清空某对象策略，需下发显式的空对象（如 `"web": {}`），
-     * 此时按默认值处理；若要沿用旧值，则整个字段不下发。
+     * ⚠️ 契约说明（曾经的自相矛盾，勿再回改）：
+     * 早期注释声称"字段不下发即沿用旧值"，但 kotlinx.serialization 反序列化后
+     * 缺失字段已回落默认值，`copy` 又是全量替换 —— 若服务端真发增量包，
+     * 未出现的管控段（时段锁、黑名单、限额）会被宽松默认值静默覆盖且版本号反而前进。
+     * 现契约：**服务端必须始终下发完整策略包**（PolicyService.applyMinorMode 的
+     * 读旧包改字段重序列化、PolicyExtensionService.buildPolicyPackage 的全段组装、
+     * createDefault 均满足），本函数因此做整体替换，并对版本回退/同版本做幂等短路。
+     * 若未来要支持真正的增量下发，必须改用 JsonElement 级"字段是否出现"判定，而非本函数。
      */
     fun mergeWith(incoming: PolicyPackage): PolicyPackage {
         if (incoming.version <= version) return this
@@ -416,19 +421,36 @@ data class ScheduleRule(
     @SerialName("end") val end: String = "23:59",
     @SerialName("action") val action: ScheduleAction = ScheduleAction.UNLOCK
 ) {
-    /** 起止时间换算为"当日 0 点起的分钟数"，便于比较 */
+    /** 起止时间换算为"当日 0 点起的分钟数"，便于比较；畸形输入返回 -1（见 [toMinutes]） */
     fun startMinutes(): Int = toMinutes(start)
     fun endMinutes(): Int = toMinutes(end)
 
-    /** 是否为跨零点区间（如 21:30–07:00 就寝时段） */
-    fun crossesMidnight(): Boolean = endMinutes() <= startMinutes()
+    /** 规则时间是否可解析。畸形规则必须整条丢弃，绝不能拿 -1/0 参与区间运算（见 [toMinutes]）。 */
+    fun isWellFormed(): Boolean = startMinutes() >= 0 && endMinutes() >= 0
+
+    /** 是否为跨零点区间（如 21:30–07:00 就寝时段）。畸形规则恒 false（调用方应先用 [isWellFormed] 过滤）。 */
+    fun crossesMidnight(): Boolean {
+        val s = startMinutes(); val e = endMinutes()
+        if (s < 0 || e < 0) return false
+        return e <= s
+    }
 
     companion object {
+        /**
+         * 解析 "HH:mm" 为当日 0 点起的分钟数。
+         *
+         * **畸形输入必须返回 -1（"无效"），不能返回 0**：0 等价于 00:00，
+         * LOCK 规则的 start 畸形会把锁窗放大成全天、UNLOCK 规则的 start 畸形
+         * 会把开窗放大成全天 —— "宁可少执行一条规则，也不要放大/缩小管控窗口"。
+         * 与 [com.padguard.core.engine.enforcer.SmartShutdownEnforcer] 的 parse 返回 null 同口径。
+         * 范围校验：hour∈0..23、minute∈0..59（"25:xx" 这类越界值同样按畸形处理）。
+         */
         fun toMinutes(hhmm: String): Int {
             val parts = hhmm.split(":")
-            if (parts.size != 2) return 0
-            val hour = parts[0].trim().toIntOrNull() ?: 0
-            val minute = parts[1].trim().toIntOrNull() ?: 0
+            if (parts.size != 2) return -1
+            val hour = parts[0].trim().toIntOrNull() ?: return -1
+            val minute = parts[1].trim().toIntOrNull() ?: return -1
+            if (hour !in 0..23 || minute !in 0..59) return -1
             return hour * 60 + minute
         }
     }
