@@ -232,7 +232,12 @@ interface UsageLogRepository : JpaRepository<UsageLog, String> {
      * 用量日志只增不删、体积最大，不清理会无限膨胀，也违背"不该长期保存历史"的诉求。
      * 配合 [com.padguard.server.config.SchemaIndexInitializer] 上的 `idx_usage_logs_ts` 索引，
      * 该 DELETE 走时间戳范围扫描，不会全表扫。
+     *
+     * 必须显式 @Transactional：派生 delete 方法不会自动获得事务，调用方
+     * UsageLogCleanup 也没有事务边界，否则运行期 TransactionRequiredException
+     * 被吞成 warn，用量日志永远不会被清理。
      */
+    @Transactional
     fun deleteByTimestampBefore(threshold: Long): Int
 }
 

@@ -64,9 +64,11 @@ class RateLimit(private val props: RateLimitProperties) {
      * @param account  账号维度键（手机号 / 用户名 / 绑定码），空则只按 IP 计数
      */
     fun require(scenario: String, request: HttpServletRequest, account: String? = null, audience: Audience = Audience.PARENT) {
-        // IP 维度默认取不可伪造的 TCP 对端地址；只有在受信任反向代理之后才采信转发头
-        // （详见 RateLimitProperties.trustForwardedFor 的注释）。
-        val ip = (if (props.trustForwardedFor) ClientIps.of(request) else ClientIps.peerOf(request))
+        // IP 维度默认取不可伪造的 TCP 对端地址；只有在受信任反向代理之后才采信转发头。
+        // 采信时用 X-Real-IP（Nginx 覆盖写入）而不是 X-Forwarded-For（可被客户端伪造首段），
+        // 否则生产环境"全站共用一个 IP 桶"（remoteAddr 恒为 nginx 容器地址）→ 全员误伤 429，
+        // 而改用 XFF 又会退化成"换个头就绕过频控"。
+        val ip = (if (props.trustForwardedFor) ClientIps.viaTrustedProxy(request) else ClientIps.peerOf(request))
             ?: "unknown"
         val limit = limitOf(scenario)
         val now = System.currentTimeMillis()

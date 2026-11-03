@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 
 @Repository
 interface DeviceGroupRepository : JpaRepository<DeviceGroup, String> {
@@ -83,7 +84,16 @@ interface LocationTrackRepository : JpaRepository<LocationTrack, String> {
      * 且属儿童行踪隐私，保留 90 天足够家长回看，超期应当清除。
      * ts 可空（历史行可能缺定位时间戳），用 coalesce 回落 receivedAt。
      */
+    /**
+     * 保留期清理。
+     *
+     * 必须显式 @Transactional：`@Modifying` 查询方法不会由 Spring Data 自动开启事务，
+     * 调用方（RetentionCleanup）也没有事务边界，否则运行期抛 TransactionRequiredException
+     * 被 runCatching 吞成一条 warn —— 表现为"清理任务每天都跑，但表永远不减少"，
+     * 最终写满磁盘导致 PG 拒写、全站瘫痪。
+     */
     @Modifying
+    @Transactional
     @Query("delete from LocationTrack t where coalesce(t.ts, t.receivedAt) < :ts")
     fun deleteByTsBefore(@Param("ts") ts: Long): Int
 }

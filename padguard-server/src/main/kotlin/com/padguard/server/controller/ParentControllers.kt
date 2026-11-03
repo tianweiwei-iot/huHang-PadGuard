@@ -112,7 +112,7 @@ class ParentDeviceController(
     fun discoverLan(
         @RequestAttribute("userId") userId: String,
         request: jakarta.servlet.http.HttpServletRequest
-    ) = ApiResponse.ok(deviceService.discoverLanDevices(userId, com.padguard.server.common.ClientIps.of(request)))
+    ) = ApiResponse.ok(deviceService.discoverLanDevices(userId, com.padguard.server.common.ClientIps.viaTrustedProxy(request)))
 
     /** 接入一台局域网发现的平板 */
     @PostMapping("/lan/bind")
@@ -233,6 +233,25 @@ class PolicyController(
             commandService.issueCommand(
                 deviceId, CommandType.SET_MANAGEMENT_ACTIVE, mapOf(CommandKey.ACTIVE to active)
             )
+        )
+    }
+
+    /**
+     * 远程揭示管理控制台：孩子端桌面图标隐藏后，把管理台"要回来"的远程通道。
+     *
+     * 与锁屏等指令对称：校验设备归属 → 下发 [CommandType.REVEAL_MANAGEMENT_UI]。
+     * 孩子端收到后点亮图标并拉起管理台（EXTRA_REVEAL 会话，配置结束自动重新隐藏）。
+     * 不做密码校验是有意设计：本接口已由家长登录态鉴权，且它是孩子端
+     * 「未设密码即隐藏图标」策略下家长不被锁在门外的兜底自救路。
+     */
+    @PostMapping("/policies/{deviceId}/reveal-console")
+    fun revealConsole(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String
+    ): ApiResponse<*> {
+        deviceService.getDevice(userId, deviceId) // 校验设备归属
+        return ApiResponse.ok(
+            commandService.issueCommand(deviceId, CommandType.REVEAL_MANAGEMENT_UI, emptyMap())
         )
     }
 

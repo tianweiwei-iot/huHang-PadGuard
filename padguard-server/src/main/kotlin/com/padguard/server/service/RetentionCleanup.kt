@@ -78,7 +78,9 @@ class RetentionCleanup(
                 log.info("location_tracks 保留期清理完成：删除 {} 条早于 {} 天的轨迹", deleted, LOCATION_RETENTION_DAYS)
             }
         }.onFailure {
-            log.warn("location_tracks 保留期清理失败（已忽略，不影响服务）: {}", it.message)
+            // 从 warn 升为 error：这条失败意味着表只增不删，最终会写满磁盘导致全站瘫痪，
+            // 属于必须告警的运维事件，不能淹没在 warn 里。
+            log.error("location_tracks 保留期清理失败（表将持续膨胀，请检查事务/权限）: {}", it.message, it)
         }
     }
 

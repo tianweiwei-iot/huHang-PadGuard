@@ -81,6 +81,11 @@ services:
       PADGUARD_MQTT_DEVICE_USERNAME: ${PADGUARD_MQTT_DEVICE_USERNAME:?PADGUARD_MQTT_DEVICE_USERNAME 必须在 .env 中设置}
       PADGUARD_MQTT_DEVICE_PASSWORD: ${PADGUARD_MQTT_DEVICE_PASSWORD:?PADGUARD_MQTT_DEVICE_PASSWORD 必须在 .env 中设置}
       PADGUARD_DEV_CHILDSIMULATOR: "false"
+      # 限流 IP 维度必须采信代理写入的 X-Real-IP：
+      # 生产流量全部经 nginx 反代，remoteAddr 恒为 nginx 容器地址 —— 不开这个开关时
+      # 所有家长共用同一个 IP 桶（登录 5 次/分钟），几个人同时登录就会互相 429。
+      # 代码侧只采信 X-Real-IP（nginx 用 $remote_addr 覆盖，客户端伪造无效），不采信 XFF。
+      PADGUARD_RATELIMIT_TRUSTFORWARDEDFOR: "true"
       # 初始/重置口令文件移出 uploads（第八轮评估第三批+纵深防御）：
       # uploads 是"用户媒体目录"，运维一旦加 nginx alias/改挂载就会把口令明文一并暴露；
       # 独立 secrets 卷与业务文件物理隔离，且同样持久化（容器重建不丢）。

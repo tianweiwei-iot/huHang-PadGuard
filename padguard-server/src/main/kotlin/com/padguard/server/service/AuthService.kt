@@ -3,6 +3,7 @@ package com.padguard.server.service
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
+import com.padguard.server.config.ProdConfigAssertion
 import com.padguard.server.domain.User
 import com.padguard.server.domain.UserStatus
 import com.padguard.server.dto.LoginResponse
@@ -188,8 +189,15 @@ class AuthService(
      * 接入真实短信服务商并上线验证码校验时，需连同本闸门一起评审移除。
      */
     fun loginWithSms(req: LoginSmsRequest): LoginResponse {
-        if (env.activeProfiles.contains("prod")) {
-            log.warn("sms login blocked in prod profile: phone={}", req.phone)
+        // 原实现判断 `activeProfiles.contains("prod")`，但 docker-compose.prod.yml / Dockerfile
+        // 都没有激活任何 profile（activeProfiles 为空），该闸门在真实生产环境是死代码。
+        // 改为「非开发 profile 一律禁用」：与 ProdConfigAssertion 的 isDevLike 同口径，
+        // 不依赖某个名为 prod 的 profile 存在。
+        val profiles = env.activeProfiles.toList()
+        val isDevLike = profiles.any { it in ProdConfigAssertion.DEV_PROFILES }
+        // 注意：无 active profile（空列表）就是当前生产容器的真实形态，必须按生产处理。
+        if (!isDevLike) {
+            log.warn("sms login blocked in non-dev profile: phone={}, profiles={}", req.phone, profiles)
             throw BizException(ParentErr.UNAUTHORIZED, "短信登录未启用，请使用密码登录", Audience.PARENT)
         }
         if (!smsLoginEnabled) {

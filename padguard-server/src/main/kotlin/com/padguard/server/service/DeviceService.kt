@@ -646,6 +646,25 @@ class DeviceService(
         if (!dev.userId.isNullOrBlank() && dev.userId != userId) {
             throw BizException(ParentErr.DEVICE_NOT_OWNED, "该设备已被其他账号接入", Audience.PARENT)
         }
+        // 订阅/设备数闸门：与 bindChildWithUser 同口径。
+        // 缺了这行，订阅过期或设备数已满的账号可以通过局域网接入无限收编设备，
+        // 等于给「付费才能用」开了一条免费后门。
+        billingService.ensureCanBindForChild(userId)
+
+        // 凭据已被吊销的设备（曾经解绑过）不能靠"改归属"接回来：
+        // unbind 会把 deviceTokenHash 写成 revoked_xxx，而孩子端仍持旧令牌，
+        // 这里若不轮换凭据，设备在列表里存在但永远 401/离线、指令全部 PENDING，
+        // 表现为"绑定成功却什么都做不了"。凭据只能由孩子端重新配对获取，
+        // 因此这里 fail-fast 给出可执行提示，而不是造一台僵尸设备。
+        val tokenHash = dev.deviceTokenHash
+        if (tokenHash.isNullOrBlank() || tokenHash.startsWith("revoked_")) {
+            throw BizException(
+                ParentErr.DEVICE_NOT_OWNED,
+                "该设备已解除绑定，请让孩子端重新打开应用生成接入码后再绑定",
+                Audience.PARENT
+            )
+        }
+
         val previousOwner = dev.userId
         dev.userId = userId
         dev.name = req.alias?.takeIf { it.isNotBlank() } ?: dev.name ?: "孩子平板"

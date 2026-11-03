@@ -35,6 +35,23 @@ class AdminRbacService(
 ) {
     private val log = LoggerFactory.getLogger(AdminRbacService::class.java)
 
+    /**
+     * 非超级管理员不得改动任何超级管理员账号（改角色 / 停用 / 删除）。
+     *
+     * 仅靠「不能动最后一个 super」不够：有 2 个 super 时，持有 rbac:write 的普通账号
+     * 可以逐个停用，最后一次才被拦——此时管理员体系已被打残。这里把口径收紧为
+     * 「跨级不可管理」，与 [ensureNotEscalatingToSuper] 的授权方向对称。
+     */
+    private fun ensureCanManageTarget(actorId: String, target: Admin) {
+        if (target.role == "super" && adminRepository.findById(actorId).orElse(null)?.role != "super") {
+            throw BizException(
+                ParentErr.FORBIDDEN,
+                "只有超级管理员可以修改或删除超级管理员账号",
+                Audience.PARENT
+            )
+        }
+    }
+
     /** 权限元数据（领域/动作中文名 + 危险等级 + 系统锁定角色），供前端渲染矩阵 */
     fun permissionSchema(adminId: String): Map<String, Any> {
         requireRead(adminPerm, adminId, "rbac")
@@ -103,6 +120,8 @@ class AdminRbacService(
         if (!adminPerm.allRoleKeys().contains(req.roleId)) {
             throw BizException(ParentErr.PARAM_ERROR, "角色不存在", Audience.PARENT)
         }
+        // 建号即授权：非 super 不能借 createAdmin 造一个 super 账号（否则 rbac:write 等价于提权）
+        ensureNotEscalatingToSuper(adminRepository, adminId, req.roleId)
         val pwd = genPassword(systemSettingRepository, objectMapper)
         val admin = Admin(
             id = "A" + UUID.randomUUID().toString().replace("-", ""),
@@ -125,6 +144,7 @@ class AdminRbacService(
         }
         val target = adminRepository.findById(targetAdminId).orElse(null)
             ?: throw BizException(ParentErr.PARAM_ERROR, "管理员不存在", Audience.PARENT)
+        ensureCanManageTarget(adminId, target)
         val old = target.role
         target.role = roleId
         adminRepository.save(target)
@@ -137,6 +157,7 @@ class AdminRbacService(
         adminPerm.require(adminId, "rbac", "write")
         val target = adminRepository.findById(targetAdminId).orElse(null)
             ?: throw BizException(ParentErr.PARAM_ERROR, "管理员不存在", Audience.PARENT)
+        ensureCanManageTarget(adminId, target)
         req.name?.takeIf { it.isNotBlank() }?.let { target.displayName = it }
         target.email = req.email?.takeIf { it.isNotBlank() }
         val newStatus = req.status?.takeIf { it.isNotBlank() }
@@ -163,6 +184,7 @@ class AdminRbacService(
         }
         val target = adminRepository.findById(targetAdminId).orElse(null)
             ?: throw BizException(ParentErr.PARAM_ERROR, "管理员不存在", Audience.PARENT)
+        ensureCanManageTarget(adminId, target)
         // 安全护栏：删除最后一个超级管理员会锁死后台
         if (target.role == "super" && countActiveSuperAdmins() <= 1) {
             throw BizException(ParentErr.FORBIDDEN, "不能删除最后一个超级管理员（将锁死后台）", Audience.PARENT)

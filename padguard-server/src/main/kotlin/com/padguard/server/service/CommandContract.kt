@@ -73,6 +73,14 @@ object CommandType {
      * payload { active }，字段名必须与孩子端 CommandExecutor.KEY_ACTIVE 一致（"active"）。
      */
     const val SET_MANAGEMENT_ACTIVE = "SET_MANAGEMENT_ACTIVE"
+    /**
+     * 远程揭示管理控制台。
+     *
+     * 孩子端图标隐藏后，家长的进入通道之一（另一条是悬浮卡密码闸）：下发后孩子端
+     * 点亮桌面图标并拉起管理台。payload 为空。免密码是有意设计——本指令通道已由
+     * 服务端家长身份鉴权，且它是「密码尚未下发时家长被锁在门外」的唯一自救路。
+     */
+    const val REVEAL_MANAGEMENT_UI = "REVEAL_MANAGEMENT_UI"
 }
 
 /** payload 字段名，取值必须与孩子端 CommandExecutor 的 KEY_* 常量一致 */

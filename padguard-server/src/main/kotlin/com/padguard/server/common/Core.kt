@@ -440,4 +440,18 @@ object ClientIps {
      */
     fun peerOf(request: jakarta.servlet.http.HttpServletRequest): String? =
         request.remoteAddr?.trim()?.takeIf { it.isNotBlank() }
+
+    /**
+     * 受信任反向代理之后的客户端 IP（可用于安全决策）。
+     *
+     * 只采信 `X-Real-IP`：本项目的 Nginx（nginx/nginx.conf）用
+     * `proxy_set_header X-Real-IP $remote_addr` **覆盖**该头，客户端自带的同名头会被丢弃，
+     * 因此经过代理后它等价于 TCP 对端地址。
+     *
+     * 刻意不采信 `X-Forwarded-For`：Nginx 用 `$proxy_add_x_forwarded_for` 是"追加"，
+     * 客户端伪造的第一段会被原样保留并在 [of] 里被取到 —— 用它做网段/限流判定，
+     * 等于把边界交给攻击者（发一个 `X-Forwarded-For: 10.0.5.9` 就能枚举别人网段的设备）。
+     */
+    fun viaTrustedProxy(request: jakarta.servlet.http.HttpServletRequest): String? =
+        request.getHeader("X-Real-IP")?.trim()?.takeIf { it.isNotBlank() } ?: peerOf(request)
 }

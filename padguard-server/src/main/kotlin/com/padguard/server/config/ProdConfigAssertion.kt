@@ -47,7 +47,8 @@ class ProdConfigAssertion(
         }
     }
 
-    private companion object {
+    companion object {
+        /** 视为「开发/联调」的 profile 集合；空 profile（生产容器形态）不在其中。 */
         val DEV_PROFILES = setOf("local", "dev")
     }
 }

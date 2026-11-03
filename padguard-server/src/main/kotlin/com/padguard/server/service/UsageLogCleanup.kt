@@ -48,7 +48,8 @@ class UsageLogCleanup(
                 log.info("usage_logs 保留期清理完成：删除 {} 条早于 {} 的历史记录", deleted, cutoff)
             }
         }.onFailure {
-            log.warn("usage_logs 保留期清理失败（已忽略，不影响服务）: {}", it.message)
+            // 同 RetentionCleanup：清理失败 = 用量日志表无限膨胀，必须按错误告警。
+            log.error("usage_logs 保留期清理失败（表将持续膨胀，请检查事务/权限）: {}", it.message, it)
         }
     }
 

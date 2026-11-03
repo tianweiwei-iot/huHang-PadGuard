@@ -316,6 +316,17 @@ class BatchARegressionTest {
     private fun requestWith(remoteAddr: String, xForwardedFor: String?): HttpServletRequest =
         Mockito.mock(HttpServletRequest::class.java).also {
             Mockito.`when`(it.getHeader("X-Forwarded-For")).thenReturn(xForwardedFor)
+            // Nginx 用 `proxy_set_header X-Real-IP $remote_addr` **覆盖**该头，所以它才是
+            // 经过受信任代理后唯一可信的客户端 IP；限流只读这个头（见 ClientIps.viaTrustedProxy）。
+            Mockito.`when`(it.getHeader("X-Real-IP")).thenReturn(xForwardedFor)
+            Mockito.`when`(it.remoteAddr).thenReturn(remoteAddr)
+        }
+
+    /** 只有 XFF、没有 X-Real-IP 的请求（模拟客户端自行伪造转发头，未经代理覆盖） */
+    private fun requestWithForgedXff(remoteAddr: String, xForwardedFor: String): HttpServletRequest =
+        Mockito.mock(HttpServletRequest::class.java).also {
+            Mockito.`when`(it.getHeader("X-Forwarded-For")).thenReturn(xForwardedFor)
+            Mockito.`when`(it.getHeader("X-Real-IP")).thenReturn(null)
             Mockito.`when`(it.remoteAddr).thenReturn(remoteAddr)
         }
 
@@ -377,11 +388,27 @@ class BatchARegressionTest {
     fun `trust-forwarded-for opt-in restores proxy awareness`() {
         val rl = RateLimit(RateLimitProperties().apply { login = 10; trustForwardedFor = true })
         // 仅在"确实部署于受信任反向代理之后"时才打开此开关；打开后同一对端、
-        // 不同 XFF 应各自独立计数（代理会重写该头，真实客户端因此被区分开）。
+        // 不同 X-Real-IP（由 Nginx 用 $remote_addr 覆盖写入）应各自独立计数，
+        // 真实客户端因此被区分开 —— 这正是"生产环境全员共用一个 IP 桶"的修复点。
         repeat(10) { i ->
             rl.require("login", requestWith("127.0.0.1", "198.51.100.$i"), "13800000011")
         }
         rl.require("login", requestWith("127.0.0.1", "198.51.100.88"), "13800000012")
+    }
+
+    @Test
+    fun `forged x-forwarded-for alone cannot open new buckets`() {
+        // XFF 是客户端可任意伪造的头：Nginx 是"追加"而非覆盖，第一段仍是伪造值。
+        // 打开 trustForwardedFor 后若采信 XFF，攻击者每请求换一个值就得到全新计数桶，
+        // IP 维度频控形同虚设。这里锁定"只认 X-Real-IP"的契约。
+        val rl = RateLimit(RateLimitProperties().apply { login = 10; trustForwardedFor = true })
+        repeat(10) { i ->
+            rl.require("login", requestWithForgedXff("127.0.0.1", "198.51.100.$i"))
+        }
+        val ex = assertThrows(BizException::class.java) {
+            rl.require("login", requestWithForgedXff("127.0.0.1", "198.51.100.99"))
+        }
+        assertEquals(ParentErr.TOO_MANY_REQUESTS, ex.code, "伪造 XFF 不得绕开 IP 维度限流")
     }
 
     @Test
