@@ -127,6 +127,22 @@ class DeviceDetailViewModel @Inject constructor(
     init {
         loadDeviceDetail()
         loadMinorMode()
+        // 在线态跟随设备列表实时翻转：详情页原本只在进入时拉一次 getDeviceDetail，
+        // 之后孩子端断电/重连都不会更新 —— 家长停在详情页时看到的可能是几分钟前的状态。
+        // 这里只同步"上下线"这一个字段，其它字段仍以详情接口为准（详情页有更多专属信息）。
+        viewModelScope.launch {
+            deviceRepository.observeDeviceList().collect { list ->
+                val fresh = list.firstOrNull { it.id == deviceId } ?: return@collect
+                val current = _uiState.value.device ?: return@collect
+                if (current.onlineStatus == fresh.onlineStatus) return@collect
+                _uiState.value = _uiState.value.copy(
+                    device = current.copy(
+                        onlineStatus = fresh.onlineStatus,
+                        lastOnlineTime = fresh.lastOnlineTime
+                    )
+                )
+            }
+        }
         // 订阅整机管控开关态（跨页面共享）：详情页与首页卡片读同一份，保证两处一致。
         // deviceId 来自 SavedStateHandle 固定不变，流默认 true（与孩子端默认行为一致）。
         viewModelScope.launch {

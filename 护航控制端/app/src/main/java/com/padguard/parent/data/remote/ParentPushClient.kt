@@ -33,9 +33,11 @@ import kotlin.math.min
  *
  * ## 职责
  * 连接服务端 `/ws?token=<JWT>`，把服务端推来的实时事件按类型分发成 [Flow]。
- * 两类事件：
+ * 事件类型：
  * - `usage.today`：孩子端上行用量后，服务端推送今日用量快照，首页据此即时刷新；
- * - `device.enrolled`：孩子端完成接入后，服务端推送接入完成，家长端据此结束等待。
+ * - `device.enrolled`：孩子端完成接入后，服务端推送接入完成，家长端据此结束等待；
+ * - `device.online` / `device.offline`：设备上下线（服务端秒级判定），设备列表据此即时翻转；
+ * - `usage.delay.requested` / `usage.delay.updated`：延时审批工单的创建与处理。
  *
  * 之所以要有一条真正的实时通道，而不是让各页面各轮询各的：
  * "孩子端什么时候绑上"这件事本质是事件而不是状态轮询能优雅回答的，
@@ -68,6 +70,7 @@ class ParentPushClient @Inject constructor(
     private val usageStatsAdapter = moshi.adapter(UsageStatsDto::class.java)
     private val enrollmentAdapter = moshi.adapter(EnrollmentEventDto::class.java)
     private val usageDelayAdapter = moshi.adapter(UsageDelayEventDto::class.java)
+    private val presenceAdapter = moshi.adapter(DevicePresenceEventDto::class.java)
     private val envelopeAdapter = moshi.adapter(PushEnvelope::class.java)
 
     /** 应用启动后调用一次：按登录态与服务器地址自动管理连接（幂等，多次调用安全） */
@@ -185,6 +188,19 @@ class ParentPushClient @Inject constructor(
                         ParentPushMessage.UsageDelayUpdated(deviceId, ticketId, status)
                     )
                 }
+                // 设备上下线：服务端判定出状态翻转即刻推（孩子端 3s 一次存活信号，
+                // 服务端约 5s 无信号判离线）。家长端拿到就改本地列表状态，
+                // 不必等 10s 一次的列表轮询 —— 那条轮询现在只作为推送丢失的兜底。
+                "device.online" -> {
+                    val dto = presenceAdapter.fromJson(text) ?: return
+                    val deviceId = dto.deviceId ?: return
+                    _messages.tryEmit(ParentPushMessage.DevicePresence(deviceId, online = true))
+                }
+                "device.offline" -> {
+                    val dto = presenceAdapter.fromJson(text) ?: return
+                    val deviceId = dto.deviceId ?: return
+                    _messages.tryEmit(ParentPushMessage.DevicePresence(deviceId, online = false))
+                }
             }
         }.onFailure { /* 单条报文解析失败忽略，不影响后续 */ }
     }
@@ -216,6 +232,15 @@ class ParentPushClient @Inject constructor(
 /** 推送报文信封：先读 type 决定如何解析，避免把其它类型误当某一种 DTO */
 @JsonClass(generateAdapter = true)
 private data class PushEnvelope(val type: String?)
+
+/**
+ * `device.online` / `device.offline` 事件体。
+ *
+ * 两个事件共用同一形状（都只带设备主键），`lastSeen` 仅 offline 携带，这里不解析 ——
+ * 家长端要的是"在不在线"，具体时刻由随后的列表刷新补齐，少一个字段就少一处不一致。
+ */
+@JsonClass(generateAdapter = true)
+private data class DevicePresenceEventDto(val deviceId: String? = null)
 
 /** `device.enrolled` 事件体 */
 @JsonClass(generateAdapter = true)
@@ -256,4 +281,12 @@ sealed interface ParentPushMessage {
         val ticketId: String,
         val status: String
     ) : ParentPushMessage
+
+    /**
+     * 设备上线 / 下线（服务端约 5 秒级判定后推送）。
+     *
+     * 消费方（[com.padguard.parent.data.remote.ApiDataSource]）直接改本地设备列表状态，
+     * 让首页/设备页的在线徽标立即翻转；HTTP 轮询退化为"推送丢失时的兜底"。
+     */
+    data class DevicePresence(val deviceId: String, val online: Boolean) : ParentPushMessage
 }

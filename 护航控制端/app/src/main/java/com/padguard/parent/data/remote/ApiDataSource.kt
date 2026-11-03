@@ -414,6 +414,47 @@ class ApiDataSource @Inject constructor(
                 delay(POLL_INTERVAL_MS)
             }
         }
+        observePresencePush()
+    }
+
+    /**
+     * 设备上下线推送 → 就地翻转列表里的在线态。
+     *
+     * ## 为什么不能只靠 [POLL_INTERVAL_MS] 轮询
+     * 服务端现在约 5 秒就能判定上下线并推 `device.online` / `device.offline`，
+     * 但列表轮询是 10 秒一次，家长端最坏要再等 10 秒才看见 —— 白白把服务端挣来的速度丢掉。
+     * 这里收到推送立刻改 [_deviceListFlow]，所有订阅设备列表的页面（首页看板、设备页、
+     * 设备详情）同步翻转，无需各自刷新。
+     *
+     * 只改本地状态、不拉整张列表：一次上下线是**一个布尔值**的变化，
+     * 为它发一次全量 HTTP 请求既浪费流量，也会让列表在弱网时闪一下旧数据。
+     * 轮询仍然保留，作为"推送丢失 / WS 断线期间"的兜底，两者不冲突（幂等赋值）。
+     */
+    private fun observePresencePush() {
+        scope.launch {
+            parentPushClient.messages.collect { msg ->
+                if (msg is ParentPushMessage.DevicePresence) {
+                    applyPresence(msg.deviceId, msg.online)
+                }
+            }
+        }
+    }
+
+    private fun applyPresence(deviceId: String, online: Boolean) {
+        val current = _deviceListFlow.value
+        val index = current.indexOfFirst { it.id == deviceId }
+        // 列表里没有这台设备：说明还没拉到列表（刚登录）或已被解绑，
+        // 交给轮询补齐，不在这里凭空插入一条信息不全的设备。
+        if (index < 0) return
+        val target = if (online) DeviceOnlineStatus.ONLINE else DeviceOnlineStatus.OFFLINE
+        val device = current[index]
+        if (device.onlineStatus == target) return
+        _deviceListFlow.value = current.toMutableList().also {
+            it[index] = device.copy(
+                onlineStatus = target,
+                lastOnlineTime = if (online) System.currentTimeMillis() else device.lastOnlineTime
+            )
+        }
     }
 
     private suspend fun refreshDeviceList() {
