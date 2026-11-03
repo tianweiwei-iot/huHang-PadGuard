@@ -246,7 +246,10 @@ class UsageSessionManager @Inject constructor(
         val countdownActive = dto.active && dto.remainingMs <= dto.countdownThresholdMs
         _state.update { s ->
             s.copy(
-                needsStartConfirm = !dto.active,
+                // 只在该设备的"时间管控"确实开启时才要求确认开始计时。
+                // 原实现只看 active，家长已关掉时间管控却仍弹"平板使用计时开始"，
+                // 孩子被引导去确认一个不存在的配额。
+                needsStartConfirm = !dto.active && dto.timeControlEnabled,
                 active = dto.active,
                 serverNow = dto.serverNow,
                 remainingMs = dto.remainingMs,

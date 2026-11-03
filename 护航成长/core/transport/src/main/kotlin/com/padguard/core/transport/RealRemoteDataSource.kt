@@ -442,11 +442,21 @@ class RealRemoteDataSource @Inject constructor(
      */
     private fun parseCommandsResponse(element: JsonElement?): CommandsResponse {
         if (element == null) return CommandsResponse()
+        // 先滤掉孩子端不认识的指令类型（服务端先升级的场景）：
+        // 不滤的话一条新类型指令会让整批反序列化失败，锁屏等既有指令跟着瘫痪。
+        val result = filterKnownCommandTypes(element)
+        if (result.droppedTypes.isNotEmpty()) {
+            Logger.w(TAG) {
+                "dropped ${result.droppedTypes.size} command(s) of unknown type ${result.droppedTypes} " +
+                    "(server newer than device); other commands in the batch are kept"
+            }
+        }
+        val filtered = result.element
         return when {
-            element is JsonArray ->
-                CommandsResponse(policyVersion = -1, commands = json.decodeFromJsonElement(ListSerializer(Command.serializer()), element))
-            element is JsonObject ->
-                json.decodeFromJsonElement(CommandsResponse.serializer(), element)
+            filtered is JsonArray ->
+                CommandsResponse(policyVersion = -1, commands = json.decodeFromJsonElement(ListSerializer(Command.serializer()), filtered))
+            filtered is JsonObject ->
+                json.decodeFromJsonElement(CommandsResponse.serializer(), filtered)
             else -> CommandsResponse()
         }
     }

@@ -38,7 +38,9 @@ import javax.inject.Inject
  * 家长验证入口（悬浮卡的唯一触点）。
  *
  * ## 它解决什么
- * 应用隐藏后，孩子看不到也打不开管理控制台；这张悬浮卡是孩子端唯一"外露"的入口，因此必须被家长密码保护。
+ * 应用隐藏后，孩子看不到也打不开管理控制台；这张悬浮卡是**设备在手边时**家长进入
+ * 管理台的本地入口，因此必须被家长密码保护（另一条远程入口是家长端下发的
+ * REVEAL_MANAGEMENT_UI 指令，免密码、走服务端家长鉴权，见 [AppHider]）。
  * 点按悬浮卡 → 本透明 Activity → 输对家长操作密码后才能：
  *   - **进入管理控制台**：[AppHider.revealManagementUi] 重新点亮图标并打开 [MainActivity]（带 EXTRA_REVEAL，
  *     使 MainActivity 在销毁时自动重新隐藏，避免图标长期暴露给孩子）；
@@ -46,7 +48,8 @@ import javax.inject.Inject
  *
  * ## 没有密码怎么办
  * 若家长端尚未下发操作密码（[GuardPasswordManager.isEnabledNow] == false），两类敏感操作都无法验证，
- * 此时本页只给提示，不放行——宁可让家长先去家长端设置密码，也不留无锁后门。
+ * 此时本页只给提示，不放行——本地通道宁可让家长先去家长端设置密码，也不留无锁后门；
+ * 密码缺失期间家长仍可用远程指令进入管理台。
  */
 @AndroidEntryPoint
 class FloatingActionActivity : ComponentActivity() {

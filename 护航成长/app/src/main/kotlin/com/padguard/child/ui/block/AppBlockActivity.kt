@@ -182,6 +182,19 @@ class AppBlockActivity : ComponentActivity() {
         }
 
         /**
+         * 拦截页是否真的还挂在屏幕上。
+         *
+         * GuardService 需要它来区分两种"后台包 == 上次拦截包"的情形：
+         * ① 拦截页仍在（探针伪影，不能重复弹）；② 孩子已按「回桌面」把拦截页关掉、
+         * 又重新点开了被拦应用（必须重新拦截）。只看包名会把 ② 误判成 ①，
+         * 导致按一次返回就永久逃逸。
+         */
+        fun isShowing(): Boolean {
+            val activity = instance ?: return false
+            return !activity.isFinishing && !activity.isDestroyed
+        }
+
+        /**
          * @param reason 人类可读的拦截原因（如「今日使用时长已达上限」）。
          *               留空时页面回退到通用文案，不会显示空白区块。
          */

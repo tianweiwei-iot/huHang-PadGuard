@@ -6,7 +6,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import com.padguard.child.KidHomeActivity
 import com.padguard.child.MainActivity
-import com.padguard.child.guard.GuardPasswordManager
 import com.padguard.core.common.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -25,10 +24,12 @@ import javax.inject.Singleton
  * 2. 仅当 [KidHomeActivity] **不是**系统当前默认桌面时才一并禁用其 HOME 组件。
  *    若它是默认桌面却强行禁用，设备会瞬间没有桌面入口 → 变砖，必须规避（见 [isDefaultHome]）。
  *
- * ## 揭示（家长入口）
- * 家长在悬浮卡上点按 → 密码验证 → [revealManagementUi] 重新点亮图标并启动 [MainActivity]，
- * 进入配置。配置结束（Activity 销毁）时由 [MainActivity] 调 [hideManagementUi] 重新隐藏，
- * 避免图标长期暴露给孩子。
+ * ## 揭示（家长入口，两条互备通道）
+ * 1. **设备在手边**：家长在悬浮卡上点按 → 密码验证 → [revealManagementUi] 重新点亮图标并启动
+ *    [MainActivity]，进入配置。配置结束（Activity 销毁）时由 [MainActivity] 调 [hideManagementUi]
+ *    重新隐藏，避免图标长期暴露给孩子。
+ * 2. **设备不在手边 / 密码尚未下发**：家长端下发 `REVEAL_MANAGEMENT_UI` 远程指令，
+ *    GuardService 收到后同样点亮图标并拉起管理台（免密码，指令通道已由服务端家长身份鉴权）。
  *
  * ## 状态是持久的
  * 组件开关写在系统 PMS 里，重启/覆盖安装后依旧生效；开机自启的 GuardService 会再次确认隐藏态，
@@ -36,8 +37,7 @@ import javax.inject.Singleton
  */
 @Singleton
 class AppHider @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val guard: GuardPasswordManager
+    @ApplicationContext private val context: Context
 ) {
     private val pm: PackageManager get() = context.packageManager
 
@@ -47,23 +47,17 @@ class AppHider @Inject constructor(
     /**
      * 隐藏管理控制台图标（绑定完成后 / 家长配置结束退出时调用）。
      *
-     * ## 安全前置：没有守护密码时禁止隐藏
-     * 揭示管理控制台的唯一入口是 [FloatingActionActivity] 的家长验证闸，而该闸在
-     * [GuardPasswordManager.isEnabledNow] 为 false 时**直接放行失败**（见 ParentGateScreen）。
-     * 因此若允许「未设密码就隐藏」，应用隐藏后将没有任何密码能把它揭示回来——
-     * 家长自己也会被锁在门外，形成「孩子端被隐藏但没有守护密码」的死局（Bug ⑥）。
+     * ## 为什么不再要求「已设密码才允许隐藏」
+     * 旧实现担心：揭示的唯一入口是悬浮卡密码闸，未设密码时该闸放行失败，
+     * 隐藏后家长会被锁在门外（hidden-but-unrecoverable）。现在揭示有了第二条
+     * 与密码无关的通道——家长端 `REVEAL_MANAGEMENT_UI` 远程指令（见类注释），
+     * 只要家长端可达就永远能把图标要回来，死局不复存在。
      *
-     * 所以这里以守护密码为前置：未设密码时拒绝隐藏、保持图标可见，并提示家长先去家长端
-     * 设置操作密码。等密码就绪后，下一次隐藏触发（配置结束退出 / 重新绑定）即可正常隐藏。
+     * 彻底隐藏换来的收益是硬的：桌面没有图标，孩子连「长按 → 卸载」的入口都摸不到，
+     * 这正是卸载防护事故（长按即卸）后堵死入口的关键一步。代价是家长必须记住
+     * 悬浮卡入口或远程指令入口，两者文档均已写明。
      */
     fun hideManagementUi() {
-        if (!guard.isEnabledNow()) {
-            Logger.w(TAG) {
-                "hideManagementUi skipped: no guardian password set; " +
-                    "keeping console visible to avoid a hidden-but-unrecoverable state"
-            }
-            return
-        }
         setComponentEnabled(mainComponent, enabled = false)
         if (!isDefaultHome(homeComponent)) {
             setComponentEnabled(homeComponent, enabled = false)

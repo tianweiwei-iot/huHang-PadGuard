@@ -65,6 +65,14 @@ class EyeCareEnforcer @Inject constructor(
             reset()
             return EyeCareVerdict.Idle
         }
+        // 0 值兜底：continuousMinutes=0 会让"连续使用 >= 0"恒成立，每轮采样都锁屏；
+        // restMinutes=0 又让休息瞬间结束 —— 合起来是"每 15s 弹一次锁屏页再收掉"的闪断，
+        // 设备事实上不可用（deriveEyeCare 有 >0 守卫，但直接下发的 eyeCare 段没有）。
+        // 这里按"配置无效即不启用"处理，避免把设备变砖。
+        if (policy.continuousMinutes <= 0 || policy.restMinutes <= 0) {
+            reset()
+            return EyeCareVerdict.Idle
+        }
 
         val nowElapsed = timeProvider.elapsedRealtime()
         val delta = computeDelta(nowElapsed)

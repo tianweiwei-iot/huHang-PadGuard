@@ -16,9 +16,14 @@ import javax.inject.Singleton
  *
  * 关键设计：
  * - 策略包 AES-GCM 加密落库，用户/第三方工具无法读取或篡改管控规则。
- * - 解密失败（密钥丢失或数据被篡改）时**不静默降级为默认策略**，
- *   而是抛出 [PolicyTamperedException]，由上层上报高危告警并强制重新拉取，
- *   避免"策略被破坏后终端处于无管控状态"这一致命漏洞。
+ * - 解密失败（密钥丢失或数据被篡改）时**在本层就地兜底**：清掉坏行、按默认策略继续，
+ *   并记 ERROR 日志触发下一次全量拉取。
+ *   早期实现是抛 [PolicyTamperedException] 交给上层，但全工程没有任何一处 catch ——
+ *   `observePolicy()` 的 6 个收集点（GuardService / HomeViewModel / AppInventoryViewModel /
+ *   ProfileViewModel / UsageStatusProvider / LocationAutoReporter）会直接抛穿收集协程，
+ *   走默认 CoroutineExceptionHandler 把进程打崩；进程被守护拉起后又崩，形成崩溃循环。
+ *   "不静默降级"的初衷是好的，但用崩溃换"不降级"是不可接受的取舍：
+ *   清空缓存后服务端会在下一轮同步重新下发，管控恢复；崩溃则意味着彻底不可用。
  */
 @Singleton
 class PolicyRepository @Inject constructor(
@@ -34,11 +39,11 @@ class PolicyRepository @Inject constructor(
 
     /** 观察当前生效策略（未绑定时返回默认策略） */
     fun observePolicy(): Flow<PolicyPackage> = dao.observe().map { entity ->
-        (entity?.let { decode(it) } ?: PolicyPackage.default()).deriveTimeControl()
+        (entity?.let { decodeOrRecover(it) } ?: PolicyPackage.default()).deriveTimeControl()
     }
 
     suspend fun getPolicy(): PolicyPackage =
-        (dao.get()?.let { decode(it) } ?: PolicyPackage.default()).deriveTimeControl()
+        (dao.get()?.let { decodeOrRecover(it) } ?: PolicyPackage.default()).deriveTimeControl()
 
     suspend fun currentVersion(): Int = dao.get()?.version ?: 0
 
@@ -66,15 +71,22 @@ class PolicyRepository @Inject constructor(
         dao.clear()
     }
 
-    private fun decode(entity: PolicyEntity): PolicyPackage {
+    /**
+     * 解密；失败时清掉坏行并返回 null（调用方回落默认策略）。
+     *
+     * 清行是必要动作：不清的话这一行每次读取都会反复失败，
+     * 而 `dao.clear()` 会让 observe 流重新发射一次空 → 默认策略，管控链路不至于断。
+     */
+    private suspend fun decodeOrRecover(entity: PolicyEntity): PolicyPackage? {
         return try {
             json.decodeFromString(PolicyPackage.serializer(), keystore.decryptFromBase64(entity.encryptedJson))
         } catch (e: Exception) {
-            Logger.e("PolicyRepository", e) { "failed to decrypt policy, treating as tampered" }
-            throw PolicyTamperedException("本地策略解密失败，可能被篡改或密钥失效", e)
+            Logger.e("PolicyRepository", e) {
+                "策略解密失败（密钥失效或缓存被破坏），清空本地缓存并回落默认策略，等待服务端重新下发"
+            }
+            runCatching { dao.clear() }
+                .onFailure { Logger.e("PolicyRepository", it) { "清空损坏策略行失败" } }
+            null
         }
     }
 }
-
-/** 策略包解密失败：说明本地缓存被破坏，需上报高危告警并强制重新拉取 */
-class PolicyTamperedException(message: String, cause: Throwable? = null) : Exception(message, cause)

@@ -145,14 +145,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     /** 最近一次前台包名（由无障碍窗口事件维护），供锁屏看门狗判断"是否已逃逸到非本应用"。 */
     private var lastForegroundPkg: String? = null
 
-    /** 锁屏看门狗 Job（进程级单例）。 */
-    private var watchdogJob: Job? = null
-
-    /**
-     * 锁屏看门狗是否已启动（onServiceConnected 可能多次调用，防重复起协程）。
-     * 仅作快速短路；真正的防重由 [watchdogJob] 生命周期保证。
-     */
-    private var watchdogStarted = false
+    /** 锁屏看门狗 Job 与其启动标志都在 companion（见文件末尾）：
+     *  它们跑在 @ApplicationScope 上，生命周期与进程一致而与 Service 实例无关，
+     *  放实例字段会导致服务重建后旧循环永不退出。 */
 
     /**
      * 当前默认桌面的包名与 HOME Activity 类名（用于识别「桌面长按弹出的卸载菜单」）。
@@ -201,6 +196,11 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 与 attach 严格配对：服务销毁后通道必须立即失效，否则弱引用之外的
         // 任何残留都会让调用方误判"通道可用"而在投影链路上多等一轮超时。
         accessibilityScreenshot.detach(this)
+        // 看门狗跑在进程级 ApplicationScope 上，不会随 Service 销毁自动停止；
+        // 不在这里取消，旧循环会继续用已销毁的 Service 上下文调 LockScreenActivity.show，
+        // 服务每重建一次就多一条 500ms 循环（泄漏 + 加剧锁屏重拉竞态）。
+        watchdogJob?.cancel()
+        watchdogJob = null
         super.onDestroy()
     }
 
@@ -223,13 +223,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
      * 过渡页到前台后自行完成撤锁并清标记，本循环随之静默。
      */
     private fun startLockWatchdog() {
-        if (watchdogStarted) return
-        watchdogStarted = true
-        // 循环跑在 @ApplicationScope（应用级）上，而本标志是实例级的：无障碍服务被系统
-        // 销毁重建（设置页开关、ROM 重绑、崩溃重启）后，旧循环永不退出、新实例再起一个，
-        // 多次重建后多个 500ms 循环并行轮询（白耗电且加剧锁屏重拉竞态）。
-        // 改为重建时先取消旧 Job 再起新的，任何时刻至多一个循环存活。
-        watchdogJob?.cancel()
+        // 进程级防重：服务被系统重建时 onServiceConnected 会再次调用，
+        // 只要旧 Job 还活着就复用它，绝不再起第二条循环。
+        if (watchdogJob?.isActive == true) return
         watchdogJob = scope.launch {
             while (isActive) {
                 delay(LOCK_WATCH_INTERVAL_MS)
@@ -658,6 +654,16 @@ class OperationGuardAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "GuardA11y"
+
+        /**
+         * 锁屏看门狗 Job（进程级单例）。
+         *
+         * 必须放在伴生对象：循环跑在 `@ApplicationScope` 上，生命周期等于进程，
+         * 而 Service 实例会被系统反复重建（设置页开关、ROM 重绑、崩溃重启）。
+         * 放实例字段时新实例看不到旧 Job，既取消不掉也判定不到"已在运行"，
+         * 每重建一次就多一条 500ms 循环，且旧循环持有已销毁的 Service 继续拉锁屏页。
+         */
+        private var watchdogJob: Job? = null
         private const val OWN_PACKAGE_PREFIX = "com.padguard.child"
         private const val DEBOUNCE_MS = 1500L
 

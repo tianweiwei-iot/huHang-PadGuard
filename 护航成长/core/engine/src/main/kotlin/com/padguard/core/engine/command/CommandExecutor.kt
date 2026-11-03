@@ -123,6 +123,7 @@ class CommandExecutor @Inject constructor(
                 CommandType.SET_MANAGEMENT_ACTIVE -> setManagementActive(command, deviceId)
                 CommandType.FLUSH_LOGS -> flushLogs(command, deviceId)
                 CommandType.WIPE -> wipe(command, deviceId)
+                CommandType.REVEAL_MANAGEMENT_UI -> revealManagementUi(command, deviceId)
             }
         } catch (e: Exception) {
             // 兜底：任何未预期异常都不能让执行链断掉，否则后续指令全部堆积
@@ -648,6 +649,20 @@ class CommandExecutor @Inject constructor(
         }
     }
 
+    // ==================== 管理台揭示 ====================
+
+    /**
+     * 远程揭示管理控制台。
+     *
+     * 幂等且无前置条件：图标本来就可见时重复点亮无害；不校验密码——指令通道本身
+     * 已由服务端家长身份鉴权，这正是它存在的意义（悬浮卡密码闸之外的第二条进入路）。
+     * 真正的点亮 + 拉起在 app 层（见 [EngineEffect.RevealManagementUi]），此处只判接收。
+     */
+    private fun revealManagementUi(command: Command, deviceId: String): CommandAck {
+        _effects.tryEmit(EngineEffect.RevealManagementUi)
+        return ack(command, deviceId, AckStatus.SUCCESS)
+    }
+
     // ==================== 工具 ====================
 
     private fun ack(
@@ -777,4 +792,10 @@ sealed interface EngineEffect {
     data class UninstallApp(val packageName: String, val msgId: String) : EngineEffect
     data class SetWatermark(val enabled: Boolean, val content: String) : EngineEffect
     data class UpdateRuntimeConfig(val params: Map<String, String>) : EngineEffect
+
+    /**
+     * 远程揭示管理控制台（[CommandType.REVEAL_MANAGEMENT_UI]）。
+     * 点亮图标 + 拉起管理台需要 app 层的 PackageManager 与 Activity 启动能力，engine 只发副作用。
+     */
+    data object RevealManagementUi : EngineEffect
 }

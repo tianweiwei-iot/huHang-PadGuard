@@ -578,6 +578,14 @@ class GuardService : Service() {
         // 滤镜必须跟着服务一起撤：服务销毁意味着退出管控，
         // 留一层黄蒙蒙的遮罩在孩子屏幕上，家长会以为平板坏了。
         eyeProtectionOverlay.remove()
+        // 水印与「计时开始」浮层同理：早期只有策略关闭/指令才会收水印、
+        // 浮层的 dispose() 全工程零调用，解绑或服务销毁后水印文字继续挂在
+        // WindowManager 上，浮层按钮还指向已 cancel 的 scope（点了没反应），
+        // 孩子只能重启设备才能清掉。这里统一随服务销毁撤收。
+        runCatching { watermark.hide() }
+            .onFailure { Logger.w(TAG) { "hide watermark on destroy failed: ${it.message}" } }
+        runCatching { usageStartOverlay.dispose() }
+            .onFailure { Logger.w(TAG) { "dispose usage overlay on destroy failed: ${it.message}" } }
         // 玻璃球同样随守护服务撤收：服务销毁即退出管控，不应再留悬浮入口。
         glassBall.dispose()
         scope.cancel()
@@ -744,15 +752,29 @@ class GuardService : Service() {
     private fun observeUsageStart() {
         val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
         scope.launch {
+            // 浮层挂起多久后自动开始计时。孩子不点确认就能让会话永远 active=false，
+            // isExpired() 恒 false，每日总时长锁被完全规避 —— 这不是"确认框"，是"开关"。
+            // 保留确认框（让孩子知道计时开始）但给它一个上限，超时按已确认处理。
+            var confirmShownAt = 0L
             usageSessionManager.state.collect { s ->
                 if (!boundNow.get()) {
+                    confirmShownAt = 0L
                     usageStartOverlay.hide()
                     return@collect
                 }
                 val interactive = pm?.isInteractive == true
                 if (s.needsStartConfirm && interactive) {
+                    if (confirmShownAt == 0L) confirmShownAt = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - confirmShownAt >= USAGE_CONFIRM_TIMEOUT_MS) {
+                        Logger.w(TAG) { "usage start unconfirmed for ${USAGE_CONFIRM_TIMEOUT_MS / 1000}s, auto-starting session" }
+                        confirmShownAt = 0L
+                        usageStartOverlay.hide()
+                        scope.launch { usageSessionManager.confirmStart() }
+                        return@collect
+                    }
                     usageStartOverlay.show { scope.launch { usageSessionManager.confirmStart() } }
                 } else {
+                    confirmShownAt = 0L
                     usageStartOverlay.hide()
                 }
             }
@@ -1276,7 +1298,12 @@ class GuardService : Service() {
             return
         }
         if (blockedPackage != foreground) return
-        if (blockedPackage == lastBlockedPackage) return
+        // 同包去重必须同时确认"拦截页还在屏幕上"：
+        // 孩子点「回桌面」会 finish 掉拦截页，但 lastBlockedPackage 仍是这个包；
+        // 只要他在下一个 15s 采样点前重新点开应用，就会命中这里的相等判断并永久 return，
+        // 此后每一轮 tick 都不再弹页 —— 限额/黑名单/Kiosk 降级三道拦截同时失效，
+        // 且无障碍兜底不覆盖单应用限额与黑名单。改成"页面不在了就重弹"。
+        if (blockedPackage == lastBlockedPackage && AppBlockActivity.isShowing()) return
         lastBlockedPackage = blockedPackage
         if (silentClose) {
             sendToHome()
@@ -2025,8 +2052,38 @@ class GuardService : Service() {
                 )
             }
 
-            is EngineEffect.UpdateRuntimeConfig ->
-                Logger.i(TAG) { "runtime config from command: ${effect.params.keys}" }
+            is EngineEffect.UpdateRuntimeConfig -> runSafely("runtimeConfig") {
+                // 原实现只打一行日志却回执 SUCCESS：家长端显示"已下发成功"，
+                // 设备的轮询间隔/传输模式毫无变化。这里按 MQTT CONFIG 主题的同一套键名落地，
+                // 保证两条下发通道语义一致。
+                val p = effect.params
+                transportSettings.applyRemoteConfig(
+                    heartbeatSec = p["heartbeatIntervalSec"]?.toIntOrNull(),
+                    pollingSec = p["pollingIntervalSec"]?.toIntOrNull(),
+                    logUploadSec = p["logUploadIntervalSec"]?.toIntOrNull()
+                )
+                p["transportMode"]?.uppercase()?.let { mode ->
+                    runCatching { com.padguard.core.transport.TransportMode.valueOf(mode) }
+                        .getOrNull()
+                        ?.let { transportSettings.setMode(it) }
+                }
+                Logger.i(TAG) { "runtime config applied from command: ${p.keys}" }
+            }
+
+            EngineEffect.RevealManagementUi -> {
+                // 远程揭示管理台（家长端指令 REVEAL_MANAGEMENT_UI）：点亮桌面图标并直接拉起
+                // 管理台（EXTRA_REVEAL 会话），配置结束销毁时 MainActivity 会自动重新隐藏。
+                // 与悬浮卡密码闸的唯一区别是免密码——指令通道已由服务端家长身份鉴权。
+                runSafely("remoteReveal") {
+                    appHider.revealManagementUi()
+                    startActivity(
+                        Intent(this, MainActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                            .putExtra(MainActivity.EXTRA_REVEAL, true)
+                    )
+                }
+                Logger.i(TAG) { "management UI revealed via remote command" }
+            }
         }
     }
 
@@ -2337,6 +2394,19 @@ class GuardService : Service() {
         runCatching { captureConsentStore.revoke() }
             .onFailure { t -> Logger.e(TAG, t) { "capture consent store revoke failed on unbind" } }
         scope.launch { runCatching { a11yCapabilityHealer.disable() } }
+        // 上网防护通道必须显式收掉：sync() 是唯一会 stop() + disableAlwaysOn() 的入口，
+        // 而它只由 refreshPolicy 调用，refreshPolicy 在未绑定态直接 return。
+        // 不补这一步，解绑后 VPN 前台服务仍按旧规则拦 DNS、always-on 锁还留在系统里 ——
+        // 家长以为已解除管控，孩子却仍上不了被拦网站，且设置里改不了 VPN。
+        runCatching { webGuardVpn.sync(com.padguard.core.data.model.policy.WebPolicy()) }
+            .onSuccess { Logger.i(TAG) { "web guard vpn synced off on unbind: $it" } }
+            .onFailure { t -> Logger.e(TAG, t) { "web guard vpn stop failed on unbind" } }
+        // 拉管理台之前先点亮图标：绑定期间 AppHider 已把 MainActivity 置为 disabled，
+        // observeBinding 的揭示是另一个协程，存在竞态；不在这里同步揭示，
+        // startActivity 可能抛 ActivityNotFoundException 被 runCatching 吞掉，
+        // 表现为"解绑后停在桌面、不进绑定页"。
+        runCatching { appHider.revealManagementUi() }
+            .onFailure { t -> Logger.w(TAG, t) { "reveal management ui before unbind navigation failed" } }
         withContext(Dispatchers.Main) {
             runCatching {
                 startActivity(
@@ -2392,6 +2462,14 @@ class GuardService : Service() {
 
         private const val CHANNEL_ID = "padguard_guard"
         private const val NOTIFICATION_ID = 1001
+
+        /**
+         * 「计时开始」确认浮层的自动确认上限（3 分钟）。
+         *
+         * 不点确认就不能开始计时 = 孩子拿到一个"是否被管控"的开关，
+         * 每日总时长锁可被完全规避。超时后按已确认处理，session 正常起算。
+         */
+        private const val USAGE_CONFIRM_TIMEOUT_MS = 3 * 60_000L
 
         /**
          * 亮屏后重新对账锁定覆盖的延迟：200ms。
