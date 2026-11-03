@@ -25,6 +25,17 @@ interface DeviceRepository : JpaRepository<Device, String> {
     /** 在线设备数（看板指标）；注意在线态由 DeviceService 惰性超时兜底，此处为近似计数 */
     fun countByOnlineStatus(onlineStatus: String): Long
 
+    /** 某在线态的全部设备（在线态扫描 / 启动预热用，见 PresenceMonitorService） */
+    fun findByOnlineStatus(onlineStatus: String): List<Device>
+
+    /**
+     * 处于指定在线态、且最后在线时间早于给定时刻的设备。
+     *
+     * 脱管告警用它把"已持续离线一段时间"的设备筛出来，
+     * 避免把全表设备拉进内存再逐条比较（设备表只增不减）。
+     */
+    fun findByOnlineStatusAndLastOnlineAtLessThan(onlineStatus: String, ts: Long): List<Device>
+
     /** 按硬件序列号查设备（跨用户）：用于"孤儿设备回收"与重绑复用同一条台账 */
     fun findByDeviceSn(deviceSn: String): List<Device>
 

@@ -26,7 +26,6 @@ import org.springframework.transaction.annotation.Transactional
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 @Service
 class DeviceService(
@@ -51,13 +50,13 @@ class DeviceService(
     @Value("\${padguard.mqtt.device-username:}") private val mqttDeviceUsername: String,
     @Value("\${padguard.mqtt.device-password:}") private val mqttDevicePassword: String,
     private val billingService: BillingService,
-    private val deviceDataPurgeService: DeviceDataPurgeService
+    private val deviceDataPurgeService: DeviceDataPurgeService,
+    /** 秒级在线态的**内存**快照（见 [DevicePresenceRegistry]）：本类只负责"信号进来就登记" */
+    private val presence: DevicePresenceRegistry
 ) {
 
     private val log = LoggerFactory.getLogger(DeviceService::class.java)
 
-    /** deviceId -> 上次因 HTTP 活动刷新在线状态的时刻，用于 [markAlive] 节流 */
-    private val aliveRefreshedAt = ConcurrentHashMap<String, Long>()
     /**
      * 孩子端绑定：消费绑定码 -> **按硬件指纹复用或新建设备** -> 下发令牌/MQTT 凭据/HMAC 密钥 -> 建默认策略
      *
@@ -316,6 +315,10 @@ class DeviceService(
 
     /** 处理孩子端心跳（MQTT 或 HTTP 降级共用），上线状态变更时推 WS */
     fun applyHeartbeat(deviceId: String, hb: HeartbeatDto) {
+        // 心跳本身就是最权威的存活信号：先登记 presence，再落库。
+        // 顺序不能反 —— 下面的 save 可能慢（行锁 / 日志上报抢写），
+        // 若等它返回才登记，弱网时 presence 会比真实上线晚几百毫秒，白白多等一轮扫描。
+        presence.touch(deviceId)
         deviceRepository.findById(deviceId).ifPresent { dev ->
             val wasOffline = dev.onlineStatus != "ONLINE"
             dev.onlineStatus = "ONLINE"
@@ -378,7 +381,16 @@ class DeviceService(
     fun policyVersionOf(deviceId: String): Int =
         policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)?.version ?: 0
 
+    /**
+     * 置为离线并推 `device.offline`。
+     *
+     * 调用方有三处：[PresenceMonitorService]（信号超时）、[OfflineMonitorService]（兜底）、解绑/易主。
+     * 无论谁调，都顺手把 presence 表里的这条摘掉 —— 否则内存里它还是"在线"，
+     * [DevicePresenceRegistry.touch] 不会认为这是一次"离线→在线"的恢复，
+     * 家长端就看不到它重新上线的那条推送（表现为"设备回来了但一直显示离线"）。
+     */
     fun setOffline(deviceId: String) {
+        presence.markOffline(deviceId)
         deviceRepository.findById(deviceId).ifPresent { dev ->
             if (dev.onlineStatus == "ONLINE") {
                 dev.onlineStatus = "OFFLINE"
@@ -389,6 +401,29 @@ class DeviceService(
                 ))
             }
         }
+    }
+
+    /**
+     * 处理"MQTT 连接断开"这一路的离线提示（broker 发布的遗嘱 `{"online":false}`）。
+     *
+     * ## 为什么要先看 presence，而不是直接置离线
+     * 遗嘱只说明**MQTT 这条连接**断了，不说明设备没了：切 Wi-Fi、broker 重启、
+     * 校园网掐掉 1883 端口都可能触发，而孩子端的 HTTPS 拉指令可能一切正常。
+     * 改造前家长端靠 10 秒轮询，这种 1~2 秒的抖动被自然吞掉；
+     * 现在 WS 直推、状态秒级可见，若照单全收就会变成"离线/在线"反复横跳。
+     *
+     * 判据：最近 [BROKER_WILL_GRACE_MS] 内还有其它存活信号（HTTP 每 3 秒一次）→
+     * 说明设备活着，忽略这条提示，交给 [PresenceMonitorService] 用统一口径判定；
+     * 否则（设备真的没了）立刻置离线，省下这几秒。
+     */
+    fun handleBrokerOffline(deviceId: String) {
+        val now = System.currentTimeMillis()
+        val last = presence.lastSeenAt(deviceId)
+        if (last != null && now - last < BROKER_WILL_GRACE_MS) {
+            log.info("broker offline hint for {} ignored: presence is fresh ({} ms ago)", deviceId, now - last)
+            return
+        }
+        setOffline(deviceId)
     }
 
     fun getUserId(deviceId: String): String? =
@@ -495,79 +530,70 @@ class DeviceService(
     private fun requireOwned(userId: String, deviceId: String): Device =
         ownershipGuard.requireOwned(userId, deviceId)
 
-    fun applyHeartbeatOnline(deviceId: String) {
+    /**
+     * 把设备置为在线并刷新 `last_online_at`（MQTT `status=online` 等显式上线信号）。
+     *
+     * @param clientIp 本次请求的来源 IP（有则一并写入，供局域网发现用）
+     */
+    fun applyHeartbeatOnline(deviceId: String, clientIp: String? = null) {
+        presence.touch(deviceId)
+        setOnline(deviceId, clientIp)
+    }
+
+    /**
+     * 落库置在线：一次读 + 一次写，顺带记录来源 IP。
+     *
+     * presence 登记由调用方负责（[applyHeartbeatOnline] / [markAlive] 各自已做）：
+     * 若这里再 touch 一次，同一次信号会被当成两个样本、间隔 0 毫秒，
+     * 把 [DevicePresenceRegistry] 的节奏均值往下拽，误判阈值随之变小。
+     *
+     * 合并写库是刻意的：改造前 `applyHeartbeatOnline` 和 `recordLanPresence` 各做一次
+     * findById + save，同一个信号落库两遍 —— 这正是原实现必须把刷新间隔压到 30 秒
+     * （[DevicePresenceRegistry.DB_REFRESH_MS] = 15s 的两倍）的直接原因。
+     */
+    private fun setOnline(deviceId: String, clientIp: String?) {
         deviceRepository.findById(deviceId).ifPresent { dev ->
+            val now = System.currentTimeMillis()
             val wasOffline = dev.onlineStatus != "ONLINE"
             dev.onlineStatus = "ONLINE"
-            dev.lastOnlineAt = System.currentTimeMillis()
+            dev.lastOnlineAt = now
+            // IP 为空时不强写：把空串写进去会让上一次有效的地址平白丢失。
+            clientIp?.takeIf { it.isNotBlank() }?.let {
+                dev.lastIp = it
+                dev.lastActiveAt = now
+            }
             deviceRepository.save(dev)
+            // 仅 OFFLINE/UNKNOWN -> ONLINE 这一跳推 WS：持续在线期间零推送、零副作用。
             if (wasOffline) {
                 webSocketPush.pushToUser(dev.userId, mapOf(
                     "type" to "device.online", "deviceId" to deviceId,
-                    "timestamp" to System.currentTimeMillis()
+                    "timestamp" to now
                 ))
             }
         }
     }
 
     /**
-     * 任意已鉴权的孩子端 HTTP 活动（长轮询拉指令、上报日志/截图、ack 等）都视为「存活」信号，
-     * 刷新 [Device.lastOnlineAt] 并把在线状态置为 ONLINE。
-     *
-     * 这是 MQTT 关闭（local profile）环境下的关键兜底：孩子端在 POLLING 模式下只跑「轮询循环」
-     * （pullCommands + uploadLogs），主循环的心跳（/device/heartbeat）并不触达服务端，
-     * 导致 [Device.onlineStatus] 永远停在默认 OFFLINE、家长端看到设备永远离线。
-     * 把这些高频 HTTP 活动当作心跳等价信号，由 [com.padguard.server.security.ChildAuthInterceptor]
-     * 在每次鉴权成功后统一刷新，无需重建孩子端 APK 即可让在线状态正确翻转。
-     *
-     * 仅当状态由 OFFLINE→ONLINE 时才推 WS（[applyHeartbeatOnline] 已处理），
-     * 持续在线期间不会重复推送，零副作用；离线后由 [effectiveOnlineStatus] 的 2 分钟惰性超时兜底判离线。
-     */
-    /**
-     * 节流：孩子端在轮询模式下每 3 秒就有一次 HTTP 请求，若每次都写一次 devices 行，
-     * 单是"在线状态维护"就占了高频写入的绝大部分，还会和孩子端日志上报抢写锁。
-     * 而在线状态晚 30 秒刷新对业务零影响 —— 离线判定本身就有 2 分钟惰性超时兜底
-     * （见 [effectiveOnlineStatus]），30 秒的刷新粒度远小于该窗口。
-     */
-    /**
      * 记录孩子端的一次 HTTP 活动（在线状态刷新 + 来源 IP）。
      *
+     * 任意已鉴权的孩子端 HTTP 请求（拉指令、上报日志/截图、ack、心跳）都视为「存活」信号：
+     * [com.padguard.server.security.ChildAuthInterceptor] 在鉴权成功后统一调用本方法。
+     *
+     * ## 快慢分离：内存每次登记，落库按秒级节流
+     * 孩子端在线时每 3 秒拉一次指令，若每次都写 `devices` 行，单是"维护在线态"就占了
+     * 高频写入的绝大部分，还会和孩子端日志上报抢行锁。所以：
+     * - **内存**：每次信号都进 [DevicePresenceRegistry]（一次 CAS，无 SQL）——
+     *   这是秒级离线判定的依据，丢一次就少一次判定机会；
+     * - **落库**：只在状态翻转或距上次落库 ≥ [DevicePresenceRegistry.DB_REFRESH_MS] 时做，
+     *   写放大被压到"在线设备数 / 15 秒"。
+     *
      * @param clientIp 本次请求的来源 IP，写进 `devices.last_ip` 供局域网发现使用。
-     *                 IP 可能为空（拿不到时），此时只刷新在线状态，不强写——
-     *                 把空串写进去会让上一次有效的地址平白丢失。
+     *                 IP 可能为空（拿不到时），此时只刷新在线状态，不强写。
      */
     fun markAlive(deviceId: String, clientIp: String? = null) {
-        val now = System.currentTimeMillis()
-        var due = false
-        aliveRefreshedAt.compute(deviceId) { _, last ->
-            if (last == null || now - last >= ALIVE_REFRESH_INTERVAL_MS) {
-                due = true
-                now
-            } else {
-                last
-            }
-        }
-        if (due) {
-            applyHeartbeatOnline(deviceId)
-            recordLanPresence(deviceId, clientIp, now)
-        }
-    }
-
-    /**
-     * 登记"这台平板最近出现在这张网络里"。
-     *
-     * 单独一个方法而不是并入 [applyHeartbeatOnline]：那边的职责是维护在线状态与阈值，
-     * 混进来会让"为什么在线判定改了会影响局域网发现"这种耦合在半年后无法解释。
-     */
-    private fun recordLanPresence(deviceId: String, clientIp: String?, now: Long) {
-        val ip = clientIp?.takeIf { it.isNotBlank() } ?: return
-        runCatching {
-            deviceRepository.findById(deviceId).orElse(null)?.let { dev ->
-                dev.lastIp = ip
-                dev.lastActiveAt = now
-                deviceRepository.save(dev)
-            }
-        }.onFailure { log.warn("记录设备 {} 的来源 IP 失败(已忽略): {}", deviceId, it.message) }
+        // 绝大多数调用会在这里返回 false：稳态下只有内存写，没有 SQL。
+        if (!presence.touch(deviceId)) return
+        setOnline(deviceId, clientIp)
     }
 
     /**
@@ -677,16 +703,10 @@ class DeviceService(
     /**
      * 在线状态的"惰性超时"兜底判定：仅影响返回给家长端的值，不改库。
      *
-     * 背景：设备上线状态早期完全依赖两个事件 —— MQTT 断线触发 [setOffline]，或孩子端心跳
-     * 触发 [applyHeartbeat] 置 ONLINE。但存在两个盲区：
-     * 1. local profile 下 MQTT 关闭，[setOffline] 永不触发；
-     * 2. HTTP 降级心跳只把状态置为 ONLINE，从不置 OFFLINE。
-     * 结果：孩子端一旦卸载/关机/断网，服务端 [onlineStatus] 永远停在最后一次的 "ONLINE"，
-     * 家长端便一直显示"在线"，进而"解绑后设备仍在列表里、还被优先选为当前设备"。
-     *
-     * 这里以最后一次心跳时间 [Device.lastOnlineAt] 兜底：若距今超过 [ONLINE_STALE_MS]
-     * （默认 2 分钟，覆盖 30~60s 心跳间隔 + 网络抖动冗余），即视为已离线返回 "OFFLINE"。
-     * 不依赖 MQTT、不回写库，零风险且立即生效。
+     * 主判定路径已经是 [PresenceMonitorService]（内存信号 + 秒级扫描，约 5 秒翻转并落库）。
+     * 这里只处理主路径不可用的边角：服务端刚重启、内存表尚未预热、扫描线程被阻塞等。
+     * 因此 [ONLINE_STALE_MS] 只需要"比落库刷新间隔宽裕"即可（见其注释），
+     * 不能反过来当成精度来源 —— 读取侧的超时永远滞后于真实状态。
      */
     private fun effectiveOnlineStatus(dev: Device): String {
         if (dev.onlineStatus != "ONLINE") return dev.onlineStatus
@@ -695,11 +715,22 @@ class DeviceService(
     }
 
     private companion object {
-        /** 在线状态超时阈值：最后一次心跳距今超过该值即判为离线（毫秒，默认 2 分钟）。 */
-        const val ONLINE_STALE_MS = 120_000L
+        /**
+         * 在线状态惰性兜底阈值。
+         *
+         * 40 秒 = 落库刷新间隔（[DevicePresenceRegistry.DB_REFRESH_MS] = 15s）
+         * × 2 余量 + 网络/GC 抖动。**它不是检测延迟**：正常路径下设备掉线约 5 秒就会被
+         * [PresenceMonitorService] 写回 OFFLINE，这里只在"内存判定完全失效"时兜底。
+         * 改造前该值是 120 秒，且是唯一判定依据 —— 家长端因此最坏要等 2 分钟以上。
+         */
+        const val ONLINE_STALE_MS = 40_000L
 
-        /** 同一设备"HTTP 活动刷新在线状态"的最小间隔（见 [markAlive]） */
-        const val ALIVE_REFRESH_INTERVAL_MS = 30_000L
+        /**
+         * "Broker 说它离线"这条提示的可信窗口：最近这段时间内还有 HTTP 存活信号，
+         * 就认为只是 MQTT 连接抖了一下（见 [handleBrokerOffline]）。
+         * 取值略大于孩子端的拉指令间隔（3s），保证一次抖动不会把状态打翻。
+         */
+        const val BROKER_WILL_GRACE_MS = 3_500L
 
         /**
          * 局域网发现的时间窗（毫秒）：只认 5 分钟内露过面的设备。

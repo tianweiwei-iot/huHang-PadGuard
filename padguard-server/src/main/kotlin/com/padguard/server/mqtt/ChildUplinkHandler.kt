@@ -219,7 +219,9 @@ class ChildUplinkHandler(
         if (online) {
             deviceService.applyHeartbeatOnline(deviceId)
         } else {
-            deviceService.setOffline(deviceId)
+            // 这一路的 offline 多为 MQTT 遗嘱（连接断了，不代表设备没了）。
+            // 由 DeviceService 结合 presence 判断是否为真离线，避免状态反复横跳。
+            deviceService.handleBrokerOffline(deviceId)
         }
     }
 

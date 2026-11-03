@@ -48,6 +48,14 @@ padguard:
     sms-login-enabled: false
   device:
     token-ttl-days: 30
+  # 孩子端上下线检测（见 DevicePresenceRegistry / PresenceMonitorService）
+  # 判定阈值不是写死的：实际阈值 = clamp(1.8 × 该设备实测信号间隔, [min, max])，
+  # 正常在线（3s 一次拉指令）约 5.4s 判离线。**不要为了让"离线更快"把 min 调到 2s 以下** ——
+  # 孩子端的信号节奏是 3s，阈值低于它会把正常请求抖动误判成离线。
+  presence:
+    min-timeout-ms: 5000
+    max-timeout-ms: 20000
+    scan-interval-ms: 1000
   billing:
     # ---- 免费试用 ----
     # 新用户（及升级前已存在的存量账号）自动获得试用，避免一升级就被锁死。

@@ -34,6 +34,8 @@ class PolicyServiceTest {
         override fun findByUserId(userId: String): List<Device> = emptyList()
         override fun countByUserId(userId: String): Long = 0L
         override fun countByOnlineStatus(onlineStatus: String): Long = 0L
+        override fun findByOnlineStatus(onlineStatus: String): List<Device> = emptyList()
+        override fun findByOnlineStatusAndLastOnlineAtLessThan(onlineStatus: String, ts: Long): List<Device> = emptyList()
         override fun findByDeviceSn(deviceSn: String): List<Device> = emptyList()
         override fun findByLastActiveAtGreaterThan(since: Long): List<Device> = emptyList()
     }

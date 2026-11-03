@@ -32,8 +32,14 @@ import javax.sql.DataSource
 /** 监控指标用：进程启动时刻（近似应用启动） */
 val startedAt: Long = System.currentTimeMillis()
 
-/** 在线态惰性超时阈值（与 DeviceService 一致，单位毫秒） */
-const val ONLINE_STALE_MS: Long = 120_000L
+/**
+ * 在线态惰性超时阈值（与 [DeviceService] 的 ONLINE_STALE_MS 保持一致，单位毫秒）。
+ *
+ * 主判定由 [PresenceMonitorService] 在约 5 秒内把离线写回库，这里只是"库里的值可能
+ * 略微滞后"时的读侧兜底，因此取 40 秒（= 落库刷新间隔 15s 的 2 倍余量）。
+ * 改造前这里是 2 分钟：后台设备列表会把已关机两分钟内的设备继续显示为在线。
+ */
+const val ONLINE_STALE_MS: Long = 40_000L
 
 val FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 

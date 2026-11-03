@@ -55,6 +55,10 @@ class BatchARegressionTest {
         override fun countByUserId(userId: String) = table.values.count { it.userId == userId }.toLong()
         override fun countByOnlineStatus(onlineStatus: String) =
             table.values.count { it.onlineStatus == onlineStatus }.toLong()
+        override fun findByOnlineStatus(onlineStatus: String) =
+            table.values.filter { it.onlineStatus == onlineStatus }
+        override fun findByOnlineStatusAndLastOnlineAtLessThan(onlineStatus: String, ts: Long) =
+            table.values.filter { it.onlineStatus == onlineStatus && (it.lastOnlineAt ?: Long.MAX_VALUE) < ts }
         override fun findByDeviceSn(deviceSn: String) = table.values.filter { it.deviceSn == deviceSn }
         override fun findByLastActiveAtGreaterThan(since: Long) =
             table.values.filter { (it.lastActiveAt ?: 0L) > since }
