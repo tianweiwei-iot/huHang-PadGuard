@@ -264,11 +264,20 @@
         <!-- 锁屏覆盖层：无解锁入口 -->
         <!-- windowSoftInputMode=adjustResize：申请解锁对话框是输入焦点所在，必须随输入法升起而缩放，
              否则键盘会把对话框顶出屏幕外；同时配合代码内显式 showSoftInput 兜底，保证理由框稳定弹键盘。 -->
+        <!--
+          resizeableActivity=false：锁屏页**绝不允许**被摆进分屏 / 自由窗口（EMUI 叫"智慧多窗"）。
+          否则孩子从底部上滑并停住就能把锁屏挤成半屏，另一半照样点开应用 —— 观感上就是
+          "滑了一下，锁屏界面就没了"。supportsPictureInPicture 同理，画中画也是缩小窗口的逃逸形态。
+          注意：Android 12+ 大屏（sw≥600dp）会**忽略**该声明并强制可调整大小，
+          因此运行时还有一道自救（见 LockScreenActivity.onMultiWindowModeChanged）。
+        -->
         <activity
             android:name=".ui.lock.LockScreenActivity"
             android:exported="false"
             android:launchMode="singleTask"
             android:excludeFromRecents="true"
+            android:resizeableActivity="false"
+            android:supportsPictureInPicture="false"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.PadGuard.Lock" />
 
@@ -286,12 +295,14 @@
             android:excludeFromRecents="true"
             android:theme="@style/Theme.PadGuard.Gate" />
 
-        <!-- 应用违规拦截覆盖层 -->
+        <!-- 应用违规拦截覆盖层（同锁屏页：不允许被摆进分屏/自由窗口，否则半屏拦截 = 没拦截） -->
         <activity
             android:name=".ui.block.AppBlockActivity"
             android:exported="false"
             android:launchMode="singleTask"
             android:excludeFromRecents="true"
+            android:resizeableActivity="false"
+            android:supportsPictureInPicture="false"
             android:theme="@style/Theme.PadGuard.Lock" />
 
         <!--
@@ -307,12 +318,14 @@
             android:excludeFromRecents="true"
             android:theme="@style/Theme.PadGuard" />
 
-        <!-- 管理员消息/公告全屏弹窗 -->
+        <!-- 管理员消息/公告全屏弹窗（同为霸屏覆盖，不允许分屏） -->
         <activity
             android:name=".ui.message.MessageActivity"
             android:exported="false"
             android:launchMode="singleTask"
             android:excludeFromRecents="true"
+            android:resizeableActivity="false"
+            android:supportsPictureInPicture="false"
             android:theme="@style/Theme.PadGuard.Lock" />
 
         <!--

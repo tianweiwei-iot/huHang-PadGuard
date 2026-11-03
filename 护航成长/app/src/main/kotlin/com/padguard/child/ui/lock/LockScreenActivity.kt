@@ -3,6 +3,7 @@ package com.padguard.child.ui.lock
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -115,6 +116,16 @@ class LockScreenActivity : ComponentActivity() {
     @Inject lateinit var keyguardBridge: SystemKeyguardBridge
     @Inject lateinit var transportSettings: TransportSettings
 
+    /**
+     * 锁屏呈现的升级引擎。
+     *
+     * 只在分屏自救里用：自救把本页移出分屏后，需要它把"锁屏覆盖力"重新铺一遍
+     * （并让无障碍看门狗/周期自检接力），否则自救失败时就没有任何一层兜住。
+     * 它不反向依赖本页（依赖是 [LockScreenNotifier] / [DeviceAdminBridge] / [LockController] 等），
+     * 注入不会形成环。
+     */
+    @Inject lateinit var presenter: LockScreenPresenter
+
     private val handler = Handler(Looper.getMainLooper())
 
     /**
@@ -205,12 +216,24 @@ class LockScreenActivity : ComponentActivity() {
      */
     private var keyguardDismissedForRequest = false
 
+    /**
+     * 本次锁定会话内已执行的「分屏自救」次数。
+     *
+     * 分屏自救 = 移除被摆进分屏的那条任务 + 以新任务重铺一次全屏锁屏页。会有一帧的切换，
+     * 因此必须限次：反复触发只会变成闪屏风暴，剩下的兜底交给无障碍看门狗（500ms 一轮）。
+     */
+    private var multiWindowFixAttempts = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         mode = intent.getIntExtra(EXTRA_MODE, MODE_LOCK)
         showOverLockScreen()
         // 新一轮锁屏会话：复位抢占计数，给本次锁定一个完整的重试预算。
         relaunchCount = 0
+        multiWindowFixAttempts = 0
+        // 新实例默认按全屏创建；若它其实是被系统直接摆进分屏的，onResume 会以权威状态再纠正。
+        // 不复位的话，上一个实例自救时置的分屏标记会一直挂着，让看门狗与升级链无限施压。
+        inMultiWindow = false
         admin.refreshControlMode()
 
         if (mode == MODE_UNLOCKING) {
@@ -405,6 +428,10 @@ class LockScreenActivity : ComponentActivity() {
                 }
             }
         }
+        // "回到前台"不等于"覆盖恢复"：有些 ROM 在后台就把本页摆进分屏，首次 onResume 时
+        // onMultiWindowModeChanged 可能已经错过。这里以权威状态补一次判定，
+        // 保证以分屏/悬浮窗形态回来的锁屏页一定会被拽回全屏。
+        if (isInMultiWindowMode && !inMultiWindow) onLockWindowModeChanged(true)
     }
 
     /**
@@ -470,6 +497,99 @@ class LockScreenActivity : ComponentActivity() {
             // 等凭证界面回调期间（安全锁验证）也不抢占：那会让系统凭证框失去焦点。
             handler.postDelayed(relaunchRunnable, transportSettings.rearmDelayMs.value.toLong())
         }
+    }
+
+    // ==================== 分屏 / 悬浮窗逃逸防护 ====================
+
+    /**
+     * 分屏 / 自由窗口形态变化回调 —— 锁屏「覆盖」被撕开的第三种形态（前两种是手势上滑、通知栏）。
+     *
+     * ## 为什么分屏同样是逃逸
+     * 锁屏页被系统摆进分屏（EMUI 日志里的 `hwMultiwindow-primary`、AOSP 的
+     * `WINDOWING_MODE_MULTI_WINDOW`）或自由窗口后，它只占半屏：
+     * 另一半屏幕上是桌面或别的应用，孩子照样能点开应用、能拖分隔条、能关掉我们这一格。
+     * 观感上就是"滑了一下，锁屏界面没了"，管控等于失效。
+     *
+     * 只在锁屏页自身拦是拦不住的：`isResizeable` 在 Android 12+ 大屏上会被系统强制忽略
+     * （清单里声明 `resizeableActivity=false` 只在 Android ≤11 有效），因此必须叠加运行时自救。
+     *
+     * @see evictMultiWindow
+     */
+    override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: Configuration) {
+        super.onMultiWindowModeChanged(isInMultiWindowMode, newConfig)
+        onLockWindowModeChanged(isInMultiWindowMode)
+    }
+
+    /**
+     * 画中画同样是"缩小窗口"的逃逸形态。
+     *
+     * 清单已禁用本页 PIP，这里只是 ROM 差异兜底：真有 ROM 强行缩成小窗，按分屏同样处理。
+     */
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        if (isInPictureInPictureMode) onLockWindowModeChanged(true)
+    }
+
+    /**
+     * 部分 ROM（含 EMUI）切换分屏时只改窗口尺寸、不回调 `onMultiWindowModeChanged`：
+     * 以 [isInMultiWindowMode] 这个权威状态再对一次，避免漏判。
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (isInMultiWindowMode != inMultiWindow) onLockWindowModeChanged(isInMultiWindowMode)
+    }
+
+    /** 锁屏覆盖是否已被分屏 / 自由窗口撕开：决定要不要自救 */
+    private fun onLockWindowModeChanged(inMultiWindowNow: Boolean) {
+        inMultiWindow = inMultiWindowNow
+        if (!inMultiWindowNow) {
+            multiWindowFixAttempts = 0
+            return
+        }
+        // 过渡页（MODE_UNLOCKING）允许被压缩：此时 App 侧已解锁，它只是撤系统锁的一次性载体，
+        // 收尾后自行退出，把它拽成全屏反而会让"已解锁"的页面挡住孩子。
+        if (mode == MODE_UNLOCKING || !stillLocked()) return
+        Logger.w(TAG) {
+            "lock screen windowed (split/freeform): coverage broken, " +
+                "w=${resources.configuration.screenWidthDp}dp, attempt=$multiWindowFixAttempts"
+        }
+        if (multiWindowFixAttempts >= MAX_MULTI_WINDOW_EVICTIONS) {
+            // 自救限次已用完（通常是 ROM 死活不放行）：不再自己闪屏，
+            // 交给无障碍看门狗（500ms 一轮，具备后台拉起能力）与守护周期自检持续施压。
+            Logger.w(TAG) { "multi-window eviction exhausted, watchdog takes over" }
+            return
+        }
+        multiWindowFixAttempts++
+        evictMultiWindow()
+    }
+
+    /**
+     * 把锁屏页从分屏 / 悬浮窗形态里拽回全屏。
+     *
+     * ## 为什么必须"先移除任务、再重铺"
+     * 本页是 `singleTask`，此刻它的任务已经被系统摆进分屏。只调用 `startActivity` 的话，
+     * 系统只会把**同一条分屏任务**再次提到前面（`singleTask` 语义），分屏原样保留；
+     * 必须先把这条任务移除，再以 `NEW_TASK` 重新铺一次，新任务才会被放进全屏窗口。
+     *
+     * 三条通道同时打，任一条成功都不会留在分屏里：
+     * 1. 就地重铺（本页此刻仍在前台，不受后台启动限制，是最快的一条）；
+     * 2. [onDestroy] 里的交接（页面被回收而锁定态仍在时重铺）；
+     * 3. [LockScreenPresenter.reenforce]，并让无障碍看门狗/周期自检持续接力。
+     */
+    private fun evictMultiWindow() {
+        val detail = currentDetail
+        Logger.w(TAG) {
+            "evicting lock screen from multi-window " +
+                "($multiWindowFixAttempts/$MAX_MULTI_WINDOW_EVICTIONS)"
+        }
+        runCatching { finishAndRemoveTask() }
+            .onFailure { Logger.w(TAG, it) { "finishAndRemoveTask for multi-window eviction failed" } }
+        show(applicationContext, detail)
+        runCatching { presenter.reenforce() }
+            .onFailure { Logger.w(TAG, it) { "reenforce after multi-window eviction failed" } }
     }
 
     /** 屏幕当前是否点亮（息屏时不铺悬浮地板，避免把它唤醒） */
@@ -1076,7 +1196,12 @@ class LockScreenActivity : ComponentActivity() {
         if (mode != MODE_UNLOCKING && stillLocked() && isScreenOn()) {
             LockScreenActivity.show(this, currentDetail)
         }
-        if (instance === this) instance = null
+        if (instance === this) {
+            instance = null
+            // 实例已经不在，分屏标记必须跟着落下：否则看门狗/升级链会拿着一个
+            // 早已销毁的页面状态无限重铺（旧实现里的日志风暴就是这么来的）。
+            inMultiWindow = false
+        }
         super.onDestroy()
     }
 
@@ -1185,6 +1310,24 @@ class LockScreenActivity : ComponentActivity() {
         @Volatile
         var resumedNow: Boolean = false
             private set
+
+        /**
+         * 锁屏页此刻是否被系统摆进了分屏 / 自由窗口（覆盖已失效）。
+         *
+         * 与 [visible] 的区别：`visible` 只说明"这一页在前台"，分屏时它同样为 true ——
+         * 但屏幕上还有另一半属于别的应用，孩子照常能操作。升级链、地板收口、无障碍看门狗
+         * 都必须读这个标记，否则会把"半屏锁屏"误判成"已锁住"而不再补救。
+         */
+        @Volatile
+        var inMultiWindow: Boolean = false
+            private set
+
+        /**
+         * 分屏自救次数上限：3 次。
+         * 每次自救都要移除任务再重铺，会有一帧切换；超过 3 次说明这条 ROM 就是不放行，
+         * 继续自救只会变成闪屏风暴，剩下的交给看门狗与周期自检持续施压。
+         */
+        private const val MAX_MULTI_WINDOW_EVICTIONS = 3
 
         /**
          * 服务端下发的 reason 可能是字面量 "null"（历史上下发过 {"reason":"null"}），

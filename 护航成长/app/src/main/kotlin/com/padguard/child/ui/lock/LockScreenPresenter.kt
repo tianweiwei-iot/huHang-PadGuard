@@ -176,9 +176,17 @@ class LockScreenPresenter     @Inject constructor(
         // 用 [LockScreenActivity.resumedNow] 而不是 [LockScreenActivity.visible]：
         // 后者到 onStop 才落，孩子上滑逃逸的判定窗口正好落在那几百毫秒里，
         // 用它会误判"锁定页还在前面"，从而漏掉本该补拉起的锁屏页。
-        if (LockScreenActivity.resumedNow) return
+        //
+        // 分屏 / 悬浮窗形态必须排除：那时锁屏页**确实 resumed**，却只占半屏，
+        // 另一半是桌面或别的应用（孩子照常能点开应用）。只判 resumedNow 会把这种
+        // "半屏锁屏"误判成已覆盖，从此不再补救——这正是「滑一下就能退出锁屏 UI」的成因。
+        if (LockScreenActivity.resumedNow && !LockScreenActivity.inMultiWindow) return
         if (!isScreenOn()) return
-        Logger.i(TAG) { "lock screen floor: re-arming lock activity (overlay floor removed)" }
+        if (LockScreenActivity.inMultiWindow) {
+            Logger.w(TAG) { "lock screen is windowed (split/freeform), coverage broken -> re-arming fullscreen" }
+        } else {
+            Logger.i(TAG) { "lock screen floor: re-arming lock activity (overlay floor removed)" }
+        }
         LockScreenActivity.show(context, detail)
     }
 
@@ -263,7 +271,10 @@ class LockScreenPresenter     @Inject constructor(
         if (escalationJob?.isActive == true) return
         escalationJob = scope.launch {
             var round = 0
-            while (isActive && desiredDetail != null && !LockScreenActivity.visible) {
+            // 分屏/悬浮窗形态下 visible 同样是 true，但覆盖只占半屏，仍算"没锁住"，要继续施压。
+            while (isActive && desiredDetail != null &&
+                (!LockScreenActivity.visible || LockScreenActivity.inMultiWindow)
+            ) {
                 round++
                 val detail = desiredDetail ?: break
                 LockScreenActivity.show(context, detail)
@@ -313,7 +324,9 @@ class LockScreenPresenter     @Inject constructor(
         // 于是"设备管理员已激活但未设系统密码"的伪硬锁设备滑走后无任何兜底。
         ensureCoverage(detail)
 
-        if (LockScreenActivity.visible) return
+        // 分屏/悬浮窗形态下 visible 也是 true，但覆盖已经失效，必须继续拉：
+        // 见 [LockScreenActivity.inMultiWindow]。
+        if (LockScreenActivity.visible && !LockScreenActivity.inMultiWindow) return
         // Activity 兜底：前台时即刻可见；后台由无障碍看门狗借特权重新顶回前台
         // （无障碍服务可后台启动 Activity，绕过 ROM 限制）。绝不作为唯一手段。
         LockScreenActivity.show(context, detail)
@@ -334,9 +347,13 @@ class LockScreenPresenter     @Inject constructor(
             LockScreenActivity.dismiss(context)
             return
         }
-        if (LockScreenActivity.visible) {
+        if (LockScreenActivity.visible && !LockScreenActivity.inMultiWindow) {
             notifier.cancel()
             Logger.i(TAG) { "lock screen confirmed on foreground" }
+        } else if (LockScreenActivity.inMultiWindow) {
+            // 半屏锁屏不算锁住：继续重铺，直到它回到全屏形态或被看门狗接手
+            Logger.w(TAG) { "lock screen windowed (split/freeform) after escalation; re-arming fullscreen" }
+            LockScreenActivity.show(context, detail)
         } else {
             // 升级链走到头仍未拉起 Activity：悬浮地板已按产品决策删除，已无「悬浮层」可兜底，
             // 退而依赖无障碍看门狗（可后台拉起 Activity）与全屏 intent 通知继续把页面顶回前台。
