@@ -370,8 +370,20 @@ private fun AppDispatchSheet(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.End
                             ) {
-                                TextButton(onClick = { onUninstall(app.packageName) }) {
-                                    Text("卸载")
+                                // 卸载会连带删除该应用在孩子端的全部数据，且不可恢复。
+                                // 原来一键直达、没有二次确认，同项目的「应用管理」页却有确认框 ——
+                                // 误触代价太大，口径统一为确认后执行。
+                                var confirmUninstall by remember(app.id) { mutableStateOf(false) }
+                                if (confirmUninstall) {
+                                    TextButton(onClick = {
+                                        confirmUninstall = false
+                                        onUninstall(app.packageName)
+                                    }) {
+                                        Text("确认卸载", color = PadGuardColors.WarningRed)
+                                    }
+                                    TextButton(onClick = { confirmUninstall = false }) { Text("取消") }
+                                } else {
+                                    TextButton(onClick = { confirmUninstall = true }) { Text("卸载") }
                                 }
                                 TextButton(onClick = { onDelete(app.id) }) {
                                     Text("删除", color = PadGuardColors.WarningRed)

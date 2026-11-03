@@ -479,6 +479,12 @@ interface PolicyRepository {
     /** 一键解锁：解除家长发起的远程锁屏，按钮回到"锁屏" */
     suspend fun unlockScreen(deviceId: String): Result<CommandResult>
 
+    /**
+     * 远程揭示管理控制台：孩子端图标隐藏后，下发 REVEAL_MANAGEMENT_UI 指令，
+     * 孩子端点亮桌面图标并拉起管理台。与悬浮卡密码闸互为备份的进入通道。
+     */
+    suspend fun revealConsole(deviceId: String): Result<CommandResult>
+
     /** 查询指令执行结果；调用方据此把界面推进到"已执行 / 未响应 / 失败" */
     suspend fun getCommand(msgId: String): Result<CommandResult>
 

@@ -346,6 +346,8 @@ class ApiDataSource @Inject constructor(
                 avatar = lr.user.avatar, role = lr.user.role, sceneType = lr.user.sceneType,
                 accessToken = lr.token, refreshToken = lr.refreshToken
             )
+            // 换账号登录必须清空上一个账号的设备流（见 resetSessionCaches 注释）
+            resetSessionCaches()
             lr.toDomainUser()
         }
     }
@@ -358,6 +360,8 @@ class ApiDataSource @Inject constructor(
                 avatar = lr.user.avatar, role = lr.user.role, sceneType = lr.user.sceneType,
                 accessToken = lr.token, refreshToken = lr.refreshToken
             )
+            // 换账号登录必须清空上一个账号的设备流（见 resetSessionCaches 注释）
+            resetSessionCaches()
             lr.toDomainUser()
         }
     }
@@ -370,6 +374,8 @@ class ApiDataSource @Inject constructor(
                 avatar = lr.user.avatar, role = lr.user.role, sceneType = lr.user.sceneType,
                 accessToken = lr.token, refreshToken = lr.refreshToken
             )
+            // 换账号登录必须清空上一个账号的设备流（见 resetSessionCaches 注释）
+            resetSessionCaches()
             lr.toDomainUser()
         }
     }
@@ -402,6 +408,17 @@ class ApiDataSource @Inject constructor(
     // ==================== DeviceRepository ====================
 
     private val _deviceListFlow = MutableStateFlow<List<Device>>(emptyList())
+
+    /**
+     * 清空会话级缓存（目前只有设备流）。
+     *
+     * `logout()` 会清，但「token 过期被踢下线 / 被挤下线 → 直接换另一个账号登录」
+     * 这条路径不会：首页会立刻渲染上一账号的孩子名与设备，点进去还用新账号的 token
+     * 请求别人的设备（403/404）。三个登录成功分支统一走这里。
+     */
+    private fun resetSessionCaches() {
+        _deviceListFlow.value = emptyList()
+    }
 
     init {
         startDevicePolling()
@@ -1037,6 +1054,10 @@ class ApiDataSource @Inject constructor(
         exec { policyApi.unlockScreen(deviceId) }
             .map { it.data?.toDomain() ?: throw Exception("解锁指令未返回指令号，无法追踪执行结果") }
 
+    override suspend fun revealConsole(deviceId: String): Result<CommandResult> =
+        exec { policyApi.revealConsole(deviceId) }
+            .map { it.data?.toDomain() ?: throw Exception("揭示指令未返回指令号，无法追踪执行结果") }
+
     /**
      * 整机管控 暂停 / 恢复（家长端「释放 / 恢复对平板的全部管控」主开关）。
      *
@@ -1460,8 +1481,10 @@ private fun TimeRestriction.toDto(): TimeRestrictionDto = TimeRestrictionDto(
 private fun TabletUsageSettingsDto.toDomain(): TabletUsageSettings = TabletUsageSettings(
     deviceId = deviceId,
     enabled = enabled,
-    enabledTimeRanges = enabledTimeRanges?.map { TimeRange(it.startTime, it.endTime) }
-        ?: listOf(TimeRange("08:00", "18:00")),
+    // 空 = 不限制。绝不能在这里塞业务默认值（原实现回落 08:00-18:00）：
+    // 家长从未配置可用时段的设备，只要在该页面做了任何改动并保存，这组伪造的时段
+    // 就会被写进策略包下发 —— 孩子端每天 18:00 后整机不可用，而家长完全不知情。
+    enabledTimeRanges = enabledTimeRanges?.map { TimeRange(it.startTime, it.endTime) } ?: emptyList(),
     weekdayLimitMinutes = weekdayLimitMinutes,
     weekendLimitMinutes = weekendLimitMinutes,
     restAfterMinutes = restAfterMinutes,

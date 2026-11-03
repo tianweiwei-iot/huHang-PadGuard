@@ -846,6 +846,9 @@ class LocalDataSource @Inject constructor(
     override suspend fun unlockScreen(deviceId: String): Result<CommandResult> =
         Result.success(CommandResult(msgId = "mock_unlock_${System.currentTimeMillis()}", type = "UNLOCK", status = "PENDING"))
 
+    override suspend fun revealConsole(deviceId: String): Result<CommandResult> =
+        Result.success(CommandResult(msgId = "mock_reveal_${System.currentTimeMillis()}", type = "REVEAL_MANAGEMENT_UI", status = "PENDING"))
+
     // Mock 里直接推进到已执行：离线预览时不必让界面一直停在"下发中"
     override suspend fun getCommand(msgId: String): Result<CommandResult> =
         Result.success(CommandResult(msgId = msgId, status = "SUCCESS", executedAt = System.currentTimeMillis()))

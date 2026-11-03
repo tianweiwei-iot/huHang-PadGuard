@@ -106,7 +106,12 @@ fun TabletUsageSettingsScreen(
     }
 
     LaunchedEffect(uiState.error) {
-        uiState.error?.let { snackbarHostState.showSnackbar(it) }
+        uiState.error?.let {
+            snackbarHostState.showSnackbar(it)
+            // 展示后清空：否则连续两次同样的失败（error 值相同 → key 不变）
+            // 第二次不再触发 LaunchedEffect，家长会以为"这次点成功了"。
+            viewModel.clearError()
+        }
     }
 
     Box(

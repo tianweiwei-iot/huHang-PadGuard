@@ -171,6 +171,8 @@ class HomeViewModel @Inject constructor(
                     // 家长会以为还是坏的。
                     _uiState.value = _uiState.value.copy(error = null)
                     applyDeviceList(it)
+                    // 网络已经给出答案（哪怕是"确实没有设备"）——此时才允许退出加载态。
+                    _uiState.value = _uiState.value.copy(hasLoadedOnce = true)
                 }
                 .onFailure { e ->
                     _uiState.value = _uiState.value.copy(
@@ -208,7 +210,10 @@ class HomeViewModel @Inject constructor(
             childName = selectedDevice?.childName?.takeIf { it.isNotBlank() }.orEmpty(),
             childNickname = selectedDevice?.childNickname?.takeIf { it.isNotBlank() }.orEmpty(),
             isRefreshing = false,
-            hasLoadedOnce = true,
+            // 空列表不能算"已加载"：observeDeviceList() 的 StateFlow 初值就是 emptyList，
+            // 冷启动时它先于网络响应到达，若在此置 true，首页加载骨架永远不会出现，
+            // 首屏直接显示"还没有绑定的孩子设备"——弱网下家长会误以为账号下没有设备。
+            hasLoadedOnce = current.hasLoadedOnce || devices.isNotEmpty(),
             // 选中设备被解绑/已无可选项时，清空其用量数据：
             // 否则首页会残留一台已解绑设备的今日统计，看起来像"还在管控里"。
             todayUsage = if (sel == null) null else current.todayUsage,
@@ -310,9 +315,29 @@ class HomeViewModel @Inject constructor(
             // - 「时间管控」页设置（平板使用时间，权威来源：weekday/weekend 额度）
             // - 未成年人模式配置（开启时仅作合规兜底，不再夹逼家长已设额度）
             // - 分龄合规默认值
-            val tablet = policyRepository.getTabletUsageSettings(deviceId).getOrNull()
-            val minor = policyRepository.getMinorMode(deviceId).getOrNull()
-            val defaults = policyRepository.getAgeBandDefaults().getOrNull().orEmpty()
+            val tabletRes = policyRepository.getTabletUsageSettings(deviceId)
+            val minorRes = policyRepository.getMinorMode(deviceId)
+            val defaultsRes = policyRepository.getAgeBandDefaults()
+
+            // 乱序防线：A→B 快速切换时，A 的限额会写进 B 的看板（跨孩子数据串台）。
+            // loadTodayUsage 已有同款校验，这里补齐。
+            if (_uiState.value.selectedDeviceId != deviceId) return@launch
+
+            val tablet = tabletRes.getOrNull()
+            val minor = minorRes.getOrNull()
+            val defaults = defaultsRes.getOrNull().orEmpty()
+
+            // 三项全失败：绝不能拿默认值 60 顶上 —— 那会在首页显示一个孩子端并不存在的限额，
+            // 家长据此判断"还有额度"是错误结论。置 0（UI 渲染为"未设置"）并给出可读错误。
+            if (tablet == null && minor == null && defaultsRes.isFailure) {
+                _uiState.value = _uiState.value.copy(
+                    dailyLimitMinutes = 0,
+                    effectiveDailyLimitMinutes = 0,
+                    error = "限额读取失败，请下拉刷新重试"
+                )
+                return@launch
+            }
+
             val effective = computeEffectiveDailyLimitMinutes(
                 enabled = tablet?.enabled ?: true,
                 weekdayLimitMinutes = tablet?.weekdayLimitMinutes ?: 60,
@@ -322,7 +347,7 @@ class HomeViewModel @Inject constructor(
                 isWeekend = isWeekendToday()
             )
             _uiState.value = _uiState.value.copy(
-                dailyLimitMinutes = tablet?.weekdayLimitMinutes ?: 60,
+                dailyLimitMinutes = tablet?.weekdayLimitMinutes ?: 0,
                 minorMode = minor,
                 ageBandDefaults = defaults,
                 effectiveDailyLimitMinutes = effective

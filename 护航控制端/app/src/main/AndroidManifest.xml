@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      Android 11+ 包可见性：不声明 <queries> 时 getPackageInfo("com.tencent.mm") 必抛
+      NameNotFoundException —— 收银台会永远提示"未检测到微信客户端"，微信支付整体不可用。
+      这里只声明微信，不申请 QUERY_ALL_PACKAGES。
+    -->
+    <queries>
+        <package android:name="com.tencent.mm" />
+    </queries>
+
     <!-- Network permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

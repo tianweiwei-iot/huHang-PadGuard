@@ -22,6 +22,14 @@ data class TabletUsageSettingsUiState(
     val isLoading: Boolean = false,
     val saved: Boolean = false,
     val error: String? = null,
+    /**
+     * 设置是否成功从服务端读取过一次。
+     *
+     * 读取失败时页面仍会用默认值（60 分钟 / 开启）渲染，此时保存等于把
+     * "开启 + 工作日 60 分钟 + 无时段"整包写回并立即下发，一次网络抖动就能
+     * 改写孩子端真实策略。保存前必须校验本标记。
+     */
+    val loaded: Boolean = false,
     /** 平板使用计时会话（三端一致的剩余时长来源）；null 表示尚未拉取 */
     val usageSession: UsageSession? = null,
     val sessionError: String? = null,
@@ -49,12 +57,13 @@ class TabletUsageSettingsViewModel @Inject constructor(
                 // "今日剩余时长"因此卡回"正在读取计时状态…"，最长要等下一个轮询周期才恢复；
                 // save() 成功后同样会把 delayTickets 清掉，延时审批区瞬间变空。
                 .onSuccess { settings ->
-                    _uiState.value = _uiState.value.copy(settings = settings, isLoading = false)
+                    _uiState.value = _uiState.value.copy(settings = settings, isLoading = false, loaded = true)
                 }
                 .onFailure { e ->
                     _uiState.value = _uiState.value.copy(
                         settings = TabletUsageSettings(deviceId = deviceId),
                         isLoading = false,
+                        loaded = false,
                         error = e.message
                     )
                 }
@@ -199,8 +208,17 @@ class TabletUsageSettingsViewModel @Inject constructor(
         }
     }
 
-    fun save() {
-        viewModelScope.launch {
+    /** 错误提示展示后清空（见 Screen 的 LaunchedEffect 注释） */
+    fun clearError() {
+        if (_uiState.value.error != null) _uiState.value = _uiState.value.copy(error = null)
+    }
+
+    fun save() {        viewModelScope.launch {
+            // 没读到真实设置就保存 = 用默认值覆盖服务端配置并立即下发（见 loaded 注释）
+            if (!_uiState.value.loaded) {
+                _uiState.value = _uiState.value.copy(error = "设置未加载成功，请重新进入页面后再保存")
+                return@launch
+            }
             _uiState.value = _uiState.value.copy(isLoading = true, saved = false, error = null)
             // 保存必须立即下发到设备。
             // syncToDevice=false 时服务端只落库、不重建策略包，孩子端要等下一次自然重建才生效，

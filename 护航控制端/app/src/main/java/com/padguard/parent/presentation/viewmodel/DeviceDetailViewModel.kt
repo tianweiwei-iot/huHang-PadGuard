@@ -119,6 +119,9 @@ class DeviceDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
+    /** 未成年人模式配置是否成功读取过一次（失败时禁止写入，防默认值覆盖服务端配置） */
+    private var minorModeLoaded = false
+
     private val deviceId: String = savedStateHandle.get<String>("deviceId").orEmpty()
 
     private val _uiState = MutableStateFlow(DeviceDetailUiState())
@@ -536,11 +539,15 @@ class DeviceDetailViewModel @Inject constructor(
             // 档位默认值、未成年人模式配置、「时间管控」页设置（平板使用时间，权威来源）并发拉取，
             // 统一计算孩子端实际生效的每日时长上限，避免详情页与首页看板 / 孩子端锁机值对不上。
             val defaults = async { policyRepository.getAgeBandDefaults().getOrNull().orEmpty() }
-            val minor = async { policyRepository.getMinorMode(deviceId).getOrNull() }
+            val minorRes = async { policyRepository.getMinorMode(deviceId) }
             val tablet = async { policyRepository.getTabletUsageSettings(deviceId).getOrNull() }
             val ageBandDefaults = defaults.await()
-            val minorMode = minor.await()
+            val minorResult = minorRes.await()
+            val minorMode = minorResult.getOrNull()
             val settings = tablet.await()
+            // 读取失败不等于"未配置"：若放行后续写入，一键开启会用默认档位与 0 时长
+            // 覆盖服务端已有的分龄/宵禁配置并下发（家长没做的变更被执行）。
+            minorModeLoaded = minorResult.isSuccess
             val effective = computeEffectiveDailyLimitMinutes(
                 enabled = settings?.enabled ?: true,
                 weekdayLimitMinutes = settings?.weekdayLimitMinutes ?: 60,
@@ -571,15 +578,29 @@ class DeviceDetailViewModel @Inject constructor(
      * 因此这里不做二次确认弹窗的替代 —— 确认由 UI 层负责，VM 只负责如实下发并回读。
      */
     fun setMinorModeEnabled(enabled: Boolean) {
+        if (!guardMinorModeLoaded()) return
         val current = _uiState.value.minorMode ?: MinorMode(deviceId = deviceId)
         applyMinorMode(current.copy(enabled = enabled))
     }
 
     /** 切换分龄档位；档位一变，时长与宵禁随即按新档默认值生效 */
     fun selectAgeBand(band: AgeBand) {
+        if (!guardMinorModeLoaded()) return
         val current = _uiState.value.minorMode ?: MinorMode(deviceId = deviceId)
         // 切档时清掉旧的自定义时长：留着会让"8–12岁"却沿用"16–18岁"的 2 小时额度
         applyMinorMode(current.copy(ageBand = band, dailyLimitMinutes = 0, weekendLimitMinutes = 0))
+    }
+
+    /**
+     * 未成年人模式配置未成功读取时，拒绝任何写操作。
+     *
+     * 空实现 → 会拿 `MinorMode(deviceId)` 默认值整包覆盖服务端配置并下发，
+     * 属于"家长没做的管控变更被静默执行"，比操作无反应严重得多。
+     */
+    private fun guardMinorModeLoaded(): Boolean {
+        if (minorModeLoaded) return true
+        showToast("未成年人模式配置未加载成功，请稍后重试")
+        return false
     }
 
     fun setCurfewEnabled(enabled: Boolean) {

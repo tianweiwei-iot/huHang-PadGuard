@@ -150,6 +150,7 @@ fun DeviceDetailScreen(
                         "一键锁屏" -> viewModel.lockScreen()
                         "定位" -> viewModel.locateNow()
                         "看屏" -> onViewScreen(deviceId)
+                        "显示管理台" -> viewModel.revealConsole()
                     }
                 }
             )
@@ -523,7 +524,8 @@ private fun QuickCommandGrid(locating: Boolean = false, onCommand: (String) -> U
     val commands = listOf(
         FeatureItem("一键锁屏", Icons.Default.Lock),
         FeatureItem("定位", Icons.Default.MyLocation),
-        FeatureItem("看屏", Icons.AutoMirrored.Filled.ScreenShare)
+        FeatureItem("看屏", Icons.AutoMirrored.Filled.ScreenShare),
+        FeatureItem("显示管理台", Icons.Default.Visibility)
     )
     SoftCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {

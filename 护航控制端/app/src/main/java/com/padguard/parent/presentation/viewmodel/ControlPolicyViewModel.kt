@@ -116,6 +116,10 @@ class ControlPolicyViewModel @Inject constructor(
                 }
             policyRepository.getInstalledApps(deviceId).onSuccess { list ->
                 _uiState.value = _uiState.value.copy(installedApps = list)
+            }.onFailure { e ->
+                // 读取失败必须可见：否则页面显示"没有已安装应用"，家长会以为平板是空的，
+                // 随后任何开关操作都会被上面的空列表防线拦下，却不知道原因。
+                _uiState.value = _uiState.value.copy(toast = "应用列表读取失败：${e.message ?: "请稍后重试"}")
             }
             policyRepository.getWebPolicy(deviceId).onSuccess { wp ->
                 // 只回写上网策略本身。
@@ -338,6 +342,13 @@ class ControlPolicyViewModel @Inject constructor(
 
     fun toggleAppBlock(app: AppPolicy, blocked: Boolean) {
         viewModelScope.launch {
+            // 应用列表没加载成功时，installedApps 为空（或只剩部分），
+            // 而 updateAppBlacklist 是**全量覆盖**语义 —— 此时提交等于把其余
+            // 已管控应用静默解禁，孩子端立刻能打开。宁可拒绝操作并提示重试。
+            if (_uiState.value.installedApps.isEmpty()) {
+                _uiState.value = _uiState.value.copy(toast = "应用列表未加载完成，请稍后重试")
+                return@launch
+            }
             val updated = app.copy(isBlocked = blocked)
             // 应用黑名单开关必须走 updateAppBlacklist（按整包名单一次下发），
             // 之前误走 setAppTimeLimit 会写成"全局每日总时长"端点（dailyLimitMinutes=null → 全局限额清零），
@@ -370,7 +381,11 @@ class ControlPolicyViewModel @Inject constructor(
     fun setAllAppsBlocked(blocked: Boolean) {
         viewModelScope.launch {
             val apps = _uiState.value.installedApps
-            if (apps.isEmpty()) return@launch
+            // 空列表时原来直接 return：开关弹回去、家长不知道为什么没反应。
+            if (apps.isEmpty()) {
+                _uiState.value = _uiState.value.copy(toast = "应用列表未加载完成，请稍后重试")
+                return@launch
+            }
             val packages = if (blocked) apps.map { it.packageName } else emptyList()
             policyRepository.updateAppBlacklist(deviceId, packages)
                 .onSuccess {

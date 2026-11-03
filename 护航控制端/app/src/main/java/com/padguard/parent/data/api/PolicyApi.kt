@@ -177,6 +177,18 @@ interface PolicyApi {
     ): Response<ApiResponse<CommandResultDto>>
 
     /**
+     * 远程揭示管理控制台：孩子端图标隐藏后，把管理台"要回来"的远程通道。
+     *
+     * 孩子端绑定后图标对桌面隐形（堵死孩子「长按 → 卸载」的入口），家长进入管理台
+     * 依赖两条互备通道：悬浮卡密码闸（设备在手边）与本指令（设备不在手边 /
+     * 密码尚未下发）。返回指令回执（含 msgId）以便追踪执行结果。
+     */
+    @POST("policies/{deviceId}/reveal-console")
+    suspend fun revealConsole(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<CommandResultDto>>
+
+    /**
      * 整机管控 暂停 / 恢复（家长端「释放 / 恢复对平板的全部管控」主开关）。
      *
      * 服务端按 [com.padguard.server.service.CommandType.SET_MANAGEMENT_ACTIVE] 下发指令，
