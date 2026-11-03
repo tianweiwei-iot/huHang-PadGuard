@@ -77,6 +77,22 @@
   // 网络层错误（服务端未启动 / file:// 跨域被拦截 / DNS / 断网）：这类才允许降级到空数据
   class NetworkError extends Error {}
 
+  /**
+   * 构造查询串：**剔除值为 undefined/null/空串的键**。
+   *
+   * 直接 `new URLSearchParams({status: undefined})` 会把 undefined ToString 成字面量
+   * "status=undefined" 发给服务端 —— 服务端 `isNullOrBlank()` 挡不住它，按字符串过滤
+   * 必然命中 0 行（表现为"全部状态"下订阅/订单页永远为空，且 Mock 路径完全正常、
+   * 只有 Live 才炸）。收口在这一处，杜绝复发。
+   */
+  function qs(params) {
+    const p = Object.assign({}, params || {});
+    Object.keys(p).forEach(k => {
+      if (p[k] === undefined || p[k] === null || p[k] === "") delete p[k];
+    });
+    return new URLSearchParams(p).toString();
+  }
+
   async function liveOrMock(liveFn, mockFn) {
     if (config.useMock) { await wait(120); return mockFn(); }
     try { return await liveFn(); }
@@ -203,7 +219,7 @@
       const opt = q || {};
       const params = Object.assign({ page: 1, size: 20 }, opt);
       return liveOrMock(
-        () => http("GET", "/v1/admin/parents?" + new URLSearchParams(params)),
+        () => http("GET", "/v1/admin/parents?" + qs(params)),
         () => {
           let arr = clone(M.parents);
           if (q) {
@@ -265,7 +281,7 @@
       const opt = q || {};
       const params = Object.assign({ page: 1, size: 20 }, opt);
       return liveOrMock(
-        () => http("GET", "/v1/admin/devices?" + new URLSearchParams(params)),
+        () => http("GET", "/v1/admin/devices?" + qs(params)),
         () => {
           let arr = clone(M.devices);
           if (q) {
@@ -292,7 +308,7 @@
       const opt = q || {};
       const params = Object.assign({ page: 1, size: 20 }, opt);
       return liveOrMock(
-        () => http("GET", "/v1/admin/billing/subscriptions?" + new URLSearchParams(params)),
+        () => http("GET", "/v1/admin/billing/subscriptions?" + qs(params)),
         () => {
           let arr = clone(M.subscriptions);
           if (q && q.status) arr = arr.filter(s => s.status === q.status);
@@ -308,7 +324,7 @@
       const opt = q || {};
       const params = Object.assign({ page: 1, size: 20 }, opt);
       return liveOrMock(
-        () => http("GET", "/v1/admin/billing/orders?" + new URLSearchParams(params)),
+        () => http("GET", "/v1/admin/billing/orders?" + qs(params)),
         () => {
           let arr = clone(M.orders);
           if (q && q.status) arr = arr.filter(o => o.status === q.status);
@@ -430,7 +446,7 @@
     // （在线是对象、离线是数组），页面会被迫写两套分支 —— 这类形状不一致是线上事故的高发区。
     async audit(q) {
       return liveOrMock(
-        () => http("GET", "/v1/admin/audit?" + new URLSearchParams(q || {})),
+        () => http("GET", "/v1/admin/audit?" + qs(q)),
         () => {
           let a = clone(M.audit);
           if (q && q.area) a = a.filter((x) => x.area === q.area);

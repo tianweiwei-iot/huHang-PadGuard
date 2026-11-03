@@ -11,9 +11,14 @@
       // 趋势由服务端按真实数据计算；服务端未返回（历史版本 / 数据不足）时为空对象，
       // 卡片降级为显示静态副标题，绝不回落到任何硬编码数组。
       const t = d.trends || {};
-      const planColors = ["#6b7693", "#3b82f6", "#14b8a6"];
+      // 套餐分布有 4 类（free/monthly/yearly/permanent，见 AdminShared.planCategory）：
+      // 3 色会令第 4 类 stroke="undefined"（扇区不渲染、图例色块空白），取模循环用色。
+      const planColors = ["#6b7693", "#3b82f6", "#14b8a6", "#a855f7"];
       const regionColors = ["#3b82f6", "#14b8a6", "#a855f7", "#f59e0b", "#ef4444", "#22c55e", "#60a5fa", "#f472b6", "#fb923c", "#34d399"];
       const body = root.querySelector("#dash-body");
+      // 弱网切页防线：仪表盘请求期间用户可能已切到别的视图，#dash-body 此时不存在，
+      // 裸写 innerHTML 会 TypeError → mountSafely 把用户正在看的新页面整体替换成"加载失败"。
+      if (!body) return;
       body.innerHTML = `
       <div class="grid grid-4">
         ${kpi("👨‍👩‍👧", "家长账号", k.parentsTotal, "活跃 " + k.parentsActive, t.parent)}
@@ -30,9 +35,9 @@
         <div class="card">
           <div class="card-head"><h3>套餐分布</h3></div>
           <div class="between" style="gap:14px">
-            <div style="flex:none">${U.donut(d.planDist.map((p, i) => ({ value: p.count, color: planColors[i] })), { center: k.parentsTotal + "", centerSub: "总账号", size: 160 })}</div>
+            <div style="flex:none">${U.donut(d.planDist.map((p, i) => ({ value: p.count, color: planColors[i % planColors.length] })), { center: k.parentsTotal + "", centerSub: "总账号", size: 160 })}</div>
             <div class="legend" style="flex-direction:column;align-items:flex-start">
-              ${d.planDist.map((p, i) => '<div><i style="background:' + planColors[i] + '"></i>' + U.esc(p.name) + ' · ' + p.count + '</div>').join("")}
+              ${d.planDist.map((p, i) => '<div><i style="background:' + planColors[i % planColors.length] + '"></i>' + U.esc(p.name) + ' · ' + p.count + '</div>').join("")}
             </div>
           </div>
         </div>

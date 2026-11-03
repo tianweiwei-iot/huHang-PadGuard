@@ -20,10 +20,13 @@
     mount: async (root) => {
       const reload = () => load(root);
       const reloadReset = () => { curPage = 1; load(root); };
-      // 全局搜索跳转过来：回填关键字并清空全局态（此前设备页不消费，搜索设备永远落在家长页）
+      // 全局搜索跳转过来：回填关键字并清空全局态（此前设备页不消费，搜索设备永远落在家长页）。
+      // 必须同时重置 curPage：模块级页码跨 mount 存留，翻到第 3 页后全局搜索会以 page=3
+      // 请求命中第 1 页的结果 → 显示"没有匹配的设备"。
       if (PG.state && PG.state.search) {
         root.querySelector("#d-kw").value = PG.state.search;
         PG.state.search = "";
+        curPage = 1;
       }
       root.querySelector("#d-reset").onclick = () => { root.querySelector("#d-kw").value = ""; root.querySelector("#d-on").value = ""; reloadReset(); };
       root.querySelector("#d-kw").oninput = debounce(reloadReset, 300);

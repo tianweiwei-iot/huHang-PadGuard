@@ -14,7 +14,9 @@
         s = await PG.api.serverMetrics();
       } catch (e) {
         // 探针失败必须给出口：此前异常直接冒泡，页面永久停在"加载中…"
-        root.querySelector("#s-body").innerHTML =
+        const body = root.querySelector("#s-body");
+        if (!body) return; // 弱网切页：旧视图的回调不得覆盖新页面
+        body.innerHTML =
           '<div class="empty">监控数据加载失败：' + U.esc((e && e.message) || "服务端未响应") +
           '<div style="margin-top:12px"><button class="btn" id="s-retry">重试</button></div></div>';
         const rt = root.querySelector("#s-retry");
@@ -40,7 +42,11 @@
       const uptimeH = Math.round(num(s.uptimeMs) / 3600000);
       const errorRate = num(s.errorRate);
       const qpm = num(s.requestsPerMin);
-      root.querySelector("#s-body").innerHTML = `
+      const sBody = root.querySelector("#s-body");
+      // 弱网切页防线：请求期间用户可能已切到别的视图，目标节点已随旧 DOM 消失，
+      // 裸写会 TypeError → mountSafely 把新页面整体替换成"加载失败"。
+      if (!sBody) return;
+      sBody.innerHTML = `
       <div class="grid grid-4">
         ${kpi("状态", up ? "运行正常" : "异常", '<span class="dot ' + (up ? "green" : "red") + '"></span>', "DB " + U.esc(s.db), up ? "up" : "down")}
         ${kpi("运行时长", uptimeH + " h", "自 " + U.esc(s.startedAt), "up", "")}

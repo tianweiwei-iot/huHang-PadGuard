@@ -99,9 +99,9 @@
         // 未映射级别不得渲染成 "undefined危"：服务端新增 critical 等值时，最需要可信的安全模块反而出洋相
         const lv = { high: "高", mid: "中", low: "低" }[a.level] || (a.level ? String(a.level) : "未知");
         return `<div class="tl-item">
-          <div class="tl-time">${U.esc(a.time)} · <span class="badge ${c}">${U.esc(lv)}危</span> ${U.esc(a.type)} · ${a.status === "closed" ? "已处理" : "待处理"}</div>
+          <div class="tl-time">${U.esc(a.time)} · <span class="badge ${c}">${U.esc(lv)}危</span> ${U.esc(a.type)} · ${a.status === "closed" ? "已处理" : (a.status === "acknowledged" ? "家长已确认" : "待处理")}</div>
           <div class="tl-text">${U.esc(a.message)} <span class="cell-sub">（家长 ${U.esc(a.relatedParent)}）</span></div>
-          ${a.status !== "closed" ? PG.guard("audit", "write", '<div style="margin-top:6px"><button class="btn btn-xs" data-close="' + U.esc(a.id) + '">标记为已处理</button></div>') : ""}
+          ${(a.status !== "closed" && a.status !== "acknowledged") ? PG.guard("audit", "write", '<div style="margin-top:6px"><button class="btn btn-xs" data-close="' + U.esc(a.id) + '">标记为已处理</button></div>') : ""}
         </div>`;
       }).join("") || '<div class="empty">暂无告警</div>';
       el.querySelectorAll("[data-close]").forEach(b => b.onclick = async () => {

@@ -171,7 +171,14 @@
   }
 
   function sparkline(values, color) {
-    const W = 90, H = 30, max = Math.max(...values, 1), min = 0;
+    // 空序列与单点序列的退化渲染：values.length-1 为 0 时 W/0=Infinity、0*Infinity=NaN，
+    // points="NaN,..." 会被 polyline 静默丢弃（服务端重启后 qpmHistory 恰好只有 1 个样本）。
+    if (!Array.isArray(values) || !values.length) return "";
+    const W = 90, H = 30, max = Math.max(...values, 1);
+    if (values.length === 1) {
+      const x = W / 2, y = H - (values[0] / max) * H;
+      return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '"><circle cx="' + x + '" cy="' + y + '" r="3" fill="' + (color || "var(--accent)") + '"/></svg>';
+    }
     const pts = values.map((v, i) => (i * (W / (values.length - 1))) + "," + (H - (v / max) * H)).join(" ");
     return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '"><polyline points="' + pts + '" fill="none" stroke="' + (color || "var(--accent)") + '" stroke-width="2"/></svg>';
   }

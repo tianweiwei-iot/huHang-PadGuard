@@ -27,17 +27,25 @@
   });
 
   const PAGE_SIZE = 20;
+  // tab 级竞态防护：seq 只保护 tab 内部的筛选/分页，tab 切换共用同一个 #b-tab 节点，
+  // 慢的旧 tab 响应会把新 tab 的 DOM 整个替换掉（后续 querySelector 返回 null → 一路 TypeError
+  // → 外层 catch 把新 tab 内容覆盖成"加载失败"）。
+  let tabSeq = 0;
 
   async function renderTab(root, t) {
+    const my = ++tabSeq;
     const el = root.querySelector("#b-tab");
     // 统一兜底：任何 tab 的加载失败都必须可见可重试，不能停在"加载中…"。
     el.innerHTML = '<div class="empty">加载中…</div>';
+    // 竞态出口：任何 await 之后 tab 已被再次切换，一律静默放弃本次渲染。
+    const stale = () => my !== tabSeq;
     try {
       if (t === "plans") {
         const plans = (await PG.api.listPlans()) || [];
+        if (stale()) return;
         if (!plans.length) { el.innerHTML = '<div class="empty">暂无套餐</div>'; return; }
         el.innerHTML = '<div class="grid grid-3">' + plans.map(p => `<div class="card">
-          <div class="between"><h3 style="margin:0">${U.esc(p.name)}</h3>${U.esc(p.id) === "yearly" ? '<span class="badge purple">推荐</span>' : ""}</div>
+          <div class="between"><h3 style="margin:0">${U.esc(p.name)}</h3>${/^yearly$/i.test(String(p.id || "")) ? '<span class="badge purple">推荐</span>' : ""}</div>
           <div style="font-size:26px;font-weight:800;margin:10px 0">${p.priceFen ? U.money(p.priceFen) + '<span class="muted" style="font-size:13px;font-weight:400"> / 期</span>' : "免费"}</div>
           <div class="stat-line"><span>设备额度</span><span>${U.esc(p.deviceLimit)} 台</span></div>
           <ul style="margin:10px 0 0;padding-left:18px;color:var(--text-2);font-size:13px">${(p.features || []).map(f => "<li>" + U.esc(f) + "</li>").join("")}</ul>
@@ -117,6 +125,7 @@
         root.querySelector("#o-st").onchange = () => { page = 1; load(); };
       } else if (t === "revenue") {
         const rev = (await PG.api.revenue()) || [];
+        if (stale()) return;
         if (!Array.isArray(rev) || !rev.length) { el.innerHTML = '<div class="empty">暂无营收数据</div>'; return; }
         const total = rev.reduce((s, r) => s + (r.amount || 0), 0);
         const newSubs = rev.reduce((s, r) => s + (r.newSubs || 0), 0);
@@ -128,6 +137,8 @@
         <div class="table-wrap" style="margin-top:14px"><table class="tbl"><thead><tr><th>月份</th><th>营收</th><th>新增订阅</th><th>流失</th></tr></thead><tbody>${rev.map(r => '<tr><td class="cell-strong">' + U.esc(r.month) + '</td><td>' + U.money(r.amount || 0) + '</td><td>' + U.esc(r.newSubs || 0) + '</td><td class="muted">' + U.esc(r.churn || 0) + '</td></tr>').join("")}</tbody></table></div>`;
       }
     } catch (e) {
+      // tab 已切换时静默放弃：旧的错误覆盖新 tab 内容是最差结局。
+      if (stale()) return;
       el.innerHTML = '<div class="empty">加载失败：' + U.esc((e && e.message) || "未知错误") + '</div>';
       PG.ui.toast("err", "加载失败", (e && e.message) || "");
     }

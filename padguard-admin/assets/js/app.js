@@ -84,9 +84,10 @@
     $("login-screen").classList.add("hidden");
     $("app-shell").classList.remove("hidden");
     const a = state.admin;
-    $("user-name").textContent = a.name;
+    // displayName 可空（AdminDto.name: String?）：直接渲染会显示字面量 "null"，回落用户名。
+    $("user-name").textContent = a.name || a.username;
     $("user-role").textContent = a.roleName;
-    $("user-avatar").textContent = (a.name || "A").charAt(0);
+    $("user-avatar").textContent = (a.name || a.username || "A").charAt(0);
     PG.router.buildSidebar();
     if (!location.hash) location.hash = "dashboard"; else PG.router.render((location.hash || "#dashboard").slice(1));
     // 未读告警角标必须走真实接口：

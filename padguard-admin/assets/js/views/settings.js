@@ -12,7 +12,9 @@
       try {
         s = await PG.api.settings();
       } catch (e) {
-        root.querySelector("#st-body").innerHTML =
+        const stBody = root.querySelector("#st-body");
+        if (!stBody) return; // 弱网切页：旧视图的回调不得覆盖新页面
+        stBody.innerHTML =
           '<div class="empty">设置加载失败：' + U.esc((e && e.message) || "服务端未响应") +
           '<div style="margin-top:12px"><button class="btn" id="st-retry">重试</button></div></div>';
         const rt = root.querySelector("#st-retry");
@@ -25,7 +27,9 @@
       const plans = Array.isArray(s.plans) ? s.plans : [];
       // 「保存」按钮只在有 settings:write 时渲染，无写权限的角色拿到的是 null
       U.bind(root, "#st-save", async () => save(root));
-      root.querySelector("#st-body").innerHTML = `
+      const stBodyMain = root.querySelector("#st-body");
+      if (!stBodyMain) return; // 弱网切页防线（同上）
+      stBodyMain.innerHTML = `
       <div class="grid grid-2">
         <div class="card">
           <div class="card-head"><h3>基础</h3></div>
