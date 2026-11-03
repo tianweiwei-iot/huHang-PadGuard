@@ -31,6 +31,20 @@ class GroupServiceTest {
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
         override val table = LinkedHashMap<String, Device>()
         override fun idOf(entity: Device) = entity.id
+        override fun countGroupByUserIds(userIds: Collection<String>): List<Array<Any>> =
+            table.values.filter { it.userId in userIds }.groupBy { it.userId }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any> }
+        override fun findByIdForUpdate(id: String): Device? = table[id]
+        override fun searchDevices(keyword: String, kw: String, onlineMode: String, staleCut: Long, pageable: org.springframework.data.domain.Pageable): org.springframework.data.domain.Page<Device> {
+            var all = table.values.toList()
+            if (onlineMode == "1") all = all.filter { it.onlineStatus == "ONLINE" && (it.lastOnlineAt ?: 0) >= staleCut }
+            if (onlineMode == "0") all = all.filter { !(it.onlineStatus == "ONLINE" && (it.lastOnlineAt ?: 0) >= staleCut) }
+            val sorted = all.sortedByDescending { it.createdAt }
+            val from = pageable.offset.toInt()
+            val to = minOf(from + pageable.pageSize, sorted.size)
+            val content = if (from >= sorted.size) emptyList<Device>() else sorted.subList(from, to)
+            return org.springframework.data.domain.PageImpl(content, pageable, sorted.size.toLong())
+        }
         // GroupService.listGroups 依赖 findByUserId 后按 groupId 计数，必须返回归属用户的真实设备。
         override fun findByUserId(userId: String): List<Device> =
             table.values.filter { it.userId == userId }

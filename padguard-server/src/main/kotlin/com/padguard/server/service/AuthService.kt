@@ -217,17 +217,62 @@ class AuthService(
      * 拒绝续期后家长端 OkHttp Authenticator 会清空本地会话并退回登录页。
      */
     fun refresh(refreshToken: String): TokenResponse {
-        val userId = try {
-            jwt.parseRefreshToken(refreshToken)
+        val payload = try {
+            jwt.parseUserToken(refreshToken, "refresh")
         } catch (e: Exception) {
             throw BizException(ParentErr.UNAUTHORIZED, "refresh 失效", Audience.PARENT)
         }
         // 必须确认用户仍存在：服务器换库/清库后旧令牌签名依然有效，
         // 若不校验，客户端会拿着"幽灵账号"的令牌永远续期，绑定的设备全挂在不存在的用户下。
-        val user = userRepository.findById(userId).orElse(null)
+        val user = userRepository.findById(payload.userId).orElse(null)
             ?: throw BizException(ParentErr.UNAUTHORIZED, "账号不存在或已被重置，请重新登录", Audience.PARENT)
         requireUsableAccount(user)
-        return TokenResponse(jwt.createAccessToken(userId), jwt.createRefreshToken(userId))
+        // 吊销校验必须在这里也做一遍：登出后家长端手里的 refreshToken 仍是合法签名，
+        // 只挡 access 的话，客户端凭它 30 天内随时能换出一对全新令牌，登出等于没登出。
+        if (payload.version < user.tokenVersion) {
+            throw BizException(ParentErr.UNAUTHORIZED, "登录状态已失效，请重新登录", Audience.PARENT)
+        }
+        return TokenResponse(
+            jwt.createAccessToken(user.id, user.tokenVersion),
+            jwt.createRefreshToken(user.id, user.tokenVersion)
+        )
+    }
+
+    /**
+     * 退出登录：把 `users.token_version` +1，令该账号**全部已签发令牌**立刻失效
+     * （本机 access、refresh，以及其他设备上的会话）。
+     *
+     * 为什么不是"只吊销当前这一个令牌"：JWT 无状态，服务端没有令牌清单可比对；
+     * 要做到逐个令牌吊销就得引入黑名单存储（等于把无状态改成有状态，成本和故障面都更大）。
+     * 版本号是"整账号吊销"，与用户点「退出登录」时的心智一致：
+     * 我退出了，谁也别想再用我的登录态。
+     *
+     * 行锁自增：多端同时点登出时避免后写覆盖先写导致自增被吞（详见 [UserRepository.findByIdForUpdate]）。
+     */
+    @Transactional
+    fun logout(userId: String): Map<String, Any> {
+        val user = userRepository.findByIdForUpdate(userId)
+            // 令牌已通过拦截器校验（账号存在），这里为空只可能是并发删号，直接放行即可。
+            ?: return mapOf("ok" to true)
+        user.tokenVersion += 1
+        userRepository.save(user)
+        log.info("家长登出，已吊销其全部令牌: userId={}, newVersion={}", userId, user.tokenVersion)
+        return mapOf("ok" to true)
+    }
+
+    /**
+     * 由后台重置密码等管理动作调用：强制该账号的既有会话全部下线。
+     *
+     * 与 [logout] 同一套机制，独立成方法是因为调用方（管理员）持有的是 adminId，
+     * 不能走"当前登录用户"的语义。
+     */
+    @Transactional
+    fun revokeAllSessions(userId: String): Long {
+        val user = userRepository.findByIdForUpdate(userId) ?: return 0
+        user.tokenVersion += 1
+        userRepository.save(user)
+        log.info("管理动作吊销家长会话: userId={}, newVersion={}", userId, user.tokenVersion)
+        return user.tokenVersion
     }
 
     private fun buildLoginResponse(user: User): LoginResponse {
@@ -237,8 +282,8 @@ class AuthService(
             user.lastLoginAt = System.currentTimeMillis()
             userRepository.save(user)
         }.onFailure { log.warn("update lastLoginAt failed for {}: {}", user.id, it.message) }
-        val access = jwt.createAccessToken(user.id)
-        val refresh = jwt.createRefreshToken(user.id)
+        val access = jwt.createAccessToken(user.id, user.tokenVersion)
+        val refresh = jwt.createRefreshToken(user.id, user.tokenVersion)
         return LoginResponse(
             user = UserDto(user.id, user.phone, user.nickname, user.avatar, user.role, user.sceneType),
             token = access,

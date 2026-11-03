@@ -1,8 +1,11 @@
 package com.padguard.server.repository
 
 import com.padguard.server.domain.*
+import jakarta.persistence.LockModeType
+import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Lock
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
@@ -15,6 +18,66 @@ interface UserRepository : JpaRepository<User, String> {
     fun findByPhone(phone: String): User?
     /** 按账号状态计数（冻结/激活看板指标） */
     fun countByStatus(status: String): Long
+
+    /**
+     * 悲观行锁读，专供"令牌版本自增"使用。
+     *
+     * 登出 / 后台重置密码都是「读版本 → +1 → 写回」，并发点两次登出时两个事务读到同一个旧值、
+     * 后写覆盖先写，第二次自增被吞掉 —— 表面上无害（版本仍比旧令牌大），
+     * 但同一账号在多端同时登出时会让"最后一次登出前刚签发的令牌"漏过吊销。
+     * 行锁把自增串行化，与订阅续费（[SubscriptionRepository.findByUserIdForUpdate]）同口径。
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select u from User u where u.id = :id")
+    fun findByIdForUpdate(@Param("id") id: String): User?
+
+    /**
+     * 后台家长列表：过滤与分页全部下推数据库。
+     *
+     * 改造前是 `findAll()` 取全表 → 内存过滤 → 内存分页，且每一行还要单独查一次订阅
+     * 和一次设备数（N+1）。家长数到几千时，一次翻页要拉全表 + 上万次查询，
+     * 后台在业务高峰期会直接把服务器拖慢，而运营只是翻了一页。
+     *
+     * 参数用空串而不是 null 表示"不过滤"：JPQL 里 `:param is null` 在部分数据库上
+     * 无法推断参数类型（PostgreSQL 会报 could not determine data type），
+     * 空串比较则总是安全的。
+     *
+     * 套餐过滤用 exists 子查询而非 join：一个家长理论上只有一条订阅，
+     * exists 不会因数据异常（历史重复订阅）把同一家长放大成多行。
+     */
+    @Query(
+        """
+        select u from User u
+        where (:status = '' or coalesce(u.status, 'active') = :status)
+          and (
+            :keyword = ''
+            or lower(u.phone) like :kw
+            or lower(coalesce(u.nickname, '')) like :kw
+            or lower(u.id) like :kw
+          )
+          and (
+            :planMode = ''
+            or (:planMode = 'free' and not exists (
+                  select 1 from Subscription s where s.userId = u.id
+                    and upper(s.plan) in ('MONTHLY', 'QUARTERLY', 'YEARLY', 'PERMANENT')))
+            or (:planMode = 'monthly' and exists (
+                  select 1 from Subscription s where s.userId = u.id
+                    and upper(s.plan) in ('MONTHLY', 'QUARTERLY')))
+            or (:planMode = 'yearly' and exists (
+                  select 1 from Subscription s where s.userId = u.id and upper(s.plan) = 'YEARLY'))
+            or (:planMode = 'permanent' and exists (
+                  select 1 from Subscription s where s.userId = u.id and upper(s.plan) = 'PERMANENT'))
+          )
+        order by u.createdAt desc
+        """
+    )
+    fun searchParents(
+        @Param("status") status: String,
+        @Param("keyword") keyword: String,
+        @Param("kw") kw: String,
+        @Param("planMode") planMode: String,
+        pageable: Pageable
+    ): Page<User>
 }
 
 @Repository
@@ -46,6 +109,66 @@ interface DeviceRepository : JpaRepository<Device, String> {
      * 避免把"网段比对"这种无法走索引的运算下沉成全表扫 —— 这张表随设备与时间持续增长。
      */
     fun findByLastActiveAtGreaterThan(since: Long): List<Device>
+
+    /**
+     * 悲观行锁读设备。用作"同一台设备的策略写入"的互斥量。
+     *
+     * 策略保存是「读最新版本 → +1 → 插入新行」的读改写：两个并发请求（家长连点开关、
+     * 端上模板应用与设置保存撞车）会读到同一个旧版本、插出两条同号策略行，
+     * `findFirstByDeviceIdOrderByVersionDesc` 取到哪条全凭数据库返回顺序 ——
+     * 表现就是"改了设置但孩子端没变"，且没有任何报错。锁住设备行即可把这段串行化，
+     * 锁在事务提交时自动释放，不依赖应用层锁（多实例部署同样成立）。
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select d from Device d where d.id = :id")
+    fun findByIdForUpdate(@Param("id") id: String): Device?
+
+    /**
+     * 按家长批量统计设备数（后台家长列表用）。
+     *
+     * 逐行 `countByUserId` 是 N+1：一页 20 个家长就是 20 次往返，
+     * 加上每行还要查一次订阅，翻一页 40 次查询只为了显示两列数字。
+     */
+    @Query("select d.userId, count(d) from Device d where d.userId in :userIds group by d.userId")
+    fun countGroupByUserIds(@Param("userIds") userIds: Collection<String>): List<Array<Any>>
+
+    /**
+     * 后台设备列表：关键字（设备号 / 家长手机号 / 家长昵称）与在线态均下推数据库。
+     *
+     * 改造前 `findAll()` 全表 + 内存过滤：设备表随绑定只增不减，
+     * 一次翻页要把几万台设备读进堆里，还要为每台设备在内存里比对家长信息。
+     *
+     * 在线态的判定口径必须与 [com.padguard.server.service.online] 完全一致
+     * （`ONLINE` + 最近心跳在 40 秒内），否则会出现"列表筛选在线，结果里却有离线设备"。
+     */
+    @Query(
+        """
+        select d from Device d
+        where (
+            :keyword = ''
+            or lower(d.id) like :kw
+            or exists (
+                select 1 from User u where u.id = d.userId
+                  and (lower(u.phone) like :kw or lower(coalesce(u.nickname, '')) like :kw))
+          )
+          and (
+            :onlineMode = ''
+            or (:onlineMode = '1' and d.onlineStatus = 'ONLINE'
+                and d.lastOnlineAt is not null and d.lastOnlineAt >= :staleCut)
+            or (:onlineMode = '0' and (
+                d.onlineStatus is null or d.onlineStatus <> 'ONLINE'
+                or d.lastOnlineAt is null or d.lastOnlineAt < :staleCut))
+          )
+        order by d.createdAt desc
+        """
+    )
+    fun searchDevices(
+        @Param("keyword") keyword: String,
+        @Param("kw") kw: String,
+        @Param("onlineMode") onlineMode: String,
+        @Param("staleCut") staleCut: Long,
+        pageable: Pageable
+    ): Page<Device>
 }
 
 @Repository
@@ -88,6 +211,15 @@ interface EnrollmentSessionRepository : JpaRepository<EnrollmentSession, String>
 @Repository
 interface PolicyRepository : JpaRepository<Policy, String> {
     fun findFirstByDeviceIdOrderByVersionDesc(deviceId: String): Policy?
+
+    /**
+     * 该设备的下一个策略版本号（`max(version) + 1`，空表为 1）。
+     *
+     * 由 [com.padguard.server.service.PolicyVersions.allocate] 在持有设备行锁后调用，
+     * 因此"读 max"与"插入新行"之间不会有第二个写入者插进来。
+     */
+    @Query("select coalesce(max(p.version), 0) + 1 from Policy p where p.deviceId = :deviceId")
+    fun nextVersion(@Param("deviceId") deviceId: String): Int
 
     /**
      * 策略包按 deviceId 归属，易主 / 解绑时必须清除：

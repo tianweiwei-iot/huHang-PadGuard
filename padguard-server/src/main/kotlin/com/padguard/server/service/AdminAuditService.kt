@@ -119,8 +119,12 @@ class AdminAuditService(
 
     fun alerts(adminId: String): List<AlertItem> {
         requireRead(adminPerm, adminId, "audit")
-        val users = userRepository.findAll().associateBy { it.id }
-        return alertRepository.findAll().map { a ->
+        // 先取最近的告警，再只为这批告警涉及的家长补手机号。
+        // 原来是 findAll() 全表 + findAll() 全量家长：两个全表扫描换一个列表页。
+        val recent = alertRepository.findTop500ByOrderByTriggeredAtDesc()
+        val ownerIds = recent.mapNotNull { it.userId }.distinct()
+        val users = if (ownerIds.isEmpty()) emptyMap() else userRepository.findAllById(ownerIds).associateBy { it.id }
+        return recent.map { a ->
             val level = when (a.level.uppercase()) {
                 "ERROR" -> "high"; "WARN" -> "mid"; else -> "low"
             }

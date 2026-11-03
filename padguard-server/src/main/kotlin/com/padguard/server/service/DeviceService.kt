@@ -101,8 +101,19 @@ class DeviceService(
      * 付费闸门放在**这里**而不是两个入口各放一次：
      * 校验分散到调用方，日后新增第三种绑定方式（比如扫码直连）时极易漏掉，
      * 漏掉就是一种免费后门。共用入口只有一处，不可能漏。
+     *
+     * ## 为什么要按设备指纹加锁
+     * 下面 [matchExistingDevice] 是"查台账，没有才新建"的 check-then-act。
+     * 孩子端绑定超时重试、家长同时用扫码与账号密码两种方式接入，都会让两个事务同时进来：
+     * 都查不到台账 → 各建一条 → 家长端出现两台同名设备，用量/策略/指令从此分裂。
+     * 键锁把"同一台平板"的绑定串行化，锁活到事务提交（详见 [DeviceBindLocks]）。
      */
-    fun bindChildWithUser(req: BindRequest, userId: String): BindResult {
+    fun bindChildWithUser(req: BindRequest, userId: String): BindResult =
+        DeviceBindLocks.withKey(DeviceBindLocks.bindKey(req.deviceSn, req.fingerprint)) {
+            doBindChildWithUser(req, userId)
+        }
+
+    private fun doBindChildWithUser(req: BindRequest, userId: String): BindResult {
         billingService.ensureCanBindForChild(userId)
         val deviceId = UUID.randomUUID().toString()
         val deviceToken = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "")
@@ -649,6 +660,16 @@ class DeviceService(
         if (hardwareId.isBlank()) {
             throw BizException(ParentErr.PARAM_ERROR, "设备编号为空", Audience.PARENT)
         }
+        // 「按 deviceSn 找无主设备 → 改归属」同样是 check-then-act：
+        // 两个家长同时对同一台孤儿设备点接入，两边都会读到 userId 为空、也都认为自己抢到了，
+        // 后提交者覆盖先提交者 —— 前一个家长会在毫无提示的情况下丢设备。
+        // 与绑定主流程共用同一把按指纹的键锁，锁活到事务提交。
+        return DeviceBindLocks.withKey(DeviceBindLocks.bindKey(hardwareId, null)) {
+            claimLanDevice(userId, req, hardwareId)
+        }
+    }
+
+    private fun claimLanDevice(userId: String, req: LanBindRequest, hardwareId: String): DeviceDto {
         val dev = deviceRepository.findByDeviceSn(hardwareId).firstOrNull { isOrphan(it) }
             ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "该设备已被其他账号接入或不存在", Audience.PARENT)
 

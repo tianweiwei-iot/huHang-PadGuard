@@ -65,17 +65,25 @@ class JwtTokenProvider(
         return generated
     }
 
-    fun createAccessToken(userId: String): String = Jwts.builder()
+    /**
+     * 签发家长 access token。
+     *
+     * [tokenVersion] 取自 `users.token_version`，写入 `ver` 声明。默认 0 是为了让
+     * 未关心吊销的调用点（如测试、内部工具）保持可编译，正式签发点必须传真实版本号。
+     */
+    fun createAccessToken(userId: String, tokenVersion: Long = 0L): String = Jwts.builder()
         .subject(userId)
         .claim("typ", "access")
+        .claim("ver", tokenVersion)
         .issuedAt(java.util.Date())
         .expiration(java.util.Date(System.currentTimeMillis() + accessTtlMinutes * 60_000))
         .signWith(key)
         .compact()
 
-    fun createRefreshToken(userId: String): String = Jwts.builder()
+    fun createRefreshToken(userId: String, tokenVersion: Long = 0L): String = Jwts.builder()
         .subject(userId)
         .claim("typ", "refresh")
+        .claim("ver", tokenVersion)
         .issuedAt(java.util.Date())
         .expiration(java.util.Date(System.currentTimeMillis() + refreshTtlDays * 86_400_000))
         .signWith(key)
@@ -91,6 +99,21 @@ class JwtTokenProvider(
     fun parseAccessToken(token: String): String = parseWithTyp(token, "access")
 
     fun parseRefreshToken(token: String): String = parseWithTyp(token, "refresh")
+
+    /**
+     * 解析家长令牌并带回版本号，用于"登出即吊销"。
+     *
+     * 历史令牌没有 `ver` 声明 → 0，与 `users.token_version` 默认值一致；
+     * 家长一旦登出，列值变 1，此前签发的全部令牌（含 refresh）立刻失效。
+     */
+    fun parseUserToken(token: String, expectedTyp: String): UserTokenPayload {
+        val claims = parseClaimsWithTyp(token, expectedTyp)
+        val version = (claims["ver"] as? Number)?.toLong() ?: 0L
+        return UserTokenPayload(userId = claims.subject, version = version)
+    }
+
+    /** 家长令牌解析结果：[version] 与库内 `users.token_version` 比对以判定是否已吊销 */
+    data class UserTokenPayload(val userId: String, val version: Long)
 
     /**
      * 解析管理员令牌，返回身份与令牌版本号。

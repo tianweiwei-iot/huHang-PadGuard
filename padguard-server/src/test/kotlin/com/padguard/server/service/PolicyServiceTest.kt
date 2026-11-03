@@ -26,6 +26,8 @@ class PolicyServiceTest {
         override fun idOf(entity: Policy) = entity.id
         override fun findFirstByDeviceIdOrderByVersionDesc(deviceId: String): Policy? =
             table.values.filter { it.deviceId == deviceId }.maxByOrNull { it.version }
+        override fun nextVersion(deviceId: String): Int =
+            (table.values.filter { it.deviceId == deviceId }.maxOfOrNull { it.version } ?: 0) + 1
         override fun deleteByDeviceId(deviceId: String): Int {
             val before = table.size
             table.values.removeIf { it.deviceId == deviceId }
@@ -36,6 +38,20 @@ class PolicyServiceTest {
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
         override val table = LinkedHashMap<String, Device>()
         override fun idOf(entity: Device) = entity.id
+        override fun countGroupByUserIds(userIds: Collection<String>): List<Array<Any>> =
+            table.values.filter { it.userId in userIds }.groupBy { it.userId }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any> }
+        override fun findByIdForUpdate(id: String): Device? = table[id]
+        override fun searchDevices(keyword: String, kw: String, onlineMode: String, staleCut: Long, pageable: org.springframework.data.domain.Pageable): org.springframework.data.domain.Page<Device> {
+            var all = table.values.toList()
+            if (onlineMode == "1") all = all.filter { it.onlineStatus == "ONLINE" && (it.lastOnlineAt ?: 0) >= staleCut }
+            if (onlineMode == "0") all = all.filter { !(it.onlineStatus == "ONLINE" && (it.lastOnlineAt ?: 0) >= staleCut) }
+            val sorted = all.sortedByDescending { it.createdAt }
+            val from = pageable.offset.toInt()
+            val to = minOf(from + pageable.pageSize, sorted.size)
+            val content = if (from >= sorted.size) emptyList<Device>() else sorted.subList(from, to)
+            return org.springframework.data.domain.PageImpl(content, pageable, sorted.size.toLong())
+        }
         override fun findByUserId(userId: String): List<Device> = emptyList()
         override fun countByUserId(userId: String): Long = 0L
         override fun countByOnlineStatus(onlineStatus: String): Long = 0L

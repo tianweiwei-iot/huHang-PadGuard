@@ -56,11 +56,53 @@ class AdminServiceTest {
         override fun existsByPhone(phone: String) = table.values.any { it.phone == phone }
         override fun findByPhone(phone: String): User? = table.values.firstOrNull { it.phone == phone }
         override fun countByStatus(status: String) = table.values.count { (it.status ?: "active") == status }.toLong()
+        override fun findByIdForUpdate(id: String): User? = table[id]
+        // 内存版复刻 SQL 的过滤/分页语义：listParents 的筛选与翻页已下推数据库，
+        // 假仓储若不跟进，翻页/筛选用例测的就不再是真实行为。
+        override fun searchParents(
+            status: String,
+            keyword: String,
+            kw: String,
+            planMode: String,
+            pageable: org.springframework.data.domain.Pageable
+        ): org.springframework.data.domain.Page<User> {
+            var all = table.values.filter { status.isEmpty() || (it.status ?: "active") == status }
+            if (keyword.isNotEmpty()) {
+                all = all.filter {
+                    it.phone.lowercase().contains(keyword) ||
+                        (it.nickname ?: "").lowercase().contains(keyword) ||
+                        it.id.lowercase().contains(keyword)
+                }
+            }
+            // 假仓储不持有订阅表，套餐维度按"全部免费"处理（用例未覆盖付费筛选）
+            if (planMode.isNotEmpty() && planMode != "free") {
+                return org.springframework.data.domain.PageImpl(emptyList(), pageable, 0)
+            }
+            val sorted = all.sortedByDescending { it.createdAt }
+            val from = pageable.offset.toInt()
+            val to = minOf(from + pageable.pageSize, sorted.size)
+            val content = if (from >= sorted.size) emptyList<User>() else sorted.subList(from, to)
+            return org.springframework.data.domain.PageImpl(content, pageable, sorted.size.toLong())
+        }
     }
 
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
         override val table = LinkedHashMap<String, Device>()
         override fun idOf(e: Device) = e.id
+        override fun countGroupByUserIds(userIds: Collection<String>): List<Array<Any>> =
+            table.values.filter { it.userId in userIds }.groupBy { it.userId }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any> }
+        override fun findByIdForUpdate(id: String): Device? = table[id]
+        override fun searchDevices(keyword: String, kw: String, onlineMode: String, staleCut: Long, pageable: org.springframework.data.domain.Pageable): org.springframework.data.domain.Page<Device> {
+            var all = table.values.toList()
+            if (onlineMode == "1") all = all.filter { it.onlineStatus == "ONLINE" && (it.lastOnlineAt ?: 0) >= staleCut }
+            if (onlineMode == "0") all = all.filter { !(it.onlineStatus == "ONLINE" && (it.lastOnlineAt ?: 0) >= staleCut) }
+            val sorted = all.sortedByDescending { it.createdAt }
+            val from = pageable.offset.toInt()
+            val to = minOf(from + pageable.pageSize, sorted.size)
+            val content = if (from >= sorted.size) emptyList<Device>() else sorted.subList(from, to)
+            return org.springframework.data.domain.PageImpl(content, pageable, sorted.size.toLong())
+        }
         override fun findByUserId(userId: String) = table.values.filter { it.userId == userId }
         override fun countByUserId(userId: String) = table.values.count { it.userId == userId }.toLong()
         override fun countByOnlineStatus(onlineStatus: String) = table.values.count { it.onlineStatus == onlineStatus }.toLong()
@@ -78,6 +120,8 @@ class AdminServiceTest {
         override fun idOf(e: Subscription) = e.id
         override fun findByUserId(userId: String): Subscription? = table.values.firstOrNull { it.userId == userId }
         override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
+        override fun findByUserIdIn(userIds: Collection<String>): List<Subscription> =
+            table.values.filter { it.userId in userIds }
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
         override fun findAllByOrderByExpiredAtDesc() = table.values.sortedByDescending { it.expiredAt }
     }
@@ -135,6 +179,8 @@ class AdminServiceTest {
         override fun countByUserIdAndStatus(userId: String, status: String) = 0L
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
         override fun findByDeviceIdOrderByTriggeredAtDesc(deviceId: String) = emptyList<Alert>()
+        override fun findTop500ByOrderByTriggeredAtDesc(): List<Alert> =
+            table.values.sortedByDescending { it.triggeredAt }.take(500)
         override fun findByUserIdAndDeviceIdAndStatus(userId: String, deviceId: String, status: String, pageable: Pageable) = emptyList<Alert>()
         override fun findByUserIdAndDeviceId(userId: String, deviceId: String, pageable: Pageable) = emptyList<Alert>()
         override fun countByUserIdAndStatusAndDeviceId(userId: String, status: String, deviceId: String) = 0L
@@ -227,6 +273,8 @@ class AdminServiceTest {
         override val table = LinkedHashMap<String, Policy>()
         override fun idOf(e: Policy) = e.id
         override fun findFirstByDeviceIdOrderByVersionDesc(deviceId: String): Policy? = null
+        override fun nextVersion(deviceId: String): Int =
+            (table.values.filter { it.deviceId == deviceId }.maxOfOrNull { it.version } ?: 0) + 1
         override fun deleteByDeviceId(deviceId: String): Int = 0
     }
 

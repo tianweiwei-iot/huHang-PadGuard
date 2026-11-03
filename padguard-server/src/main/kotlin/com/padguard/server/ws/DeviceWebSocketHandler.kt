@@ -41,8 +41,11 @@ class DeviceWebSocketHandler(
         // 且账号必须真实存在 —— 与 ParentAuthInterceptor 的"幽灵账号"防护同口径。
         val userId = if (token != null) {
             try {
-                val parsed = jwt.parseAccessToken(token)
-                if (users.existsById(parsed)) parsed else null
+                val parsed = jwt.parseUserToken(token, "access")
+                // 令牌版本必须与库内一致：家长登出 / 后台重置密码后，
+                // 旧令牌不得再建立推送通道（否则还能收到自家孩子的告警与解锁申请）。
+                val owner = users.findById(parsed.userId).orElse(null)
+                if (owner != null && parsed.version >= owner.tokenVersion) parsed.userId else null
             } catch (e: Exception) { null }
         } else null
 

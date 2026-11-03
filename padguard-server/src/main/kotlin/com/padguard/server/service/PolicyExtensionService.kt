@@ -406,8 +406,9 @@ class PolicyExtensionService(
             objectMapper.readValue(tpl.packageJson, Map::class.java) as MutableMap<String, Any?>
         } else mutableMapOf()
         base["deviceId"] = deviceId
-        val latest = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)
-        val version = (latest?.version ?: 0) + 1
+        // 版本号必须"分配"而不是本地 +1：模板应用与设置保存可能同时发生，
+        // 各自读到同一个旧版本就会插出两条同号策略行（详见 [PolicyVersions]）。
+        val version = PolicyVersions.allocate(deviceId, deviceRepository, policyRepository, log)
         base["version"] = version
         policyRepository.save(
             Policy(
@@ -444,8 +445,8 @@ class PolicyExtensionService(
 
     fun rebuildPolicy(deviceId: String) {
         val device = deviceRepository.findById(deviceId).orElse(null) ?: return
-        val latest = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)
-        val version = (latest?.version ?: 0) + 1
+        // 同一台设备可能同时被"设置保存"与"拉取前自愈"触发重建，同样必须走分配器
+        val version = PolicyVersions.allocate(deviceId, deviceRepository, policyRepository, log)
         val packageJson = buildPolicyPackage(deviceId, version) ?: return
         policyRepository.save(
             Policy(

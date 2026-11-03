@@ -11,6 +11,7 @@ import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.AdminPermissionService
 import org.slf4j.LoggerFactory
+import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 
@@ -29,22 +30,43 @@ class AdminDeviceService(
 ) {
     private val log = LoggerFactory.getLogger(AdminDeviceService::class.java)
 
+    /**
+     * 设备列表（分页 + 关键字 + 在线态）。
+     *
+     * 改造前 `findAll()` 把设备表整表读进内存过滤：设备只增不减，
+     * 几百台时还能忍，上千台后每次翻页都是一次全表加载 + 全量在线态计算，
+     * 后台在早高峰（家长集中查看设备）会把堆和 CPU 一起顶上去。
+     *
+     * 现在过滤与分页下推数据库，只有当前页需要补家长信息与今日用量，
+     * 且都是一次批量查询。在线态判定在 SQL 里与 [online] 同口径（40 秒心跳窗）。
+     */
     fun listDevices(adminId: String, keyword: String?, online: String?, page: Int = 1, size: Int = 20): PageResult<DeviceRow> {
         requireRead(adminPerm, adminId, "devices")
-        val users = userRepository.findAll()
-        val userMap = users.associateBy { it.id }
-        var devs = deviceRepository.findAll()
-        if (!keyword.isNullOrBlank()) {
-            val k = keyword.lowercase()
-            devs = devs.filter { d ->
-                d.id.lowercase().contains(k) ||
-                (userMap[d.userId]?.phone?.contains(k) == true) ||
-                (userMap[d.userId]?.nickname?.lowercase()?.contains(k) == true)
-            }
+        val p = if (page < 1) 1 else page
+        val s = when {
+            size < 1 -> 20
+            size > 200 -> 200
+            else -> size
         }
-        if (online == "1") devs = devs.filter { online(it) }
-        else if (online == "0") devs = devs.filter { !online(it) }
-        // 一次性取全部设备的今日用量，避免逐台查询。
+        val k = keyword?.trim()?.lowercase() ?: ""
+        val onlineMode = when (online?.trim()) {
+            "1" -> "1"
+            "0" -> "0"
+            else -> ""
+        }
+        val result = deviceRepository.searchDevices(
+            keyword = k,
+            kw = "%$k%",
+            onlineMode = onlineMode,
+            staleCut = System.currentTimeMillis() - ONLINE_STALE_MS,
+            pageable = PageRequest.of(p - 1, s)
+        )
+        val devs = result.content
+        // 只取当前页涉及到的家长，而不是全表家长
+        val ownerIds = devs.mapNotNull { it.userId }.distinct()
+        val userMap = if (ownerIds.isEmpty()) emptyMap()
+        else userRepository.findAllById(ownerIds).associateBy { it.id }
+        // 一次性取当前页设备的今日用量，避免逐台查询。
         // 取不到的（今日尚未开始计时）保持 null，前端显示"—"而不是伪造一个 0。
         val usedMinutes = usageSessionService.usedMinutesBatch(devs.map { it.id })
         val rows = devs.map { d ->
@@ -62,7 +84,9 @@ class AdminDeviceService(
                 boundAt = fmt(d.createdAt)
             )
         }
-        return paginate(rows, page, size)
+        val total = result.totalElements.toInt()
+        val totalPages = if (total == 0) 1 else ((total + s - 1) / s)
+        return PageResult(rows, p, s, total, totalPages)
     }
 
     @Transactional

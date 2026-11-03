@@ -6,8 +6,10 @@ import com.padguard.server.dto.MinorModeRequest
 import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.PolicyRepository
+import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
 
 /**
@@ -58,10 +60,20 @@ class PolicyService(
     private val objectMapper: ObjectMapper,
     @Value("\${padguard.mqtt.tenant:default}") private val tenant: String
 ) {
+    private val log = LoggerFactory.getLogger(PolicyService::class.java)
+    /**
+     * 为新设备建默认策略。
+     *
+     * 版本号改为**分配**而非写死 1：绑定流程在极端情况下（孩子端超时重试、局域网绑定与扫码绑定撞车）
+     * 可能出现同一设备两次创建，写死 1 会插出两条 version=1 的行，之后任何 `version+1`
+     * 都会与被覆盖的那条打架。
+     */
+    @Transactional
     fun createDefault(deviceId: String) {
+        val version = PolicyVersions.allocate(deviceId, deviceRepository, policyRepository, log)
         policyRepository.save(
             Policy(
-                id = UUID.randomUUID().toString(), deviceId = deviceId, version = 1,
+                id = UUID.randomUUID().toString(), deviceId = deviceId, version = version,
                 packageJson = buildDefaultPolicyJson(deviceId),
                 scene = "FAMILY", updatedAt = System.currentTimeMillis()
             )
@@ -76,6 +88,7 @@ class PolicyService(
      *
      * @return 新的策略版本号
      */
+    @Transactional
     fun applyMinorMode(deviceId: String, req: MinorModeRequest): Int {
         val policy = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)
             ?: run { createDefault(deviceId); policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)!! }
@@ -119,7 +132,7 @@ class PolicyService(
             "parentOverridden" to (req.dailyLimitMinutes != null || req.weekendLimitMinutes != null)
         )
 
-        val newVersion = policy.version + 1
+        val newVersion = PolicyVersions.allocate(deviceId, deviceRepository, policyRepository, log)
         policyRepository.save(
             Policy(
                 id = UUID.randomUUID().toString(), deviceId = deviceId, version = newVersion,
@@ -182,6 +195,7 @@ class PolicyService(
         }
 
     /** 孩子端拉策略：版本一致返回 upToDate，否则返回全量包 */
+    @Transactional
     fun getForChild(deviceId: String, currentVersion: Int): Any {
         val policy = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)
         if (policy == null) {
@@ -203,6 +217,7 @@ class PolicyService(
      * 回退成默认值 "NORMAL"，表现为"切换管控模式对孩子端不生效"。落库后 buildPolicyPackage 读到的
      * 就是家长真正选中的模式，整条链路口径一致。
      */
+    @Transactional
     fun applyMode(deviceId: String, mode: String): Int {
         val policy = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)
             ?: run { createDefault(deviceId); policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)!! }
@@ -212,7 +227,7 @@ class PolicyService(
         } else mutableMapOf()
 
         base["sceneMode"] = mode
-        val newVersion = policy.version + 1
+        val newVersion = PolicyVersions.allocate(deviceId, deviceRepository, policyRepository, log)
         policyRepository.save(
             Policy(
                 id = UUID.randomUUID().toString(), deviceId = deviceId, version = newVersion,

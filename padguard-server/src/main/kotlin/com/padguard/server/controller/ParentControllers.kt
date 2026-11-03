@@ -44,8 +44,16 @@ class AuthController(private val authService: AuthService, private val rateLimit
     fun refresh(@RequestHeader("Refresh-Token") refreshToken: String) =
         ApiResponse.ok(authService.refresh(refreshToken))
 
+    /**
+     * 退出登录。
+     *
+     * 改造前这里是 `ApiResponse.ok(null)` —— 一个空实现：客户端删掉本地令牌就算"登出"，
+     * 服务端手里的 access token 还能用满 120 分钟，refresh token 更能续期 30 天。
+     * 令牌一旦泄漏（截图、代理日志、二手设备），"我已经登出了"完全不能止损。
+     * 现在把账号的 token_version +1，使该账号已签发的全部令牌立即失效。
+     */
     @PostMapping("/logout")
-    fun logout() = ApiResponse.ok<Any?>(null)
+    fun logout(@RequestAttribute("userId") userId: String) = ApiResponse.ok(authService.logout(userId))
 }
 
 @RestController

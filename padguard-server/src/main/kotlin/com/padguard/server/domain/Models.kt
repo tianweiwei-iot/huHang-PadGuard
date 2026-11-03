@@ -26,6 +26,14 @@ class User(
     @Column(name = "status") var status: String? = "active",
     /** 最近登录时刻（毫秒）；NULL 表示从未登录 */
     @Column(name = "last_login_at") var lastLoginAt: Long? = null,
+    /**
+     * 令牌版本号：登出 / 后台重置密码时 +1，签发时写进 JWT 的 `ver` 声明。
+     *
+     * JWT 是无状态的，"退出登录"本身没有任何服务端动作 —— 令牌在过期前一直有效。
+     * 版本号是让"吊销"真正生效的最小代价方案：请求进来时拿令牌里的 ver 与这一列比对，
+     * 落后即拒绝。历史令牌没有 ver 声明，按 0 处理，与本列默认值一致。
+     */
+    @Column(name = "token_version") var tokenVersion: Long = 0,
     @Column(name = "created_at") var createdAt: Long = 0
 )
 

@@ -32,6 +32,15 @@ class AuthServiceTest {
         override fun existsByPhone(phone: String) = table.values.any { it.phone == phone }
         override fun findByPhone(phone: String): User? = table.values.firstOrNull { it.phone == phone }
         override fun countByStatus(status: String) = table.values.count { (it.status ?: "active") == status }.toLong()
+        override fun findByIdForUpdate(id: String): User? = table[id]
+        override fun searchParents(
+            status: String,
+            keyword: String,
+            kw: String,
+            planMode: String,
+            pageable: org.springframework.data.domain.Pageable
+        ): org.springframework.data.domain.Page<User> =
+            org.springframework.data.domain.PageImpl(emptyList(), pageable, 0)
     }
 
     private class FakeSubRepo : FakeJpaRepository<Subscription, String>(), SubscriptionRepository {
@@ -41,6 +50,8 @@ class AuthServiceTest {
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
         override fun findAllByOrderByExpiredAtDesc() = table.values.sortedByDescending { it.expiredAt }
         override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
+        override fun findByUserIdIn(userIds: Collection<String>): List<Subscription> =
+            table.values.filter { it.userId in userIds }
     }
 
     private class FakeOrderRepo : FakeJpaRepository<PaymentOrder, String>(), PaymentOrderRepository {
@@ -78,6 +89,20 @@ class AuthServiceTest {
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
         override val table = LinkedHashMap<String, Device>()
         override fun idOf(e: Device) = e.id
+        override fun countGroupByUserIds(userIds: Collection<String>): List<Array<Any>> =
+            table.values.filter { it.userId in userIds }.groupBy { it.userId }
+                .map { arrayOf(it.key, it.value.size.toLong()) as Array<Any> }
+        override fun findByIdForUpdate(id: String): Device? = table[id]
+        override fun searchDevices(keyword: String, kw: String, onlineMode: String, staleCut: Long, pageable: org.springframework.data.domain.Pageable): org.springframework.data.domain.Page<Device> {
+            var all = table.values.toList()
+            if (onlineMode == "1") all = all.filter { it.onlineStatus == "ONLINE" && (it.lastOnlineAt ?: 0) >= staleCut }
+            if (onlineMode == "0") all = all.filter { !(it.onlineStatus == "ONLINE" && (it.lastOnlineAt ?: 0) >= staleCut) }
+            val sorted = all.sortedByDescending { it.createdAt }
+            val from = pageable.offset.toInt()
+            val to = minOf(from + pageable.pageSize, sorted.size)
+            val content = if (from >= sorted.size) emptyList<Device>() else sorted.subList(from, to)
+            return org.springframework.data.domain.PageImpl(content, pageable, sorted.size.toLong())
+        }
         override fun findByUserId(userId: String) = table.values.filter { it.userId == userId }
         override fun countByUserId(userId: String) = table.values.count { it.userId == userId }.toLong()
         override fun countByOnlineStatus(onlineStatus: String) = table.values.count { it.onlineStatus == onlineStatus }.toLong()

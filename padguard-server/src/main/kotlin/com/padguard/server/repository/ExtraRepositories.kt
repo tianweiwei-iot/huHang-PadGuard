@@ -108,6 +108,16 @@ interface AlertRepository : JpaRepository<Alert, String> {
     fun findByDeviceIdOrderByTriggeredAtDesc(deviceId: String): List<Alert>
 
     /**
+     * 后台告警列表：只取最近 500 条。
+     *
+     * 告警表只增不减（每条异常一次），`findAll()` 会把整张表读进内存再逐条关联家长。
+     * 上线半年后这个接口的耗时会随数据量线性增长，直到把后台拖垮 ——
+     * 而运营真正关心的永远只是"最近发生了什么"。上限写死在仓储方法名里，
+     * 避免调用方以后又加一条不带 limit 的路径。
+     */
+    fun findTop500ByOrderByTriggeredAtDesc(): List<Alert>
+
+    /**
      * 按「用户 + 设备」过滤（可选状态）。
      * 供告警列表页使用：早期是查出该用户全部告警后在内存里 filter deviceId，
      * 会导致分页返回的条数不足一页（过滤发生在分页之后），且随告警累积越来越慢。
@@ -375,6 +385,9 @@ interface InstalledAppRepository : JpaRepository<InstalledApp, String> {
 @Repository
 interface SubscriptionRepository : JpaRepository<Subscription, String> {
     fun findByUserId(userId: String): Subscription?
+
+    /** 批量取订阅：后台家长列表一页 N 个账号，逐条 findByUserId 就是 N 次往返（N+1） */
+    fun findByUserIdIn(userIds: Collection<String>): List<Subscription>
 
     /**
      * 续费专用：悲观行锁读。

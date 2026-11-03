@@ -39,13 +39,19 @@ class ParentAuthInterceptor(
         if (auth.isNullOrBlank() || !auth.startsWith("Bearer ")) {
             throw BizException(ParentErr.UNAUTHORIZED, "missing or invalid Authorization", Audience.PARENT)
         }
-        val userId = try {
-            jwt.parseAccessToken(auth.substring(7))
+        val payload = try {
+            jwt.parseUserToken(auth.substring(7), "access")
         } catch (e: Exception) {
             throw BizException(ParentErr.UNAUTHORIZED, "invalid token", Audience.PARENT)
         }
-        val user = users.findById(userId).orElse(null)
+        val user = users.findById(payload.userId).orElse(null)
             ?: throw BizException(ParentErr.UNAUTHORIZED, "账号不存在或已被重置，请重新登录", Audience.PARENT)
+        // 吊销校验：登出 / 后台重置密码会把 users.token_version +1，
+        // 此前签发的令牌都停留在旧版本，必须与"账号不存在"同样处理（退回登录页）。
+        // 没有这一步，/auth/logout 就只是客户端删了个本地文件，服务端令牌照常可用。
+        if (payload.version < user.tokenVersion) {
+            throw BizException(ParentErr.UNAUTHORIZED, "登录状态已失效，请重新登录", Audience.PARENT)
+        }
         val status = UserStatus.of(user.status)
         if (!UserStatus.isUsable(status)) {
             throw BizException(
@@ -55,7 +61,7 @@ class ParentAuthInterceptor(
                 Audience.PARENT
             )
         }
-        request.setAttribute("userId", userId)
+        request.setAttribute("userId", payload.userId)
         return true
     }
 }
@@ -91,10 +97,13 @@ class FileAccessInterceptor(
         val token = auth?.takeIf { it.startsWith("Bearer ") }?.substring(7)
         val matchedParent = token
             // S5：typ 隔离 —— 只认 access token，refresh/admin token 不得冒充下载身份
-            ?.let { runCatching { jwt.parseAccessToken(it) }.getOrNull() }
-            // 冻结/待激活账号不认（同事侧）：查实体校验状态，而非只判存在性
-            ?.let { uid -> runCatching { users.findById(uid).orElse(null) }.getOrNull() }
-            ?.takeIf { UserStatus.isUsable(it.status) }
+            ?.let { runCatching { jwt.parseUserToken(it, "access") }.getOrNull() }
+            // 冻结/待激活账号不认（同事侧）：查实体校验状态，而非只判存在性；
+            // 已登出的令牌同样不认——否则登出后仍能以家长身份下载本家素材与截图。
+            ?.let { p ->
+                runCatching { users.findById(p.userId).orElse(null) }.getOrNull()
+                    ?.takeIf { UserStatus.isUsable(it.status) && p.version >= it.tokenVersion }
+            }
             ?.id
         if (matchedParent != null) {
             request.setAttribute("fileViewerUserId", matchedParent)
