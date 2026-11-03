@@ -18,6 +18,8 @@ class PadGuardApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // 先挂前台可见性监听：下面的轮询循环据此在后台暂停（见 AppVisibility）
+        com.padguard.parent.util.AppVisibility.attach(this)
         initAmapPrivacyCompliance()
     }
 

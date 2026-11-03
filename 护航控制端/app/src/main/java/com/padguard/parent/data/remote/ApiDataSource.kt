@@ -157,6 +157,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.firstOrNull
@@ -425,10 +426,19 @@ class ApiDataSource @Inject constructor(
     }
 
     private fun startDevicePolling() {
+        // 只在 App 可见时轮询：
+        // - 后台/锁屏期间不再发请求（原先只判 token，挂后台一整天等于空转几千次请求，
+        //   既浪费用户流量与电量，也让服务端的"在线用户 QPS"被噪声污染）；
+        // - collectLatest 在状态翻转时自动取消内层循环，回到前台会立刻刷一次，
+        //   不会出现"切回来还要等 10 秒才更新"的观感回退；
+        // - WS 推送通道（observePresencePush）**不受影响**，后台仍能收到上下线与告警。
         scope.launch {
-            while (isActive) {
-                if (tokenManager.getAccessToken() != null) refreshDeviceList()
-                delay(POLL_INTERVAL_MS)
+            com.padguard.parent.util.AppVisibility.isForeground.collectLatest { foreground ->
+                if (!foreground) return@collectLatest
+                while (isActive) {
+                    if (tokenManager.getAccessToken() != null) refreshDeviceList()
+                    delay(POLL_INTERVAL_MS)
+                }
             }
         }
         observePresencePush()

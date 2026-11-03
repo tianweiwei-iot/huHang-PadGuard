@@ -55,7 +55,9 @@ fun GuardPasswordCard(
     onClear: () -> Unit
 ) {
     var draft by remember(set) { mutableStateOf("") }
-    val canSubmit = draft.length >= 4
+    // 与服务端 GuardPasswords.MIN_LENGTH、孩子端 setPasswordPlain 同口径（6 位）。
+    // 前端先挡是为了给出即时反馈；真正的闸门在服务端，改这里不影响安全性，只影响体验。
+    val canSubmit = draft.length >= 6
 
     SoftCard {
         Column(
@@ -94,7 +96,7 @@ fun GuardPasswordCard(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 shape = RoundedCornerShape(10.dp),
-                label = { Text("家长密码（至少 4 位）") },
+                label = { Text("家长密码（至少 6 位）") },
                 placeholder = { Text("孩子改动设备时输入的密码") },
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
