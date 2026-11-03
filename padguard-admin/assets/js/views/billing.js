@@ -170,6 +170,10 @@
     });
     m.el.querySelector("#m-cancel").onclick = m.close;
     m.el.querySelector("#m-ok").onclick = async () => {
+      const okBtn = m.el.querySelector("#m-ok");
+      // 防重复提交：这个按钮每点一次都会给订阅加 days 天，慢网下双击 = 白送一年（不可逆资损）。
+      // 先置 disabled 再发请求，失败时恢复。
+      if (okBtn.disabled) return;
       const phone = m.el.querySelector("#m-phone").value.trim();
       if (!/^1\d{10}$/.test(phone)) { PG.ui.toast("err", "手机号格式不正确"); return; }
       // 显式范围校验：parseInt 静默吞 0/负数会把"输错"变成"送一年/送一万天"，都是资损
@@ -178,9 +182,14 @@
         PG.ui.toast("err", "时长不合法", "请输入 1~3650 之间的天数");
         return;
       }
+      okBtn.disabled = true;
+      const oldText = okBtn.textContent;
+      okBtn.textContent = "提交中…";
       try {
         await PG.api.manualActivate(phone, m.el.querySelector("#m-plan").value, days);
       } catch (e) {
+        okBtn.disabled = false;
+        okBtn.textContent = oldText;
         PG.ui.toast("err", (e && e.message) ? e.message : "开通失败，请重试");
         return;
       }

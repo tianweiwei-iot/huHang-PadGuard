@@ -4,6 +4,9 @@
 (function (global) {
   const PG = global.PG || (global.PG = {});
   const views = PG.views;          // 复用 components.js 中初始化的注册表
+
+  /** 当前路由代次：每次 render 自增，用于丢弃过期视图的异步回调（见 render/mountSafely） */
+  let routeSeq = 0;
   // 每个菜单项绑定到其「读权限」领域；无该领域读权限的管理员看不到对应菜单（服务端同样会拒绝读请求）。
   const NAV = [
     { title: "总览", items: [{ k: "dashboard", area: "server" }] },
@@ -27,10 +30,16 @@
     if (!views[key]) key = "dashboard";
     const v = views[key];
     const root = document.getElementById("view");
+    // 路由序号：慢请求返回时用户可能已经切到别的页面。
+    // 旧视图的 mount 会对着已被 innerHTML 换掉的 DOM 写（querySelector 返回 null 后抛
+    // TypeError），若 catch 里再写 root.innerHTML，就会把用户正在看的新页面覆盖成
+    // "加载失败"。用序号把过期视图的失败整个丢弃。
+    const mySeq = ++routeSeq;
     document.getElementById("crumb-mod").textContent = v.title;
     document.querySelectorAll(".nav-item").forEach(el => el.classList.toggle("active", el.dataset.view === key));
     root.innerHTML = typeof v.render === "function" ? v.render() : "";
-    await mountSafely(v, root);
+    await mountSafely(v, root, mySeq);
+    if (mySeq !== routeSeq) return;
     root.scrollTop = 0;
   }
 
@@ -42,11 +51,16 @@
    * 都会变成一个未捕获的 Promise rejection —— 页面永久停在 render() 渲染出的「加载中…」，
    * 管理员完全不知道自己是被拒了还是系统坏了。
    */
-  async function mountSafely(v, root) {
+  async function mountSafely(v, root, seq) {
     if (typeof v.mount !== "function") return;
     try {
       await v.mount(root);
     } catch (err) {
+      // 过期视图的异常只记日志，不动 DOM（见 render 里的 routeSeq 说明）
+      if (seq !== undefined && seq !== routeSeq) {
+        console && console.warn && console.warn("[PadGuard] stale view error ignored:", v.key, err && err.message);
+        return;
+      }
       const msg = (err && err.message) || String(err);
       const forbidden = /403|FORBIDDEN|没有权限|无权限/i.test(msg);
       root.innerHTML = '<div class="empty" style="flex-direction:column;gap:12px;padding:40px 20px">' +

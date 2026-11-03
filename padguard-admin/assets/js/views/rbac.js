@@ -184,6 +184,20 @@
    * 而重绘若又从 role.privileges 重新初始化 working，改动会被立刻抹掉 ——
    * 界面弹出"已设为全领域只读"的成功提示，矩阵却一格未变（假成功）。
    */
+  /**
+   * 用「当前选中角色在服务端的最新权限」重建 baseline/working。
+   *
+   * 重置/删除/切换角色后必须调用：drawDetail(true) 的语义是"保留正在编辑的副本"，
+   * 在服务端数据已经变了的场景下继续保留旧副本，界面与真实权限脱节 ——
+   * 最坏情况是上次把已删角色的权限写进新角色（越权授权）。
+   */
+  function resetWorkingFromCurrent() {
+    const role = ROLES.find((r) => r.id === currentId);
+    const p = (role && role.privileges) || {};
+    baseline = JSON.parse(JSON.stringify(p));
+    working = JSON.parse(JSON.stringify(p));
+  }
+
   function drawDetail(keepWorking) {
     const detail = document.querySelector("#r-detail");
     const role = ROLES.find((r) => r.id === currentId);
@@ -284,7 +298,12 @@
       try {
         await PG.api.resetRolePrivileges(role.id);
         U.toast("ok", "已还原默认权限", role.name);
-        await reload(); redraw();
+        await reload();
+        // 关键：reload 后必须用服务端值重建 working。
+        // redraw() 走 drawDetail(true) 是"保留正在编辑的副本"，还原成功后副本仍是旧权限：
+        // 界面看起来没还原，用户再点一次保存就把旧权限原样写回去，等于"还原"从未生效。
+        resetWorkingFromCurrent();
+        redraw();
       } catch (e) { U.toast("err", "还原失败", e.message); }
     };
     const del = detail.querySelector("#r-del");
@@ -294,7 +313,7 @@
         : "删除后不可恢复。";
       // confirm 内部已 esc：这里传原始 role.name，避免双重转义把引号显示成 &#39;
       U.confirm("删除角色", `${role.name}：${msg}`, async () => {
-        try { await PG.api.deleteRole(role.id); U.toast("ok", "角色已删除", role.name); await reload(); redraw(); }
+        try { await PG.api.deleteRole(role.id); U.toast("ok", "角色已删除", role.name); await reload(); resetWorkingFromCurrent(); redraw(); }
         catch (e) { U.toast("err", "删除失败", e.message); }
       }, true);
     };

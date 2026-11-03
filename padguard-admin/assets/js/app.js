@@ -21,7 +21,9 @@
   $("theme-btn").onclick = () => { const t = document.body.classList.contains("theme-dark") ? "light" : "dark"; applyTheme(t); };
 
   function applyTheme(t) {
-    document.body.className = "theme-" + t;
+    // 不用 body.className = ...：那会把 body 上的其它类（collapsed / 全局 loading 等）一并抹掉。
+    document.body.classList.toggle("theme-dark", t === "dark");
+    document.body.classList.toggle("theme-light", t !== "dark");
     store.set("pg-theme", t);
   }
 
@@ -89,7 +91,24 @@
     $("user-role").textContent = a.roleName;
     $("user-avatar").textContent = (a.name || a.username || "A").charAt(0);
     PG.router.buildSidebar();
-    if (!location.hash) location.hash = "dashboard"; else PG.router.render((location.hash || "#dashboard").slice(1));
+    // 落地页必须按权限挑：仪表盘要 server:read，客服/财务等只有 parents/devices/billing
+    // 读权限的账号登录后会被直接扔到"没有访问权限"，看起来像账号没开通。
+    if (!location.hash) {
+      const nav = PG.router.NAV || [];
+      let landing = null;
+      nav.some(g => g.items.some(it => {
+        if (PG.canRead(it.area)) { landing = it.k; return true; }
+        return false;
+      }));
+      if (landing) {
+        location.hash = landing;
+      } else {
+        // 一个可读菜单都没有：如实提示，而不是渲染一个 403 空壳
+        PG.ui && PG.ui.toast && PG.ui.toast("err", "当前账号没有可访问的页面", "请联系超级管理员分配读权限");
+      }
+    } else {
+      PG.router.render((location.hash || "#dashboard").slice(1));
+    }
     // 未读告警角标必须走真实接口：
     // 去 mock 重构时把 PG.Mock.alerts 清空了，但这里漏改，导致角标恒为 0 —— 未读告警永远不提示。
     await refreshAlertBadge();

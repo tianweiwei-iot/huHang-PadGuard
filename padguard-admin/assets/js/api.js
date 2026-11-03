@@ -22,8 +22,14 @@
   function allowedOverride(url) {
     try {
       const u = new URL(url);
-      if (u.protocol === "https:") return true;
+      // 同源：无风险（就是当前后台自己）。
+      if (u.origin === location.origin) return true;
+      // 内网/本机 http：家庭与内网部署的常见形态。
       if (u.protocol === "http:" && PRIVATE_HTTP.test(url)) return true;
+      // file:// 打开（无同源可比）时才允许 https：否则任意 https 都放行，
+      // 一条 http://真实后台/?api=https://attacker.example 的钓鱼链接就能把
+      // 管理员口令 POST 到攻击者服务器（注释声称的"白名单防诱导"实际只挡住了 http）。
+      if (IS_FILE && u.protocol === "https:") return true;
     } catch (e) { /* 非法 URL 一律拒绝 */ }
     return false;
   }
@@ -48,6 +54,9 @@
     baseUrl: resolveBaseUrl(),
     token: "",
   };
+
+  /** 单次请求超时（毫秒）。见 http() 注释。 */
+  const REQUEST_TIMEOUT_MS = 20000;
 
   /** 把底层网络/HTTP 错误翻译成运营能看懂、能照做的中文提示 */
   function friendlyNetworkError(e) {
@@ -110,15 +119,25 @@
   }
 
   async function http(method, path, body) {
+    // 统一超时：fetch 本身没有超时，服务端线程池打满/反代挂起时请求会永远挂着，
+    // 各页面就永久停在"加载中…"，运营无法区分"卡死"和"慢"。
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, REQUEST_TIMEOUT_MS) : null;
     let res;
     try {
       res = await fetch(config.baseUrl + path, {
         method, headers: { "Content-Type": "application/json", ...(config.token ? { "Authorization": "Bearer " + config.token } : {}) },
         body: body ? JSON.stringify(body) : undefined,
+        signal: ctrl ? ctrl.signal : undefined,
       });
     } catch (e) {
-      // 网络层失败（服务端未启动 / file:// 跨域被浏览器拦截 / DNS 等）—— 标记为可降级
+      // 网络层失败（服务端未启动 / file:// 跨域被浏览器拦截 / DNS / 超时）—— 标记为可降级
+      if (e && (e.name === "AbortError" || /aborted/i.test(String(e.message)))) {
+        throw new NetworkError("请求超时（" + Math.round(REQUEST_TIMEOUT_MS / 1000) + "s 无响应）：" + path);
+      }
       throw new NetworkError(friendlyNetworkError(e));
+    } finally {
+      if (timer) clearTimeout(timer);
     }
     let j = null;
     try { j = await res.json(); } catch (e) { j = null; }
