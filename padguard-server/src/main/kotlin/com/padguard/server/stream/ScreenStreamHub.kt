@@ -182,6 +182,59 @@ class ScreenStreamHub {
     /** 最近一帧的时间戳：家长端据此判断"流是否还活着"，避免对着一张死图以为在看实时画面 */
     fun lastFrameAt(deviceId: String): Long = lastFrameAt[deviceId]?.get() ?: 0L
 
+    // ==================== 缓存回收 ====================
+    // 上面这些 Map 都是"按设备累积"的：设备推过一次流就会留下条目，解绑/换机/重装后
+    // 没有任何路径会删它们。lastFrames 存的是整帧 JPEG（几十到几百 KB），
+    // 长期运行 + 设备不断进出，等于一条只增不减的堆外账 —— 最终 OOM，
+    // 而 OOM 现场看只会是"服务端莫名重启"，根本指不到这里。
+    // 累计字节（totalUp/Down）**保留**：它是运维要看的历史量，且每条只有几十字节。
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelay = 60_000L)
+    fun evictIdleDevices() {
+        val now = System.currentTimeMillis()
+        val candidates = HashSet<String>(lastFrames.keys)
+        candidates.addAll(lastFrameAt.keys)
+        var freed = 0
+        candidates.forEach { d ->
+            // 还在推流、还有人在看 → 一定不能清（清了家长端会黑屏等下一帧）
+            if (publishers.contains(d)) return@forEach
+            val list = subscribers[d]
+            if (list != null && list.isNotEmpty()) return@forEach
+            // 刚推过帧但 publisher 已注销（TCP 断开有延迟）：留一个宽限期，
+            // 避免"孩子端短暂抖动 → 家长端重新订阅时缓存帧没了 → 先黑屏再出画"
+            if (now - (lastFrameAt[d]?.get() ?: 0L) < IDLE_EVICT_MS) return@forEach
+            dropFrameCache(d)
+            freed++
+        }
+        // 订阅者列表可能在 unsubscribe 后留下空壳（key 还在，list 为空）
+        subscribers.entries.removeIf { it.value.isEmpty() }
+        if (freed > 0) {
+            log.info("stream cache evicted: idleDevices={} remainingFrameCache={}", freed, lastFrames.size)
+        }
+    }
+
+    /**
+     * 彻底移除某设备的全部状态（帧缓存 + 统计）。
+     *
+     * 设备解绑/删除时调用：此时"该设备的累计流量"已无业务意义，
+     * 留着只会让后台的设备流量榜出现一堆已不存在的设备。
+     */
+    fun evict(deviceId: String) {
+        dropFrameCache(deviceId)
+        upTotalBytes.remove(deviceId)
+        downTotalBytes.remove(deviceId)
+        subscribers.remove(deviceId)
+        log.info("stream state evicted for device={}", deviceId)
+    }
+
+    private fun dropFrameCache(deviceId: String) {
+        lastFrames.remove(deviceId)
+        lastFrameAt.remove(deviceId)
+        upWindowBytes.remove(deviceId)
+        upWindowStart.remove(deviceId)
+        downWindowBytes.remove(deviceId)
+        downWindowStart.remove(deviceId)
+    }
+
     private companion object {
         const val MAX_QUEUE = 3
         /** 单设备并发观看上限：正常业务远小于此，超过即视为异常并发 */
@@ -192,6 +245,8 @@ class ScreenStreamHub {
          * 缓存帧是失效前的旧画面，不再回放（见 [subscribe]）。
          */
         const val STALE_FRAME_MS = 30_000L
+        /** 无推流、无订阅者且超过此空闲时长，才回收该设备的帧缓存（远宽于 30s 的"在线"判定） */
+        const val IDLE_EVICT_MS = 5 * 60_000L
         val log = LoggerFactory.getLogger(ScreenStreamHub::class.java)
     }
 }

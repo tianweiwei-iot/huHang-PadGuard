@@ -42,6 +42,15 @@ class AdminAuditService(
          * 真正的深挖走导出/检索，不在本接口职责内。
          */
         const val AUDIT_MAX_ROWS = 200
+
+        /**
+         * 单次导出的硬上限。
+         *
+         * 导出必须真的能拿到"比页面更多"的记录，否则前端那句"更早记录需通过导出查看"
+         * 就是空话；但也不能无上限：`auditPage` 走 `findAll` + 内存映射，
+         * 一次拉十万条会把堆与响应体同时撑爆，而这类请求点一下就会发生。
+         */
+        const val AUDIT_EXPORT_MAX_ROWS = 5_000
     }
 
     /**
@@ -71,9 +80,15 @@ class AdminAuditService(
      * 于是"只看审计告警"时看到的其实是"最近 200 条里恰好属于告警的那几条"。
      * 运营据此判断"这个领域最近没动静"，实际上只是被其他领域的洪流挤出去了。
      * 现在先过滤再截断，得到的是"该领域最近的 N 条"。
+     *
+     * @param limit 本次最多返回多少条。默认 [AUDIT_MAX_ROWS]（页面展示用）；
+     *              导出场景可传更大值，但硬上限 [AUDIT_EXPORT_MAX_ROWS] ——
+     *              一次导出十万条会让 `findAll` + 序列化把堆和响应体同时撑爆，
+     *              而这类请求只要有一个人点就会发生。
      */
-    fun auditPage(adminId: String, area: String?): AuditPageDto {
+    fun auditPage(adminId: String, area: String?, limit: Int? = null): AuditPageDto {
         requireRead(adminPerm, adminId, "audit")
+        val effectiveLimit = (limit ?: AUDIT_MAX_ROWS).coerceIn(1, AUDIT_EXPORT_MAX_ROWS)
         val admins = adminRepository.findAll().associateBy { it.id }
         val users = userRepository.findAll().associateBy { it.id }
         val rows = auditLogRepository.findAllByOrderByCreatedAtDesc()
@@ -95,9 +110,9 @@ class AdminAuditService(
             )
         }
         return AuditPageDto(
-            items = matched.take(AUDIT_MAX_ROWS),
-            truncated = matched.size > AUDIT_MAX_ROWS,
-            maxRows = AUDIT_MAX_ROWS,
+            items = matched.take(effectiveLimit),
+            truncated = matched.size > effectiveLimit,
+            maxRows = effectiveLimit,
             total = matched.size
         )
     }

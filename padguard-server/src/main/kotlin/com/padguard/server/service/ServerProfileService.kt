@@ -23,11 +23,26 @@ import org.springframework.stereotype.Service
 class ServerProfileService(
     private val systemSettingRepository: SystemSettingRepository,
     private val adminPerm: AdminPermissionService,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    /**
+     * 显式声明的对外地址（`PADGUARD_PUBLIC_HOST`）。为空时不做任何猜测，
+     * 由 [getPublicInfo] 回落到"本次请求的 Host 头"。
+     *
+     * 这里曾经硬编码一台具体机器的公网 IP 作默认值 —— 那等于把"某次部署的地址"
+     * 编进所有部署的产物里：任何私有化部署只要没在后台填过 publicHost，
+     * 公开端点就会把**别人的服务器地址**返回给客户端，引导页上的二维码/地址直接错。
+     * 更糟的是它把一台真实机器的 IP 暴露在源码与安装包里，无任何收益。
+     */
+    @org.springframework.beans.factory.annotation.Value("\${padguard.public-host:}")
+    private val configuredHost: String = ""
 ) {
     companion object {
         const val KEY = "server.profile"
-        const val DEFAULT_HOST = "8.148.68.183"
+
+        /**
+         * 端口默认值只在"完全没配置"时用于展示，不再带任何主机名。
+         * 保留 8090 是因为它与 compose/nginx 的默认映射一致，属于协议约定而非环境信息。
+         */
         const val DEFAULT_PORT = 8090
         const val DEFAULT_SCHEME = "http"
         const val DEFAULT_NAME = "PadGuard 管控服务端"
@@ -53,23 +68,46 @@ class ServerProfileService(
         systemSettingRepository.save(SystemSetting(KEY, objectMapper.writeValueAsString(dto)))
     }
 
-    /** 对外公开信息（脱敏，缺失时回落默认值，绝不抛错） */
-    fun getPublicInfo(): ServerPublicInfoDto {
+    /**
+     * 对外公开信息（脱敏，绝不抛错）。
+     *
+     * 主机地址的取值优先级（前一档为空才看下一档）：
+     * 1. 环境变量 `PADGUARD_PUBLIC_HOST` —— 运维明确知道对外地址时用它，最权威；
+     * 2. 后台「服务器信息」页保存的值 —— 家长可见可改；
+     * 3. 本次请求的 `Host` 头 —— 客户端**实际连到的**地址，没配置时这就是正确答案；
+     * 4. 空串 —— 让前端显示"未配置"并引导去后台填写，而不是编一个地址出来。
+     *
+     * @param requestHost 请求的 Host 头（可能含端口），可为空
+     */
+    fun getPublicInfo(requestHost: String? = null): ServerPublicInfoDto {
         val p = load()
+        val host = sequenceOf(configuredHost.trim(), p.publicHost.trim(), sanitizeHost(requestHost))
+            .firstOrNull { it.isNotBlank() }
+            .orEmpty()
         return ServerPublicInfoDto(
-            publicHost = if (p.publicHost.isBlank()) DEFAULT_HOST else p.publicHost,
+            publicHost = host,
             port = p.port,
             scheme = p.scheme,
             serverName = if (p.serverName.isBlank()) DEFAULT_NAME else p.serverName
         )
     }
 
+    /** Host 头形如 `example.com:8090` —— 端口另有字段承载，这里只取主机部分 */
+    private fun sanitizeHost(raw: String?): String {
+        val h = raw?.trim().orEmpty()
+        if (h.isEmpty()) return ""
+        // IPv6 字面量形如 [::1]:8090
+        if (h.startsWith("[")) return h.substringBefore(']') + "]"
+        return h.substringBefore(':')
+    }
+
     private fun load(): ServerProfileDto {
         val json = systemSettingRepository.findById(KEY).orElse(null)?.valueJson
         if (json.isNullOrBlank()) {
-            return ServerProfileDto(DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SCHEME, DEFAULT_NAME, "", null)
+            // 未配置时不伪造主机，留给 getPublicInfo 按优先级回落
+            return ServerProfileDto("", DEFAULT_PORT, DEFAULT_SCHEME, DEFAULT_NAME, "", null)
         }
         return runCatching { objectMapper.readValue(json, ServerProfileDto::class.java) }
-            .getOrElse { ServerProfileDto(DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SCHEME, DEFAULT_NAME, "", null) }
+            .getOrElse { ServerProfileDto("", DEFAULT_PORT, DEFAULT_SCHEME, DEFAULT_NAME, "", null) }
     }
 }

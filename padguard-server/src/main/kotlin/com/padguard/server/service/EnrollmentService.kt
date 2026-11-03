@@ -152,10 +152,17 @@ class EnrollmentService(
     /**
      * 6 位短码只有 90 万个取值，而历史会话会累积 —— 撞上唯一约束就是插入失败，
      * 表现为家长点开接入页直接报错。重试几次即可化解（存量 10 万时，5 次全撞的概率可忽略）。
+     *
+     * 随机源必须用 [SecureRandom]：`(100000..999999).random()` 走的是 Kotlin 的
+     * [kotlin.random.Random.Default]（xorshift 系，非密码学安全）。这个短码本身就是
+     * 绑定凭证 —— 拿到码就能把一台设备接入某家庭。可预测序列意味着攻击者观测到
+     * 几个自己的接入码后，能推断同一时间段内其他家长正在使用的码，进而抢绑他人设备。
+     * 90 万空间仍然可穷举，所以真正的防线是 [consume] 侧的尝试限流，这里先把
+     * "可预测"这一层补掉。
      */
     private fun generateUniqueCode(): String {
         repeat(MAX_CODE_RETRY) {
-            val code = (100000..999999).random().toString()
+            val code = (CODE_MIN + SECURE_RANDOM.nextInt(CODE_SPACE)).toString()
             if (!repository.existsByPairingCode(code)) return code
         }
         throw BizException(ChildErr.SERVER_ERROR, "接入码生成失败，请重试", Audience.PARENT)
@@ -181,6 +188,13 @@ class EnrollmentService(
     )
 
     companion object {
+        /** 短码取值区间 [100000, 999999]，共 90 万个，首位非 0 保证固定 6 位 */
+        private const val CODE_MIN = 100000
+        private const val CODE_SPACE = 900000
+
+        /** 配对码是绑定凭证，必须用密码学安全随机源（见 [generateUniqueCode]） */
+        private val SECURE_RANDOM = java.security.SecureRandom()
+
         const val STATE_PENDING = "PENDING"
         const val STATE_BOUND = "BOUND"
         const val STATE_EXPIRED = "EXPIRED"

@@ -57,8 +57,9 @@ class DeviceMgmtService(
         if (file.isEmpty) throw BizException(ParentErr.PARAM_ERROR, "APK 文件为空", Audience.PARENT)
         if (packageName.isBlank()) throw BizException(ParentErr.PARAM_ERROR, "包名不能为空", Audience.PARENT)
         val mime = "application/vnd.android.package-archive"
-        val stored = fileStorageService.storeDetailed(
-            mime, file.bytes, file.originalFilename ?: "$packageName.apk", ownerUserId = userId
+        // APK 可达 200MB：必须流式，`file.bytes` 会整块进堆（见 FileStorageService.storeStream）
+        val stored = fileStorageService.storeStream(
+            mime, file.inputStream, file.originalFilename ?: "$packageName.apk", ownerUserId = userId
         )
         val now = System.currentTimeMillis()
         val entity = AppCatalog(

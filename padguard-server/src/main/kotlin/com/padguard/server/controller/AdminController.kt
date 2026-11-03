@@ -296,8 +296,11 @@ class AdminController(
     @GetMapping("/audit")
     fun audit(
         @RequestAttribute("adminId") adminId: String,
-        @RequestParam(required = false) area: String?
-    ): ApiResponse<AuditPageDto> = ApiResponse.ok(adminService.auditPage(adminId, area))
+        @RequestParam(required = false) area: String?,
+        // 导出场景可显式要更多（硬上限见 AdminAuditService.AUDIT_EXPORT_MAX_ROWS）；
+        // 不传时仍是页面展示用的 200 条，行为与改造前完全一致。
+        @RequestParam(required = false) limit: Int?
+    ): ApiResponse<AuditPageDto> = ApiResponse.ok(adminService.auditPage(adminId, area, limit))
 
     @GetMapping("/alerts")
     fun alerts(@RequestAttribute("adminId") adminId: String): ApiResponse<List<AlertItem>> =

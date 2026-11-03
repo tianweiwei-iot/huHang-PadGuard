@@ -288,7 +288,8 @@ class AdminServiceTest {
             ws, mqtt, users, policyRepo, auditService,
             30L, "", "", billing,
             Mockito.mock(DeviceDataPurgeService::class.java),
-            DevicePresenceRegistry()
+            DevicePresenceRegistry(),
+            com.padguard.server.stream.ScreenStreamHub()
         )
         // UsageSessionService 用真实实现驱动 B1/B2 的"今日用量"派生（走假 usageSessionRepo）。
         // usageDelayService 在 list 路径不触发，以 mock 占位。

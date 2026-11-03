@@ -86,6 +86,13 @@ services:
       # 所有家长共用同一个 IP 桶（登录 5 次/分钟），几个人同时登录就会互相 429。
       # 代码侧只采信 X-Real-IP（nginx 用 $remote_addr 覆盖，客户端伪造无效），不采信 XFF。
       PADGUARD_RATELIMIT_TRUSTFORWARDEDFOR: "true"
+      # 服务端对外地址：可选。不填时公开端点会回落到"本次请求的 Host 头"（客户端实际连到的地址），
+      # 这比任何硬编码默认值都准。只有当反代改写了 Host、或客户端需要拿到与访问地址不同的公开域名时
+      # 才需要显式指定（例：内网经反代访问，但对孩子端要下发公网域名）。
+      # PADGUARD_PUBLIC_HOST: "guard.example.com"
+      # 浏览器侧 WebSocket 来源白名单：默认空 = 只放行不带 Origin 的原生客户端（家长端 APK 即此类），
+      # 任何网页发起的握手一律 403（CSWSH 防护）。将来做 Web 家长端时把域名填进来。
+      # PADGUARD_WS_ALLOWED_ORIGINS: "https://guard.example.com"
       # 初始/重置口令文件移出 uploads（第八轮评估第三批+纵深防御）：
       # uploads 是"用户媒体目录"，运维一旦加 nginx alias/改挂载就会把口令明文一并暴露；
       # 独立 secrets 卷与业务文件物理隔离，且同样持久化（容器重建不丢）。

@@ -52,7 +52,12 @@ class DeviceService(
     private val billingService: BillingService,
     private val deviceDataPurgeService: DeviceDataPurgeService,
     /** 秒级在线态的**内存**快照（见 [DevicePresenceRegistry]）：本类只负责"信号进来就登记" */
-    private val presence: DevicePresenceRegistry
+    private val presence: DevicePresenceRegistry,
+    /**
+     * 实时看屏的帧缓存。解绑/易主时要把该设备的缓存帧与带宽统计一并清掉 ——
+     * 否则 ScreenStreamHub 里的条目会跟着 deviceId 永久留在内存里（帧缓存是整张 JPEG）。
+     */
+    private val streamHub: com.padguard.server.stream.ScreenStreamHub
 ) {
 
     private val log = LoggerFactory.getLogger(DeviceService::class.java)
@@ -477,6 +482,10 @@ class DeviceService(
      * 重试耗尽仍失败则记 ERROR（运维需关注），但**不**阻断解绑/易主主流程。
      */
     private fun purgeDeviceDataWithRetry(deviceId: String, reason: String, maxRetries: Int = 3) {
+        // 内存态不属于"私有数据清理"的重试范围：它必然成功，且必须在推流连接可能仍存活时
+        // 就先把旧画面摘掉（易主场景下，新家长不该看到上一任孩子遗留的最后一帧）。
+        runCatching { streamHub.evict(deviceId) }
+            .onFailure { log.warn("evict stream cache for {} failed: {}", deviceId, it.message) }
         var lastErr: Throwable? = null
         repeat(maxRetries) { attempt ->
             try {

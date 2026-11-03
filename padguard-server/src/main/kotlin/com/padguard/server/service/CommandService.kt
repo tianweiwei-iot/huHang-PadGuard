@@ -221,15 +221,12 @@ class CommandService(
     }
 
     /**
-     * 规范化 payload：与服务端约定一致——按键升序、值字符串化、固定格式 `{"k":"v",...}`。
-     * 终端 [com.padguard.core.data.model.Command.canonicalJson] 用完全相同的排序与格式，
-     * 必须逐字符一致，否则 HMAC 校验失败。
+     * 规范化 payload。协议定义在 [com.padguard.server.security.CommandSigning]，
+     * 终端 `Command.canonicalJson` 与之逐字符一致（含转义规则）——
+     * 任一侧改动都必须同步另一侧，否则所有指令签名对不上、终端全判伪造。
      */
-    private fun canonicalPayload(payload: Map<String, String>?): String {
-        if (payload.isNullOrEmpty()) return "{}"
-        return payload.entries.sortedBy { it.key }
-            .joinToString(",", "{", "}") { "\"${it.key}\":\"${it.value}\"" }
-    }
+    private fun canonicalPayload(payload: Map<String, String>?): String =
+        com.padguard.server.security.CommandSigning.canonical(payload)
 
     /**
      * HMAC-SHA256，Base64 编码（与终端 [com.padguard.core.common.Crypto.hmacSha256] 一致）。

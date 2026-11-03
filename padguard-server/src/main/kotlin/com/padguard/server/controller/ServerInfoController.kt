@@ -18,6 +18,8 @@ class ServerInfoController(
 ) {
 
     @GetMapping("/server/info")
-    fun info(): ApiResponse<ServerPublicInfoDto> =
-        ApiResponse.ok(serverProfileService.getPublicInfo())
+    fun info(request: jakarta.servlet.http.HttpServletRequest): ApiResponse<ServerPublicInfoDto> =
+        // 把请求的 Host 传下去：运维没配 publicHost 时，这才是"客户端实际连到的地址"，
+        // 比任何硬编码默认值都准（见 ServerProfileService.getPublicInfo）。
+        ApiResponse.ok(serverProfileService.getPublicInfo(request.getHeader("Host")))
 }

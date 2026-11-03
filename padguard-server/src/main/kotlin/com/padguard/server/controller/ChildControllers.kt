@@ -282,12 +282,12 @@ class ChildReportController(
         @RequestAttribute("deviceId") deviceId: String,
         @RequestParam("file") file: org.springframework.web.multipart.MultipartFile
     ): DeviceApiResponse<*> {
-        val url = fileStorageService.store(
+        val url = fileStorageService.storeStream(
             file.contentType ?: "image/jpeg",
-            file.bytes,
+            file.inputStream,
             file.originalFilename ?: "avatar.jpg",
             deviceId = deviceId
-        )
+        ).url
         deviceService.updateChildProfile(deviceId, DeviceProfileRequest(childAvatar = url))
         return DeviceApiResponse.ok(mapOf("url" to url))
     }
@@ -311,10 +311,10 @@ class ChildReportController(
         @RequestParam(required = false) triggerType: String?,
         @RequestParam("file") file: MultipartFile
     ): DeviceApiResponse<*> {
-        val url = fileStorageService.store(
-            file.contentType ?: "image/jpeg", file.bytes, file.originalFilename ?: "shot.jpg",
+        val url = fileStorageService.storeStream(
+            file.contentType ?: "image/jpeg", file.inputStream, file.originalFilename ?: "shot.jpg",
             deviceId = deviceId
-        )
+        ).url
         monitorService.storeScreenshot(shotId, deviceId, url, null, null, capturedAt)
         return DeviceApiResponse.ok(UploadAckDto(accepted = true, url = url))
     }
@@ -328,7 +328,10 @@ class ChildReportController(
         @RequestParam("file") file: MultipartFile
     ): DeviceApiResponse<*> {
         val mime = file.contentType ?: "application/octet-stream"
-        val url = fileStorageService.store(mime, file.bytes, file.originalFilename ?: "media.bin", deviceId = deviceId)
+        // 录屏文件不比 APK 小，统一走流式落盘，避免"孩子端传一段课堂录像就把服务端打挂"
+        val url = fileStorageService.storeStream(
+            mime, file.inputStream, file.originalFilename ?: "media.bin", deviceId = deviceId
+        ).url
         monitorService.finishMediaTask(taskId, deviceId, url, mime, file.size, durationSeconds ?: 0)
         return DeviceApiResponse.ok(UploadAckDto(accepted = true, url = url))
     }

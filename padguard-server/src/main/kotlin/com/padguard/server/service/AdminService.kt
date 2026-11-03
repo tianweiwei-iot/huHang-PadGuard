@@ -128,7 +128,8 @@ class AdminService(
     fun audit(adminId: String, area: String?) = auditService.audit(adminId, area)
 
     /** 带截断元信息的审计列表，对外接口走这个，避免调用方把"最近 200 条"当成"全部历史"。 */
-    fun auditPage(adminId: String, area: String?) = auditService.auditPage(adminId, area)
+    fun auditPage(adminId: String, area: String?, limit: Int? = null) =
+        auditService.auditPage(adminId, area, limit)
 
     fun alerts(adminId: String) = auditService.alerts(adminId)
 

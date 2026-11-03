@@ -47,8 +47,11 @@ class AdminServerMonitorService(
                 ServerMetrics.Instance(
                     name = "padguard-server",
                     // 主机地址取自后台可维护的「服务器基本信息」，早期写死 192.168.1.10:8090。
+                    // 未配置时显示"未配置"而不是拼出 ":8090" 这种半截地址 —— 后者会被误读成解析失败。
                     host = runCatching { serverProfileService.getServerProfile() }
-                        .getOrNull()?.let { "${it.publicHost}:${it.port}" } ?: "—",
+                        .getOrNull()
+                        ?.takeIf { it.publicHost.isNotBlank() }
+                        ?.let { "${it.publicHost}:${it.port}" } ?: "未配置",
                     status = if (up) "UP" else "DOWN",
                     cpu = "—",
                     mem = "${usedMb.toInt()} / ${maxMb.toInt()} MB"

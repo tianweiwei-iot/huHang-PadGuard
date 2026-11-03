@@ -7,6 +7,12 @@ import org.springframework.stereotype.Service
 import java.io.File
 import java.util.UUID
 
+/**
+ * 流式拷贝缓冲：64KB。够大以摊薄系统调用，又小到与文件大小无关 ——
+ * 200MB 安装包上传时堆上稳定只占这一个缓冲区（见 [FileStorageService.storeStream]）。
+ */
+private const val STREAM_BUFFER_BYTES = 64 * 1024
+
 /** 本地文件存储（开发/单机可用）。生产可替换为 MinIO/OSS 对象存储，仅改本类实现。 */
 @Service
 class FileStorageService(
@@ -62,6 +68,48 @@ class FileStorageService(
 
     /** 落盘结果：id 用于后续按文件操作，url 用于直接访问，name 用于界面回显。 */
     data class StoredFile(val id: String, val url: String, val name: String)
+
+    /**
+     * 流式落盘（大文件唯一正确的写法）。
+     *
+     * `store(contentType, file.bytes, ...)` 会把整个文件读进堆：上限 200MB 时，
+     * 两三个家长同时上传安装包/课堂录屏就能把堆打满，表现为整站 502 且日志里只有 OOM，
+     * 与"服务端挂了"无法区分。这里用固定缓冲区边读边写，堆占用与文件大小无关。
+     *
+     * 返回值中的 size 以**实际写入字节数**为准，不采信 `MultipartFile.size`：
+     * 客户端可声明任意长度，库里记错会导致下载侧 Range/Content-Length 与真实文件不符。
+     *
+     * 写入中途失败（客户端断开、磁盘满）时会删除半截文件 —— 否则 `uploads/` 里会留下
+     * 一堆没有 DB 记录、也没人能访问的孤儿文件，日积月累把磁盘吃光。
+     */
+    fun storeStream(
+        contentType: String,
+        input: java.io.InputStream,
+        originalName: String? = null,
+        ownerUserId: String? = null,
+        deviceId: String? = null
+    ): StoredFile {
+        val id = UUID.randomUUID().toString()
+        val safeName = sanitize(originalName)
+        val fileName = "${id}_$safeName"
+        val target = File(dir, fileName)
+        val written = try {
+            input.use { src ->
+                target.outputStream().use { out -> src.copyTo(out, STREAM_BUFFER_BYTES) }
+            }
+        } catch (e: Exception) {
+            target.delete()
+            throw e
+        }
+        uploadedFileRepository.save(
+            UploadedFile(
+                id = id, contentType = contentType, storedPath = fileName,
+                size = written, createdAt = System.currentTimeMillis(),
+                ownerUserId = ownerUserId, deviceId = deviceId
+            )
+        )
+        return StoredFile(id, url(id), safeName)
+    }
 
     /**
      * 生成可访问的文件 URL。

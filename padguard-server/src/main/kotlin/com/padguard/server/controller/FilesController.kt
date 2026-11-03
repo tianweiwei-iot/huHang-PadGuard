@@ -252,7 +252,9 @@ class ParentMediaUploadController(private val fileStorageService: FileStorageSer
         if (mime.substringBefore(';').trim().lowercase() in BLOCKED_MIME_TYPES) {
             return ApiResponse.fail(ParentErr.PARAM_ERROR, "不支持上传该类型的文件")
         }
-        val stored = fileStorageService.storeDetailed(mime, file.bytes, file.originalFilename, ownerUserId = userId)
+        // 流式落盘：上限 200MB 的文件若走 file.bytes 会整块进堆，两三个并发上传即可 OOM
+        // （见 FileStorageService.storeStream 的说明）。这里只占一个 64KB 缓冲区。
+        val stored = fileStorageService.storeStream(mime, file.inputStream, file.originalFilename, ownerUserId = userId)
         // 上传是唯一能往磁盘写任意内容的入口，出问题时（磁盘打满、传错文件）需要能追到是谁传的
         log.info("parent upload: userId={} fileId={} name={} size={} type={}", userId, stored.id, stored.name, file.size, mime)
         return ApiResponse.ok(
