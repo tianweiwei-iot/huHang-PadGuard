@@ -93,11 +93,28 @@ interface CommandRecordDao {
     suspend fun recentIds(): List<String>
 
     @Query("DELETE FROM command_record WHERE receivedAt < :before")
-    suspend fun deleteBefore(before: Long)
+    suspend fun deleteBefore(before: Long): Int
 
     /** 按状态删除（启动清理残留 PENDING 中间态，使其可被服务端重发重新认领） */
     @Query("DELETE FROM command_record WHERE status = :status")
-    suspend fun deleteByStatus(status: String)
+    suspend fun deleteByStatus(status: String): Int
+
+    /**
+     * 幂等窗口裁剪：只保留最近 [keep] 条，其余删除。
+     *
+     * 与 [deleteBefore] 并存而不是二选一：时间窗口保证「7 天后旧 msgId 自然作废」，
+     * 条数窗口保证「指令风暴（服务端重试放大 / 批量下发）不会把本地库撑爆」。
+     * 只按时间裁剪时，一次异常重发就能在 7 天内写进几十万行；
+     * 只按条数裁剪时，长期离线又复连的设备会把窗口压到只剩几小时。两者都在才稳。
+     */
+    @Query(
+        """
+        DELETE FROM command_record WHERE msgId NOT IN (
+            SELECT msgId FROM command_record ORDER BY receivedAt DESC LIMIT :keep
+        )
+        """
+    )
+    suspend fun deleteBeyondWindow(keep: Int): Int
 }
 
 @Dao

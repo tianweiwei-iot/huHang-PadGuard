@@ -4,7 +4,12 @@ import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.db.AppUsageDao
 import com.padguard.core.data.db.DailyUsageDao
 import com.padguard.core.data.model.AppUsageStat
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -21,6 +26,7 @@ import javax.inject.Singleton
  * 日切（dayKey）以设备本地日期为准，服务端可下发时区覆盖。
  */
 @Singleton
+@OptIn(ExperimentalCoroutinesApi::class)
 open class UsageRepository @Inject constructor(
     private val appUsageDao: AppUsageDao,
     private val dailyUsageDao: DailyUsageDao,
@@ -108,11 +114,32 @@ open class UsageRepository @Inject constructor(
      * [TimeProvider.now]（服务端时区），这里读取也必须用同一时刻，否则设备本地墙钟
      * 与服务端校准时间存在偏移时，"写"进 A 日、"读"出 B 日，首页"已用/剩余"与
      * 孩子端锁机判定、家长端服务端聚合（Asia/Shanghai）全部错位，表现为"学生端与家长端不同步"。
+     *
+     * ## 为什么不能只在构造 Flow 时算一次 dayKey（历史缺陷）
+     * 早期实现是 `dailyUsageDao.observe(dayKey(timeProvider.now()))` —— dayKey 在**订阅建立那一刻**
+     * 求值一次并固定下来。于是跨过零点后，悬浮卡与首页仍然订阅着**昨天**那一行：
+     * 孩子熬到 0 点看到"今日已用 3 小时"，而真实值已归零；次日早上家长端显示 0、孩子端显示 3 小时，
+     * 双方各执一词。锁机判定（按当时 dayKey 现算）却是对的，于是出现
+     * "卡上还剩 2 小时、设备却被锁"的矛盾。
+     *
+     * 现在改成：每分钟吐一次当前 dayKey，靠 [distinctUntilChanged] 只在**跨日那一刻**
+     * 切换内层订阅。轮询粒度取分钟而不是"睡到下一个日界"，是因为校准时间可能被服务端
+     * 一次性拉前/拉后若干小时，固定睡到日界会睡过头或提前醒；分钟级 tick 能自愈。
      */
     fun observeTodayUsageMinutes(): Flow<Int> =
-        dailyUsageDao.observe(dayKey(timeProvider.now())).map { entity ->
-            (entity?.totalMs ?: 0L).let { ms -> (ms / 60_000L).toInt() }
+        dayKeyTicks()
+            .distinctUntilChanged()
+            .flatMapLatest { key -> dailyUsageDao.observe(key) }
+            .map { entity -> ((entity?.totalMs ?: 0L) / 60_000L).toInt() }
+            .distinctUntilChanged()
+
+    /** 日切信号源：每次醒来重新求值 dayKey（用校准时间，口径与写入方一致）。 */
+    private fun dayKeyTicks(): Flow<String> = flow {
+        while (true) {
+            emit(dayKey())
+            delay(DAY_KEY_POLL_MS)
         }
+    }
 
     /**
      * 清理 N 天前的统计记录。
@@ -122,5 +149,17 @@ open class UsageRepository @Inject constructor(
         val cutoff = dayKey(System.currentTimeMillis() - days * 24L * 60 * 60 * 1000)
         appUsageDao.deleteBefore(cutoff)
         dailyUsageDao.deleteBefore(cutoff)
+    }
+
+    private companion object {
+        /**
+         * 日切轮询间隔：1 分钟。
+         *
+         * 取 1 分钟而不是"精确睡到下一个日界"，是因为 [TimeProvider.now] 是**校准时间**，
+         * 服务端校时可能把它一次性拉前或拉后几小时。固定睡到旧日界会睡过头（跨日很久才切）
+         * 或提前醒（醒在旧日里空转）。分钟级 tick 的最坏误差是 1 分钟，且能随校时自愈。
+         * 订阅方常驻（首页 / 悬浮卡），每分钟一次空转的代价可以忽略。
+         */
+        const val DAY_KEY_POLL_MS = 60_000L
     }
 }

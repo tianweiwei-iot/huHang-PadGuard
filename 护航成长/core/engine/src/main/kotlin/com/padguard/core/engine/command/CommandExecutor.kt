@@ -6,6 +6,7 @@ import com.padguard.core.data.model.AckStatus
 import com.padguard.core.data.model.Command
 import com.padguard.core.data.model.CommandAck
 import com.padguard.core.data.model.CommandType
+import com.padguard.core.data.repository.CommandRepository
 import com.padguard.core.data.repository.PolicyRepository
 import com.padguard.core.data.repository.UnlockRequestRepository
 import com.padguard.core.engine.admin.Capability
@@ -55,7 +56,8 @@ class CommandExecutor @Inject constructor(
     private val appLimitEnforcer: AppLimitEnforcer,
     private val eyeCareEnforcer: EyeCareEnforcer,
     private val timeProvider: TimeProvider,
-    private val guardMasterSwitch: GuardMasterSwitch
+    private val guardMasterSwitch: GuardMasterSwitch,
+    private val commandRepository: CommandRepository
 ) {
 
     private val _effects = MutableSharedFlow<EngineEffect>(extraBufferCapacity = 32)
@@ -88,11 +90,14 @@ class CommandExecutor @Inject constructor(
 
     suspend fun execute(command: Command, deviceId: String): CommandAck {
         if (!markExecutedIfFirst(command.msgId)) {
+            // 本进程内的重复下发：**不写账本**。
+            // 账本里存的是上一次执行的真实终态，用一条 SUCCESS(DUPLICATE) 覆盖它，
+            // 会把"上次其实失败了"洗成"已成功"，服务端与本地审计双双失真。
             Logger.w(TAG) { "duplicate command ${command.type} (msgId=${command.msgId}) ignored" }
             return ack(command, deviceId, AckStatus.SUCCESS, "DUPLICATE", "指令已执行过，忽略重复下发")
         }
         Logger.i(TAG) { "executing ${command.type} (msgId=${command.msgId})" }
-        return try {
+        val result = try {
             when (command.type) {
                 CommandType.LOCK_SCREEN -> lockScreen(command, deviceId)
                 CommandType.UNLOCK -> unlock(command, deviceId)
@@ -130,6 +135,34 @@ class CommandExecutor @Inject constructor(
             Logger.e(TAG, e) { "command ${command.type} crashed" }
             ack(command, deviceId, AckStatus.FAILED, "EXEC_CRASH", e.message)
         }
+        recordOutcome(command, result)
+        return result
+    }
+
+    /**
+     * 把执行结果写入本地幂等账本（`command_record`）。
+     *
+     * ## 为什么这一步不能省
+     * 认领（[com.padguard.core.transport.CommandGate] 的 `tryClaim`）写的是 PENDING 中间态，
+     * 而启动清理会把残留 PENDING 全删以便重放。若这里不写终态，**所有**记录都会停在 PENDING，
+     * 于是每次进程重启/设备重启后整个 7 天幂等窗口被清零 ——
+     * 服务端重发的旧指令（比如早就该失效的 LOCK_SCREEN）会被重新执行。
+     *
+     * 记账失败（数据库异常）只记日志、**不改写回执**：回执的可靠性优先于本地审计完整性，
+     * 最坏结果是这条指令在重启后可能被重放一次，而不是家长那边看到执行失败。
+     */
+    private suspend fun recordOutcome(command: Command, result: CommandAck) {
+        runCatching {
+            commandRepository.recordResult(
+                msgId = command.msgId,
+                type = command.type,
+                status = result.status,
+                executedAt = result.executedAt,
+                errorMessage = listOfNotNull(result.errorCode, result.errorMessage)
+                    .takeIf { it.isNotEmpty() }
+                    ?.joinToString(": ")
+            )
+        }.onFailure { Logger.w(TAG) { "record command outcome failed (msgId=${command.msgId}): ${it.message}" } }
     }
 
     // ==================== 锁屏相关 ====================

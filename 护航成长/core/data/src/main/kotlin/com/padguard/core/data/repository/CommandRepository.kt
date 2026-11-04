@@ -13,13 +13,18 @@ import javax.inject.Singleton
 /**
  * 指令仓库：负责指令**幂等去重**与执行留痕。
  *
- * 防重放三道关（对应接口契约 §4.1）：
- * 1. [isDuplicate] —— msgId 命中历史窗口（最近 500 条）即判重
- * 2. 时效校验由调用方基于 Command.expiresAt 执行
- * 3. 签名校验由调用方基于 Command.signature 执行
+ * 防重放三道关（对应接口契约 §4.1），关卡实现分布如下：
+ * 1. 时效（expiresAt）—— [com.padguard.core.transport.CommandGate.evaluate] 关卡 1
+ * 2. 签名（HMAC）—— 同上关卡 2
+ * 3. msgId 幂等 —— 同上关卡 3，落到本类的 [tryClaim]
  *
- * 幂等窗口持久化在本地数据库，因此设备重启后依然有效，
+ * 幂等窗口持久化在本地数据库（`command_record`），因此设备重启后依然有效，
  * 避免了"重启后重放旧指令"的绕过路径。
+ *
+ * ## 生命周期（缺一不可）
+ * `tryClaim`（写 PENDING）→ 执行 → `recordResult`（写终态）→ 定期 `purgeExpired`。
+ * 中间任何一环断开都会让幂等窗口失真：**只认领不写终态**正是本项目曾经的真实缺陷，
+ * 表现为"每次重启后整个窗口被清空、旧指令可被重放"。
  */
 @Singleton
 class CommandRepository @Inject constructor(
@@ -31,13 +36,19 @@ class CommandRepository @Inject constructor(
         const val IDEMPOTENT_WINDOW = 500
         /** 记录保留时长：7 天 */
         private const val RETENTION_MS = 7 * 24 * 60 * 60 * 1000L
+
+        /** 未认领即到终态时的类型占位。正常路径永远写真实 [CommandType]。 */
+        private const val TYPE_UNKNOWN = "UNKNOWN"
     }
 
     private val mutex = Mutex()
 
-    suspend fun isDuplicate(msgId: String): Boolean = mutex.withLock {
-        dao.get(msgId) != null
-    }
+    private val TAG = "CommandRepository"
+
+    // 注：曾有一个 `isDuplicate(msgId)` 公开方法，已删除。
+    // 它的语义是"先查重、再另行调用 tryClaim 占位"，属于典型的 check-then-act ——
+    // MQTT 与轮询双通道同时收到同一指令时，两边都能查到不存在、随后双双执行。
+    // 去重必须由 tryClaim 在同一把锁里"查重 + 占位"一次完成，不提供单独的查重入口。
 
     /**
      * 登记指令（在处理前调用，抢占幂等标记）。
@@ -71,41 +82,86 @@ class CommandRepository @Inject constructor(
      * 这些记录意味着"认领了但没执行完就退出了"（进程崩溃 / 设备重启）。
      * 不清的话服务端在 7 天幂等窗口内重发会被 tryClaim 判重丢弃，指令永久丢失。
      * 清除后服务端重发会重新认领并执行，保证最终一致。
+     *
+     * **取舍**：这里刻意"宁可重放，不可静默丢失"——重放最坏是幂等指令再做一次，
+     * 而丢失意味着家长点了锁屏/解锁却什么也没发生且无人知晓。
+     * 唯一的代价是 TEMP_UNLOCK 重放会从当下起重新计时（见 [CommandExecutor.tempUnlock]），
+     * 概率极低（须恰好在执行中途崩溃）且方向是"多放行几分钟"，可接受。
+     *
+     * @return 被清理的条数。常态应为 0；持续非 0 说明有指令在执行中途稳定崩溃，需要看日志。
      */
-    suspend fun resetInFlightOnStartup() {
+    suspend fun resetInFlightOnStartup(): Int =
         runCatching { dao.deleteByStatus(AckStatus.PENDING.name) }
             .onFailure { Logger.w(TAG) { "resetInFlightOnStartup failed: ${it.message}" } }
-    }
-    private val TAG = "CommandRepository"
+            .getOrDefault(0)
+            .also { if (it > 0) Logger.w(TAG) { "cleared $it in-flight command(s) left by a crash, will replay on resend" } }
 
+    /**
+     * 写入指令终态。
+     *
+     * ## 为什么必须调用（历史缺陷）
+     * 早期版本只有 [tryClaim] 被调用、本方法零调用点，于是：
+     * 1. 每条指令永远停在 [AckStatus.PENDING]，`resetInFlightOnStartup` 每次启动把**全部**记录删光，
+     *    7 天幂等窗口实际不存在（重启即清零）；
+     * 2. 服务端因回执丢失而重发的旧指令会被重新认领并执行 ——
+     *    例如孩子已被家长解锁、设备重启后又收到一条早该失效的 LOCK_SCREEN，平板被莫名锁上；
+     * 3. 本地审计里没有任何一条"执行成功/失败"的痕迹。
+     *
+     * @param type 指令类型。正常执行路径传 `command.type`；
+     *   [CommandGate] 因时效/签名拒绝时指令**未认领**（tryClaim 未执行），此处传 null，
+     *   记录仍会补插一条终态，保证"被拒绝"这一事实可追溯，而不是查无此令。
+     */
     suspend fun recordResult(
         msgId: String,
+        type: CommandType?,
         status: AckStatus,
         executedAt: Long = System.currentTimeMillis(),
         errorMessage: String? = null,
         retryCount: Int = 0
     ) {
-        val existing = dao.get(msgId) ?: run {
-            Logger.w("CommandRepository") { "result for unknown command: $msgId" }
-            return
+        // 与 tryClaim 共用同一把锁：避免"recordResult 读到 null → 补插终态"与
+        // 另一通道的 "tryClaim 写入 PENDING" 交错，把已完成的终态覆盖回 PENDING。
+        mutex.withLock {
+            runCatching {
+                val existing = dao.get(msgId)
+                if (existing == null) {
+                    // 未认领就到达终态（拒绝路径）：补插而不是丢弃。
+                    // 丢了会让"签名校验失败"这类高危事件在本地毫无痕迹，事后无法复盘。
+                    dao.upsert(
+                        CommandRecordEntity(
+                            msgId = msgId,
+                            type = type?.name ?: TYPE_UNKNOWN,
+                            receivedAt = executedAt,
+                            executedAt = executedAt,
+                            status = status.name,
+                            retryCount = retryCount,
+                            errorMessage = errorMessage
+                        )
+                    )
+                } else {
+                    dao.upsert(
+                        existing.copy(
+                            executedAt = executedAt,
+                            status = status.name,
+                            errorMessage = errorMessage,
+                            retryCount = retryCount
+                        )
+                    )
+                }
+            }.onFailure { Logger.w(TAG) { "recordResult($msgId) failed: ${it.message}" } }
         }
-        dao.upsert(
-            existing.copy(
-                executedAt = executedAt,
-                status = status.name,
-                errorMessage = errorMessage,
-                retryCount = retryCount
-            )
-        )
     }
 
-    suspend fun pendingRetryCandidates(): List<CommandRecordEntity> =
-        dao.recentIds().let { ids ->
-            ids.mapNotNull { dao.get(it) }
-                .filter { it.status == AckStatus.FAILED.name && it.retryCount < 3 }
-        }
-
-    suspend fun purgeExpired() {
-        dao.deleteBefore(System.currentTimeMillis() - RETENTION_MS)
+    /**
+     * 周期清理：时间窗口（7 天）+ 条数窗口（[IDEMPOTENT_WINDOW]）双裁剪。
+     *
+     * @return 本次删除的总行数，供调用方判断是否需要记日志。
+     */
+    suspend fun purgeExpired(): Int {
+        val byAge = runCatching { dao.deleteBefore(System.currentTimeMillis() - RETENTION_MS) }
+            .getOrDefault(0)
+        val byCount = runCatching { dao.deleteBeyondWindow(IDEMPOTENT_WINDOW) }
+            .getOrDefault(0)
+        return byAge + byCount
     }
 }

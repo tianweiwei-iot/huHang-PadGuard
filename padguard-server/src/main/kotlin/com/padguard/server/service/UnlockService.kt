@@ -11,6 +11,8 @@ import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UnlockTicketRepository
 import com.padguard.server.service.AuditAction
 import com.padguard.server.service.AuditService
+import org.slf4j.LoggerFactory
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
@@ -22,23 +24,44 @@ class UnlockService(
     private val commandService: CommandService,
     private val auditService: AuditService
 ) {
-    /** 孩子端 UNLOCK_REQUEST 日志 -> 工单（工单 ID = requestId，便于回执对齐） */
+    private val log = LoggerFactory.getLogger(UnlockService::class.java)
+
+    /**
+     * 孩子端 UNLOCK_REQUEST 日志 -> 工单（工单 ID = requestId，便于回执对齐）。
+     *
+     * ## 为什么 save 要包 try/catch（而不是只靠前面的 existsById）
+     * `existsById` + `save` 是 check-then-act：同一 requestId 的两条日志（孩子端本地重试
+     * 会生成新的 logId，但 requestId 不变）若被并发处理，两边都会查到不存在，
+     * 随后第二个 INSERT 撞主键抛 [DataIntegrityViolationException]。
+     * 该异常一路冒泡到 `/v1/logs` 的控制器，孩子端收到 500 后会把**整批**日志重发，
+     * 其中已经写进库的部分再度撞 logId 唯一约束，形成"越重试越失败"的雪崩。
+     *
+     * 主键冲突在这里的语义就是"另一条并发请求已经建好了同一张工单"，
+     * 属于**幂等成功**，不是错误。因此捕获后回查一次确认，确认存在就安静返回。
+     */
     fun createFromRequest(deviceId: String, payload: Map<String, Any?>?) {
         val requestId = (payload?.get("requestId") as? String)?.takeIf { it.isNotBlank() }
             ?: "ur_" + UUID.randomUUID().toString().replace("-", "").take(20)
+        // 快路径：绝大多数重复上报在这里就返回，不去触发一次注定失败的主键冲突
         if (unlockTicketRepository.existsById(requestId)) return
         val dev = deviceRepository.findById(deviceId).orElse(null) ?: return
-        unlockTicketRepository.save(
-            UnlockTicket(
-                id = requestId, deviceId = deviceId, userId = dev.userId,
-                packageName = payload?.get("packageName") as? String,
-                appLabel = payload?.get("appLabel") as? String,
-                durationMinutes = (payload?.get("durationMinutes") as? String)?.toIntOrNull()
-                    ?: (payload?.get("durationMinutes") as? Number)?.toInt(),
-                reason = payload?.get("reason") as? String,
-                status = "PENDING", createdAt = System.currentTimeMillis()
-            )
+        val ticket = UnlockTicket(
+            id = requestId, deviceId = deviceId, userId = dev.userId,
+            packageName = payload?.get("packageName") as? String,
+            appLabel = payload?.get("appLabel") as? String,
+            durationMinutes = (payload?.get("durationMinutes") as? String)?.toIntOrNull()
+                ?: (payload?.get("durationMinutes") as? Number)?.toInt(),
+            reason = payload?.get("reason") as? String,
+            status = "PENDING", createdAt = System.currentTimeMillis()
         )
+        try {
+            unlockTicketRepository.save(ticket)
+        } catch (e: DataIntegrityViolationException) {
+            // 只有"确实是同一 requestId 已被插入"才视为幂等成功；
+            // 其他完整性错误（如归属家长已不存在导致外键失败）仍然如实抛出。
+            if (!unlockTicketRepository.existsById(requestId)) throw e
+            log.info("concurrent unlock ticket ignored (already created): {}", requestId)
+        }
     }
 
     /**

@@ -69,6 +69,7 @@ import com.padguard.child.ui.overlay.WatermarkOverlay
 import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
 import com.padguard.core.engine.guard.GuardMasterSwitch
+import com.padguard.core.data.model.AckStatus
 import com.padguard.core.data.model.Heartbeat
 import com.padguard.core.data.model.LogType
 import com.padguard.core.data.db.ParentMessageEntity
@@ -1519,6 +1520,12 @@ class GuardService : Service() {
         // 随上报周期跑，只删已上传记录，未上报数据不受影响。
         runCatching { policyEngine.purgeExpiredLogs() }
             .onFailure { Logger.w(TAG) { "purge expired logs failed: $it" } }
+
+        // 指令幂等账本同样只增不减：7 天时间窗 + 500 条条数窗双裁剪。
+        // 不裁剪时，服务端在故障重投窗口里的一次风暴就能写进几万行，
+        // 之后每次 tryClaim 都要在这张表上查重，指令通道被自己的审计表拖慢。
+        runCatching { commandRepository.purgeExpired() }
+            .onFailure { Logger.w(TAG) { "purge command records failed: $it" } }
     }
 
     /**
@@ -1805,6 +1812,24 @@ class GuardService : Service() {
                                     "rejectReason" to event.reason
                                 )
                             )
+                            // 幂等账本也要落一条终态，但**只对真正的拒绝**（时效/签名未过）补写：
+                            // 这条路径上 tryClaim 从未执行，账本里查无此令，签名类攻击事件因此
+                            // 没有任何本地痕迹可复盘。补一条 REJECTED 就有了。
+                            //
+                            // DUPLICATED 必须跳过：账本里那条记录存的是**首次执行的真实终态**
+                            // （可能是 FAILED），用"已判重"覆盖会把失败洗成成功，还会冲掉真实执行时间。
+                            if (event.ack.status != AckStatus.DUPLICATED) {
+                                runCatching {
+                                    // 事件未携带 command，类型未知，传 null 由仓库写占位类型
+                                    commandRepository.recordResult(
+                                        msgId = event.ack.msgId,
+                                        type = null,
+                                        status = event.ack.status,
+                                        executedAt = event.ack.executedAt,
+                                        errorMessage = event.reason
+                                    )
+                                }.onFailure { Logger.w(TAG) { "record rejected command failed: ${it.message}" } }
+                            }
                         }
 
                         is Downlink.PolicyChanged -> refreshPolicy()
