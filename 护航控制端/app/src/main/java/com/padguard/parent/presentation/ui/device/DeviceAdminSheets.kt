@@ -18,19 +18,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.padguard.parent.domain.model.*
+import com.padguard.parent.presentation.ui.apps.ApkFileReader
 import com.padguard.parent.presentation.ui.components.FeatureGridItem
 import com.padguard.parent.presentation.ui.components.FeatureItem
 import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.util.TimeFormat
 import com.padguard.parent.presentation.viewmodel.DeviceAdminSheet
-import android.content.Context
-import android.content.pm.PackageManager
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
-import java.io.File
+import kotlinx.coroutines.launch
 
 /**
  * 设备管理功能网格 + 五个管理面板
@@ -232,33 +230,6 @@ private fun FunctionsSheet(
 
 // ==================== 应用分发 ====================
 
-/** 从 APK 文件解析包名 / 版本（用于上传到应用库）；结果以 domain 层 [AppUploadMeta] 表达 */
-private fun parseApkMeta(context: Context, uri: Uri): AppUploadMeta? {
-    val tmp = File(context.cacheDir, "pg_upload_${System.currentTimeMillis()}.apk")
-    return runCatching {
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            tmp.outputStream().use { out -> input.copyTo(out) }
-        }
-        val pi = context.packageManager.getPackageArchiveInfo(tmp.absolutePath, 0)
-        tmp.delete()
-        pi?.let {
-            // versionCode 字段已弃用，API 28+ 用 longVersionCode 避免 32 位版本号溢出
-            val versionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                it.longVersionCode
-            } else {
-                @Suppress("DEPRECATION")
-                it.versionCode.toLong()
-            }
-            AppUploadMeta(
-                packageName = it.packageName,
-                versionCode = versionCode,
-                versionName = it.versionName ?: "",
-                appName = it.applicationInfo?.loadLabel(context.packageManager)?.toString() ?: it.packageName
-            )
-        }
-    }.getOrNull()
-}
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AppDispatchSheet(
@@ -272,19 +243,33 @@ private fun AppDispatchSheet(
     onUninstall: (String) -> Unit
 ) {
     val context = LocalContext.current
+    // 应用分发上传：选包后的读文件 + 解析包名必须离开主线程。
+    // 原来在回调里直接 readBytes() 再 parseApkMeta（后者又把同一文件整份拷贝一次），
+    // 上传 80~200MB 的 APK 会冻结界面数秒到十几秒并触发系统 ANR。
+    // 统一走 ApkFileReader（Dispatchers.IO + 分块 + 200MB 上限），
+    // 与应用管理页那条路径共用同一份实现，行为不再两套。
+    val scope = rememberCoroutineScope()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
-        val bytes = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull() ?: return@rememberLauncherForActivityResult
-        val meta = parseApkMeta(context, uri) ?: return@rememberLauncherForActivityResult
-        val name = context.contentResolver.query(uri, null, null, null, null)?.use { c ->
-            if (c.moveToFirst()) {
-                val idx = c.getColumnIndex("_display_name")
-                if (idx >= 0) c.getString(idx) else null
-            } else null
-        } ?: "app.apk"
-        onUpload(bytes, meta, name)
+        scope.launch {
+            val info = ApkFileReader.read(context, uri).getOrNull()
+            if (info == null) {
+                android.widget.Toast
+                    .makeText(context, "无法读取安装包（文件可能已损坏或超过 200MB）", android.widget.Toast.LENGTH_LONG)
+                    .show()
+                return@launch
+            }
+            onUpload(
+                info.bytes,
+                AppUploadMeta(
+                    packageName = info.packageName,
+                    versionCode = info.versionCode,
+                    versionName = info.versionName,
+                    appName = info.appName ?: info.packageName
+                ),
+                info.fileName
+            )
+        }
     }
     ModalBottomSheet(onDismissRequest = onClose) {
         Column(

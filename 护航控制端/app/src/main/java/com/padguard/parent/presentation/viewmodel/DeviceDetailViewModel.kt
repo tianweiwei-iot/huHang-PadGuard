@@ -367,6 +367,9 @@ class DeviceDetailViewModel @Inject constructor(
     fun locateNow() {
         if (deviceId.isBlank()) return
         if (_uiState.value.locating) return
+        // 与 LocationViewModel.locateNow 同口径：只有真的拿到**更新的**坐标才说"已更新"。
+        // 原来无论回拉成功与否都提示"位置已更新"，平板离线时家长会拿着一个小时前的点当实时位置。
+        val beforeTs = _uiState.value.location?.timestamp ?: 0L
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(locating = true)
             locationRepository.requestLocate(deviceId)
@@ -378,7 +381,16 @@ class DeviceDetailViewModel @Inject constructor(
                     delay(5_000)
                     locationRepository.getDeviceLocation(deviceId)
                         .onSuccess { _uiState.value = _uiState.value.copy(location = it) }
-                    _uiState.value = _uiState.value.copy(locating = false, toast = "位置已更新")
+                    val after = _uiState.value.location
+                    val gotNew = after != null && (after.timestamp > beforeTs || after.fresh == true)
+                    _uiState.value = _uiState.value.copy(
+                        locating = false,
+                        toast = if (gotNew) {
+                            "位置已更新"
+                        } else {
+                            "平板未上报新位置（可能离线或定位权限被关闭），当前显示的是上次记录"
+                        }
+                    )
                 }
                 .onFailure {
                     _uiState.value = _uiState.value.copy(

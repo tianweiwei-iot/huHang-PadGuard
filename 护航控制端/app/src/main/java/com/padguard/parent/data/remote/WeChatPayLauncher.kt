@@ -83,6 +83,31 @@ class WeChatPayLauncher @Inject constructor(
             .getOrDefault(false)
     }
 
+    /**
+     * 记下"有一次支付结果没能当场确认"。
+     *
+     * 触发场景：家长在微信收银台里停留时 App 进程被系统回收（低内存机型常态），
+     * 从微信返回时 [WXPayEntryActivity] 是冷启动，内存里没有 lastAppId，
+     * 无法把回调 intent 解析成 errCode。
+     *
+     * 这不代表支付失败 —— 钱可能已经扣了、服务端回调也可能已经开通订阅。
+     * 所以只落一个标记，由订阅页读取后主动拉一次订单状态，避免"付了钱但界面说没付"。
+     */
+    fun markResultPending() {
+        runCatching {
+            prefs().edit().putBoolean(KEY_RESULT_PENDING, true).apply()
+        }
+    }
+
+    /** 读取并清除"支付结果待确认"标记；为 true 时调用方应主动刷新一次订单状态。 */
+    fun consumeResultPending(): Boolean = runCatching {
+        val pending = prefs().getBoolean(KEY_RESULT_PENDING, false)
+        if (pending) prefs().edit().putBoolean(KEY_RESULT_PENDING, false).apply()
+        pending
+    }.getOrDefault(false)
+
+    private fun prefs() = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
     @Volatile
     private var api: IWXAPI? = null
 
@@ -117,5 +142,8 @@ class WeChatPayLauncher @Inject constructor(
         const val WECHAT_PACKAGE = "com.tencent.mm"
         /** 用户在微信收银台停留的最长等待；超时按 FAILED 处理（调用方仍会轮询服务端） */
         const val RESULT_TIMEOUT_MS = 5 * 60_000L
+
+        const val PREFS_NAME = "wechat_pay_state"
+        const val KEY_RESULT_PENDING = "result_pending"
     }
 }

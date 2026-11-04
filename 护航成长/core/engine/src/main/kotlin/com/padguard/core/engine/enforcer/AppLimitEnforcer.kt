@@ -89,9 +89,20 @@ class AppLimitEnforcer @Inject constructor(
         lastSampleElapsed = nowElapsed
 
         if (!screenOn) {
-            // 息屏：结束当前会话计时，但保留当日累计值
-            lastForegroundPackage = null
-            sessionStartElapsed = 0L
+            // 息屏：**只停止累计**（不调 addTotalUsage/addAppUsage），但不重置会话上下文。
+            //
+            // 这里原本写的是 `lastForegroundPackage = null; sessionStartElapsed = 0L`，
+            // 两个后果都是可被孩子直接利用的：
+            // ① **单次限额绕过**：sessionStartElapsed 是 APP_SINGLE（单次使用时长）的计时起点。
+            //    孩子按两次电源键（息屏→亮屏，无需解锁、无需任何工具）就把它清零，
+            //    同一个应用的"单次连续使用"永远重新计时，单次限额永远达不到。
+            // ② **启动次数虚增**：置 null 后亮屏第一帧必然满足"前台包 != 上次前台包"，
+            //    被当成一次应用切换，每次息屏/亮屏循环都多记一次 addAppLaunch，
+            //    dailyLaunchCount 失真，会反过来误导家长端的使用画像。
+            //
+            // 息屏期间不累计时间，靠的是上面已经更新的 lastSampleElapsed
+            // （下次采样 delta 只从息屏后算起），不需要清会话起点。
+            // 跨日重置由 onDayRollover 负责，那里会把 sessionStartElapsed 归到当天起点。
             return LimitVerdict.Allowed
         }
 

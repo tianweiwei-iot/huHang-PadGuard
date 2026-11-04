@@ -145,6 +145,24 @@
   function leaveToLogin() {
     PG.api.config.token = "";
     PG.state.admin = null;
+    // 弹层 / 抽屉 / 提示挂在 #app-shell **之外**（见 index.html 的 modal-root），
+    // 不会被下面那句 hidden 一起收掉。会话过期（401）时若正开着「家长详情」「重置密码」
+    // 这类弹层，里面是真实的家长手机号与设备信息，会继续盖在登录屏上方 ——
+    // 既是脏页面，也等于把上一个账号的数据留给了下一个用这台电脑的人。
+    const modal = $("modal-root");
+    if (modal) modal.innerHTML = "";
+    const toast = $("toast-root");
+    if (toast) toast.innerHTML = "";
+    const view = $("view");
+    if (view) view.innerHTML = "";
+    // 换账号登录：hash 还停在上个账号的页面时，低权限管理员会直接落到「没有访问权限」，
+    // 看起来像账号没开通。清掉 hash，让 enterApp 重新按权限挑落地页。
+    // file:// 下部分浏览器禁止 replaceState，退化为直接清空 hash（留个 # 无害）。
+    try {
+      history.replaceState(null, "", location.pathname + location.search);
+    } catch (e) {
+      location.hash = "";
+    }
     $("app-shell").classList.add("hidden");
     $("login-screen").classList.remove("hidden");
   }

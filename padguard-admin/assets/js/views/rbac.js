@@ -391,6 +391,9 @@
     });
     m.el.querySelector("#nr-cancel").onclick = m.close;
     m.el.querySelector("#nr-ok").onclick = async () => {
+      const okBtn = m.el.querySelector("#nr-ok");
+      // 防重复提交：双击「创建」会连发两次，自动生成的 role_id 若跨毫秒就变成两个角色
+      if (okBtn.disabled) return;
       const name = m.el.querySelector("#nr-name").value.trim();
       const rawId = m.el.querySelector("#nr-id").value.trim();
       const seed = m.el.querySelector("#nr-seed").value;
@@ -406,6 +409,8 @@
         const src = ROLES.find((r) => r.id === seed.slice(5));
         if (src && src.privileges) privileges = JSON.parse(JSON.stringify(src.privileges));
       }
+      okBtn.disabled = true;
+      okBtn.textContent = "创建中…";
       try {
         // 服务端 AdminRoleCreateRequest 的字段名是 description（不是 desc）：
         // 用 desc 会被 Jackson 静默丢弃，运营填的职责说明永远存空。
@@ -414,6 +419,8 @@
         await reload(); currentId = id; paintRoleList(true);
       } catch (e) {
         U.toast("err", "创建失败", String((e && e.message) || e));
+        okBtn.disabled = false;
+        okBtn.textContent = "创建";
       }
     };
   }
@@ -499,8 +506,28 @@
     el.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => delAdmin(b.dataset.del)));
   }
 
+  /**
+   * 取单个管理员，失败时提示并返回 null。
+   *
+   * 这四个入口（变更角色 / 编辑 / 重置密码 / 删除）都直接挂在 onclick 上，
+   * 里面的 `await PG.api.listAdmins()` 若抛错（403、超时、服务端 500）就是一条
+   * **未捕获的 rejection**：运营点了按钮之后既没有弹窗也没有报错，只会以为功能坏了、
+   * 反复点（每次都在打接口）。统一在这里接住。
+   */
+  async function loadAdminOrToast(adminId) {
+    try {
+      return (await PG.api.listAdmins()).find((x) => x.id === adminId);
+    } catch (e) {
+      U.toast("err", "加载管理员失败", (e && e.message) || "");
+      return null;
+    }
+  }
+
   async function assignRole(adminId, roles, root) {
-    const a = (await PG.api.listAdmins()).find((x) => x.id === adminId);
+    const a = await loadAdminOrToast(adminId);
+    // 原实现没有这句判空：管理员被别的同事删掉后，这里会读 a.roleId 抛 TypeError，
+    // 表现同样是"点了没反应"。
+    if (!a) return;
     const opts = roles.map((r) => `<option value="${U.esc(r.id)}" ${r.id === a.roleId ? "selected" : ""}>${U.esc(r.name)} · ${countOf(r.privileges)}项权限</option>`).join("");
     const m = U.modal({
       title: "变更管理员角色 · " + (a.name || a.username), width: 420,
@@ -519,7 +546,7 @@
   }
 
   async function editAdmin(adminId, roles, root) {
-    const a = (await PG.api.listAdmins()).find((x) => x.id === adminId);
+    const a = await loadAdminOrToast(adminId);
     if (!a) { U.toast("err", "未找到", adminId); return; }
     const m = U.modal({
       title: "编辑管理员 · " + (a.name || a.username), width: 420,
@@ -548,7 +575,7 @@
   }
 
   async function resetAdminPwd(adminId) {
-    const a = (await PG.api.listAdmins()).find((x) => x.id === adminId);
+    const a = await loadAdminOrToast(adminId);
     if (!a) { U.toast("err", "未找到", adminId); return; }
     U.confirm("重置管理员密码", "将为 " + a.username + " 生成随机密码（按系统密码策略生成），原密码立即失效。", async () => {
       try {
@@ -578,7 +605,7 @@
   }
 
   async function delAdmin(adminId) {
-    const a = (await PG.api.listAdmins()).find((x) => x.id === adminId);
+    const a = await loadAdminOrToast(adminId);
     if (!a) { U.toast("err", "未找到", adminId); return; }
     U.confirm("删除管理员", "确认删除 " + a.username + "（" + (a.name || "") + "）？删除后该账号无法登录，操作不可恢复。", async () => {
       try { await PG.api.deleteAdmin(adminId); U.toast("ok", "已删除", a.username); PG.router.refresh(); }
@@ -601,8 +628,14 @@
     });
     m.el.querySelector("#na-cancel").onclick = m.close;
     m.el.querySelector("#na-ok").onclick = async () => {
+      const okBtn = m.el.querySelector("#na-ok");
+      // 防重复提交：双击会建出两个管理员账号（用户名唯一约束能挡住第二个，
+      // 但运营会同时看到「已创建」和「用户名已存在」两条互相矛盾的提示）
+      if (okBtn.disabled) return;
       const username = m.el.querySelector("#na-u").value.trim();
       if (!username) { U.toast("err", "请填写登录账号"); return; }
+      okBtn.disabled = true;
+      okBtn.textContent = "创建中…";
       try {
         const r = await PG.api.createAdmin({
           username, name: m.el.querySelector("#na-n").value.trim() || username,
@@ -620,7 +653,11 @@
           });
           m2.el.querySelector("#ok").onclick = m2.close;
         } else PG.router.refresh();
-      } catch (e) { U.toast("err", "创建失败", e.message); }
+      } catch (e) {
+        U.toast("err", "创建失败", (e && e.message) || "");
+        okBtn.disabled = false;
+        okBtn.textContent = "创建";
+      }
     };
   }
 })(window.PG);

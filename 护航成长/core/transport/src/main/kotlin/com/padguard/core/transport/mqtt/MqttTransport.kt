@@ -57,6 +57,15 @@ class MqttTransport @Inject constructor(
     private val connectMutex = Mutex()
 
     private var client: MqttAsyncClient? = null
+    /**
+     * 当前 [client] 是用哪个 broker 地址创建的。
+     *
+     * 必须有这个记录：`transportSettings` 支持服务端远程下发，broker 地址是会在运行时变的。
+     * 只判 `client != null` 就复用，会让"换 broker"永远不生效 ——
+     * 旧地址可达就连到弃用节点，不可达就每轮 connect 失败、永久降级 POLLING，
+     * 进程重启前新地址永远不生效；而日志仍按新地址打印，排障时会被彻底误导。
+     */
+    private var clientBroker: String? = null
     private var pingSender: AlarmPingSender? = null
 
     private val _connected = MutableStateFlow(false)
@@ -98,7 +107,15 @@ class MqttTransport @Inject constructor(
 
         return try {
             withContext(Dispatchers.IO) {
-                val mqttClient = client ?: createClient(broker, deviceId).also { client = it }
+                // broker 与缓存不一致时**必须重建**：Paho 的 broker 地址在构造时绑定，
+                // 复用旧实例等于继续连旧地址（详见 clientBroker 注释）。
+                val mqttClient = client?.takeIf { clientBroker == broker } ?: run {
+                    client?.let { stale -> runCatching { stale.close(true) } }
+                    createClient(broker, deviceId).also {
+                        client = it
+                        clientBroker = broker
+                    }
+                }
                 val options = buildConnectOptions(tenant, deviceId, broker)
                 awaitToken("connect") { listener -> mqttClient.connect(options, null, listener) }
                 subscribeAll(mqttClient, tenant, deviceId)

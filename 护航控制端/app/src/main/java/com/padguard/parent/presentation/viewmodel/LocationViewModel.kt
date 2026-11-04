@@ -97,6 +97,10 @@ class LocationViewModel @Inject constructor(
     fun locateNow() {
         if (deviceId.isBlank()) return
         if (_uiState.value.isLocating) return
+        // 记住请求前的位置时间戳：只有回拉到"更新的坐标"才算定位成功。
+        // 原来无论回拉成功与否都固定提示"位置已更新"——平板离线时家长等 16 秒，
+        // 收到一句"已更新"，地图上却还是一个小时前的点，据此判断孩子在哪儿就是错的。
+        val beforeTs = _uiState.value.location?.timestamp ?: 0L
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLocating = true, error = null)
             locationRepository.requestLocate(deviceId)
@@ -106,7 +110,17 @@ class LocationViewModel @Inject constructor(
                     refreshLocationInternal()
                     delay(LOCATE_SECOND_PULL_DELAY_MS)
                     refreshLocationInternal()
-                    _uiState.value = _uiState.value.copy(isLocating = false, toast = "位置已更新")
+                    val after = _uiState.value.location
+                    // fresh=false 表示孩子端没有新坐标、降级上传了缓存点，这种也不算"已更新"
+                    val gotNew = after != null && (after.timestamp > beforeTs || after.fresh == true)
+                    _uiState.value = _uiState.value.copy(
+                        isLocating = false,
+                        toast = if (gotNew) {
+                            "位置已更新"
+                        } else {
+                            "平板未上报新位置（可能离线或定位权限被关闭），当前显示的是上次记录"
+                        }
+                    )
                 }
                 .onFailure {
                     _uiState.value = _uiState.value.copy(

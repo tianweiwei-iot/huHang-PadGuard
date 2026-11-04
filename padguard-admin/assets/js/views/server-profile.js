@@ -13,7 +13,16 @@
       root.querySelector("#sp-refresh").onclick = () => PG.views.serverProfile.mount(root);
       let p;
       try { p = await PG.api.serverProfile(); }
-      catch (e) { U.toast && U.toast("err", "加载失败", e.message); return; }
+      catch (e) {
+        U.toast && U.toast("err", "加载失败", e.message);
+        // 只弹 toast 就 return 会让整页永远停在"加载中…"：运营分不清是"还在加载"还是"已经失败"，
+        // 而其他所有视图都有重试兜底，唯独这里没有。给错误占位 + 重试，失败也要有出口。
+        root.querySelector("#sp-body").innerHTML =
+          '<div class="empty">加载失败：' + esc(e.message || "网络异常") +
+          '<br><button class="btn" id="sp-retry" style="margin-top:8px">重试</button></div>';
+        U.bind(root, "#sp-retry", () => PG.views.serverProfile.mount(root));
+        return;
+      }
       // 未配置时给空值 + "未配置"占位，绝不拿真实生产 IP 冒充默认值（接口挂了却显示像模像样的错误地址）
       if (!p) p = { publicHost: "", port: 8090, scheme: "http", serverName: "PadGuard 管控服务端", remark: "" };
 

@@ -26,7 +26,9 @@ object ApkFileReader {
         val bytes: ByteArray,
         val fileName: String,
         val packageName: String,
-        val appName: String?
+        val appName: String?,
+        val versionCode: Long,
+        val versionName: String
     )
 
     /** 单文件体积上限（200MB，与服务端 multipart 上限一致，避免传一半被拒） */
@@ -69,7 +71,15 @@ object ApkFileReader {
                     fileName = name,
                     packageName = pkg,
                     appName = info.applicationInfo
-                        ?.let { context.packageManager.getApplicationLabel(it).toString() }
+                        ?.let { context.packageManager.getApplicationLabel(it).toString() },
+                    // versionCode 字段已弃用，API 28+ 用 longVersionCode 避免 32 位版本号溢出
+                    versionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                        info.longVersionCode
+                    } else {
+                        @Suppress("DEPRECATION")
+                        info.versionCode.toLong()
+                    },
+                    versionName = info.versionName ?: ""
                 )
             } finally {
                 tmp.delete()

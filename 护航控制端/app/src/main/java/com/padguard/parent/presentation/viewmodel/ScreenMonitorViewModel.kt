@@ -429,18 +429,26 @@ class ScreenMonitorViewModel @Inject constructor(
      */
     private fun saveRecordingLocally(url: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            monitorRepository.downloadImage(url)
-                .onSuccess { bytes ->
-                    gallerySaver.saveVideo(bytes)
-                        .onSuccess { path ->
-                            _uiState.value = _uiState.value.copy(
-                                lastRecordSavedPath = path,
-                                toast = "录像已保存到本机相册"
-                            )
-                        }
-                        .onFailure { _uiState.value = _uiState.value.copy(toast = "录像本机保存失败：${it.message}") }
-                }
+            // 必须走流式下载：录屏文件动辄上百 MB，`downloadImage` 会把整个响应体读成
+            // ByteArray，下载瞬间堆内存翻倍（字节数组 + 写库缓冲），中低端机直接 OOM。
+            // 仓储接口里本来就有 downloadToFile、注释也写明了"录屏必须用它"，
+            // 只是这个调用点一直没用上。
+            val temp = monitorRepository.downloadToFile(url)
                 .onFailure { _uiState.value = _uiState.value.copy(toast = "录像下载失败：${it.message}") }
+                .getOrNull() ?: return@launch
+            try {
+                gallerySaver.saveVideo(temp)
+                    .onSuccess { path ->
+                        _uiState.value = _uiState.value.copy(
+                            lastRecordSavedPath = path,
+                            toast = "录像已保存到本机相册"
+                        )
+                    }
+                    .onFailure { _uiState.value = _uiState.value.copy(toast = "录像本机保存失败：${it.message}") }
+            } finally {
+                // 临时文件只用于搬运，无论成功失败都要删；否则每录一次就多占一份磁盘
+                runCatching { temp.delete() }
+            }
         }
     }
 

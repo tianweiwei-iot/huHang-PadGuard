@@ -5,6 +5,7 @@ import android.content.Context
 import android.provider.MediaStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import com.padguard.parent.util.DISPLAY_TIME_ZONE
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -46,10 +47,15 @@ class GallerySaver @Inject constructor(
     }
 
     /**
-     * 保存 MP4 字节到系统视频库，归档到 Movies/PadGuard。
+     * 保存 MP4 **文件**到系统视频库，归档到 Movies/PadGuard。
      * 家长在系统相册/文件管理器里能直接找到录屏文件 —— 满足「录像保存在家长端平板」。
+     *
+     * 只接 [File] 而不接 `ByteArray`（原签名）：录屏默认可达 10 分钟、动辄上百 MB，
+     * 整段读成字节数组再写库会让堆内存瞬间翻倍，中低端机直接 `OutOfMemoryError` ——
+     * 家长看到的是"点停止录屏后 App 闪退"。这里用固定缓冲区流式搬运，
+     * 内存占用与文件大小无关。调用方负责删除传入的临时文件。
      */
-    fun saveVideo(bytes: ByteArray): Result<String> = runCatching {
+    fun saveVideo(file: File): Result<String> = runCatching {
         val resolver = context.contentResolver
         val displayName = "PadGuard_Rec_${FILE_FORMAT.format(Date())}.mp4"
         val values = ContentValues().apply {
@@ -61,8 +67,10 @@ class GallerySaver @Inject constructor(
         val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
             ?: error("系统视频库拒绝写入")
         try {
-            resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                ?: error("无法打开视频输出流")
+            file.inputStream().use { input ->
+                resolver.openOutputStream(uri)?.use { output -> input.copyTo(output) }
+                    ?: error("无法打开视频输出流")
+            }
         } finally {
             values.clear()
             values.put(MediaStore.Video.Media.IS_PENDING, 0)

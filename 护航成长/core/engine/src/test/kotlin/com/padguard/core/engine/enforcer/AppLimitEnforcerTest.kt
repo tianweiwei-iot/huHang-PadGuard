@@ -127,6 +127,48 @@ class AppLimitEnforcerTest {
     }
 
     /**
+     * 息屏不得重置"单次会话"上下文。
+     *
+     * 曾经的实现是息屏时 `lastForegroundPackage = null; sessionStartElapsed = 0L`。
+     * 两个后果都能被孩子直接利用：
+     * ① 单次使用时长（APP_SINGLE）的计时起点被清零 —— 按两次电源键（息屏→亮屏，
+     *    不需要解锁、不需要任何工具）就能让同一个应用"重新开始一次连续使用"，
+     *    单次限额永远达不到；
+     * ② 亮屏后第一帧必然满足"前台包 != 上次前台包"，被误判为应用切换，
+     *    每次息屏/亮屏都多记一次启动，dailyLaunchCount 失真。
+     *
+     * 这条测试盯住 ②（可直接观测）。① 与 ② 出自同一处赋值，改回去时 ① 必然复发。
+     */
+    @Test
+    fun `screen off keeps session context so wake does not fake an app launch`() = runBlocking {
+        val enforcer = AppLimitEnforcer(repo, timeProvider, evaluator())
+        // 建立基线
+        elapsed = 0L; wall = 1_000_000L
+        enforcer.track(AppLimitPolicy(), "com.game", true, false)
+        // 首次进入 com.game：记一次启动
+        elapsed = 10_000L; wall = 1_010_000L
+        enforcer.track(AppLimitPolicy(), "com.game", true, false)
+        assertEquals(1, repo.launchCalls("com.game"))
+
+        // 息屏：前台包未知（系统不上报），这段不计时
+        elapsed = 20_000L; wall = 1_020_000L
+        enforcer.track(AppLimitPolicy(), null, false, false)
+
+        // 亮屏仍是同一个应用：这不是一次新的"应用切换"，不能再记启动；
+        // 若这里变成 2，说明息屏把 lastForegroundPackage 清掉了（单次计时也被同时清零）。
+        elapsed = 30_000L; wall = 1_030_000L
+        enforcer.track(AppLimitPolicy(), "com.game", true, false)
+        assertEquals(1, repo.launchCalls("com.game"))
+
+        // 息屏期间确实换了应用：亮屏后应正常记一次启动
+        elapsed = 45_000L; wall = 1_045_000L
+        enforcer.track(AppLimitPolicy(), null, false, false)
+        elapsed = 60_000L; wall = 1_060_000L
+        enforcer.track(AppLimitPolicy(), "com.video", true, false)
+        assertEquals(1, repo.launchCalls("com.video"))
+    }
+
+    /**
      * 计数替身：覆写 suspend 累计方法做调用计数，绕开纯 Mockito 对 suspend 函数 verify 的限制。
      * 父类 [UsageRepository] 已开放继承；dayKey() 等非 suspend 方法沿用真实实现（依赖 mock 的 timeProvider）。
      */
@@ -136,6 +178,7 @@ class AppLimitEnforcerTest {
         var totalUsageCalls = 0
             private set
         private val appUsageByPackage = mutableMapOf<String, Int>()
+        private val launchByPackage = mutableMapOf<String, Int>()
 
         override suspend fun addTotalUsage(deltaMs: Long, timestamp: Long) {
             totalUsageCalls++
@@ -145,6 +188,12 @@ class AppLimitEnforcerTest {
             appUsageByPackage[packageName] = appUsageByPackage.getOrDefault(packageName, 0) + 1
         }
 
+        override suspend fun addAppLaunch(packageName: String, timestamp: Long) {
+            launchByPackage[packageName] = launchByPackage.getOrDefault(packageName, 0) + 1
+        }
+
         fun appUsageCalls(packageName: String): Int = appUsageByPackage.getOrDefault(packageName, 0)
+
+        fun launchCalls(packageName: String): Int = launchByPackage.getOrDefault(packageName, 0)
     }
 }

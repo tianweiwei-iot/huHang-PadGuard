@@ -167,7 +167,15 @@
   }
 
   async function openDetail(id) {
-    const p = await PG.api.getParent(id);
+    let p;
+    try {
+      p = await PG.api.getParent(id);
+    } catch (e) {
+      // 这里是 onclick 直接调用的 async 函数：不接住异常就是一条未捕获的 rejection，
+      // 运营点「详情」后既没有弹层也没有报错，只会以为功能坏了并反复点（每次都在打接口）。
+      PG.ui.toast("err", "加载详情失败", (e && e.message) || "");
+      return;
+    }
     if (!p) { PG.ui.toast("err", "未找到", id); return; }
     const d = PG.ui.drawer({
       title: "家长账号详情 · " + p.name,
@@ -218,14 +226,24 @@
     });
     m.el.querySelector("#c-cancel").onclick = m.close;
     m.el.querySelector("#c-ok").onclick = async () => {
+      const okBtn = m.el.querySelector("#c-ok");
+      // 防重复提交：弱网下双击「创建并开通」会连发两次 POST，可能建出两条台账
+      // （后端手机号唯一约束会挡住第二次，但运营会看到「已创建」+「手机号已存在」两条矛盾提示）。
+      // 与 billing.js 手动开通同一套写法。
+      if (okBtn.disabled) return;
       const phone = m.el.querySelector("#c-phone").value.trim();
       if (!/^1\d{10}$/.test(phone)) { PG.ui.toast("err", "手机号格式不正确"); return; }
+      const label = okBtn.textContent;
+      okBtn.disabled = true;
+      okBtn.textContent = "创建中…";
       // 新建失败（如手机号已存在）必须显式提示，且弹窗保持打开以便修改重试
       let r;
       try {
         r = await PG.api.createParent({ name: m.el.querySelector("#c-name").value.trim() || "新家长", phone, email: m.el.querySelector("#c-email").value.trim(), plan: m.el.querySelector("#c-plan").value, region: m.el.querySelector("#c-region").value.trim(), remark: m.el.querySelector("#c-remark").value.trim() });
       } catch (e) {
         PG.ui.toast("err", "创建失败", (e && e.message) || "");
+        okBtn.disabled = false;
+        okBtn.textContent = label;
         return;
       }
       m.close(); PG.ui.toast("ok", "账号已创建", phone);

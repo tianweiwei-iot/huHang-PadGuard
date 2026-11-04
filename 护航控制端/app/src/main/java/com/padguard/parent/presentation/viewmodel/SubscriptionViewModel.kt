@@ -82,7 +82,14 @@ class SubscriptionViewModel @Inject constructor(
     val uiState: StateFlow<SubscriptionUiState> = _uiState.asStateFlow()
 
     init {
+        // 上一笔支付的结果可能在"微信收银台里 App 被杀"时丢失：WXPayEntryActivity
+        // 冷启动解析不了回调，只能留下这个标记。刷新会拉到服务端权威的订单与订阅状态，
+        // 但必须额外说明一句 —— 否则家长付完钱回来，界面既不报错也不提示，像是没反应。
+        val payResultPending = weChatPay.consumeResultPending()
         refresh()
+        if (payResultPending) {
+            _uiState.value = _uiState.value.copy(message = "上次支付结果待确认，已为你刷新订单状态")
+        }
     }
 
     fun refresh() {
@@ -161,6 +168,10 @@ class SubscriptionViewModel @Inject constructor(
      */
     fun confirmPay() {
         val c = _uiState.value.checkout ?: return
+        // 重入护栏：必须放在发任何请求之前。
+        // 没有它时，家长在弱网下连点两次"确认支付"会各建一笔订单、两个协程并行轮询，
+        // 最坏情况是弹出两次"支付成功"，多付的那笔要走人工退款。
+        if (c.paying) return
         val channel = c.selectedChannel ?: return
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(
@@ -245,8 +256,17 @@ class SubscriptionViewModel @Inject constructor(
 
         val localResult = weChatPay.pay(payParams)
 
-        // 轮询服务端：PAID 即成功；CLOSED 即订单关闭；超时则给出"确认中"的诚实提示
-        val settled = pollOrderUntilSettled(created.orderNo)
+        // 轮询服务端：PAID 即成功；CLOSED 即订单关闭；超时则给出"确认中"的诚实提示。
+        //
+        // 窗口长度按本地结果区分：用户在微信里点了"取消"后，原来仍会跑满 60 秒，
+        // 期间收银台一直显示"支付中…"、取消按钮是禁用的 —— 家长只能杀掉 App。
+        // 取消时仍要查一小段（可能已输完密码才退出，本地语义不可靠），但 5 秒足够覆盖。
+        val pollWindow = if (localResult == WeChatPayLauncher.PayResult.CANCEL) {
+            CANCEL_POLL_TOTAL_MS
+        } else {
+            POLL_TOTAL_MS
+        }
+        val settled = pollOrderUntilSettled(created.orderNo, pollWindow)
         when {
             settled?.status == ORDER_STATUS_PAID -> {
                 _uiState.value = _uiState.value.copy(
@@ -258,10 +278,7 @@ class SubscriptionViewModel @Inject constructor(
                 refresh()
             }
             settled?.status == ORDER_STATUS_CLOSED -> {
-                _uiState.value = _uiState.value.copy(
-                    checkout = c.copy(paying = false, error = "订单已超时关闭，如已扣款请联系客服核实退款"),
-                    orderingPlan = null
-                )
+                updateCheckoutIfOpen("订单已超时关闭，如已扣款请联系客服核实退款")
             }
             else -> {
                 // 未在窗口内确认到结果：不撒谎说成功也不说失败——钱可能已扣，服务端回调可能还在路上
@@ -269,17 +286,34 @@ class SubscriptionViewModel @Inject constructor(
                     "支付未完成。如已扣款，结果确认后会在订单列表自动更新"
                 else
                     "支付结果确认中，如已扣款，开通后会在订单列表自动更新"
-                _uiState.value = _uiState.value.copy(
-                    checkout = c.copy(paying = false, error = hint),
-                    orderingPlan = null
-                )
+                updateCheckoutIfOpen(hint)
             }
         }
     }
 
-    /** 每隔 [POLL_INTERVAL_MS] 查一次订单状态，最长 [POLL_TOTAL_MS]；查不到（网络抖动）继续重试 */
-    private suspend fun pollOrderUntilSettled(orderNo: String): OrderDto? {
-        val deadline = System.currentTimeMillis() + POLL_TOTAL_MS
+    /**
+     * 把"支付未成功"的提示写回收银台 —— 前提是收银台**还开着**。
+     *
+     * 原来这里是 `checkout = c.copy(error = …)`，`c` 是进入支付前捕获的旧快照。
+     * 家长在等待期间用返回键/点外部关掉收银台（`cancelCheckout` 把 checkout 置 null）后，
+     * 轮询结束仍会拿着旧 `c` 写回一个 checkout —— 于是"支付中"的弹窗自己又复活了，
+     * 家长明明已经关掉它。
+     */
+    private fun updateCheckoutIfOpen(error: String) {
+        val cur = _uiState.value.checkout ?: run {
+            // 已关闭：只清理下单占位标记，不回填任何 UI
+            _uiState.value = _uiState.value.copy(orderingPlan = null)
+            return
+        }
+        _uiState.value = _uiState.value.copy(
+            checkout = cur.copy(paying = false, error = error),
+            orderingPlan = null
+        )
+    }
+
+    /** 每隔 [POLL_INTERVAL_MS] 查一次订单状态，最长 [totalMs]；查不到（网络抖动）继续重试 */
+    private suspend fun pollOrderUntilSettled(orderNo: String, totalMs: Long = POLL_TOTAL_MS): OrderDto? {
+        val deadline = System.currentTimeMillis() + totalMs
         while (System.currentTimeMillis() < deadline) {
             billingRepository.getOrder(orderNo).getOrNull()?.let { o ->
                 if (o.status == ORDER_STATUS_PAID || o.status == ORDER_STATUS_CLOSED) return o
@@ -323,5 +357,13 @@ class SubscriptionViewModel @Inject constructor(
         const val POLL_INTERVAL_MS = 2_000L
         /** 总轮询窗口：覆盖用户在微信收银台停留 + 回调传播；超时后给"确认中"提示 */
         const val POLL_TOTAL_MS = 60_000L
+        /**
+         * 用户主动取消支付后的轮询窗口。
+         *
+         * 不能直接不查：微信里"取消"可能是输完密码后才退出，钱仍可能被扣。
+         * 也不能跑满 60 秒：收银台会长时间卡在"支付中"、取消按钮禁用，
+         * 家长唯一的出路是杀掉 App。5 秒足够覆盖正常的回调传播。
+         */
+        const val CANCEL_POLL_TOTAL_MS = 5_000L
     }
 }

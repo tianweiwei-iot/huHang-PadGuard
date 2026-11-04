@@ -73,6 +73,30 @@ class AppBlockActivity : ComponentActivity() {
     private val blockedReason = mutableStateOf("")
     private val blockedLabel = mutableStateOf("")
 
+    /**
+     * 本页此刻是否处于**前台可见**状态（onResume ~ onPause 之间）。
+     *
+     * 只判 `isFinishing/isDestroyed` 是不够的：孩子按**系统 HOME 键**或从最近任务
+     * 切到别的应用时，本页进入后台（stopped）但实例仍然存活、也从未 finish。
+     * 此时 [isShowing] 会继续返回 true，`GuardService.reconcileAppBlock` 的同包去重
+     * 就永远不会重弹 —— 拦截页在后台看不见，被拦应用在前台照常使用，
+     * 单应用限额 / 黑名单 / Kiosk 降级三条线同时失守。
+     *
+     * 这是"点「回桌面」后重开应用逃逸"（按钮路径已修）的残留变体：
+     * 按钮会 finish 本页，HOME 键不会。
+     */
+    private var resumed = false
+
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+    }
+
+    override fun onPause() {
+        resumed = false
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
@@ -182,16 +206,21 @@ class AppBlockActivity : ComponentActivity() {
         }
 
         /**
-         * 拦截页是否真的还挂在屏幕上。
+         * 拦截页是否**真的还盖在孩子眼前**。
          *
          * GuardService 需要它来区分两种"后台包 == 上次拦截包"的情形：
-         * ① 拦截页仍在（探针伪影，不能重复弹）；② 孩子已按「回桌面」把拦截页关掉、
+         * ① 拦截页仍在前台（探针伪影，不能重复弹）；② 孩子已把拦截页弄走、
          * 又重新点开了被拦应用（必须重新拦截）。只看包名会把 ② 误判成 ①，
          * 导致按一次返回就永久逃逸。
+         *
+         * 而"弄走"有两条路径，必须都覆盖：
+         * - 点「回桌面」→ `goHome()` 会 finish 本页（isFinishing 为真）；
+         * - 按**系统 HOME 键 / 最近任务切走**→ 本页只是进入后台，实例还活着、从未 finish。
+         *   所以必须再判 [resumed]，否则第二条路径仍然逃逸。
          */
         fun isShowing(): Boolean {
             val activity = instance ?: return false
-            return !activity.isFinishing && !activity.isDestroyed
+            return activity.resumed && !activity.isFinishing && !activity.isDestroyed
         }
 
         /**

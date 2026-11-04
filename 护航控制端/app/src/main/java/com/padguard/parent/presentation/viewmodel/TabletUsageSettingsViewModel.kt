@@ -36,7 +36,16 @@ data class TabletUsageSettingsUiState(
     /** 该设备的延时审批工单（含已处理）；空表示尚未拉取或没有 */
     val delayTickets: List<UsageDelayTicket> = emptyList(),
     /** 延时工单处理中：按钮置灰，避免连点重复下发 */
-    val delayProcessing: Boolean = false
+    val delayProcessing: Boolean = false,
+    /**
+     * 一次性操作反馈（同意/拒绝/忽略延时工单的结果，成功与失败都用它）。
+     *
+     * 原来这里没有这个字段：`actDelay` 把结果写进 `sessionError`，而 `sessionError`
+     * 只用于"计时会话读取失败"，页面从不渲染它 —— 家长点「同意延长 30 分钟」后
+     * 既没有成功提示也没有失败提示，孩子那边仍在倒计时，家长只能反复点
+     * （每点一次就是一次真实的审批请求）。
+     */
+    val actionMessage: String? = null
 )
 
 @HiltViewModel
@@ -203,9 +212,16 @@ class TabletUsageSettingsViewModel @Inject constructor(
             loadDelayTickets(ticket.deviceId)
             _uiState.value = _uiState.value.copy(
                 delayProcessing = false,
-                sessionError = message.takeIf { outcome.isFailure }
+                // 成功与失败都必须让家长看见结果：这是"孩子还在干等"的关键操作，
+                // 静默成功和静默失败在产品上是同一种故障（家长不知道要不要再点一次）。
+                actionMessage = message
             )
         }
+    }
+
+    /** 操作反馈展示后清空（否则同样的文案第二次不再触发 LaunchedEffect） */
+    fun clearActionMessage() {
+        if (_uiState.value.actionMessage != null) _uiState.value = _uiState.value.copy(actionMessage = null)
     }
 
     /** 错误提示展示后清空（见 Screen 的 LaunchedEffect 注释） */
