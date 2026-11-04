@@ -60,6 +60,34 @@ class DataInitializerTest {
         override fun countByStatus(status: String) =
             table.values.count { (it.status ?: "active") == status }.toLong()
         override fun findByIdForUpdate(id: String): User? = table[id]
+
+        // ---- 登录失败计数：语义必须与真实仓储的 SQL 一致，
+        // 否则「测试通过但线上是错的」比不补更危险 ----
+        override fun registerLoginFailure(phone: String, maxAttempts: Int, lockUntil: Long): Int {
+            val u = table.values.firstOrNull { it.phone == phone } ?: return 0
+            val next = (u.loginFailCount ?: 0) + 1
+            if (next >= maxAttempts) {
+                // 与 SQL 的 CASE 一致：达阈值时计数清零并写入锁定时间
+                u.loginFailCount = 0
+                u.loginLockedUntil = lockUntil
+            } else {
+                u.loginFailCount = next
+            }
+            return 1
+        }
+
+        override fun clearLoginFailure(phone: String): Int {
+            val u = table.values.firstOrNull { it.phone == phone } ?: return 0
+            u.loginFailCount = 0
+            u.loginLockedUntil = null
+            return 1
+        }
+
+        override fun touchLastLoginAt(id: String, ts: Long): Int {
+            val u = table[id] ?: return 0
+            u.lastLoginAt = ts
+            return 1
+        }
         override fun searchParents(
             status: String,
             keyword: String,

@@ -36,12 +36,15 @@ class AdminDashboardService(
     private val requestMetrics: RequestMetrics,
     private val runtimeLogRing: RuntimeLogRing,
     private val dataSource: DataSource,
-    private val serverProfileService: ServerProfileService
+    private val serverProfileService: ServerProfileService,
+    private val dashboardCache: DashboardCache
 ) {
     private val log = LoggerFactory.getLogger(AdminDashboardService::class.java)
 
     fun dashboard(adminId: String): DashboardResponse {
         // S13：仪表盘是跨领域聚合（含服务器状态），统一挂 server:read。
+        // 权限校验必须**先于**缓存查询：缓存命中永远不能替代鉴权，
+        // 否则无权限的管理员能在 TTL 窗口内读到完整仪表盘。
         adminPerm.require(adminId, "server", "read")
         val now = System.currentTimeMillis()
 
@@ -57,7 +60,33 @@ class AdminDashboardService(
          * 顺带修掉一个只有并发时才会暴露的不一致：营收的两个数字原来分两次查询，
          * 期间若有订单入账，首页会显示"本月营收 ¥X，但营收曲线最后一点是 ¥Y"。
          * 现在两者出自同一次查询的同一批数据。
+         *
+         * 聚合部分走 30 秒短缓存（见 [DashboardCache] 类注释）：
+         * KPI 是分钟级数字，不值得每次刷新都打十余次聚合查询；
+         * `recent` 依赖当前管理员的 audit:read 权限，必须每请求现算，绝不能进缓存。
          */
+        val cached = dashboardCache.get(now)
+        val agg = cached ?: buildAggregate(now).also { dashboardCache.put(it) }
+
+        // 首页最近操作：必须尊重 audit:read —— 没有审计查看权限的角色不应在首页看到操作流。
+        val recent = if (adminPerm.can(adminId, "audit", "read")) adminAuditService.audit(adminId, null).take(6) else emptyList()
+
+        return DashboardResponse(
+            kpis = Kpis(
+                agg.parentsTotal, agg.parentsActive, agg.parentsSuspended, agg.devicesTotal, agg.devicesOnline,
+                agg.subsActive, agg.subsTrial, agg.monthRevenue, agg.serverStatus
+            ),
+            revenueSeries = agg.revenueSeries,
+            planDist = agg.planDist,
+            regionDist = agg.regionDist,
+            alertsOpen = agg.alertsOpen,
+            recent = recent,
+            trends = agg.trends
+        )
+    }
+
+    /** 构建与请求者无关的聚合快照（缓存未命中时执行，一次请求十余条聚合查询） */
+    private fun buildAggregate(now: Long): DashboardCache.Snapshot {
         val parentsTotal = userRepository.count()
         // 注意用 coalesce 版本：status 是后加的列，存量行为 NULL，派生查询 countByStatus 不计入它们。
         val parentsActive = userRepository.countByStatusOrNullAsActive("active")
@@ -96,26 +125,28 @@ class AdminDashboardService(
 
         val alertsOpen = alertRepository.countByStatus("ACTIVE")
 
-        // 首页最近操作：必须尊重 audit:read —— 没有审计查看权限的角色不应在首页看到操作流。
-        val recent = if (adminPerm.can(adminId, "audit", "read")) adminAuditService.audit(adminId, null).take(6) else emptyList()
-
         val trendSince = trendWindowStart(TREND_DAYS)
-        return DashboardResponse(
-            kpis = Kpis(
-                parentsTotal, parentsActive, parentsSuspended, devicesTotal, devicesOnline,
-                subsActive, subsTrial, monthRevenue, serverStatus
-            ),
+        return DashboardCache.Snapshot(
+            parentsTotal = parentsTotal,
+            parentsActive = parentsActive,
+            parentsSuspended = parentsSuspended,
+            devicesTotal = devicesTotal,
+            devicesOnline = devicesOnline,
+            subsActive = subsActive,
+            subsTrial = subsTrial,
+            monthRevenue = monthRevenue,
+            serverStatus = serverStatus,
             revenueSeries = revenueSeries,
             planDist = planDist,
             regionDist = regionDist,
             alertsOpen = alertsOpen,
-            recent = recent,
             trends = DashboardTrends(
                 parent = growthTrend(dailyCounts(userRepository.findCreatedAtSince(trendSince), TREND_DAYS)),
                 device = growthTrend(dailyCounts(deviceRepository.findCreatedAtSince(trendSince), TREND_DAYS)),
                 subscription = growthTrend(dailyCounts(subscriptionRepository.findCreatedAtSince(trendSince), TREND_DAYS)),
                 revenue = revenueTrend(revenueSeries)
-            )
+            ),
+            builtAt = now
         )
     }
 

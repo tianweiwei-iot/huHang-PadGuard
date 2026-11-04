@@ -59,7 +59,9 @@ import java.util.concurrent.atomic.AtomicInteger
     "padguard.demo-accounts-enabled=false",
     "padguard.initial-password-file=target/adminagg-admin-pwd.txt",
     "padguard.parent-initial-password-file=target/adminagg-parent-pwd.txt",
-    "padguard.base-url=http://localhost:8080"
+    "padguard.base-url=http://localhost:8080",
+    // 仪表盘缓存禁用：用例会改数据后再断言 KPI 变化，缓存会让第二次读到旧值
+    "padguard.admin.dashboard-cache-ttl-ms=0"
 ])
 class AdminAggregateIntegrationTest {
 

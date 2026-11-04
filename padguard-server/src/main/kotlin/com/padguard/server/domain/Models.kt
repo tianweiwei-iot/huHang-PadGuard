@@ -34,6 +34,19 @@ class User(
      * 落后即拒绝。历史令牌没有 ver 声明，按 0 处理，与本列默认值一致。
      */
     @Column(name = "token_version") var tokenVersion: Long = 0,
+    /**
+     * 连续密码错误次数。
+     *
+     * 从进程内 ConcurrentHashMap 搬到库里，是因为内存态有两个致命短板：
+     * ① 重启即清零 —— 攻击者只要能诱发一次重启（或赶上一次发布）就能白拿 N 次重试额度；
+     * ② 多实例各算各的 —— 5 次锁定在 3 个实例下实际是 15 次，扩缩容还会随机重置。
+     * 落库后由数据库行锁保证自增不丢，与实例数无关。
+     *
+     * 用 `coalesce` 语义兜底：列是后加的，存量行为 NULL，读取方必须按 0 处理。
+     */
+    @Column(name = "login_fail_count") var loginFailCount: Int? = 0,
+    /** 锁定截止时刻（毫秒）；NULL 或已过期表示未锁定 */
+    @Column(name = "login_locked_until") var loginLockedUntil: Long? = null,
     @Column(name = "created_at") var createdAt: Long = 0
 )
 

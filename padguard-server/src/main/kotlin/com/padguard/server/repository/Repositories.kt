@@ -32,6 +32,56 @@ interface UserRepository : JpaRepository<User, String> {
     fun findByIdForUpdate(@Param("id") id: String): User?
 
     /**
+     * 记录一次密码错误：**单条 UPDATE 完成「自增 / 达阈值则加锁并清零」**。
+     *
+     * 为什么不能写成「读出来 +1 再 save」：并发的多次错误会读到同一个旧值，后写覆盖先写，
+     * 攻击者只要并发发请求就能让计数涨得比实际慢（甚至一直停在 1），阈值形同虚设。
+     * 单条 UPDATE 让数据库行锁把自增串行化，这是计数类字段唯一可靠的做法。
+     *
+     * 两个 CASE 都必须用 coalesce 兜底：列是后加的，存量行为 NULL，
+     * 而 `NULL + 1` 在 SQL 里仍是 NULL —— CASE 条件恒不成立、赋值也恒为 NULL，
+     * 表现为「计数永远是 0、锁定永远不触发」，且只在有历史数据的库上出现。
+     *
+     * @return 受影响行数（手机号不存在时为 0）
+     */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update User u set
+          u.loginFailCount = case when coalesce(u.loginFailCount, 0) + 1 >= :maxAttempts then 0
+                                 else coalesce(u.loginFailCount, 0) + 1 end,
+          u.loginLockedUntil = case when coalesce(u.loginFailCount, 0) + 1 >= :maxAttempts then :lockUntil
+                                   else u.loginLockedUntil end
+        where u.phone = :phone
+        """
+    )
+    fun registerLoginFailure(
+        @Param("phone") phone: String,
+        @Param("maxAttempts") maxAttempts: Int,
+        @Param("lockUntil") lockUntil: Long
+    ): Int
+
+    /** 登录成功后清空失败计数与锁定 */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("update User u set u.loginFailCount = 0, u.loginLockedUntil = null where u.phone = :phone")
+    fun clearLoginFailure(@Param("phone") phone: String): Int
+
+    /**
+     * 只更新最近登录时刻。
+     *
+     * 不能再用 `save(user)`：那是把调用方**加载时刻的整行快照**写回数据库。
+     * 若在这两个动作之间该账号在另一端点了登出（`token_version` +1），
+     * 旧快照会把版本号写回旧值 —— 已吊销的令牌重新生效，登出等于没登出。
+     * 单列 UPDATE 只碰这一列，不会覆盖任何并发写入。
+     */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("update User u set u.lastLoginAt = :ts where u.id = :id")
+    fun touchLastLoginAt(@Param("id") id: String, @Param("ts") ts: Long): Int
+
+    /**
      * 后台家长列表：过滤与分页全部下推数据库。
      *
      * 改造前是 `findAll()` 取全表 → 内存过滤 → 内存分页，且每一行还要单独查一次订阅

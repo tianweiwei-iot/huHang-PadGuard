@@ -21,7 +21,6 @@ import org.springframework.core.env.Environment
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
 
 @Service
@@ -42,32 +41,17 @@ class AuthService(
      *
      * 为什么需要：限流只按"IP+账号"限速（10 次/分钟），专业爆破仍可低速尝试；
      * 这里再加一道"连续 N 次失败 → 锁 M 分钟"的账号级闸门，大幅抬升爆破成本。
-     * 内存态（单实例部署足够），重启即清空——但重启需服务器权限，攻击者无法利用；
-     * 配合限流，二者叠加。仅对已存在账号计数，避免被用来恶意锁定受害者账号(DoS)。
+     * 仅对已存在账号计数，避免被用来恶意锁定受害者账号(DoS)。
+     *
+     * 计数存在 users 表的 `login_fail_count` / `login_locked_until` 两列，不是进程内 Map：
+     * 内存态下「重启即清零」（等一次发布就能白拿一轮重试额度）、
+     * 「多实例各算各的」（5 次阈值在 3 实例下实际接近 15 次）。见 [UserRepository.registerLoginFailure]。
      */
-    private val failedAttempts = ConcurrentHashMap<String, Int>()
-    private val lockedUntil = ConcurrentHashMap<String, Long>()
-
     @Value("\${padguard.auth.max-fail-attempts:5}")
     private val maxFailAttempts: Int = 5
 
     @Value("\${padguard.auth.lock-minutes:15}")
     private val lockMinutes: Int = 15
-
-    init {
-        // 第八轮评估 P2-1：锁定/计数 map 的过期条目此前永不清理，长期运行下缓慢泄漏。
-        // 每 30 分钟清扫一次：锁定已过期、且失败计数为 0（或无计数）的条目即可移除。
-        val cleaner = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
-            Thread(r, "auth-lock-sweeper").apply { isDaemon = true }
-        }
-        cleaner.scheduleWithFixedDelay({
-            runCatching {
-                val now = System.currentTimeMillis()
-                lockedUntil.entries.removeIf { it.value <= now }
-                failedAttempts.entries.removeIf { it.value <= 0 && lockedUntil[it.key] == null }
-            }.onFailure { LoggerFactory.getLogger(AuthService::class.java).warn("auth lock sweep failed: {}", it.message) }
-        }, 30, 30, java.util.concurrent.TimeUnit.MINUTES)
-    }
 
     /**
      * 登录前置闸门：账号必须处于可用状态。
@@ -96,36 +80,51 @@ class AuthService(
     }
 
     fun loginWithPassword(req: LoginPasswordRequest): LoginResponse {
-        // 锁定检查：未到解锁时间直接拒绝（给出剩余分钟，避免家长反复重试）。
-        val lockExpire = lockedUntil[req.phone] ?: 0L
-        if (lockExpire > System.currentTimeMillis()) {
-            val remainMin = ((lockExpire - System.currentTimeMillis()) / 60_000L).coerceAtLeast(1)
+        // 先查账号，再做锁定判定：锁定期存在这一行上，没有账号就没有锁定态。
+        // 顺序反过来（先看锁定再看账号）会让"未注册手机号"与"已注册但被锁"返回不同提示，
+        // 而后者只可能是真实账号 —— 等于给攻击者一个免费的号码枚举接口。
+        val user = userRepository.findByPhone(req.phone)
+            ?: throw BizException(ParentErr.UNAUTHORIZED, "用户不存在", Audience.PARENT)
+        val now = System.currentTimeMillis()
+        val lockUntil = user.loginLockedUntil ?: 0L
+        if (lockUntil > now) {
+            val remainMin = ((lockUntil - now) / 60_000L).coerceAtLeast(1)
             throw BizException(
                 ParentErr.TOO_MANY_REQUESTS,
                 "密码连续错误次数过多，账号已临时锁定，请约 ${remainMin} 分钟后再试",
                 Audience.PARENT
             )
         }
-        val user = userRepository.findByPhone(req.phone)
-            ?: throw BizException(ParentErr.UNAUTHORIZED, "用户不存在", Audience.PARENT)
         if (!Passwords.matches(req.password, user.passwordHash)) {
-            recordFailure(req.phone)
+            recordFailure(req.phone, user.loginFailCount ?: 0)
             throw BizException(ParentErr.UNAUTHORIZED, "密码错误", Audience.PARENT)
         }
         // 登录成功：清空失败计数与锁定。
-        failedAttempts.remove(req.phone)
-        lockedUntil.remove(req.phone)
+        // 只在确实有残留时才写库 —— 正常用户每次登录都多一条 UPDATE 是没必要的写放大。
+        if ((user.loginFailCount ?: 0) != 0 || lockUntil != 0L) {
+            runCatching { userRepository.clearLoginFailure(req.phone) }
+                .onFailure { log.warn("clear login failure count failed for {}: {}", req.phone, it.message) }
+        }
         requireUsableAccount(user)
         return buildLoginResponse(user)
     }
 
-    /** 记录一次失败并尝试加锁；仅对已存在账号生效，避免被用来锁定受害者。 */
-    private fun recordFailure(phone: String) {
-        val n = failedAttempts.merge(phone, 1, Int::plus)
-        if (n != null && n >= maxFailAttempts) {
-            lockedUntil[phone] = System.currentTimeMillis() + lockMinutes * 60_000L
-            failedAttempts[phone] = 0
-            log.warn("account locked due to {} consecutive failed logins: phone={}", maxFailAttempts, phone)
+    /**
+     * 记录一次失败并尝试加锁。
+     *
+     * 计数自增交给数据库的单条 UPDATE（见仓储注释），这里只负责判定"本次是否触发锁定"以留痕。
+     * 并发下可能两条日志都说自己触发了锁定，不影响正确性 —— 锁定本身由数据库串行化。
+     *
+     * 写库失败**不向上抛**：锁定只是限流之外的第二道防御，让它把"密码正确也登不进去"
+     * 变成 500 是本末倒置；此时仍返回"密码错误"，限流仍在生效。
+     */
+    private fun recordFailure(phone: String, knownCount: Int) {
+        val max = maxFailAttempts.coerceAtLeast(1)
+        val lockUntil = System.currentTimeMillis() + lockMinutes.coerceAtLeast(1) * 60_000L
+        runCatching { userRepository.registerLoginFailure(phone, max, lockUntil) }
+            .onFailure { log.warn("record login failure failed for {}: {}", phone, it.message) }
+        if (knownCount + 1 >= max) {
+            log.warn("account locked due to {} consecutive failed logins: phone={}", max, phone)
         }
     }
 
@@ -278,10 +277,14 @@ class AuthService(
     private fun buildLoginResponse(user: User): LoginResponse {
         // 最近登录时刻：后台「家长账号」列表要展示它，注册/登录成功后必须落库，
         // 否则那一列永远是空的，运营无法判断账号是否还在使用。
-        runCatching {
-            user.lastLoginAt = System.currentTimeMillis()
-            userRepository.save(user)
-        }.onFailure { log.warn("update lastLoginAt failed for {}: {}", user.id, it.message) }
+        //
+        // 这里刻意**不**用 `save(user)`：那是把调用方的整行快照写回数据库。
+        // 家长在 A 端登出（token_version +1）与 B 端登录几乎同时发生时，
+        // B 端手里的旧快照会把 version 写回旧值 —— 刚被吊销的令牌重新生效。
+        val now = System.currentTimeMillis()
+        runCatching { userRepository.touchLastLoginAt(user.id, now) }
+            .onFailure { log.warn("update lastLoginAt failed for {}: {}", user.id, it.message) }
+        user.lastLoginAt = now
         val access = jwt.createAccessToken(user.id, user.tokenVersion)
         val refresh = jwt.createRefreshToken(user.id, user.tokenVersion)
         return LoginResponse(
