@@ -763,32 +763,51 @@ class GuardService : Service() {
      */
     private fun observeUsageStart() {
         val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
-        scope.launch {
-            // 浮层挂起多久后自动开始计时。孩子不点确认就能让会话永远 active=false，
-            // isExpired() 恒 false，每日总时长锁被完全规避 —— 这不是"确认框"，是"开关"。
-            // 保留确认框（让孩子知道计时开始）但给它一个上限，超时按已确认处理。
-            var confirmShownAt = 0L
-            usageSessionManager.state.collect { s ->
-                if (!boundNow.get()) {
-                    confirmShownAt = 0L
+        // 自动确认的截止时刻，**必须用单调时钟**：墙钟一旦被往前调（非 DO 设备可改时间），
+        // `now - shownAt` 恒为负，超时永不触发 → active 恒 false → isExpired() 恒 false →
+        // 当天的每日总时长锁彻底失效，而且全程没有任何告警。
+        var deadlineElapsed = 0L
+        // 状态流与 10 秒心跳会并发调用 evaluate()（Dispatchers.Default，两个协程）。
+        // 浮层的幂等判定是"view == null"，而真正 addView 在主线程 post 里执行 ——
+        // 两次并发调用可能都看到 null，挂出两个浮层。这里把判定串起来。
+        val evalGate = Any()
+        fun evaluate() {
+            synchronized(evalGate) {
+                val s = usageSessionManager.state.value
+                // 只在"已解绑 / 不需要确认（已确认或家长关了时间管控）"时清零，
+                // **不能**因为息屏就清零：孩子每 3 分钟按一次电源键，就能把这条唯一的兜底无限推后。
+                if (!boundNow.get() || !s.needsStartConfirm) {
+                    deadlineElapsed = 0L
                     usageStartOverlay.hide()
-                    return@collect
+                    return
                 }
-                val interactive = pm?.isInteractive == true
-                if (s.needsStartConfirm && interactive) {
-                    if (confirmShownAt == 0L) confirmShownAt = System.currentTimeMillis()
-                    if (System.currentTimeMillis() - confirmShownAt >= USAGE_CONFIRM_TIMEOUT_MS) {
-                        Logger.w(TAG) { "usage start unconfirmed for ${USAGE_CONFIRM_TIMEOUT_MS / 1000}s, auto-starting session" }
-                        confirmShownAt = 0L
-                        usageStartOverlay.hide()
-                        scope.launch { usageSessionManager.confirmStart() }
-                        return@collect
-                    }
+                if (deadlineElapsed == 0L) {
+                    deadlineElapsed = SystemClock.elapsedRealtime() + USAGE_CONFIRM_TIMEOUT_MS
+                }
+                if (SystemClock.elapsedRealtime() >= deadlineElapsed) {
+                    Logger.w(TAG) { "usage start unconfirmed for ${USAGE_CONFIRM_TIMEOUT_MS / 1000}s, auto-starting session" }
+                    deadlineElapsed = 0L
+                    usageStartOverlay.hide()
+                    scope.launch { usageSessionManager.confirmStart() }
+                    return
+                }
+                // 息屏时系统本就不会展示浮层，但计时照常推进（截止时刻不清零）。
+                if (pm?.isInteractive == true) {
                     usageStartOverlay.show { scope.launch { usageSessionManager.confirmStart() } }
                 } else {
-                    confirmShownAt = 0L
                     usageStartOverlay.hide()
                 }
+            }
+        }
+        scope.launch {
+            usageSessionManager.state.collect { evaluate() }
+        }
+        // 状态流只在状态**变化**时发射：孩子一直不点确认、状态也不再变时，
+        // 光靠 collect 永远等不到超时（这也是原实现的第二个漏洞）。加一个低频心跳兜底。
+        scope.launch {
+            while (isActive) {
+                delay(USAGE_CONFIRM_TICK_MS)
+                evaluate()
             }
         }
     }
@@ -2546,6 +2565,15 @@ class GuardService : Service() {
          * 每日总时长锁可被完全规避。超时后按已确认处理，session 正常起算。
          */
         private const val USAGE_CONFIRM_TIMEOUT_MS = 3 * 60_000L
+
+        /**
+         * 自动确认的检查节拍（10 秒）。
+         *
+         * 状态流只在状态变化时发射，孩子一直不点确认时就再也不会有下一次发射；
+         * 只靠 collect 的实现在这种情况下永远不会走到超时分支。用低频心跳保证兜底一定触发，
+         * 代价是每小时 360 次空判断（无 IO、无唤醒锁）。
+         */
+        private const val USAGE_CONFIRM_TICK_MS = 10_000L
 
         /**
          * 亮屏后重新对账锁定覆盖的延迟：200ms。

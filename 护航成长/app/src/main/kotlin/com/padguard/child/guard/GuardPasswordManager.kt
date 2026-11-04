@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -127,11 +129,20 @@ class GuardPasswordManager @Inject constructor(
                 && System.currentTimeMillis() < unlockedUntilWall
         }
 
-        fun isLockedOut(): Boolean {
-            if (lockedUntilElapsed <= 0) return false
-            return SystemClock.elapsedRealtime() < lockedUntilElapsed
-                && System.currentTimeMillis() < lockedUntilWall
-        }
+        /**
+         * 剩余锁定毫秒（0 = 未锁定）。
+         *
+         * 两个时钟各算一遍、取**较大值**，并夹到 [LOCKOUT_MS] 以内：
+         * - 原实现用 `&&`（两个时钟都未过期才算锁定），把系统时间往前拨 5 分钟，
+         *   墙钟条件立刻为假 → 锁定直接解除，5 次上限形同虚设，4~6 位数字密码可离线枚举。
+         *   改成"任一时钟说还没到就继续锁"。
+         * - 单纯取 max 会把"重启后 elapsedRealtime 归零"放大成"锁近一小时"（旧的上界曾是开机时长），
+         *   所以上界夹到一个完整锁定时长：重启最多多锁 5 分钟，方向偏保守（fail-closed）。
+         */
+        fun lockedRemainingMs(): Long =
+            GuardPasswordManager.lockedRemainingMs(lockedUntilElapsed, lockedUntilWall)
+
+        fun isLockedOut(): Boolean = lockedRemainingMs() > 0L
 
         /**
          * 该包是否处于「家长刚验证通过」的应用访问放行窗口内。
@@ -237,17 +248,26 @@ class GuardPasswordManager @Inject constructor(
  * ## 锁定计时
  * 锁定到期同样用双时钟（elapsed + wall），回拨系统时间无法提前解除锁定。
      */
-    suspend fun verifyWithLimit(plain: String): VerifyResult {
+    /**
+     * 校验串行化。
+     *
+     * 失败计数是"读 DataStore 快照 → +1 → 写回"，并发校验会各自读到同一个快照、
+     * 最终只加 1 次：同时打开门禁浮层和无障碍保护页（两个入口都会拉起校验）时，
+     * 10 次错误密码可能只消耗 1 次配额，5 次锁定的门槛被并发度稀释。
+     */
+    private val verifyMutex = Mutex()
+
+    suspend fun verifyWithLimit(plain: String): VerifyResult = verifyMutex.withLock {
         val prefs = store.data.first()
         val enabled = prefs[KEY_ENABLED] ?: false
         if (!enabled) return VerifyResult(false, 0, 0L)
 
-        val now = System.currentTimeMillis()
-        val elapsed = SystemClock.elapsedRealtime()
-        val lockedUntilE = prefs[KEY_LOCKED_UNTIL_ELAPSED] ?: 0L
-        val lockedUntilW = prefs[KEY_LOCKED_UNTIL] ?: 0L
-        if (lockedUntilE > 0 && elapsed < lockedUntilE && now < lockedUntilW) {
-            return VerifyResult(false, 0, (lockedUntilW - now).coerceAtLeast(0L))
+        val lockedForMs = lockedRemainingMs(
+            prefs[KEY_LOCKED_UNTIL_ELAPSED] ?: 0L,
+            prefs[KEY_LOCKED_UNTIL] ?: 0L
+        )
+        if (lockedForMs > 0L) {
+            return VerifyResult(false, 0, lockedForMs)
         }
 
         // stored 为 Keystore 加密串（或 Keystore 降级时的明文哈希）；先解密，降级时 stored 即原文。
@@ -277,7 +297,7 @@ class GuardPasswordManager @Inject constructor(
             }
         }
         Logger.w(TAG) { "guard password wrong: fail=$fails remaining=$remaining locked=${remaining == 0}" }
-        return VerifyResult(false, remaining, if (remaining == 0) LOCKOUT_MS else 0L)
+        VerifyResult(false, remaining, if (remaining == 0) LOCKOUT_MS else 0L)
     }
 
     data class VerifyResult(
@@ -444,6 +464,24 @@ class GuardPasswordManager @Inject constructor(
 
         /** 锁定时长：足够让"守着平板试密码"这种手速失效 */
         const val LOCKOUT_MS = 5 * 60 * 1000L
+
+        /**
+         * 剩余锁定毫秒：两个时钟取较大值并夹到 [LOCKOUT_MS]。
+         *
+         * 见 [Snapshot.lockedRemainingMs] 的说明 —— 单一时钟都能被绕过：
+         * 墙钟可被往前调（立刻解锁），单调时钟在重启后归零（可能被拉长）。
+         */
+        internal fun lockedRemainingMs(
+            untilElapsed: Long,
+            untilWall: Long,
+            nowElapsed: Long = SystemClock.elapsedRealtime(),
+            nowWall: Long = System.currentTimeMillis()
+        ): Long {
+            if (untilElapsed <= 0L && untilWall <= 0L) return 0L
+            val byElapsed = untilElapsed - nowElapsed
+            val byWall = untilWall - nowWall
+            return maxOf(byElapsed, byWall).coerceIn(0L, LOCKOUT_MS)
+        }
 
         /** 协议哈希算法，与服务端 [com.padguard.server.security.GuardPasswords] 保持一致：PBKDF2WithHmacSHA1（加盐、慢哈希）。 */
         fun protocolHash(plain: String): String = pbkdf2Hash(plain)

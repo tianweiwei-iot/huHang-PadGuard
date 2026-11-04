@@ -52,7 +52,22 @@ class PolicyRepository @Inject constructor(
      * @return 实际落地的策略（可能与传入不同，说明发生了局部合并）
      */
     suspend fun save(policy: PolicyPackage, rawJson: String? = null): PolicyPackage {
-        val merged = getPolicy().mergeWith(policy).deriveTimeControl()
+        val current = getPolicy()
+        // 服务端版本不高于本地：**一律以本地为准，且不写库**。
+        //
+        // 原实现继续往下走：`mergeWith` 对低版本直接返回本地策略（version 取本地、内容也取本地），
+        // 但 `payload` 用的是服务端原文 —— 同一行里被拼成"本地的高版本号 + 服务端的旧内容"。
+        // 服务端按 `policy.version == currentVersion` 判断设备是否最新，于是此后它会一直认为
+        // 设备已是最新：家长后续每一次策略变更都被 `mergeWith` 丢弃，界面显示"已下发"，
+        // 孩子端规则永远停在旧版本，且没有任何失败信号（只能靠重装恢复）。
+        // 典型触发：服务端库还原/重建、设备策略行被删后由 createDefault 重新生成 v1。
+        if (policy.version <= current.version) {
+            Logger.w("PolicyRepository") {
+                "ignore stale policy v=${policy.version} (local v=${current.version})"
+            }
+            return current
+        }
+        val merged = current.mergeWith(policy).deriveTimeControl()
         val payload = rawJson ?: json.encodeToString(PolicyPackage.serializer(), policy)
         dao.upsert(
             PolicyEntity(

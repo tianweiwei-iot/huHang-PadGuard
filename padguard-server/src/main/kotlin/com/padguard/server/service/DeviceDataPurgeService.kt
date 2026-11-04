@@ -23,6 +23,7 @@ import com.padguard.server.repository.UsageLogRepository
 import com.padguard.server.repository.UsageSessionRepository
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.support.TransactionSynchronization
 import org.springframework.transaction.support.TransactionSynchronizationManager
@@ -84,11 +85,19 @@ class DeviceDataPurgeService(
     /**
      * 清除该设备的全部私有数据。
      *
+     * ## 为什么是 REQUIRES_NEW
+     * 调用方（易主 / 解绑）本身在事务里。若这里用默认的 REQUIRED，清理只是加入外层事务：
+     * 任意一条 delete 失败一次，外层事务就被标记 rollback-only，
+     * [com.padguard.server.service.DeviceService] 的"失败重试 3 次"在同一个已废事务里执行，
+     * 第 2、3 次必然也失败，最终整笔绑定/解绑以 `UnexpectedRollbackException` 收场 ——
+     * 家长看到的是莫名其妙的失败，日志写的却是"隐私数据可能残留"，排障方向完全错。
+     * 独立事务后：内层回滚不影响外层，重试是真正的新事务，解绑/易主也不会被清理失败拖垮。
+     *
      * @param deviceId 设备台账 id
      * @param reason   触发原因（写日志用），取值如 `TRANSFER`（易主）/ `UNBIND`（解绑）
      * @return 各表实际删除行数，key 为表名
      */
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     fun purge(deviceId: String, reason: String): Map<String, Int> {
         val removed = LinkedHashMap<String, Int>()
         // 顺序按"敏感度 + 体积"排：最敏感的先删，即使中途中断也不会留下截图/轨迹。

@@ -78,6 +78,13 @@ class UsageDelayCenterViewModel @Inject constructor(
      */
     private val handledInSession = mutableSetOf<String>()
 
+    /**
+     * 审批失败后的弹窗冷却（ticketId → 解禁时刻），与解锁申请中心同一套理由：
+     * 失败时工单仍是 PENDING，若也记进 [handledInSession]，本会话再也不会弹窗，
+     * 孩子一直等着延时、家长却只看到一闪而过的提示。冷却一分钟再提醒。
+     */
+    private val failedPopupCooldown = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     /** 已发过本地通知的工单 ID，避免 10 秒轮询反复堆叠同一条通知 */
     private val notifiedTicketIds = mutableSetOf<String>()
 
@@ -144,6 +151,7 @@ class UsageDelayCenterViewModel @Inject constructor(
                 // 弹窗只挑"待处理且本次会话没处理过"里最早的一条
                 val next = entries
                     .filter { it.ticket.isPending && it.ticket.id !in handledInSession }
+                    .filter { (failedPopupCooldown[it.ticket.id] ?: 0L) <= System.currentTimeMillis() }
                     .minByOrNull { it.ticket.createdAt }
 
                 if (!appInForeground) {
@@ -215,9 +223,16 @@ class UsageDelayCenterViewModel @Inject constructor(
             onSuccess = { successMessage },
             onFailure = { e -> "操作失败：${e.message ?: "请检查网络后重试"}" }
         )
-        handledInSession.add(ticket.id)
-        // 处理（含忽略）即取消对应本地通知，避免通知栏长期挂着与事实不符的内容
-        notificationHelper.cancelUsageDelayRequest(ticket.id)
+        // 只有成功才记"本会话已处理"；失败只冷却一分钟（理由同解锁申请中心）：
+        // 失败时工单仍是 PENDING，记成已处理会让它在本会话内永不弹窗。
+        if (outcome.isSuccess) {
+            handledInSession.add(ticket.id)
+            failedPopupCooldown.remove(ticket.id)
+            // 处理（含忽略）即取消对应本地通知，避免通知栏长期挂着与事实不符的内容
+            notificationHelper.cancelUsageDelayRequest(ticket.id)
+        } else {
+            failedPopupCooldown[ticket.id] = System.currentTimeMillis() + FAILED_POPUP_COOLDOWN_MS
+        }
         _uiState.value = _uiState.value.copy(
             actionMessage = message,
             popup = null,
@@ -228,5 +243,7 @@ class UsageDelayCenterViewModel @Inject constructor(
 
     private companion object {
         const val POLL_INTERVAL_MS = 10_000L
+        /** 审批失败后，同一条工单重新弹窗前的冷却时长 */
+        const val FAILED_POPUP_COOLDOWN_MS = 60_000L
     }
 }

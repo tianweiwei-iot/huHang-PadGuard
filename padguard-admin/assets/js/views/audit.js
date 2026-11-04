@@ -26,13 +26,27 @@
       </div>`,
     mount: async (root) => {
       const tabs = root.querySelectorAll(".tab");
-      const show = (t) => { tabs.forEach(b => b.classList.toggle("btn-primary", b.dataset.tab === t)); t === "log" ? renderLog(root) : renderAlert(root); };
+      /**
+       * Tab 令牌：异步渲染返回时必须确认"仍是我这一版"。
+       *
+       * 两个 Tab 的渲染函数各自 await 网络后直接写 `#a-tab`，原先没有任何版本校验：
+       * 先进审计再点风险告警，若 auditAreas() 比 alerts() 慢，日志表格会把告警整页覆盖
+       * （高亮标签仍是"风险告警"），紧接着对已消失的 `#al-area` 取 .onchange 抛 TypeError，
+       * 而 mount 里的 show("log") 没被 await，router 的兜底捕获不到 —— 页面停在半渲染且无提示。
+       */
+      let viewSeq = 0;
+      const alive = (my) => my === viewSeq && root.querySelector("#a-tab") != null;
+      const show = (t) => {
+        tabs.forEach(b => b.classList.toggle("btn-primary", b.dataset.tab === t));
+        const my = ++viewSeq;
+        t === "log" ? renderLog(root, () => alive(my)) : renderAlert(root, () => alive(my));
+      };
       tabs.forEach(b => b.onclick = () => show(b.dataset.tab));
       show("log");
     },
   });
 
-  async function renderLog(root) {
+  async function renderLog(root, alive = () => true) {
     // 领域下拉取自服务端权限定义（前后端单一事实源）。
     // 取不到时回落到本地兜底表，保证页面还能用 —— 兜底表已覆盖全部 7 个领域（含 audit）。
     let opts;
@@ -44,6 +58,8 @@
     } catch (e) {
       opts = Object.keys(AREA_CN).map((k) => ({ key: k, name: AREA_CN[k] }));
     }
+    // 取完元数据先确认 Tab 没被切走：否则会用自己的整页结构覆盖另一个 Tab 的内容
+    if (!alive()) return;
     const nameOf = (k) => { const hit = opts.find((o) => o.key === k); return hit ? hit.name : k; };
 
     // 结构先落地，数据异步填充：领域下拉切换时**重新请求服务端**，
@@ -80,7 +96,11 @@
       body.innerHTML = items.map(l => `<tr><td class="cell-sub">${U.esc(l.time)}</td><td>${U.esc(l.admin)}</td><td>${U.esc(l.actionName)}</td><td>${U.esc(nameOf(l.area))}</td><td class="cell-sub">${U.esc(l.target)}</td><td class="cell-sub">${U.esc(l.ip)}</td><td>${l.result === "success" ? '<span class="badge green">成功</span>' : '<span class="badge red">失败</span>'}</td></tr>`).join("") || '<tr><td colspan="7" class="empty">暂无记录</td></tr>';
     };
     await draw("");
-    root.querySelector("#al-area").onchange = (e) => draw(e.target.value);
+    // 同理：draw 内部也有 await，回来时可能已经不是我的 Tab（节点已被移除）
+    if (!alive()) return;
+    const areaSel = root.querySelector("#al-area");
+    if (!areaSel) return;
+    areaSel.onchange = (e) => draw(e.target.value);
 
     // 导出：按**当前领域筛选**取最多 5000 条。
     // 不做"翻页拉全量"——审计接口没有分页（全表扫描 + 内存过滤），
@@ -120,17 +140,20 @@
     };
   }
 
-  async function renderAlert(root) {
+  async function renderAlert(root, alive = () => true) {
     let list;
     try {
       list = (await PG.api.alerts()) || [];
     } catch (e) {
       // 接口失败必须可见可重试，否则告警 tab 一片空白，运营会当成"没有告警"
+      // 失败提示也要认 Tab：切走之后这条错误不该再覆盖当前页面
+      if (!alive()) return;
       const host = root.querySelector("#a-tab");
       if (host) host.innerHTML = '<div class="empty">告警加载失败：' + U.esc((e && e.message) || "未知错误") + '</div>';
       PG.ui.toast("err", "告警加载失败", (e && e.message) || "");
       return;
     }
+    if (!alive()) return;
     root.querySelector("#a-tab").innerHTML = `<div class="timeline" id="al-list"></div>`;
     const draw = () => {
       const el = root.querySelector("#al-list");

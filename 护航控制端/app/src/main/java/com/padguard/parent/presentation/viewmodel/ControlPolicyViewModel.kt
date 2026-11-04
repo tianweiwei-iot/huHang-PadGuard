@@ -22,6 +22,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import java.util.UUID
 
@@ -88,6 +90,17 @@ class ControlPolicyViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(ControlPolicyUiState())
     val uiState: StateFlow<ControlPolicyUiState> = _uiState.asStateFlow()
+
+    /**
+     * 应用名单提交串行化。
+     *
+     * `updateAppBlacklist` 是**全量覆盖**语义（PUT 整个 blockedPackages），而请求体在发送瞬间
+     * 由 `_uiState.installedApps` 拼装、本地状态要等响应成功才更新。家长在 1 个 RTT 内连续
+     * 关掉应用 A、再关掉 B 时，第二次的名单里 A 仍是"未禁用" —— 后一次 PUT 把 A 的改动整体盖掉。
+     * 结果是界面显示"A 已禁用"、服务端名单里没有 A、孩子端照常能打开，且家长完全无从察觉。
+     * 加锁后第二次提交会等第一次落地并读到最新状态，全量覆盖语义才真正成立。
+     */
+    private val appListMutex = Mutex()
 
     init { load() }
 
@@ -342,31 +355,33 @@ class ControlPolicyViewModel @Inject constructor(
 
     fun toggleAppBlock(app: AppPolicy, blocked: Boolean) {
         viewModelScope.launch {
-            // 应用列表没加载成功时，installedApps 为空（或只剩部分），
-            // 而 updateAppBlacklist 是**全量覆盖**语义 —— 此时提交等于把其余
-            // 已管控应用静默解禁，孩子端立刻能打开。宁可拒绝操作并提示重试。
-            if (_uiState.value.installedApps.isEmpty()) {
-                _uiState.value = _uiState.value.copy(toast = "应用列表未加载完成，请稍后重试")
-                return@launch
-            }
-            val updated = app.copy(isBlocked = blocked)
-            // 应用黑名单开关必须走 updateAppBlacklist（按整包名单一次下发），
-            // 之前误走 setAppTimeLimit 会写成"全局每日总时长"端点（dailyLimitMinutes=null → 全局限额清零），
-            // 且根本不下发任何黑名单 —— 界面说已禁用、孩子端照常能开。
-            val blockedPackages = _uiState.value.installedApps.mapNotNull { a ->
-                val isBlocked = if (a.packageName == app.packageName) blocked else a.isBlocked
-                if (isBlocked) a.packageName else null
-            }
-            policyRepository.updateAppBlacklist(deviceId, blockedPackages)
-                .onSuccess {
-                    _uiState.value = _uiState.value.copy(
-                        installedApps = _uiState.value.installedApps.map {
-                            if (it.packageName == app.packageName) updated else it
-                        },
-                        toast = if (blocked) "已禁用：${app.appName}" else "已解禁：${app.appName}"
-                    )
+            appListMutex.withLock {
+                // 应用列表没加载成功时，installedApps 为空（或只剩部分），
+                // 而 updateAppBlacklist 是**全量覆盖**语义 —— 此时提交等于把其余
+                // 已管控应用静默解禁，孩子端立刻能打开。宁可拒绝操作并提示重试。
+                if (_uiState.value.installedApps.isEmpty()) {
+                    _uiState.value = _uiState.value.copy(toast = "应用列表未加载完成，请稍后重试")
+                    return@launch
                 }
-                .onFailure { e -> fail(if (blocked) "禁用失败" else "解禁失败", e) }
+                val updated = app.copy(isBlocked = blocked)
+                // 应用黑名单开关必须走 updateAppBlacklist（按整包名单一次下发），
+                // 之前误走 setAppTimeLimit 会写成"全局每日总时长"端点（dailyLimitMinutes=null → 全局限额清零），
+                // 且根本不下发任何黑名单 —— 界面说已禁用、孩子端照常能开。
+                val blockedPackages = _uiState.value.installedApps.mapNotNull { a ->
+                    val isBlocked = if (a.packageName == app.packageName) blocked else a.isBlocked
+                    if (isBlocked) a.packageName else null
+                }
+                policyRepository.updateAppBlacklist(deviceId, blockedPackages)
+                    .onSuccess {
+                        _uiState.value = _uiState.value.copy(
+                            installedApps = _uiState.value.installedApps.map {
+                                if (it.packageName == app.packageName) updated else it
+                            },
+                            toast = if (blocked) "已禁用：${app.appName}" else "已解禁：${app.appName}"
+                        )
+                    }
+                    .onFailure { e -> fail(if (blocked) "禁用失败" else "解禁失败", e) }
+            }
         }
     }
 
@@ -380,22 +395,24 @@ class ControlPolicyViewModel @Inject constructor(
      */
     fun setAllAppsBlocked(blocked: Boolean) {
         viewModelScope.launch {
-            val apps = _uiState.value.installedApps
-            // 空列表时原来直接 return：开关弹回去、家长不知道为什么没反应。
-            if (apps.isEmpty()) {
-                _uiState.value = _uiState.value.copy(toast = "应用列表未加载完成，请稍后重试")
-                return@launch
-            }
-            val packages = if (blocked) apps.map { it.packageName } else emptyList()
-            policyRepository.updateAppBlacklist(deviceId, packages)
-                .onSuccess {
-                    _uiState.value = _uiState.value.copy(
-                        installedApps = apps.map { it.copy(isBlocked = blocked) },
-                        toast = if (blocked) "已管控全部 ${apps.size} 个应用，孩子端将不再显示"
-                        else "已放行全部应用"
-                    )
+            appListMutex.withLock {
+                val apps = _uiState.value.installedApps
+                // 空列表时原来直接 return：开关弹回去、家长不知道为什么没反应。
+                if (apps.isEmpty()) {
+                    _uiState.value = _uiState.value.copy(toast = "应用列表未加载完成，请稍后重试")
+                    return@launch
                 }
-                .onFailure { e -> fail(if (blocked) "一键管控失败" else "一键放行失败", e) }
+                val packages = if (blocked) apps.map { it.packageName } else emptyList()
+                policyRepository.updateAppBlacklist(deviceId, packages)
+                    .onSuccess {
+                        _uiState.value = _uiState.value.copy(
+                            installedApps = apps.map { it.copy(isBlocked = blocked) },
+                            toast = if (blocked) "已管控全部 ${apps.size} 个应用，孩子端将不再显示"
+                            else "已放行全部应用"
+                        )
+                    }
+                    .onFailure { e -> fail(if (blocked) "一键管控失败" else "一键放行失败", e) }
+            }
         }
     }
 

@@ -65,14 +65,21 @@ class CommandService(
             )
         )
 
-        mqttGateway.publishCommand(
-            deviceId,
-            CommandPacket(msgId, type, 1, now, expiresAt, priority, strPayload, signature)
-        )
-        // MQTT 不可用（家庭/本地部署无 broker）时唤醒正在长轮询的孩子端，
-        // 让它不必等下一个轮询周期就能取走这条指令。
+        // 下发必须等事务提交后：本方法常被 @Transactional 的审批流程调用（解锁/延时审批），
+        // 发布留在事务里会出现两种错位 —— Broker 抖动时指令已发出而事务回滚，
+        // 库里没有这条指令（家长端查无此令、孩子端却已执行）；以及行锁被拖到 PUBACK 之后。
+        afterCommit {
+            runCatching {
+                mqttGateway.publishCommand(
+                    deviceId,
+                    CommandPacket(msgId, type, 1, now, expiresAt, priority, strPayload, signature)
+                )
+            }.onFailure { log.warn("command publish failed device={} msgId={}: {}", deviceId, msgId, it.message) }
+            // MQTT 不可用（家庭/本地部署无 broker）时唤醒正在长轮询的孩子端，
+            // 让它不必等下一个轮询周期就能取走这条指令。
+            notifyWaiters(deviceId)
+        }
         auditService.record(null, deviceId, AuditAction.COMMAND_ISSUE, targetType = "command", targetId = msgId, detail = "type=$type")
-        notifyWaiters(deviceId)
         return CommandDto(msgId, type, "PENDING", strPayload, now, null)
     }
 

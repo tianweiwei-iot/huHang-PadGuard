@@ -106,7 +106,11 @@ class AdminBillingService(
             throw BizException(ParentErr.PARAM_ERROR, "开通天数必须为正整数", Audience.PARENT)
         }
         val now = System.currentTimeMillis()
-        val sub = subscriptionRepository.findByUserId(user.id)
+        // 必须悲观行锁读：这是"读 expiredAt → 改套餐/到期 → save"的 check-then-act。
+        // 家长自助续费（markPaid → extend）用的是 findByUserIdForUpdate，
+        // 后台却用无锁读的话，两笔并发会各自基于旧快照整行写回 ——
+        // 一次付费或一次补开的时长凭空消失（"钱付了但时间没加"），且审计里看不出异常。
+        val sub = subscriptionRepository.findByUserIdForUpdate(user.id)
             ?: Subscription(
                 id = "S" + UUID.randomUUID().toString().replace("-", ""), userId = user.id,
                 plan = Plan.TRIAL.key, status = SubStatus.TRIAL.name,

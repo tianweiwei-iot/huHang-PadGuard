@@ -86,11 +86,19 @@
           currentId = pick ? pick.id : null;
         }
       };
+      /**
+       * Tab 令牌：`load()` 是网络往返，期间用户完全可能已经点开另一个 Tab。
+       * 原先这里无条件继续画本 Tab —— 慢的管理员列表会把权限矩阵整页覆盖，
+       * 标签却还高亮在"权限矩阵"，点角色卡片/保存毫无反应（节点已被换掉）。
+       */
+      let viewSeq = 0;
       const show = async (t) => {
         tabs.forEach((b) => b.classList.toggle("btn-primary", b.dataset.tab === t));
+        const my = ++viewSeq;
         try {
           await load();
         } catch (e) {
+          if (my !== viewSeq) return; // 已切走：错误提示不该覆盖当前 Tab
           root.querySelector("#r-tab").innerHTML =
             '<div class="empty">权限数据加载失败：' + U.esc((e && e.message) || "服务端未响应") +
             '<div style="margin-top:12px"><button class="btn" id="r-retry">重试</button></div></div>';
@@ -98,6 +106,7 @@
           if (rt) rt.onclick = () => PG.views.rbac.mount(root);
           return;
         }
+        if (my !== viewSeq) return;
         if (t === "matrix") drawMatrix(root);
         else if (t === "overview") drawOverview(root);
         // 必须 await：管理员列表是异步拉取的，不等待则异常成为未捕获 rejection，
@@ -473,12 +482,15 @@
       admins = Array.isArray(res[0]) ? res[0] : [];
       roles = Array.isArray(res[1]) ? res[1] : [];
     } catch (e) {
+      // 期间可能已切到别的 Tab，节点已被换掉：错误提示只写还在文档里的容器
+      if (!el.isConnected) return;
       el.innerHTML = '<div class="empty">管理员列表加载失败：' + U.esc((e && e.message) || "服务端未响应") +
         '<div style="margin-top:12px"><button class="btn" id="ra-retry">重试</button></div></div>';
       const rt = el.querySelector("#ra-retry");
       if (rt) rt.onclick = () => renderAdmins(root);
       return;
     }
+    if (!el.isConnected) return;
     el.innerHTML = `
       <div class="row" style="justify-content:flex-end;margin-bottom:10px">
         ${PG.guard("rbac", "write", '<button class="btn btn-primary btn-sm" id="ra-new">＋ 新建管理员</button>')}

@@ -175,8 +175,11 @@ class TabletUsageDetailViewModel @Inject constructor(
             val todayResult = todayDeferred.await()
             val reportResult = reportDeferred.await()
 
-            // 乱序防线：A→B 快速切换时，A 的响应会覆盖 B 的页面
-            if (currentDeviceId != deviceId) return@launch
+            // 乱序防线：设备 A→B 或周期 日→周→月 快速切换时，旧响应会覆盖新页面。
+            // 只比设备是不够的：三个周期共用同一个 reload，而 period 在点击瞬间就被改掉，
+            // "近 7 天"的响应晚于"近 30 天"返回时（弱网下常见），会把 7 天的数据写进
+            // 「近 30 天」的标题下 —— 已用时长、剩余额度、"是否超额"的结论全部错位。
+            if (currentDeviceId != deviceId || _uiState.value.period != period) return@launch
 
             var error: String? = null
             todayResult?.onFailure { error = it.message }

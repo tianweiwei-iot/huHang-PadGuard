@@ -265,7 +265,13 @@ class PolicyService(
                 deviceRepository.save(dev)
             }
         }
-        mqttGateway.publishPolicyNotify(deviceId, newVersion)
+        // 与 applyMinorMode 同口径：通知必须等事务提交后再发。
+        // 同步 MQTT 发布留在事务里时，Broker 不在线会让"切换管控模式"整体回滚报保存失败，
+        // 而且 PolicyVersions.allocate 拿到的 devices 行锁要拖到 PUBACK 之后才释放。
+        afterCommit {
+            runCatching { mqttGateway.publishPolicyNotify(deviceId, newVersion) }
+                .onFailure { log.warn("policy notify failed device={} v={}: {}", deviceId, newVersion, it.message) }
+        }
         return newVersion
     }
 

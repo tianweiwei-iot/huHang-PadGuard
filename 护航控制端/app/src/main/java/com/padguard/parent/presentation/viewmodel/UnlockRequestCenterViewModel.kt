@@ -81,6 +81,16 @@ class UnlockRequestCenterViewModel @Inject constructor(
     private val handledInSession = mutableSetOf<String>()
 
     /**
+     * 审批**失败**后的弹窗冷却（ticketId → 解禁时刻）。
+     *
+     * 失败不能等同于"已处理"：工单在服务端仍是 PENDING，若也写进 [handledInSession]，
+     * 本会话内它再也不会进弹窗候选 —— 孩子被锁在锁屏页一直等，家长只看到一个 3 秒就消失的
+     * snackbar，双方都以为对方在处理。这里改成"冷却一分钟"：既挡住了"忽略-又弹-又忽略"的循环，
+     * 又保证一分钟后再提醒一次。
+     */
+    private val failedPopupCooldown = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
      * 已发过本地通知的工单 ID。
      * 与 [handledInSession] 分开——后者记"本会话处理过"，这里记"已通知过"，
      * 避免 10 秒轮询反复堆叠同一条通知。未授权 POST_NOTIFICATIONS 时，
@@ -151,6 +161,7 @@ class UnlockRequestCenterViewModel @Inject constructor(
                 // 孩子可能连着提好几次，一次只弹一条，处理完再弹下一条，避免堆叠成一摞对话框。
                 val next = entries
                     .filter { it.ticket.isPending && it.ticket.id !in handledInSession }
+                    .filter { (failedPopupCooldown[it.ticket.id] ?: 0L) <= System.currentTimeMillis() }
                     .minByOrNull { it.ticket.createdAt }
 
                 // 家长端在后台/未启动时"孩子求解锁"完全零触达——本地通知是唯一的离屏触达手段。
@@ -249,11 +260,20 @@ class UnlockRequestCenterViewModel @Inject constructor(
             onSuccess = { successMessage },
             onFailure = { e -> "操作失败：${e.message ?: "请检查网络后重试"}" }
         )
-        // 无论成败都记一笔：避免失败后弹窗立刻复活，家长陷入"忽略-又弹-又忽略"的循环
-        handledInSession.add(ticket.id)
-        // 处理（含忽略）即取消对应本地通知 —— 不清则通知栏长期挂着
-        // "孩子请求解锁"，家长过会儿点开发现孩子早已在用平板，通知与事实不符。
-        notificationHelper.cancelUnlockRequest(ticket.id)
+        // 只有**成功**才记"本会话已处理"。
+        // 失败时工单仍是 PENDING：记进 handledInSession 会让它在本会话内永不弹窗，
+        // 孩子一直卡在锁屏页等，而家长只看到 3 秒就消失的提示，双方都以为对方在动。
+        // 失败改为"冷却一分钟"，既挡住"忽略-又弹"的循环，又保证稍后再提醒。
+        if (outcome.isSuccess) {
+            handledInSession.add(ticket.id)
+            failedPopupCooldown.remove(ticket.id)
+            // 处理（含忽略）即取消对应本地通知 —— 不清则通知栏长期挂着
+            // "孩子请求解锁"，家长过会儿点开发现孩子早已在用平板，通知与事实不符。
+            // 失败时**保留**通知：工单还没处理完，通知就是家长唯一的离屏入口。
+            notificationHelper.cancelUnlockRequest(ticket.id)
+        } else {
+            failedPopupCooldown[ticket.id] = System.currentTimeMillis() + FAILED_POPUP_COOLDOWN_MS
+        }
         _uiState.value = _uiState.value.copy(
             actionMessage = message,
             popup = null,
@@ -265,5 +285,7 @@ class UnlockRequestCenterViewModel @Inject constructor(
     private companion object {
         const val POLL_INTERVAL_MS = 10_000L
         const val DEFAULT_UNLOCK_MINUTES = 30
+        /** 审批失败后，同一条工单重新弹窗前的冷却时长 */
+        const val FAILED_POPUP_COOLDOWN_MS = 60_000L
     }
 }

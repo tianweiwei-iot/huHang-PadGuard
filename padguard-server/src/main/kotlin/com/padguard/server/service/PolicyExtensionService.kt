@@ -419,7 +419,7 @@ class PolicyExtensionService(
         )
         auditService.record(userId, deviceId, AuditAction.POLICY_TEMPLATE_APPLY,
             targetType = "template", targetId = tpl.id, detail = "template=${tpl.name}")
-        mqttGateway.publishPolicyNotify(deviceId, version)
+        publishPolicyNotifySafely(deviceId, version)
     }
 
     // ---------- 由子表重建策略包（单一数据源） ----------

@@ -954,7 +954,22 @@ class ScreenCaptureService : Service() {
                 if (attempt >= LIVE_RETRY_MAX) break
                 delay((LIVE_RETRY_BACKOFF_MS * attempt).coerceAtMost(LIVE_RETRY_BACKOFF_MAX_MS))
             }
-            if (!liveViewCommanded.get()) stopIfIdle()
+            // 循环结束有两种原因：命令态被撤销（stopLiveStream 已收尾），或**自己到期/提前返回**。
+            // 后者原先什么都不做：streaming 仍为 true，而 stopIfIdle() 第一件事就是
+            // `if (streaming.get()) return` —— 于是服务、投影、ImageReader 长期空转
+            // （Android 15 起还会常驻"正在共享屏幕"状态栏芯片），且唯一的清理入口只剩
+            // "家长端再发一条 LIVE_VIEW_STOP"，断网/家长端被杀时它永远不会来。
+            if (!liveViewCommanded.get() || SystemClock.elapsedRealtime() >= streamDeadlineMs) {
+                Logger.i(TAG) { "live stream ended (ttl or abort), releasing capture resources" }
+                liveViewCommanded.set(false)
+                // 这里不能调 releaseStream()：它会 cancel 当前协程（streamJob 就是自己）。
+                // 帧泵退出时连接已随 use{} 关闭，手动复位状态与缓冲区即可。
+                streaming.set(false)
+                streamCall = null
+                streamJob = null
+                releaseLiveBuffers()
+                stopIfIdle()
+            }
         }
     }
 

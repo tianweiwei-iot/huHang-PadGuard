@@ -57,7 +57,16 @@ class DeviceService(
      * 实时看屏的帧缓存。解绑/易主时要把该设备的缓存帧与带宽统计一并清掉 ——
      * 否则 ScreenStreamHub 里的条目会跟着 deviceId 永久留在内存里（帧缓存是整张 JPEG）。
      */
-    private val streamHub: com.padguard.server.stream.ScreenStreamHub
+    private val streamHub: com.padguard.server.stream.ScreenStreamHub,
+    /**
+     * 批量导入的**按行事务**模板。
+     *
+     * 为什么不在方法上加 @Transactional：导入必须"失败只影响该行"，外层事务一挂就整批回滚
+     * （且 PostgreSQL 会进入 aborted 状态，后续每行都报 current transaction is aborted）。
+     * 为什么又需要事务：单行里的"建台账 + 建默认策略 + 记审计"必须原子，
+     * 否则中途失败会留下"有台账、无策略"的半成品，重试时又被判"已存在"跳过。
+     */
+    private val txTemplate: org.springframework.transaction.support.TransactionTemplate
 ) {
 
     private val log = LoggerFactory.getLogger(DeviceService::class.java)
@@ -277,34 +286,51 @@ class DeviceService(
                 failures += "第${lineNo}行：设备编号为空"
                 return@forEachIndexed
             }
-            runCatching {
-                val existing = findImportableDevice(userId, hardwareId)
-                if (existing != null) {
-                    // 已在我的名下，或已被别人占用：都算跳过，不做任何改写（避免抢设备 / 覆盖别名）
-                    skipped++
-                    log.info("批量导入跳过第{}行：设备编号 {} 已存在（deviceId={}）", lineNo, hardwareId, existing.id)
-                } else {
-                    val now = System.currentTimeMillis()
-                    val deviceId = UUID.randomUUID().toString()
-                    deviceRepository.save(
-                        Device(
-                            id = deviceId, userId = userId,
-                            name = row.alias?.takeIf { it.isNotBlank() } ?: "孩子平板",
-                            deviceSn = hardwareId, model = row.model?.takeIf { it.isNotBlank() },
-                            scene = "FAMILY", onlineStatus = "OFFLINE", createdAt = now
-                        )
-                    )
-                    policyService.createDefault(deviceId)
-                    auditService.record(
-                        userId, deviceId, AuditAction.DEVICE_BIND,
-                        targetType = "device", targetId = deviceId
-                    )
-                    success++
+            // 与绑定主流程共用同一把按 SN 的键锁：导入原先**一把锁都没有**，
+            // 家长连点两次导入、或导入与孩子扫码绑定同时发生，两边都查不到台账 → 各建一条，
+            // 同一台平板出现两条 deviceId，用量/策略/指令从此分裂（这正是绑定路径早就堵掉的那个缺陷）。
+            DeviceBindLocks.withKey(DeviceBindLocks.bindKey(hardwareId, null)) {
+                runCatching {
+                    // 每行一个独立事务：既要"失败只影响该行"（不能整批回滚），
+                    // 又要"台账 + 默认策略 + 审计"三件事原子。
+                    // 原先三步各自成事务，createDefault 一旦失败就留下"有台账、无策略、无审计"的半成品：
+                    // 家长按返回的失败原因改完重试，这一行会被判"已存在"跳过，半成品永久留存。
+                    txTemplate.execute<Boolean> {
+                        val existing = findImportableDevice(userId, hardwareId)
+                        if (existing != null) {
+                            // 已在我的名下，或已被别人占用：都算跳过，不做任何改写（避免抢设备 / 覆盖别名）
+                            skipped++
+                            log.info("批量导入跳过第{}行：设备编号 {} 已存在（deviceId={}）", lineNo, hardwareId, existing.id)
+                            false
+                        } else {
+                            // 付费/设备数闸门：导入会真实产生台账并占用套餐名额，
+                            // 与 bindChildWithUser 同一口径。缺了这一步，订阅过期或设备数已满的账号
+                            // 仍能靠导入无限扩容 —— 绑定路径堵住了，导入路径就是免费后门。
+                            billingService.ensureCanBindForChild(userId)
+                            val now = System.currentTimeMillis()
+                            val deviceId = UUID.randomUUID().toString()
+                            deviceRepository.save(
+                                Device(
+                                    id = deviceId, userId = userId,
+                                    name = row.alias?.takeIf { it.isNotBlank() } ?: "孩子平板",
+                                    deviceSn = hardwareId, model = row.model?.takeIf { it.isNotBlank() },
+                                    scene = "FAMILY", onlineStatus = "OFFLINE", createdAt = now
+                                )
+                            )
+                            policyService.createDefault(deviceId)
+                            auditService.record(
+                                userId, deviceId, AuditAction.DEVICE_BIND,
+                                targetType = "device", targetId = deviceId
+                            )
+                            success++
+                            true
+                        }
+                    }
+                }.onFailure {
+                    // 单行失败不能中断整批；记录原因让家长知道改哪一行
+                    log.warn("批量导入第{}行失败：{}", lineNo, it.message)
+                    failures += "第${lineNo}行：${it.message ?: "导入失败"}"
                 }
-            }.onFailure {
-                // 单行失败不能中断整批；记录原因让家长知道改哪一行
-                log.warn("批量导入第{}行失败：{}", lineNo, it.message)
-                failures += "第${lineNo}行：${it.message ?: "导入失败"}"
             }
         }
 
@@ -336,6 +362,9 @@ class DeviceService(
     }
 
     /** 处理孩子端心跳（MQTT 或 HTTP 降级共用），上线状态变更时推 WS */
+    // @Transactional 的理由同 [markAlive]：心跳与绑定/解绑/易主并发，脱管实体的整行 merge
+    // 会把并发事务刚写入的归属与凭据覆盖回旧值。托管态下只写实际变更的列。
+    @Transactional
     fun applyHeartbeat(deviceId: String, hb: HeartbeatDto) {
         // 心跳本身就是最权威的存活信号：先登记 presence，再落库。
         // 顺序不能反 —— 下面的 save 可能慢（行锁 / 日志上报抢写），
@@ -581,6 +610,7 @@ class DeviceService(
      *
      * @param clientIp 本次请求的来源 IP（有则一并写入，供局域网发现用）
      */
+    @Transactional
     fun applyHeartbeatOnline(deviceId: String, clientIp: String? = null) {
         presence.touch(deviceId)
         setOnline(deviceId, clientIp)
@@ -633,9 +663,18 @@ class DeviceService(
      * - **落库**：只在状态翻转或距上次落库 ≥ [DevicePresenceRegistry.DB_REFRESH_MS] 时做，
      *   写放大被压到"在线设备数 / 15 秒"。
      *
+     * ## 为什么必须 `@Transactional`
+     * 这条路径是"读 → 改 presence 字段 → save"，且与绑定/解绑/易主**并发**。
+     * 没有事务时 `findById` 拿到的是脱管实体，`save()` 走 merge：**整行全列写回**，
+     * 会把并发事务刚提交的 `user_id` / `device_token_hash` 用旧快照覆盖掉 ——
+     * 家长刚绑好的设备又"消失"、旧令牌复活（解绑后仍可用）。有了事务，实体处于托管态，
+     * Hibernate 只 UPDATE 真正变了的列，归属类字段完全不在 SET 子句里。
+     * 代价是每次信号一次短事务；稳态下 [DevicePresenceRegistry.DB_REFRESH_MS] 已把写库节流。
+     *
      * @param clientIp 本次请求的来源 IP，写进 `devices.last_ip` 供局域网发现使用。
      *                 IP 可能为空（拿不到时），此时只刷新在线状态，不强写。
      */
+    @Transactional
     fun markAlive(deviceId: String, clientIp: String? = null) {
         // 绝大多数调用会在这里返回 false：稳态下只有内存写，没有 SQL。
         if (!presence.touch(deviceId)) return

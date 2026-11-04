@@ -429,7 +429,12 @@ class AdminServiceTest {
             30L, "", "", billing,
             Mockito.mock(DeviceDataPurgeService::class.java),
             DevicePresenceRegistry(),
-            com.padguard.server.stream.ScreenStreamHub()
+            com.padguard.server.stream.ScreenStreamHub(),
+            // 批量导入的按行事务模板：构造即可，本 fixture 的用例不走导入路径，
+            // 真正的导入原子性由 DeviceImportTest 用内存 H2 覆盖。
+            org.springframework.transaction.support.TransactionTemplate(
+                Mockito.mock(org.springframework.transaction.PlatformTransactionManager::class.java)
+            )
         )
         // UsageSessionService 用真实实现驱动 B1/B2 的"今日用量"派生（走假 usageSessionRepo）。
         // usageDelayService 在 list 路径不触发，以 mock 占位。
