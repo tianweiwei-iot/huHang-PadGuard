@@ -101,10 +101,23 @@ class DeviceManageViewModel @Inject constructor(
         watchEnrollment()
     }
 
+    /**
+     * 关闭接入面板。
+     *
+     * 只清「面板本身」的字段，**保留 toast 与 S11 的设密码步骤**。
+     * 原先这里直接 `DeviceManageUiState()` 全量重建，而"导入完成 / 局域网接入成功"都是
+     * `showToast(...)` 紧跟 `closeAccessSheet()` —— 提示刚写进去就被抹掉，
+     * 家长永远看不到"成功 N 台、跳过 M 台、失败 K 行"这个结果。
+     */
     fun closeAccessSheet() {
         enrollmentJob?.cancel()
         enrollmentJob = null
-        _uiState.value = DeviceManageUiState()
+        val cur = _uiState.value
+        _uiState.value = DeviceManageUiState(
+            toast = cur.toast,
+            postBindDevice = cur.postBindDevice,
+            postBindBusy = cur.postBindBusy
+        )
     }
 
     /** 重新获取接入信息（失败重试 / 过期后换码都走这里） */

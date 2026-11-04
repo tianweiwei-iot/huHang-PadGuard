@@ -37,7 +37,7 @@ import com.padguard.parent.domain.model.Enrollment
 import com.padguard.parent.presentation.viewmodel.DeviceManageViewModel
 import com.padguard.parent.presentation.viewmodel.EnrollmentUi
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.collect
 
 /**
  * 设备管理页（底部导航「设备」Tab 的二级管理页）
@@ -60,11 +60,12 @@ fun DeviceManageScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(Unit) {
-        viewModel.uiState.collectLatest {
-            if (it.toast != null) {
-                snackbarHostState.showSnackbar(it.toast)
-                viewModel.clearToast()
-            }
+        // 用 collect 而非 collectLatest：后者会在任意一次 state 变化时取消正在显示的
+        // snackbar，导致"导入完成 / 接入成功"这类一次性提示被后续刷新打断。
+        viewModel.uiState.collect { st ->
+            val msg = st.toast ?: return@collect
+            snackbarHostState.showSnackbar(msg)
+            if (viewModel.uiState.value.toast == msg) viewModel.clearToast()
         }
     }
 

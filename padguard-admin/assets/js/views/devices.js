@@ -109,7 +109,9 @@
     }
     if (!d) { PG.ui.toast("warn", "未找到设备", "设备 " + U.esc(id) + " 不在当前设备列表中（可能刚被解绑或删除）。"); return; }
     const dl = PG.ui.drawer({
-      title: "设备详情 · " + U.esc(d.name),
+      // 标题由 drawer() 内部统一 esc()，这里不能再转义一次：
+      // 双重转义会把 "小米 & 平板" 显示成 "小米 &amp; 平板"
+      title: "设备详情 · " + d.name,
       body: `<div class="stat-line"><span>设备ID</span><span>${U.esc(d.deviceId)}</span></div>
         <div class="stat-line"><span>序列号</span><span>${U.esc(d.deviceSn)}</span></div>
         <div class="stat-line"><span>机型 / 系统</span><span>${U.esc(d.model)} · ${U.esc(d.osVersion)}</span></div>

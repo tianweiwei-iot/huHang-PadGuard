@@ -97,7 +97,8 @@
         const page = await PG.api.audit(area ? { area, limit: EXPORT_LIMIT } : { limit: EXPORT_LIMIT });
         const items = (page && page.items) || [];
         if (!items.length) { U.toast("err", "当前筛选下没有可导出的记录"); return; }
-        const stamp = new Date().toISOString().slice(0, 10);
+        // 本地日期（东八区），不是 UTC：否则 0–8 点导出的文件名是"昨天"
+        const stamp = U.todayStamp();
         U.downloadCsv(
           `审计日志_${area ? nameOf(area) : "全部领域"}_${stamp}.csv`,
           ["时间", "操作人", "动作", "领域", "对象", "来源IP", "结果"],

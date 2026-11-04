@@ -206,7 +206,7 @@ fun TabletUsageSettingsScreen(
                 }
                 item { RestSection(settings = uiState.settings, viewModel = viewModel, enabled = enabled) }
                 item {
-                    UsageSessionCard(session = uiState.usageSession)
+                    UsageSessionCard(session = uiState.usageSession, error = uiState.sessionError)
                 }
                 item {
                     DelayApprovalCard(
@@ -786,14 +786,19 @@ private fun RestSection(
  * 卡片内部每秒本地插值刷新倒计时，服务端拉取由页面每 15 秒轮询一次。
  */
 @Composable
-private fun UsageSessionCard(session: UsageSession?) {
+private fun UsageSessionCard(session: UsageSession?, error: String?) {
     GlassCard {
         GlassSectionHeader(icon = Icons.Default.Schedule, title = "今日剩余时长")
         Spacer(modifier = Modifier.height(6.dp))
         if (session == null) {
+            // 读取失败必须可见：原来 sessionError 只写不读，计时会话拉不到时
+            // 页面永远停在"正在读取计时状态…"，家长分不清是在加载还是已经挂了。
             Text(
-                "正在读取计时状态…",
-                style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
+                text = error?.let { "读取计时状态失败：$it（每 15 秒自动重试）" } ?: "正在读取计时状态…",
+                style = TextStyle(
+                    color = if (error != null) MaterialTheme.colorScheme.error else GlassTextDim,
+                    fontSize = 12.sp
+                )
             )
             return@GlassCard
         }

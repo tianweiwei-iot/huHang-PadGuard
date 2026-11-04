@@ -455,6 +455,17 @@ class GuardService : Service() {
         // 历史 PENDING 捞一遍。无记录时 getLong 默认 0 = 拉回全部未过期 PENDING，
         // 与首次安装语义一致。
         lastCommandPullAtMs = commandPollPrefs.getLong(KEY_LAST_PULL_AT, 0L)
+        // 游标现在统一用「服务端校准时间」写（timeProvider.now()）。若盘上留着旧版本写的
+        // 纯本地墙钟值，而本地时钟比服务端快很多，这个游标会落在服务端未来 ——
+        // 服务端 pendingForPolling 会 clamp，但代价是这段时间内新指令可能被过滤。
+        // 超过 5 分钟容差就判定为不可信，归零重拉（幂等由 tryClaim + msgId 保证）。
+        if (lastCommandPullAtMs > timeProvider.now() + COMMAND_CURSOR_FUTURE_TOLERANCE_MS) {
+            Logger.w(TAG) {
+                "command cursor in the future (cursor=$lastCommandPullAtMs, now=${timeProvider.now()}), reset to 0"
+            }
+            lastCommandPullAtMs = 0L
+            commandPollPrefs.edit().remove(KEY_LAST_PULL_AT).apply()
+        }
         // 必须第一时间进入前台：Android 对 startForegroundService 后的宽限期只有 5 秒，
         // 超时直接 ForegroundServiceDidNotStartInTimeException 崩溃。
         // 所以先挂一个"启动中"的通知，真实状态等拿到数据后再刷。
@@ -2269,7 +2280,9 @@ class GuardService : Service() {
                 // 执行后再推进：崩溃时游标仍指旧值，重启后重拉 —— 幂等由 tryClaim+msgId 兜底，
                 // 重复拉取不会重复执行；已回执的指令在服务端已是终态、pendingForPolling 不会返回。
                 if (list.isEmpty()) {
-                    lastCommandPullAtMs = System.currentTimeMillis()
+                    // 游标一律取服务端校准时间（timeProvider.now()），不能直接读本地墙钟：
+                    // 本地快 30s 就会把 since 写到服务端未来，下一批指令在服务端被判为"旧数据"过滤掉。
+                    lastCommandPullAtMs = timeProvider.now()
                     commandPollPrefs.edit().putLong(KEY_LAST_PULL_AT, lastCommandPullAtMs).apply()
                     return
                 }
@@ -2285,7 +2298,7 @@ class GuardService : Service() {
                             .onFailure { Logger.w(TAG) { "fallback ack ${cmd.msgId} failed: $it" } }
                     }
                 }
-                lastCommandPullAtMs = System.currentTimeMillis()
+                lastCommandPullAtMs = timeProvider.now()
                 // 游标落盘：进程被回收后续接，杜绝"息屏期间下达的指令被永久跳过"
                 commandPollPrefs.edit().putLong(KEY_LAST_PULL_AT, lastCommandPullAtMs).apply()
             }
@@ -2450,6 +2463,15 @@ class GuardService : Service() {
         /** 指令轮询游标的持久化文件（见 [lastCommandPullAtMs]） */
         private const val PREFS_COMMAND_POLL = "padguard_command_poll"
         private const val KEY_LAST_PULL_AT = "last_pull_at"
+
+        /**
+         * 游标"落在未来"的容忍窗口。
+         *
+         * 游标写入用的是服务端校准时间，但进程刚启动、时间尚未同步时 `timeProvider.now()`
+         * 会短暂退化为本地墙钟。容忍 5 分钟既能覆盖这个窗口，又能识别出"本地时钟被拨快
+         * 数小时"这类真异常并归零重拉。
+         */
+        private const val COMMAND_CURSOR_FUTURE_TOLERANCE_MS = 5 * 60 * 1000L
 
         /** 临时解锁申请本地保留天数，到期随上报周期安全销毁 */
         private const val UNLOCK_REQUEST_RETENTION_DAYS = 30

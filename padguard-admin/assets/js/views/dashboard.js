@@ -62,6 +62,7 @@
         </div>
       </div>`;
       body.querySelectorAll("[data-go]").forEach(b => b.onclick = () => PG.router.go(b.dataset.go));
+      body.querySelectorAll("[data-reload]").forEach(b => b.onclick = () => PG.router.refresh());
     },
   });
 
@@ -101,7 +102,15 @@
     // 明明有权限看 KPI 却打不开首页。这里降级成一块局部提示。
     let list;
     try { list = await PG.api.alerts(); }
-    catch (e) { return '<div class="empty">无权查看告警（需要“审计”读权限）</div>'; }
+    catch (e) {
+      // 原先把**一切**失败都说成"无权查看告警"：令牌过期、服务端 500、断网全被这条文案掩盖，
+      // 运营真的会去找管理员要权限，而问题其实在别处。现在只在确实是权限问题时这么说。
+      const msg = String((e && e.message) || e || "");
+      const denied = /403|无权|没有权限|forbidden|不允许/i.test(msg);
+      if (denied) return '<div class="empty">无权查看告警（需要“审计”读权限）</div>';
+      return '<div class="empty">告警加载失败：' + U.esc(msg || "未知错误") +
+        '<br><a style="cursor:pointer;color:var(--brand)" data-reload="alerts">重试</a></div>';
+    }
     list = Array.isArray(list) ? list : [];
     return list.filter(a => a.status !== "closed").slice(0, 5).map(a => {
       const c = { high: "red", mid: "amber", low: "gray" }[a.level] || "gray";

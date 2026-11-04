@@ -44,6 +44,28 @@
   // 第八轮 P2-9：请求序号防竞态——快速翻页/输入搜索时，慢的旧响应不得覆盖新结果
   let loadSeq = 0;
 
+  /**
+   * 家长资料前端校验。
+   *
+   * 长度上限与服务端列定义严格一致（nickname VARCHAR(64) / email VARCHAR(256) /
+   * region VARCHAR(64) / remark VARCHAR(512)，见 V15__user_profile_fields.sql）：
+   * 超长时 PostgreSQL 会直接报 500，运营看到的是"创建失败"却说不出哪一项不对。
+   * 邮箱不校验则会把 "zhangwei" 之类的串存进库里，之后「重置密码发邮件」必然失败。
+   */
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+  function validateParentInput(v) {
+    const name = (v.name || "").trim();
+    const email = (v.email || "").trim();
+    const region = (v.region || "").trim();
+    const remark = (v.remark || "").trim();
+    if (name.length > 64) return "家长姓名最长 64 个字符";
+    if (email.length > 256) return "邮箱最长 256 个字符";
+    if (email && !EMAIL_RE.test(email)) return "邮箱格式不正确（如 name@example.com）";
+    if (region.length > 64) return "区域最长 64 个字符";
+    if (remark.length > 512) return "备注最长 512 个字符";
+    return null;
+  }
+
   async function load(root) {
     const seq = ++loadSeq;
     const q = { keyword: root.querySelector("#p-kw").value.trim(), status: root.querySelector("#p-status").value, plan: root.querySelector("#p-plan").value, page: curPage, size: PAGE_SIZE };
@@ -57,6 +79,13 @@
     }
     if (seq !== loadSeq) return; // 旧响应到达时已有新请求在途，丢弃
     const list = (resp && resp.items) || [];
+    // 页码越界自愈：删掉某页最后一条、或筛选后总数变少时，curPage 会停在已不存在的页上，
+    // 页面显示"没有匹配的家长账号"，运营会误以为账号被误删了。回退一页重取。
+    if (!list.length && curPage > 1) {
+      const totalPages = (resp && resp.totalPages) || 0;
+      curPage = Math.max(1, Math.min(curPage - 1, totalPages || 1));
+      return load(root);
+    }
     const tb = root.querySelector("#p-body");
     if (!list.length) { tb.innerHTML = ""; root.querySelector("#p-empty").innerHTML = '<div class="empty">没有匹配的家长账号</div>'; root.querySelector("#p-pager").innerHTML = ""; return; }
     root.querySelector("#p-empty").innerHTML = "";
@@ -139,6 +168,11 @@
           remark: m.el.querySelector("#e-remark").value.trim(),
         };
         // 保存失败必须留在弹窗里并说明原因：静默失败会让运营以为改成功了
+        const invalid = validateParentInput(body);
+        if (invalid) {
+          PG.ui.toast("err", "请检查输入", invalid);
+          return;
+        }
         try {
           await PG.api.updateParent(id, body);
         } catch (e) {
@@ -233,13 +267,23 @@
       if (okBtn.disabled) return;
       const phone = m.el.querySelector("#c-phone").value.trim();
       if (!/^1\d{10}$/.test(phone)) { PG.ui.toast("err", "手机号格式不正确"); return; }
+      const payload = {
+        name: m.el.querySelector("#c-name").value.trim() || "新家长",
+        phone,
+        email: m.el.querySelector("#c-email").value.trim(),
+        plan: m.el.querySelector("#c-plan").value,
+        region: m.el.querySelector("#c-region").value.trim(),
+        remark: m.el.querySelector("#c-remark").value.trim(),
+      };
+      const invalid = validateParentInput(payload);
+      if (invalid) { PG.ui.toast("err", "请检查输入", invalid); return; }
       const label = okBtn.textContent;
       okBtn.disabled = true;
       okBtn.textContent = "创建中…";
       // 新建失败（如手机号已存在）必须显式提示，且弹窗保持打开以便修改重试
       let r;
       try {
-        r = await PG.api.createParent({ name: m.el.querySelector("#c-name").value.trim() || "新家长", phone, email: m.el.querySelector("#c-email").value.trim(), plan: m.el.querySelector("#c-plan").value, region: m.el.querySelector("#c-region").value.trim(), remark: m.el.querySelector("#c-remark").value.trim() });
+        r = await PG.api.createParent(payload);
       } catch (e) {
         PG.ui.toast("err", "创建失败", (e && e.message) || "");
         okBtn.disabled = false;

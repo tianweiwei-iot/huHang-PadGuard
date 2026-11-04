@@ -27,7 +27,7 @@ import com.padguard.parent.presentation.util.TimeFormat
 import com.padguard.parent.presentation.viewmodel.ControlPolicyUiState
 import com.padguard.parent.presentation.viewmodel.ControlPolicyViewModel
 import com.padguard.parent.presentation.viewmodel.FamilyPreset
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.collect
 
 /**
  * 管控策略页（纯家庭场景，四栏：时长 / 应用 / 上网 / 系统）
@@ -45,14 +45,16 @@ fun ControlPolicyScreen(
     val tabs = listOf("时长", "应用", "上网", "系统")
 
     LaunchedEffect(Unit) {
-        viewModel.uiState.collectLatest {
+        // 用 collect 而非 collectLatest：collectLatest 会在下一次 state 变化（哪怕只是
+        // isLoading / 计时变化）时取消正在显示的 showSnackbar —— "保存失败"可能刚弹出就被吞掉。
+        viewModel.uiState.collect { st ->
             // 失败必须可见：此前只消费 toast，而所有写操作失败都落在 error ——
             // 家长以为已下发、孩子端毫无变化，是最不能接受的形态。
-            val msg = it.toast ?: it.error
-            if (msg != null) {
-                snackbarHostState.showSnackbar(msg)
-                if (it.toast != null) viewModel.clearToast() else viewModel.clearError()
-            }
+            val msg = st.toast ?: st.error ?: return@collect
+            snackbarHostState.showSnackbar(msg)
+            // 只清除"刚刚展示的那一条"：展示期间若有新错误到达，不能连它一起清掉
+            val now = viewModel.uiState.value
+            if (now.toast == msg) viewModel.clearToast() else if (now.error == msg) viewModel.clearError()
         }
     }
 

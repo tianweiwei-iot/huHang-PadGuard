@@ -141,7 +141,8 @@ fun ScreenMonitorScreen(
                     fetchingFrame = uiState.fetchingFrame,
                     liveConnected = uiState.liveConnected,
                     liveHint = uiState.liveHint,
-                    updatedAtMillis = uiState.screenshot?.capturedAt,
+                    // "更新于"要跟着画面走：实时帧用帧到达时间，没有实时帧时才回落到上次截屏时间
+                    updatedAtMillis = uiState.liveUpdatedAt.takeIf { it > 0 } ?: uiState.screenshot?.capturedAt,
                     resolutionText = uiState.liveImage?.let { b -> "${b.width}×${b.height}" },
                     isRecording = uiState.isRecording,
                     recordingSeconds = uiState.recordingSeconds,

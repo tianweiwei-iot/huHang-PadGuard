@@ -94,10 +94,25 @@ class ParentPushClient @Inject constructor(
      * 第八轮 P2-7：原实现用 `runBlocking` 读 DataStore（token），阻塞 IO 线程池线程；
      * 且 `@Synchronized` 会在挂起点持锁（DataStore 读取是挂起 IO），高并发重连时可能长时间占住锁。
      * 改为 suspend + Mutex：等价互斥，不阻塞线程，所有调用点本就运行在 [scope] 协程内。
+     *
+     * 第十七轮修正：`disconnect()` / `reconnect()` 原先用 `@Synchronized`（对象监视器），
+     * 与这里的 Mutex 是**两把互不相干的锁**，登出与建连仍能交错：
+     * connect 在读 token 的挂起点上让出线程 → 登出拿到监视器、看到 webSocket 还是 null、
+     * 什么也没关 → connect 醒来后建出一条**已鉴权但无人引用**的连接，永远不会被关闭。
+     * 现在建连、断连、换地址重连**全部串到同一把 Mutex** 上，登出必然能关掉刚建好的连接。
      */
     private val connectMutex = Mutex()
 
-    private suspend fun connect() = connectMutex.withLock {
+    private suspend fun connect() = connectMutex.withLock { openSocketLocked() }
+
+    /** 必须持有 [connectMutex] 才能调用 */
+    private fun closeSocketLocked(reason: String) {
+        webSocket?.close(1000, reason)
+        webSocket = null
+    }
+
+    /** 必须持有 [connectMutex] 才能调用 */
+    private suspend fun openSocketLocked() {
         if (webSocket != null) return
         // 拿到锁后复查 active：登出（disconnect）与退避重连竞态时，
         // 不复查会在登出后仍建立一条已认证连接且无人持有引用去关它。
@@ -120,21 +135,16 @@ class ParentPushClient @Inject constructor(
         // 复位只属于 onOpen —— 连接真正建立才算"恢复健康"。
     }
 
-    @Synchronized
-    private fun disconnect() {
-        webSocket?.close(1000, "logout")
-        webSocket = null
-    }
+    private suspend fun disconnect() = connectMutex.withLock { closeSocketLocked("logout") }
 
-    /** 服务器地址变化：断开旧连接，按新地址重连 */
-    private suspend fun reconnect() {
-        webSocket?.close(1000, "reconnect")
-        webSocket = null
-        connect()
+    /** 服务器地址变化：断开旧连接，按新地址重连（同一把锁内完成，登出不会插到中间） */
+    private suspend fun reconnect() = connectMutex.withLock {
+        closeSocketLocked("reconnect")
+        openSocketLocked()
     }
 
     private fun scheduleReconnect() {
-        synchronized(this) { webSocket = null }
+        // 连接引用由调用方（onFailure）在锁内清空，这里只负责排期
         if (!active) return
         val delayMs = (1000L * (1 shl min(reconnectAttempts, 5))).coerceAtMost(30_000L)
         reconnectAttempts++
@@ -225,12 +235,21 @@ class ParentPushClient @Inject constructor(
             // 身份比对：reconnect() 关旧连 A、建新连 B 后，A 的 onClosed/onFailure 会异步迟到。
             // 无差别置空会把 B 也清掉并再排一次重连（B、C 并存，事件双份，滚雪球）。
             // 只有"死掉的 socket 仍是当前连接"时才清理并排重连。
-            val isCurrent = synchronized(this@ParentPushClient) {
-                (this@ParentPushClient.webSocket === webSocket).also {
-                    if (it) this@ParentPushClient.webSocket = null
+            //
+            // 清理动作必须在 connectMutex 内做：回调线程与 connect() 并发时，
+            // 先判后清（原实现用 synchronized 是另一把锁）会把刚建好的新连接清掉。
+            if (this@ParentPushClient.webSocket !== webSocket) return
+            scope.launch {
+                val cleared = connectMutex.withLock {
+                    if (this@ParentPushClient.webSocket === webSocket) {
+                        this@ParentPushClient.webSocket = null
+                        true
+                    } else {
+                        false
+                    }
                 }
+                if (cleared && active) scheduleReconnect()
             }
-            if (isCurrent && active) scheduleReconnect()
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {

@@ -90,6 +90,14 @@ fun TabletUsageDetailScreen(
             // 1. 周期切换
             item { PeriodSwitcher(uiState.period, viewModel::setPeriod) }
 
+            // 1.1 读取失败 / 加载中提示（原实现两者都不渲染，失败时页面静默停在空数据）
+            uiState.error?.let { message ->
+                item { LoadErrorBar(message = message, onRetry = viewModel::retry) }
+            }
+            if (uiState.isLoading && uiState.report == null && uiState.todayStats == null) {
+                item { LoadingBar() }
+            }
+
             // 2. 顶部圆环
             item { UsageHeaderCard(uiState) }
 
@@ -119,22 +127,24 @@ fun TabletUsageDetailScreen(
     }
 }
 
+// 服务端 weekly / monthly 是"最近 7 / 30 天（含今天）"，不是自然周 / 自然月，
+// 标题写"本周/本月"会让家长误以为窗口从周一起算，故统一改为"近 N 天"。
 private fun currentAppSectionTitle(period: ReportPeriod): String = when (period) {
     ReportPeriod.DAILY -> "今日应用使用记录"
-    ReportPeriod.WEEKLY -> "本周应用使用记录"
-    ReportPeriod.MONTHLY -> "本月应用使用记录"
+    ReportPeriod.WEEKLY -> "近 7 天应用使用记录"
+    ReportPeriod.MONTHLY -> "近 30 天应用使用记录"
 }
 
 private fun currentTrendTitle(period: ReportPeriod): String = when (period) {
     ReportPeriod.DAILY -> "近 7 天趋势"
-    ReportPeriod.WEEKLY -> "本周每日趋势"
-    ReportPeriod.MONTHLY -> "本月每日趋势"
+    ReportPeriod.WEEKLY -> "近 7 天每日趋势"
+    ReportPeriod.MONTHLY -> "近 30 天每日趋势"
 }
 
 private fun currentDailyTitle(period: ReportPeriod): String = when (period) {
     ReportPeriod.DAILY -> "近 7 天每日明细"
-    ReportPeriod.WEEKLY -> "本周每日明细"
-    ReportPeriod.MONTHLY -> "本月每日明细"
+    ReportPeriod.WEEKLY -> "近 7 天每日明细"
+    ReportPeriod.MONTHLY -> "近 30 天每日明细"
 }
 
 private fun currentAppUsages(state: TabletUsageDetailUiState): List<AppUsage> = when (state.period) {
@@ -193,16 +203,34 @@ private fun SectionTitle(text: String) {
 private fun UsageHeaderCard(state: TabletUsageDetailUiState) {
     val usedSeconds = state.totalUsageSeconds
     val limitSeconds = state.periodLimitSeconds.coerceAtLeast(1)
-    val fraction = (usedSeconds.toFloat() / limitSeconds.toFloat()).coerceIn(0f, 1f)
+    // 不限时 / 限额读取失败时不画进度环：0 刻度环会被读成"额度已耗尽"
+    val fraction = if (state.limitApplies) {
+        (usedSeconds.toFloat() / limitSeconds.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
     val periodLabel = when (state.period) {
         ReportPeriod.DAILY -> "今日平板使用情况"
-        ReportPeriod.WEEKLY -> "本周平板使用情况"
-        ReportPeriod.MONTHLY -> "本月平板使用情况"
+        ReportPeriod.WEEKLY -> "近 7 天平板使用情况"
+        ReportPeriod.MONTHLY -> "近 30 天平板使用情况"
     }
     val periodLimitLabel = when (state.period) {
         ReportPeriod.DAILY -> "每日限额"
-        ReportPeriod.WEEKLY -> "本周限额"
-        ReportPeriod.MONTHLY -> "本月限额"
+        ReportPeriod.WEEKLY -> "近 7 天限额"
+        ReportPeriod.MONTHLY -> "近 30 天限额"
+    }
+
+    // 三态文案：限额未知 / 不限时 / 正常剩余或超额
+    val headline = when {
+        !state.limitKnown -> "限额读取失败"
+        !state.limitApplies -> "未开启时间管控"
+        state.overLimit -> "已超出 ${TimeFormat.formatDuration(state.overLimitSeconds)}"
+        else -> "剩余 ${TimeFormat.formatDuration(state.remainingSeconds)}"
+    }
+    val footnote = when {
+        !state.limitKnown -> "剩余时长暂不可用"
+        !state.limitApplies -> "不限时"
+        else -> "$periodLimitLabel ${TimeFormat.formatDuration(limitSeconds)}"
     }
 
     SoftHeroCard(
@@ -249,11 +277,7 @@ private fun UsageHeaderCard(state: TabletUsageDetailUiState) {
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = if (state.overLimit) {
-                        "已超出 ${TimeFormat.formatDuration(state.overLimitSeconds)}"
-                    } else {
-                        "剩余 ${TimeFormat.formatDuration(state.remainingSeconds)}"
-                    },
+                    text = headline,
                     color = Color.White,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
@@ -261,12 +285,49 @@ private fun UsageHeaderCard(state: TabletUsageDetailUiState) {
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "$periodLimitLabel ${TimeFormat.formatDuration(limitSeconds)}",
+                    text = footnote,
                     color = Color.White.copy(alpha = 0.7f),
                     style = MaterialTheme.typography.bodySmall
                 )
             }
         }
+    }
+}
+
+/** 读取失败提示条：给出可点的重试入口，避免页面静默停在空数据。 */
+@Composable
+private fun LoadErrorBar(message: String, onRetry: () -> Unit) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.errorContainer
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = message,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+            TextButton(onClick = onRetry) { Text("重试") }
+        }
+    }
+}
+
+@Composable
+private fun LoadingBar() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
     }
 }
 

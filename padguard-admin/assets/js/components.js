@@ -251,9 +251,22 @@
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
 
+  /**
+   * 本地日期戳 yyyy-MM-dd（用于导出文件名）。
+   *
+   * 不能用 `new Date().toISOString().slice(0, 10)`：那是 **UTC** 日期。
+   * 东八区 00:00–07:59 之间导出，文件名会是"昨天"，跟报表内容、跟界面上显示的
+   * 时间对不上，运营对账时按文件名归档会归错天。
+   */
+  function todayStamp(d) {
+    const t = d instanceof Date ? d : new Date();
+    const p = (n) => (n < 10 ? "0" + n : "" + n);
+    return t.getFullYear() + "-" + p(t.getMonth() + 1) + "-" + p(t.getDate());
+  }
+
   PG.ui = {
     esc, money, moneyK, pct, fmtMinutes, toast, modal, drawer, confirm, bind,
     badge, PARENT_STATUS, SUB_STATUS, ORDER_STATUS,
-    donut, line, bar, sparkline, pager, downloadCsv,
+    donut, line, bar, sparkline, pager, downloadCsv, todayStamp,
   };
 })(window);

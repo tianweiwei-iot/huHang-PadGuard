@@ -54,6 +54,13 @@ data class ScreenMonitorUiState(
     val settingsDirty: Boolean = false,
     val screenshot: ScreenshotData? = null,
     val liveImage: Bitmap? = null,
+    /**
+     * 最近一帧**实时画面**的到达时间（本机墙钟，毫秒）。
+     *
+     * 与 [ScreenshotData.capturedAt] 是两件事：后者是"上次截屏"的时间，
+     * 拿它当"更新于"会让家长在连续看流时看到几小时前的旧时间，误判画面是否还在动。
+     */
+    val liveUpdatedAt: Long = 0L,
     /** 实时流是否已建立（已收到至少一帧） */
     val liveConnected: Boolean = false,
     val fetchingFrame: Boolean = false,
@@ -144,14 +151,23 @@ class ScreenMonitorViewModel @Inject constructor(
         if (deviceId.isBlank()) return
         liveJob?.cancel()
         liveJob = viewModelScope.launch {
+            // 连续"没出画"的次数：用来做指数退避，避免平板离线时每 5 秒一次开流
+            // （一小时 720 次）把服务端和孩子端一起打满。
+            var noFrameAttempts = 0
             while (coroutineContext.isActive) {
                 _uiState.value = _uiState.value.copy(fetchingFrame = true)
                 monitorRepository.startLiveView(deviceId).onFailure { e ->
-                    _uiState.value = _uiState.value.copy(
-                        liveConnected = false,
-                        fetchingFrame = false,
-                        toast = "开启实时画面失败：${e.message ?: "未知错误"}"
-                    )
+                    val reason = e.message ?: "未知错误"
+                    if (noFrameAttempts == 0) {
+                        // 第一次失败给 toast；后续重试只更新占位文案，否则会每轮弹一次
+                        _uiState.value = _uiState.value.copy(
+                            liveConnected = false,
+                            fetchingFrame = false,
+                            toast = "开启实时画面失败：$reason"
+                        )
+                    } else {
+                        _uiState.value = _uiState.value.copy(liveHint = "开启实时画面失败：$reason（自动重连中）")
+                    }
                 }
 
                 // 续期：孩子端推流有 TTL，这里在观看期间持续续命
@@ -195,18 +211,22 @@ class ScreenMonitorViewModel @Inject constructor(
                     monitorRepository.liveFrames(deviceId)
                         .onStart { _uiState.value = _uiState.value.copy(fetchingFrame = true) }
                         .catch { e ->
+                            // 断流原因写进 liveHint（页面已渲染）而不是 error（页面从不渲染）：
+                            // 原来断流后家长只看到"等待平板上传实时画面"，以为是平板的问题。
                             _uiState.value = _uiState.value.copy(
                                 liveConnected = false,
                                 fetchingFrame = false,
-                                error = "实时画面中断：${e.message ?: "网络异常"}"
+                                liveHint = "实时画面中断：${e.message ?: "网络异常"}（自动重连中）"
                             )
                         }
                         .onCompletion { keepAlive.cancel(); firstFrameHint.cancel(); bandwidthPoller.cancel() }
                         .collect { bitmap ->
                             gotFrame = true
+                            noFrameAttempts = 0
                             firstFrameHint.cancel()
                             _uiState.value = _uiState.value.copy(
                                 liveImage = bitmap,
+                                liveUpdatedAt = System.currentTimeMillis(),
                                 liveConnected = true,
                                 fetchingFrame = false,
                                 liveHint = null,
@@ -227,8 +247,16 @@ class ScreenMonitorViewModel @Inject constructor(
                 )
                 // 正常退出页面 / 被主动停止：不再重连
                 if (!coroutineContext.isActive) break
-                // 断流后短暂等待再重连，避免孩子端离线时空转刷屏
-                delay(if (gotFrame) LIVE_RECONNECT_MS else LIVE_RETRY_MS)
+                // 出过画后再断：1.5s 快速重连（多半是网络抖动，家长几乎无感）
+                if (gotFrame) {
+                    noFrameAttempts = 0
+                    delay(LIVE_RECONNECT_MS)
+                } else {
+                    // 一直没出画：多半是平板离线 / 未授权采集，指数退避（3→6→12→24→48→60s 封顶），
+                    // 避免每 5 秒发一次 startLiveView 空转。
+                    noFrameAttempts++
+                    delay(reconnectDelayMs(noFrameAttempts))
+                }
             }
         }
     }
@@ -236,6 +264,8 @@ class ScreenMonitorViewModel @Inject constructor(
     /** 手动重连实时画面（占位态下家长可主动触发）。 */
     fun refreshScreenshot() {
         if (deviceId.isBlank()) return
+        // 手动重连要立刻给反馈：清掉上一次的断流原因，页面回到"正在连接…"
+        _uiState.value = _uiState.value.copy(liveHint = null, fetchingFrame = true)
         startLiveStream()
     }
 
@@ -316,6 +346,7 @@ class ScreenMonitorViewModel @Inject constructor(
                     _uiState.value = _uiState.value.copy(
                         screenshot = shot,
                         liveImage = bitmap,
+                        liveUpdatedAt = System.currentTimeMillis(),
                         screenshotHistory = history,
                         fetchingFrame = false,
                         toast = "截屏已保存到相册（Pictures/PadGuard）"
@@ -325,6 +356,7 @@ class ScreenMonitorViewModel @Inject constructor(
                     _uiState.value = _uiState.value.copy(
                         screenshot = shot,
                         liveImage = bitmap,
+                        liveUpdatedAt = System.currentTimeMillis(),
                         screenshotHistory = history,
                         fetchingFrame = false,
                         toast = "画面已更新，保存到相册失败：${e.message}"
@@ -556,6 +588,16 @@ class ScreenMonitorViewModel @Inject constructor(
             out.toByteArray()
         }
 
+    /**
+     * 无画面时的重连等待：3s 起步、每次翻倍、60s 封顶。
+     *
+     * 平板离线一小时的开流次数因此从 720 次降到约 65 次，且平板一上线最迟 60s 内就能自动接上。
+     */
+    private fun reconnectDelayMs(attempt: Int): Long {
+        val shift = (attempt - 1).coerceIn(0, 5)
+        return (LIVE_RETRY_BASE_MS shl shift).coerceAtMost(LIVE_RETRY_MAX_MS)
+    }
+
     private companion object {
         /** 截屏历史在端上保留的最大条数。 */
         const val MAX_SCREENSHOT_HISTORY = 20
@@ -580,7 +622,10 @@ class ScreenMonitorViewModel @Inject constructor(
         const val SCREENSHOT_POLL_TIMES = 20
         const val SCREENSHOT_POLL_INTERVAL_MS = 2_000L
 
-        /** 从未出画（孩子端离线/未就绪）时的重试等待 */
-        const val LIVE_RETRY_MS = 5_000L
+        /** 从未出画（孩子端离线/未就绪）时的首次重试等待，之后按 2 的幂退避 */
+        const val LIVE_RETRY_BASE_MS = 3_000L
+
+        /** 退避上限：平板长时间离线时也要保证"一上线就能在 1 分钟内接上" */
+        const val LIVE_RETRY_MAX_MS = 60_000L
     }
 }
