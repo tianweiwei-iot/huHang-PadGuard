@@ -326,15 +326,17 @@ interface UsageSessionRepository : JpaRepository<UsageSession, String> {
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query(
         """
-        update UsageSession u set u.extendedMinutes = u.extendedMinutes + :minutes,
+        update UsageSession u set u.extendedMinutes = coalesce(u.extendedMinutes, 0) + :minutes,
             u.lastDelayEpoch = :now, u.updatedAt = :now
         where u.deviceId = :deviceId
+          and coalesce(u.extendedMinutes, 0) + :minutes <= :maxExtendedMinutes
         """
     )
     fun addExtendedMinutes(
         @Param("deviceId") deviceId: String,
         @Param("minutes") minutes: Int,
-        @Param("now") now: Long
+        @Param("now") now: Long,
+        @Param("maxExtendedMinutes") maxExtendedMinutes: Int
     ): Int
 }
 

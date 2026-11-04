@@ -75,8 +75,12 @@ fun AppManageScreen(
     }
 
     LaunchedEffect(Unit) {
-        viewModel.uiState.collectLatest {
-            if (it.toast != null) { snackbarHostState.showSnackbar(it.toast); viewModel.clearToast() }
+        // 同 DeviceDetailScreen：collectLatest 会在勾选/取消任意应用造成的状态刷新时
+        // 取消正在展示的 Snackbar，导致"应用已隐藏""操作失败"这类反馈一闪而过或根本不出现。
+        viewModel.uiState.collect { s ->
+            val msg = s.toast ?: return@collect
+            snackbarHostState.showSnackbar(msg)
+            if (viewModel.uiState.value.toast == msg) viewModel.clearToast()
         }
     }
 

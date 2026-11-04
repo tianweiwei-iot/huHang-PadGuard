@@ -5,15 +5,23 @@ import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.db.AppUsageDao
 import com.padguard.core.data.db.DailyUsageDao
 import com.padguard.core.data.model.policy.AppLimitPolicy
+import com.padguard.core.data.model.policy.AppLimitRule
+import com.padguard.core.data.model.policy.DayType
 import com.padguard.core.data.repository.UsageRepository
+import com.padguard.core.engine.schedule.HolidayProvider
 import com.padguard.core.engine.schedule.ScheduleEvaluator
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.util.TimeZone
 
 /**
  * [AppLimitEnforcer] 护眼休息期间跳过本地累计的 JVM 行为测试。
@@ -65,6 +73,54 @@ class AppLimitEnforcerTest {
     // （repo.totalUsageCalls / repo.appUsageCalls）。
     // 结果是这两个死方法连同缺失的 import 让 `:core:engine` 的**整个测试源码集编译失败**，
     // 本模块所有单元测试从未真正跑过。删除后测试源码即可编译、用例开始生效。
+
+    /**
+     * 回归：规则适用性的「今天」必须与用量分桶同一口径（Asia/Shanghai），不能取设备时区。
+     *
+     * 构造：JVM 默认时区设成 UTC，时间取北京时间周六 00:30（= UTC 周五 16:30），
+     * 规则只在周末生效，且提醒阈值（60 分钟）大于当日额度（30 分钟）——
+     * 于是"规则是否生效"直接体现在返回值上：生效必然 Warning，不生效必然 Allowed。
+     * 修复前用 systemDefault 判成「周五」，周六 00:00–08:00 的周末规则完全不生效。
+     */
+    @Test
+    fun `rule applicability follows the usage day bucket instead of the device timezone`() = runBlocking {
+        val originalTz = TimeZone.getDefault()
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+            elapsed = 0L
+            wall = ZonedDateTime.of(2026, 11, 7, 0, 30, 0, 0, ZoneId.of("Asia/Shanghai"))
+                .toInstant().toEpochMilli()
+            val evaluator = ScheduleEvaluator(
+                timeProvider,
+                object : HolidayProvider {
+                    override fun isHoliday(date: LocalDate) = false
+                    override fun isWorkdayOverride(date: LocalDate) = false
+                }
+            )
+            val enforcer = AppLimitEnforcer(repo, timeProvider, evaluator)
+            val verdict = enforcer.evaluate(
+                AppLimitPolicy(
+                    reminderMinutes = listOf(60),
+                    rules = listOf(
+                        AppLimitRule(
+                            packageName = "com.game",
+                            dailyMinutes = 30,
+                            dayTypes = listOf(DayType.WEEKEND)
+                        )
+                    )
+                ),
+                "com.game"
+            )
+            assertTrue(
+                "北京时间周六 00:30 必须按周六判定（额度规则应生效），实际：$verdict",
+                verdict is LimitVerdict.Warning
+            )
+            // JUnit4 要求 @Test 方法返回 void；runBlocking 会返回 lambda 最后一个表达式的类型
+            Unit
+        } finally {
+            TimeZone.setDefault(originalTz)
+        }
+    }
 
     @Test
     fun `normal screen-on ticks accumulate usage`() = runBlocking {

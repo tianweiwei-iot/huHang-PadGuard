@@ -76,7 +76,9 @@ class PolicyVersionConcurrencyTest {
             pool.submit {
                 try {
                     start.await()
-                    policyService.applyMode(deviceId, if (i % 2 == 0) "DO" else "NORMAL")
+                    // 模式值必须是 applyMode 白名单内的合法值（NORMAL/LEARNING/FOCUS）：
+                    // 本用例只关心版本号分配是否并发安全，不需要非法输入
+                    policyService.applyMode(deviceId, if (i % 2 == 0) "FOCUS" else "NORMAL")
                 } catch (e: Throwable) {
                     errors.add(e)
                 } finally {

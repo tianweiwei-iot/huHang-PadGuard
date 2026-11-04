@@ -65,6 +65,10 @@ fun MainScreen(
     )
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    // 导航图里「设备」注册的是带参路由 `devices?openAccess={openAccess}`，
+    // 直接拿它和 `"devices"` 比永远不会相等 —— 结果是进入设备页后底栏没有任何一项高亮。
+    // 比较时先剥掉查询串，拿到真正的目的地。
+    val currentRouteBase = currentRoute?.substringBefore('?')
 
     Scaffold(
         containerColor = Color.Transparent,
@@ -75,7 +79,7 @@ fun MainScreen(
             ) {
                 items.forEach { item ->
                     NavigationBarItem(
-                        selected = currentRoute == item.route,
+                        selected = currentRouteBase == item.route,
                         onClick = {
                             // 起始页（首页）不能走 saveState/restoreState：
                             // 实测经过「接入新设备」流程后，restoreState 会在起始目的地上

@@ -1,8 +1,10 @@
 package com.padguard.child.usagesession
 
+import android.content.Context
 import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.repository.AuthRepository
+import com.padguard.core.data.repository.UsageRepository
 import com.padguard.core.transport.http.CredentialStore
 import com.padguard.core.engine.lock.LockController
 import com.padguard.core.engine.lock.LockDetail
@@ -10,6 +12,7 @@ import com.padguard.core.engine.lock.LockReason
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.http.ApiResult
 import com.padguard.core.transport.http.UsageSessionDto
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -48,7 +51,9 @@ class UsageSessionManager @Inject constructor(
     private val timeProvider: TimeProvider,
     private val lockController: LockController,
     private val authRepository: AuthRepository,
-    private val credentials: CredentialStore
+    private val credentials: CredentialStore,
+    private val usageRepository: UsageRepository,
+    @ApplicationContext appContext: Context
 ) {
 
     data class UiState(
@@ -103,6 +108,13 @@ class UsageSessionManager @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val refreshMutex = Mutex()
+
+    /** 最近一次权威会话的落盘副本，用于进程重启 / 离线冷启动时恢复"今日已用" */
+    private val sessionPrefs = appContext.getSharedPreferences(PREFS_SESSION, Context.MODE_PRIVATE)
+
+    init {
+        restorePersistedSession()
+    }
 
     /**
      * 拉取当前会话并刷新 UI 状态。
@@ -233,8 +245,99 @@ class UsageSessionManager @Inject constructor(
         baselineRemainingMs = 0L
         baselineElapsedRealtime = 0L
         _state.value = UiState()
+        // 落盘副本必须一起清掉：解绑后换一个家庭重新绑定，若沿用上一家的"今日剩余"，
+        // 新家长的额度会被旧家庭的进度直接吃掉（甚至一绑上就是"已用完"）。
+        runCatching { sessionPrefs.edit().clear().apply() }
         // 若早期因会话到期锁过屏，这里把 DAILY_LIMIT 原因释放掉（新一轮 tick 也会由 syncAutoReasons 兜底）
         lockController.releaseLock(LockReason.DAILY_LIMIT)
+    }
+
+    /**
+     * 把权威会话落盘一份「可离线恢复」的快照。
+     *
+     * ## 为什么必须落盘
+     * 会话原先只活在内存 StateFlow 里，而 [isExpired] 在 `active == false` 时恒返回 false：
+     * 孩子把当日额度用到耗尽，再开飞行模式并重启进程，[refresh] 必然失败，
+     * 状态停在默认值 → [com.padguard.core.engine.PolicyEngine.tick] 拿到的 `dailyLimitExpired`
+     * 永远是 false → **当日总时长管控整天消失**，连「计时开始」确认浮层都不会弹
+     * （`needsStartConfirm` 默认也是 false）。这是"断网即解除管控"级别的一类漏洞。
+     *
+     * 落盘后即使完全离线，重启也能按「上次已知剩余 − 已流逝时间」继续判到期：
+     * 恢复值只会让设备更早锁屏，联网后第一帧服务端权威值就会把它纠正回来。
+     */
+    private fun persistSession(dto: UsageSessionDto) {
+        runCatching {
+            sessionPrefs.edit()
+                .putString(KEY_DAY, dto.dayKey)
+                .putBoolean(KEY_ACTIVE, dto.active)
+                .putLong(KEY_REMAINING, dto.remainingMs)
+                .putLong(KEY_SERVER_NOW, dto.serverNow)
+                .putLong(KEY_ELAPSED, android.os.SystemClock.elapsedRealtime())
+                .putInt(KEY_QUOTA, dto.quotaMinutes)
+                .putInt(KEY_EXTENDED, dto.extendedMinutes)
+                .putBoolean(KEY_TIME_CONTROL, dto.timeControlEnabled)
+                // apply 而非 commit：这是"尽力而为"的副本，不能阻塞采样线程
+                .apply()
+        }
+    }
+
+    /**
+     * 冷启动恢复上次落盘的会话（构造期调用，早于任何一次网络请求）。
+     *
+     * 只恢复**当天**快照：跨日的剩余额度是另一个数字，沿用会让新的一天一开机就"已用完"。
+     */
+    private fun restorePersistedSession() {
+        runCatching {
+            val savedDay = sessionPrefs.getString(KEY_DAY, null) ?: return
+            // 两侧格式不同、口径相同：服务端下发 ISO（2026-11-04），
+            // 本地 UsageRepository.dayKey() 是紧凑格式（20261104），必须归一化后再比，
+            // 否则永远不相等 —— 快照会被每次启动都当成"跨日"清掉，等于没落盘。
+            if (savedDay.filter { it.isDigit() } != usageRepository.dayKey()) {
+                sessionPrefs.edit().clear().apply()
+                return
+            }
+            // 未激活（今日还没确认开始计时）不需要恢复：保持默认态，由确认流程正常起表。
+            if (!sessionPrefs.getBoolean(KEY_ACTIVE, false)) return
+
+            val savedRemaining = sessionPrefs.getLong(KEY_REMAINING, 0L)
+            val savedServerNow = sessionPrefs.getLong(KEY_SERVER_NOW, 0L)
+            val savedElapsed = sessionPrefs.getLong(KEY_ELAPSED, 0L)
+            val nowElapsed = android.os.SystemClock.elapsedRealtime()
+
+            // 两种推进量取大者：
+            // ① 单调时钟差 —— 进程被杀重启后仍然连续（含深睡），是首选；
+            // ② 墙钟差 —— 设备重启会让 elapsedRealtime 归零，此时①退化为 0，必须靠②补齐停机时间。
+            // 取大是刻意的（与 [liveRemainingMs] 的"宁可多算不可少算"同向）：
+            // 少算等于白送额度，多算最多提前锁屏，且联网后立刻被服务端权威值纠正。
+            val advancedElapsed = (nowElapsed - savedElapsed).coerceAtLeast(0L)
+            val advancedWall = (timeProvider.now() - savedServerNow).coerceAtLeast(0L)
+            val advance = maxOf(advancedElapsed, advancedWall)
+            val remaining = (savedRemaining - advance).coerceAtLeast(0L)
+
+            val defaults = UiState()
+            val quota = sessionPrefs.getInt(KEY_QUOTA, 0)
+            val extended = sessionPrefs.getInt(KEY_EXTENDED, 0)
+            baselineServerNow = savedServerNow + advance
+            baselineRemainingMs = remaining
+            baselineElapsedRealtime = nowElapsed
+            _state.value = defaults.copy(
+                // 不弹"计时开始"浮层：这是恢复态，不是新的开始
+                needsStartConfirm = false,
+                active = true,
+                serverNow = baselineServerNow,
+                remainingMs = remaining,
+                countdownActive = remaining <= defaults.countdownThresholdMs,
+                extendedMinutes = extended,
+                quotaMinutes = quota + extended,
+                // 起点未落盘（恢复态只需剩余量），留空不影响任何判定
+                startEpoch = null,
+                timeControlEnabled = sessionPrefs.getBoolean(KEY_TIME_CONTROL, true)
+            )
+            Logger.i(TAG) {
+                "usage-session restored: remainingMs=$remaining advance=$advance " +
+                    "(elapsed=$advancedElapsed wall=$advancedWall)"
+            }
+        }
     }
 
     /** 把服务端会话 DTO 落到本地状态与平滑倒计时基线 */
@@ -243,6 +346,8 @@ class UsageSessionManager @Inject constructor(
         baselineRemainingMs = dto.remainingMs
         // 与权威剩余同帧记录单调时钟读数（见 liveRemainingMs 注释：本地推进量不能用墙钟）
         baselineElapsedRealtime = android.os.SystemClock.elapsedRealtime()
+        // 落盘一份快照：断网 / 进程被杀后仍能按"上次已知剩余"继续判到期（见 persistSession）
+        persistSession(dto)
         val countdownActive = dto.active && dto.remainingMs <= dto.countdownThresholdMs
         _state.update { s ->
             s.copy(
@@ -274,5 +379,17 @@ class UsageSessionManager @Inject constructor(
 
     companion object {
         private const val TAG = "UsageSessionMgr"
+
+        /** 会话快照专用的 prefs 文件（解绑时整体清空，不能与凭据等共用） */
+        private const val PREFS_SESSION = "usage_session_snapshot"
+
+        private const val KEY_DAY = "day"
+        private const val KEY_ACTIVE = "active"
+        private const val KEY_REMAINING = "remaining_ms"
+        private const val KEY_SERVER_NOW = "server_now"
+        private const val KEY_ELAPSED = "saved_elapsed"
+        private const val KEY_QUOTA = "quota_minutes"
+        private const val KEY_EXTENDED = "extended_minutes"
+        private const val KEY_TIME_CONTROL = "time_control_enabled"
     }
 }

@@ -1,6 +1,8 @@
 package com.padguard.server.service
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.padguard.server.common.BizException
+import com.padguard.server.common.ParentErr
 import com.padguard.server.domain.Policy
 import com.padguard.server.dto.MinorModeRequest
 import com.padguard.server.mqtt.MqttGateway
@@ -24,6 +26,14 @@ import java.util.UUID
  * 单位与取值区间须与孩子端 `MonitoringEnforcer` 的收敛逻辑（60~7200 秒）一致。
  */
 const val DEFAULT_LOCATION_INTERVAL_SEC = 300
+
+/**
+ * 合法的场景模式集合（与家长端 `ControlMode` 枚举逐字对应）。
+ *
+ * 只在这里定义一次：`applyMode` 是唯一写 `devices.scene_mode` 的入口，
+ * 而该列是 VARCHAR(20)，放任意字符串进来既可能撞列宽（500），也可能写入孩子端无法识别的值。
+ */
+val SCENE_MODES: Set<String> = setOf("NORMAL", "LEARNING", "FOCUS")
 
 /**
  * 分龄档位的合规默认值（服务端侧唯一事实源）。
@@ -150,7 +160,12 @@ class PolicyService(
             }
         }.onFailure { /* 设备记录缺失时不影响策略下发 */ }
 
-        mqttGateway.publishPolicyNotify(deviceId, newVersion)
+        // 通知必须在提交之后才发：同步 MQTT 发布留在事务里，Broker 不在线时
+        // 家长改个模式会直接变成"保存失败"，而且 devices 行锁要等到 PUBACK 才释放。
+        afterCommit {
+            runCatching { mqttGateway.publishPolicyNotify(deviceId, newVersion) }
+                .onFailure { log.warn("policy notify failed device={} v={}: {}", deviceId, newVersion, it.message) }
+        }
         return newVersion
     }
 
@@ -219,6 +234,14 @@ class PolicyService(
      */
     @Transactional
     fun applyMode(deviceId: String, mode: String): Int {
+        // 白名单校验：device.scene_mode 是 VARCHAR(20)，而 mode 直接从请求体透传。
+        // 超长值会撞列宽变 500（策略行已插入新版本号），非法短值则会静默落库，
+        // 孩子端拿到无法识别的 sceneMode 后回退默认包 —— 家长端显示"专注模式"、
+        // 实际执行的是默认策略，这种"显示与生效不一致"最难排查。
+        val normalized = mode.trim().uppercase()
+        if (normalized !in SCENE_MODES) {
+            throw BizException(ParentErr.PARAM_ERROR, "不支持的场景模式：$mode")
+        }
         val policy = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)
             ?: run { createDefault(deviceId); policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)!! }
 
@@ -226,7 +249,7 @@ class PolicyService(
             objectMapper.readValue(policy.packageJson, Map::class.java) as MutableMap<String, Any?>
         } else mutableMapOf()
 
-        base["sceneMode"] = mode
+        base["sceneMode"] = normalized
         val newVersion = PolicyVersions.allocate(deviceId, deviceRepository, policyRepository, log)
         policyRepository.save(
             Policy(
@@ -237,8 +260,8 @@ class PolicyService(
         )
         //  把选中模式同步到 device.sceneMode，作为该设备管控模式的唯一事实源。
         deviceRepository.findById(deviceId).orElse(null)?.let { dev ->
-            if (dev.sceneMode != mode) {
-                dev.sceneMode = mode
+            if (dev.sceneMode != normalized) {
+                dev.sceneMode = normalized
                 deviceRepository.save(dev)
             }
         }

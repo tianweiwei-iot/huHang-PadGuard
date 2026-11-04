@@ -438,12 +438,38 @@ data class UsageSession(
     /** 最近一次延时申请的服务端墙钟 */
     val lastDelayEpoch: Long? = null,
     /** 当前等待家长审批的延时分钟数（>0 表示孩子已提交、家长尚未处理） */
-    val pendingDelayMinutes: Int = 0
+    val pendingDelayMinutes: Int = 0,
+    /**
+     * 本端**收到**该快照那一刻的单调时钟读数（SystemClock.elapsedRealtime，毫秒）。
+     * 0 表示未记录，此时 [liveRemainingMsAt] 退回墙钟算法。
+     */
+    val receivedAtElapsedMs: Long = 0L
 ) {
-    /** 以本地墙钟 [now] 平滑插值，得到与家长端/孩子端一致的实时剩余毫秒（永不为负） */
+    /**
+     * 以本地墙钟 [now] 平滑插值，得到实时剩余毫秒（永不为负）。
+     *
+     * ⚠️ 这里把「家长手机的墙钟」和「服务端墙钟 serverNow」直接相减，是两个时钟源混用：
+     * 手机时间不准时误差会原样变成倒计时误差（手机快 10 分钟 → 一进页面就少 10 分钟，
+     * 甚至直接显示 00:00，家长可能因此误批延时）。界面请改用 [liveRemainingMsAt]。
+     */
     fun liveRemainingMs(now: Long): Long {
         val remaining = remainingMs - (now - serverNow)
         return if (remaining > 0L) remaining else 0L
+    }
+
+    /**
+     * 以**单调时钟**推进的实时剩余（推荐）。
+     *
+     * 与孩子端 `UsageSessionManager.liveRemainingMs` 同口径：推进量取本机单调时钟差值，
+     * 不受手机时钟偏差影响，也无法被倒拨。未记录基线时退回墙钟算法，行为不劣于旧实现。
+     */
+    fun liveRemainingMsAt(nowElapsedRealtime: Long): Long {
+        val advance = if (receivedAtElapsedMs > 0L) {
+            (nowElapsedRealtime - receivedAtElapsedMs).coerceAtLeast(0L)
+        } else {
+            (System.currentTimeMillis() - serverNow).coerceAtLeast(0L)
+        }
+        return (remainingMs - advance).coerceAtLeast(0L)
     }
 }
 

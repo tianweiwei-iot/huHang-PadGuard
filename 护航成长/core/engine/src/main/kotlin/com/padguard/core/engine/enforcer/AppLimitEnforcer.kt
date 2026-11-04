@@ -7,8 +7,8 @@ import com.padguard.core.data.model.policy.AppLimitRule
 import com.padguard.core.data.model.policy.DayType
 import com.padguard.core.data.repository.UsageRepository
 import com.padguard.core.engine.schedule.ScheduleEvaluator
-import java.time.Instant
-import java.time.ZoneId
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -146,7 +146,7 @@ class AppLimitEnforcer @Inject constructor(
 
         val pkg = foregroundPackage ?: return LimitVerdict.Allowed
         val rule = policy.rules.firstOrNull { it.packageName == pkg } ?: return LimitVerdict.Allowed
-        if (!ruleAppliesToday(rule)) return LimitVerdict.Allowed
+        if (!ruleAppliesToday(rule, dayKey)) return LimitVerdict.Allowed
 
         val stat = usageRepository.getAppUsage(pkg, dayKey)
         val usedMs = stat?.usedMs ?: 0L
@@ -218,9 +218,16 @@ class AppLimitEnforcer @Inject constructor(
      *
      * 复用 [ScheduleEvaluator.dayTypeOf] 而不是自己判周末：节假日/调休的判定逻辑
      * 必须与时段锁机完全一致，否则会出现"时段锁按节假日放行、限额却按工作日计算"的错乱。
+     *
+     * ## 为什么日期取自 dayKey 而不是重新算一次
+     * 用量分桶用的 [UsageRepository.dayKey] 钉死了 Asia/Shanghai，而这里早期用
+     * `ZoneId.systemDefault()` 取 `LocalDate` —— 同一函数里两套日界。
+     * 设备时区被改成非东八区（孩子改时区是常规绕过手段，非 DO 设备拦不住）时，
+     * 「仅周末可用」的规则会在周六 00:00–08:00 完全不生效（设备本地还是周五），
+     * 等到 08:00 才突然开始拦。直接解析 dayKey 可保证"判定按哪一天"与"用量记在哪一天"永远同一口径。
      */
-    private fun ruleAppliesToday(rule: AppLimitRule): Boolean {
-        val today = Instant.ofEpochMilli(timeProvider.now()).atZone(ZoneId.systemDefault()).toLocalDate()
+    private fun ruleAppliesToday(rule: AppLimitRule, dayKey: String): Boolean {
+        val today = parseDayKey(dayKey) ?: return false
         val dayType = scheduleEvaluator.dayTypeOf(today)
         if (dayType in rule.dayTypes) return true
         // 与 ScheduleEvaluator 保持一致：未单独配置节假日时退化按周末处理
@@ -228,15 +235,15 @@ class AppLimitEnforcer @Inject constructor(
     }
 
     /**
-     * 今天是否按"周末"额度计算。
+     * 解析用量分桶的 dayKey。
      *
-     * 复用 [ScheduleEvaluator.dayTypeOf] 与时段锁机共用同一套节假日/调休判定，
-     * 避免出现"时段锁按节假日放行、总时长却按工作日额度卡死"的错乱。
+     * 必须同时接受两种写法：`UsageRepository.dayKey()` 产出的是紧凑格式（20261107），
+     * 而服务端会话下发的是 ISO（2026-11-07）。只认一种会让"今天适用哪条规则"恒判空 ——
+     * 表现就是所有单应用限额静默失效（比原来按设备时区判更糟）。
      */
-    private fun isWeekend(nowWall: Long): Boolean {
-        val today = Instant.ofEpochMilli(nowWall).atZone(ZoneId.systemDefault()).toLocalDate()
-        return scheduleEvaluator.dayTypeOf(today) == DayType.WEEKEND
-    }
+    private fun parseDayKey(dayKey: String): LocalDate? =
+        runCatching { LocalDate.parse(dayKey) }.getOrNull()
+            ?: runCatching { LocalDate.parse(dayKey, DateTimeFormatter.BASIC_ISO_DATE) }.getOrNull()
 
     /**
      * 计算本次采样的有效增量。

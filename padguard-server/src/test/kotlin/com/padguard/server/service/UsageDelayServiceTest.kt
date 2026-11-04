@@ -212,6 +212,52 @@ class UsageDelayServiceTest {
         ) { service.approve("user-1", "device-1", ticket.id, UsageDelayApproveRequest()) }
     }
 
+    @Test
+    @DisplayName("跨日工单：即使今天已起表，也不得把昨天的申请批到今天的额度上")
+    fun `approve rejects a ticket created on a previous day even if today session is active`() {
+        // 今天是激活的会话（孩子今天已经起过表 / 零点自动开始），这正是旧实现漏判的前提：
+        // 旧逻辑只判 `session.dayKey == today`，于是这里会直接放行。
+        assertThat(sessionRepo.table["device-1"]!!.dayKey).isEqualTo(today)
+        delayRepo.table["dl_old"] = UsageDelayTicket(
+            id = "dl_old",
+            deviceId = "device-1",
+            userId = "user-1",
+            minutes = 30,
+            status = "PENDING",
+            // 24 小时前 = 昨天（Asia/Shanghai 无夏令时，减 24h 必落在前一天）
+            createdAt = Instant.now().minusSeconds(86_400L).toEpochMilli()
+        )
+
+        org.junit.jupiter.api.Assertions.assertThrows(com.padguard.server.common.BizException::class.java) {
+            service.approve("user-1", "device-1", "dl_old", UsageDelayApproveRequest())
+        }
+
+        assertThat(sessionRepo.table["device-1"]!!.extendedMinutes).isZero()
+        assertThat(delayRepo.table["dl_old"]!!.status).isEqualTo("REJECTED")
+    }
+
+    @Test
+    @DisplayName("单日延时上限作为写条件：超限的批准必须失败且额度不变")
+    fun `approve fails when the daily extension cap would be exceeded`() {
+        // 已批准 100 分钟，再批 30 → 130 > 120。`request` 的额度检查是读-判-写，
+        // 两条工单并发提交时都能通过；只有把上限写进 UPDATE 的 WHERE 才拦得住。
+        sessionRepo.table["device-1"]!!.extendedMinutes = 100
+        delayRepo.table["dl_big"] = UsageDelayTicket(
+            id = "dl_big",
+            deviceId = "device-1",
+            userId = "user-1",
+            minutes = 30,
+            status = "PENDING",
+            createdAt = System.currentTimeMillis()
+        )
+
+        org.junit.jupiter.api.Assertions.assertThrows(com.padguard.server.common.BizException::class.java) {
+            service.approve("user-1", "device-1", "dl_big", UsageDelayApproveRequest())
+        }
+
+        assertThat(sessionRepo.table["device-1"]!!.extendedMinutes).isEqualTo(100)
+    }
+
     // ---- 构造一个仅用于校验 pending 透传的 UsageSessionService（复用同一组 fake） ----
     private fun buildSessionService(): UsageSessionService {
         val deviceSettingRepo = mock(com.padguard.server.repository.DeviceSettingRepository::class.java)
@@ -315,9 +361,12 @@ class FakeUsageSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSes
         return before - table.size
     }
 
-    // 对应 UsageSessionRepository.addExtendedMinutes 的条件自增（额度累加不再读改写）
-    override fun addExtendedMinutes(deviceId: String, minutes: Int, now: Long): Int {
+    // 对应 UsageSessionRepository.addExtendedMinutes 的条件自增（额度累加不再读改写）。
+    // 单日上限也作为写条件：影响 0 行 = 已到顶，语义必须与 SQL 逐字对齐，
+    // 否则「并发批准顶穿上限」这条防线在测试里永远是绿的。
+    override fun addExtendedMinutes(deviceId: String, minutes: Int, now: Long, maxExtendedMinutes: Int): Int {
         val s = table[deviceId] ?: return 0
+        if (s.extendedMinutes + minutes > maxExtendedMinutes) return 0
         s.extendedMinutes += minutes
         s.lastDelayEpoch = now
         s.updatedAt = now

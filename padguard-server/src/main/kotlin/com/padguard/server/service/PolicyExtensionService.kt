@@ -455,7 +455,20 @@ class PolicyExtensionService(
                 updatedAt = System.currentTimeMillis()
             )
         )
-        mqttGateway.publishPolicyNotify(deviceId, version)
+        publishPolicyNotifySafely(deviceId, version)
+    }
+
+    /**
+     * 策略通知：提交之后发，且失败不影响保存。
+     *
+     * 见 [afterCommit] 的说明 —— 同步 MQTT 发布放在事务里，会让"Broker 不在线"
+     * 直接表现为"家长改任何设置都保存失败"，同时把 `devices` 行锁拖到 PUBACK 之后。
+     */
+    private fun publishPolicyNotifySafely(deviceId: String, version: Int) {
+        afterCommit {
+            runCatching { mqttGateway.publishPolicyNotify(deviceId, version) }
+                .onFailure { log.warn("policy notify failed device={} v={}: {}", deviceId, version, it.message) }
+        }
     }
 
     /** 由子表纯构建策略包 JSON（含指定 version）；设备不存在时返回 null */

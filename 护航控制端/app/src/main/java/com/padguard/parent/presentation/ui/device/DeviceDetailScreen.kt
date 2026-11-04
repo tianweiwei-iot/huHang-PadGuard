@@ -65,7 +65,15 @@ fun DeviceDetailScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(Unit) {
-        viewModel.uiState.collectLatest { if (it.toast != null) { snackbarHostState.showSnackbar(it.toast); viewModel.clearToast() } }
+        // 必须用 collect 而不是 collectLatest：showSnackbar 会挂起约 4 秒，
+        // collectLatest 会在任意一次无关的状态刷新（设备上下线、开关翻转）时把它取消掉。
+        // 而这里展示的「设备执行失败：…」「超时未执行」正是家长判断要不要重试的唯一线索。
+        // 只清除"刚展示的那一条"：展示期间若来了新提示，不能被上一轮的 clearToast 吞掉。
+        viewModel.uiState.collect { s ->
+            val msg = s.toast ?: return@collect
+            snackbarHostState.showSnackbar(msg)
+            if (viewModel.uiState.value.toast == msg) viewModel.clearToast()
+        }
     }
 
     Scaffold(

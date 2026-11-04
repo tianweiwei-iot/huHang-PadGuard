@@ -819,6 +819,12 @@ class GuardService : Service() {
                     // 解绑即结束看屏会话恢复窗口，防止重新绑定后恢复陈旧推流
                     GuardHeartbeat.clearLiveView(this@GuardService)
                     lockController.releaseAll()
+                    // 临时解锁必须一并作废：releaseAll() 刻意保留"仍在临时解锁中"的状态
+                    // （远程解锁不该顺手把家长的放行取消掉），但解绑是换家庭的边界 ——
+                    // 沿用上一家的 8 小时放行，会让新家长的时段锁/远程锁在接下来几小时内
+                    // 被静默抑制（requestLock 走 "suppressed by temp unlock" 分支），
+                    // 表现为"刚绑上，锁屏命令点了没反应"，日志里只有一行 debug。
+                    lockController.cancelTempUnlock()
                     // 解绑即清空会话状态，避免陈旧会话继续驱动 UI 与锁定
                     usageSessionManager.reset()
                     // 解绑后彻底释放系统级管控（挂起/隐藏应用、相机/截屏、用户限制、
@@ -1464,15 +1470,38 @@ class GuardService : Service() {
             val alerts = logRepository.takePendingAlerts()
             if (alerts.items.isNotEmpty()) {
                 val r = remote.uploadEvents(deviceId, alerts.items.map { it.copy(deviceId = deviceId) })
-                if (r.isSuccess) logRepository.markAlertsUploaded(alerts)
-                else Logger.w(TAG) { "alert upload failed, keep ${alerts.size} pending" }
+                when {
+                    r.isSuccess -> logRepository.markAlertsUploaded(alerts)
+                    // 服务端明确拒绝（BizError）必须"认栽丢弃"，不能原样留着重试。
+                    // takePendingAlerts 每次取的是**最旧的** 50 条，一批被永久拒绝的坏数据会一直占住队头，
+                    // 新告警只能排在队尾、永远进不了批次 —— 结果是家长从此收不到任何告警
+                    // （包括「正在被卸载」「检测到 root」这类高危），而且服务端日志里只有一行 warn。
+                    // 丢一批坏数据换来整条链路继续流动，是这里唯一正确的取舍。
+                    r is ApiResult.BizError -> {
+                        Logger.e(TAG) {
+                            "alert upload rejected (${r.code} ${r.message}); dropping ${alerts.size} items to unblock queue"
+                        }
+                        logRepository.markAlertsUploaded(alerts)
+                    }
+                    else -> Logger.w(TAG) { "alert upload failed, keep ${alerts.size} pending" }
+                }
             }
 
             val logs = logRepository.takePendingLogs()
             if (logs.items.isNotEmpty()) {
                 val r = remote.uploadLogs(deviceId, logs.items)
-                if (r.isSuccess) logRepository.markLogsUploaded(logs)
-                else Logger.w(TAG) { "log upload failed, keep ${logs.size} pending" }
+                when {
+                    r.isSuccess -> logRepository.markLogsUploaded(logs)
+                    // 与告警同理：普通日志同样是"取最旧一批"，被拒的坏批次不丢弃就会堵死后续所有上报
+                    // （家长端用量/轨迹永久停在某一刻）。日志不是高危信号，丢一批的代价可以接受。
+                    r is ApiResult.BizError -> {
+                        Logger.e(TAG) {
+                            "log upload rejected (${r.code} ${r.message}); dropping ${logs.size} items to unblock queue"
+                        }
+                        logRepository.markLogsUploaded(logs)
+                    }
+                    else -> Logger.w(TAG) { "log upload failed, keep ${logs.size} pending" }
+                }
             }
         }
 

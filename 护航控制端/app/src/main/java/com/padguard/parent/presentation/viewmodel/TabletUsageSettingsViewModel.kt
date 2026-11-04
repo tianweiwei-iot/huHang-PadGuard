@@ -138,7 +138,11 @@ class TabletUsageSettingsViewModel @Inject constructor(
         viewModelScope.launch {
             policyRepository.getUsageSession(deviceId)
                 .onSuccess { session ->
-                    _uiState.value = _uiState.value.copy(usageSession = session, sessionError = null)
+                    // 记录"收到时刻"的单调时钟：界面倒计时用它推进，避免拿手机墙钟去减服务端墙钟
+                    _uiState.value = _uiState.value.copy(
+                        usageSession = session.copy(receivedAtElapsedMs = android.os.SystemClock.elapsedRealtime()),
+                        sessionError = null
+                    )
                 }
                 .onFailure { e ->
                     _uiState.value = _uiState.value.copy(sessionError = e.message)

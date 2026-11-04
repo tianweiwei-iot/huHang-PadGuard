@@ -296,7 +296,10 @@ class ScreenMonitorViewModel @Inject constructor(
                 height = height
             )
             val history = (listOf(record) + _uiState.value.screenshotHistory).take(MAX_SCREENSHOT_HISTORY)
-            gallerySaver.saveJpeg(bytes)
+            // 落相册必须在 IO 线程：MediaStore 插入 + 整张 JPEG 写入，2560x1600 的截图有数 MB，
+            // 放在 viewModelScope(Main) 上会让主线程掉帧甚至 ANR。录屏保存已用 launch(IO)，此处对齐。
+            val saveResult = withContext(Dispatchers.IO) { gallerySaver.saveJpeg(bytes) }
+            saveResult
                 .onSuccess {
                     _uiState.value = _uiState.value.copy(
                         screenshot = record,
@@ -341,7 +344,9 @@ class ScreenMonitorViewModel @Inject constructor(
                 return@launch
             }
             val history = (listOf(shot) + _uiState.value.screenshotHistory).take(MAX_SCREENSHOT_HISTORY)
-            gallerySaver.saveJpeg(bytes)
+            // 同上方主路径：落盘不能占主线程
+            val saveResult = withContext(Dispatchers.IO) { gallerySaver.saveJpeg(bytes) }
+            saveResult
                 .onSuccess {
                     _uiState.value = _uiState.value.copy(
                         screenshot = shot,

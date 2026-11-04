@@ -181,10 +181,11 @@ class SubscriptionViewModel @Inject constructor(
             // 1) 下单
             val order = billingRepository.createOrder(c.plan.key, channel)
             if (order.isFailure) {
-                _uiState.value = _uiState.value.copy(
-                    checkout = c.copy(paying = false, error = order.exceptionOrNull()?.message ?: "下单失败"),
-                    orderingPlan = null
-                )
+                // 必须写「当前」收银台，不能用进入支付前捕获的快照 c：
+                // 家长在下单在途时关掉收银台（返回键在 paying 期间仍可点），
+                // 快照回写会把弹窗连同旧套餐、旧渠道一起复活，并且 paying 被复位成 false，
+                // 于是"确认支付"重新可点 —— 再点一次就是第二笔订单。
+                updateCheckoutIfOpen(order.exceptionOrNull()?.message ?: "下单失败")
                 return@launch
             }
             val created = order.getOrThrow()
@@ -195,10 +196,8 @@ class SubscriptionViewModel @Inject constructor(
             if (selected?.mock == true) {
                 val paid = billingRepository.mockPay(created.orderNo)
                 if (paid.isFailure) {
-                    _uiState.value = _uiState.value.copy(
-                        checkout = c.copy(paying = false, error = paid.exceptionOrNull()?.message ?: "支付失败"),
-                        orderingPlan = null
-                    )
+                    // 同上：只用当前收银台，收银台已被关掉就不再复活
+                    updateCheckoutIfOpen(paid.exceptionOrNull()?.message ?: "支付失败")
                     return@launch
                 }
                 _uiState.value = _uiState.value.copy(
@@ -220,13 +219,7 @@ class SubscriptionViewModel @Inject constructor(
 
             // 2c) 其他真实渠道：服务端只会下发已配置就绪的渠道（微信），
             // 走到这里说明渠道清单与实现出现漂移，如实告知而不是静默失败
-            _uiState.value = _uiState.value.copy(
-                checkout = c.copy(
-                    paying = false,
-                    error = "该渠道尚未接入支付方式，请选择其他渠道或联系客服"
-                ),
-                orderingPlan = null
-            )
+            updateCheckoutIfOpen("该渠道尚未接入支付方式，请选择其他渠道或联系客服")
         }
     }
 
@@ -240,17 +233,11 @@ class SubscriptionViewModel @Inject constructor(
     private suspend fun payWithWeChat(c: CheckoutState, created: com.padguard.parent.data.model.CreateOrderResponse) {
         val payParams = created.payParams
         if (payParams.isNullOrEmpty()) {
-            _uiState.value = _uiState.value.copy(
-                checkout = c.copy(paying = false, error = "微信下单参数缺失，请稍后重试或联系客服"),
-                orderingPlan = null
-            )
+            updateCheckoutIfOpen("微信下单参数缺失，请稍后重试或联系客服")
             return
         }
         if (!weChatPay.weChatInstalled()) {
-            _uiState.value = _uiState.value.copy(
-                checkout = c.copy(paying = false, error = "未检测到微信客户端，请安装微信后重试或联系客服代开通"),
-                orderingPlan = null
-            )
+            updateCheckoutIfOpen("未检测到微信客户端，请安装微信后重试或联系客服代开通")
             return
         }
 

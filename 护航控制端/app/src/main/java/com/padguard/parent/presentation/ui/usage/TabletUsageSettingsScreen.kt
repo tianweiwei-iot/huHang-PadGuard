@@ -809,15 +809,17 @@ private fun UsageSessionCard(session: UsageSession?, error: String?) {
             )
             return@GlassCard
         }
-        // 每秒本地墙钟插值刷新，与服务端/孩子端同源派生，避免三端数字漂移
-        var tick by remember { mutableStateOf(System.currentTimeMillis()) }
+        // 每秒按**单调时钟**插值刷新，与服务端/孩子端同源派生。
+        // 不能用墙钟：serverNow 是服务端墙钟，拿家长手机的墙钟去减它，手机时间偏 10 分钟
+        // 就会让倒计时凭空少 10 分钟（家长据此误判"快用完了"去批延时）。
+        var tick by remember { mutableStateOf(android.os.SystemClock.elapsedRealtime()) }
         LaunchedEffect(Unit) {
             while (true) {
-                tick = System.currentTimeMillis()
+                tick = android.os.SystemClock.elapsedRealtime()
                 delay(1000)
             }
         }
-        val remaining = session.liveRemainingMs(tick)
+        val remaining = session.liveRemainingMsAt(tick)
         val mm = (remaining / 60_000L).toInt()
         val ss = ((remaining / 1000L) % 60L).toInt()
         val mmText = if (mm < 10) "0$mm" else "$mm"

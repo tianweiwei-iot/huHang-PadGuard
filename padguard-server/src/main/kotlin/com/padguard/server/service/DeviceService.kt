@@ -256,8 +256,14 @@ class DeviceService(
      *
      * ## 失败隔离
      * 逐行独立处理并收集失败原因：几十台设备的表不会因为一行格式错误整体失败。
+     *
+     * ## 为什么**不能**加 @Transactional
+     * 本方法逐行 `runCatching` 吞掉单行异常，靠的就是"每行各自提交"。
+     * 若整个方法在一个事务里，某一行（例如 alias 超过列宽 64）抛异常后事务已被标记 rollback-only，
+     * PostgreSQL 更会直接进入 aborted 状态 —— 后续每一行都报 `current transaction is aborted`，
+     * 最终整批一行都导不进去，而失败明细把错误归到了无辜的后继行。
+     * 去掉外层事务后，每行的 save / createDefault / audit 各自成事务，才与"失败只影响该行"的承诺一致。
      */
-    @Transactional
     fun importDevices(userId: String, req: com.padguard.server.dto.DeviceImportRequest): com.padguard.server.dto.DeviceImportResultDto {
         val rows = req.rows
         var success = 0
@@ -513,21 +519,41 @@ class DeviceService(
     /** 家长修改设备别名 */
     fun rename(userId: String, deviceId: String, name: String) {
         val dev = requireOwned(userId, deviceId)
-        dev.name = name
+        val safeName = sanitizeDeviceName(name, Audience.PARENT)
+        dev.name = safeName
         deviceRepository.save(dev)
         // 实时同步到被控端：通过下行 config 通道把自定义设备名推下去，
         // 孩子端「我的」页立即显示新名称，无需重连或重启。
-        pushDeviceName(deviceId, name)
+        pushDeviceName(deviceId, safeName)
     }
 
     /** 孩子端自定义设备名（凭设备令牌鉴权，不依赖家长 userId） */
     fun updateNameByDevice(deviceId: String, name: String) {
+        val safe = sanitizeDeviceName(name, Audience.CHILD)
         deviceRepository.findById(deviceId).ifPresent { dev ->
-            dev.name = name
+            dev.name = safe
             deviceRepository.save(dev)
         }
         // 同步回被控端：确保各端（家长看板 / 孩子端本地）最终一致
-        pushDeviceName(deviceId, name)
+        pushDeviceName(deviceId, safe)
+    }
+
+    /**
+     * 设备名校验：`devices.name` 是 `VARCHAR(64)`，而入参 DTO 没有任何长度约束。
+     *
+     * 不校验的后果是「改名功能彻底不可用」而不是"提示太长"：超长串直接撞列宽，
+     * 全局异常处理器把它变成 500「服务器内部错误」，家长端只能看到一句失败；
+     * 空串（或全空格）则会把设备名清空，家长端列表出现一行空白设备，事后无法辨认。
+     */
+    private fun sanitizeDeviceName(raw: String, audience: Audience): String {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) {
+            throw BizException(ParentErr.PARAM_ERROR, "设备名不能为空", audience)
+        }
+        if (trimmed.length > DEVICE_NAME_MAX_CHARS) {
+            throw BizException(ParentErr.PARAM_ERROR, "设备名最长 $DEVICE_NAME_MAX_CHARS 个字符", audience)
+        }
+        return trimmed
     }
 
     /** 把设备名通过 MQTT 下发行推给被控端 */
@@ -773,6 +799,9 @@ class DeviceService(
          * 改造前该值是 120 秒，且是唯一判定依据 —— 家长端因此最坏要等 2 分钟以上。
          */
         const val ONLINE_STALE_MS = 40_000L
+
+        /** 与 `devices.name VARCHAR(64)` 对齐；超限应在业务层拒绝，而不是让数据库报 500 */
+        const val DEVICE_NAME_MAX_CHARS = 64
 
         /**
          * "Broker 说它离线"这条提示的可信窗口：最近这段时间内还有 HTTP 存活信号，

@@ -200,9 +200,12 @@ class FakeSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionR
         return before - table.size
     }
 
-    // 对应 UsageSessionRepository.addExtendedMinutes 的条件自增（额度累加不再读改写）
-    override fun addExtendedMinutes(deviceId: String, minutes: Int, now: Long): Int {
+    // 对应 UsageSessionRepository.addExtendedMinutes 的条件自增（额度累加不再读改写）。
+    // 单日上限也作为写条件：影响 0 行 = 已到顶，语义必须与 SQL 逐字对齐，
+    // 否则「并发批准顶穿上限」这条防线在测试里永远是绿的。
+    override fun addExtendedMinutes(deviceId: String, minutes: Int, now: Long, maxExtendedMinutes: Int): Int {
         val s = table[deviceId] ?: return 0
+        if (s.extendedMinutes + minutes > maxExtendedMinutes) return 0
         s.extendedMinutes += minutes
         s.lastDelayEpoch = now
         s.updatedAt = now

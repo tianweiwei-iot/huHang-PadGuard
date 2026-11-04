@@ -559,14 +559,25 @@ class PolicyEngine @Inject constructor(
         logRepository.raise(type = type, level = level, detail = detail, deviceId = deviceId)
     }
 
-    /** 日切用服务端校准后的墙钟，与限额统计保持同一口径 */
+    /**
+     * 告警去重的日切键：用服务端校准后的墙钟 + 与用量统计完全相同的时区。
+     *
+     * 时区必须是 Asia/Shanghai，不能取 `ZoneId.systemDefault()`：
+     * 设备时区非东八区时，去重键的清空时刻会和用量日切差几个小时 ——
+     * 同一个业务日内 `limit:APP_DAILY:<pkg>` 被提前清空 → 同一原因重复上报（家长通知栏刷屏）；
+     * 反向则会把两个业务日合成一天，该报的告警被吞掉。
+     * 该常量与 [com.padguard.core.data.repository.UsageRepository.dayKey] 的时区必须一致。
+     */
     private fun currentDayKey(): String =
-        Instant.ofEpochMilli(timeProvider.now()).atZone(ZoneId.systemDefault()).toLocalDate().toString()
+        Instant.ofEpochMilli(timeProvider.now()).atZone(ZoneId.of(BIZ_ZONE)).toLocalDate().toString()
 
     companion object {
         private const val TAG = "PolicyEngine"
         private const val NOT_APPLIED = -1
         private const val MAX_DETAIL_CHARS = 500
+
+        /** 业务时区：与 UsageRepository.dayKey / 服务端 StatisticsService 保持完全一致 */
+        private const val BIZ_ZONE = "Asia/Shanghai"
 
         /**
          * Kiosk 降级态下的前台拦截判定（纯函数，便于 JVM 单测）。

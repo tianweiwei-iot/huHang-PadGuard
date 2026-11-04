@@ -111,14 +111,25 @@ class UsageDelayService(
     fun approve(userId: String, deviceId: String, ticketId: String, req: UsageDelayApproveRequest) {
         val t = ownedOpen(userId, deviceId, ticketId)
         val now = System.currentTimeMillis()
-        // 跨日防线：额度自增打在会话行的 dayKey 上。昨天的工单今天批准，
-        // 分钟会加到昨天的会话里，孩子今天的会话重置后一分都拿不到（家长看到"已同意"却没生效）。
-        // 故非当日申请直接过期作废并如实告知。
         val today = dayKey(now)
+        // 跨日防线（按**工单创建日**判，不能按会话日判）：
+        // 早期实现只看 `session.dayKey != today`，本意是"昨天的工单批到今天的会话上没意义"。
+        // 但只要孩子今天已经起过表（零点自动开始、或早上开过机），session.dayKey 就等于 today，
+        // 于是**昨天没处理的工单今天照样能批**，分钟直接加进今天的额度 —— 等于跨日续命。
+        // 判据必须回到工单本身：非当日提交的申请一律过期作废，并如实告知家长。
+        val ticketDay = dayKey(t.createdAt)
         val session = usageSessionRepository.findByDeviceId(deviceId)
+        if (ticketDay != today) {
+            usageDelayRepository.claimReject(ticketId, now)
+            log.info(
+                "usage delay expired (ticket day {} != today {}): device={} ticket={}",
+                ticketDay, today, deviceId, ticketId
+            )
+            throw BizException(ParentErr.PARAM_ERROR, "该延时申请已过期（非今日申请），请让孩子重新提交", Audience.PARENT)
+        }
         if (session == null || session.dayKey != today) {
             usageDelayRepository.claimReject(ticketId, now)
-            log.info("usage delay expired (stale dayKey): device={} ticket={}", deviceId, ticketId)
+            log.info("usage delay expired (stale session dayKey): device={} ticket={}", deviceId, ticketId)
             throw BizException(ParentErr.PARAM_ERROR, "该延时申请已过期（非今日申请），请让孩子重新提交", Audience.PARENT)
         }
         // 先抢占工单：并发/重试的第二次请求影响 0 行，直接退出。
@@ -128,8 +139,25 @@ class UsageDelayService(
         if (claimed == 0) {
             throw BizException(ParentErr.PARAM_ERROR, "该延时申请已被处理，请刷新后查看", Audience.PARENT)
         }
-        // 额度用数据库自增而不是"读出来 +n 再 save"：后者在并发续批时会丢更新。
-        usageSessionRepository.addExtendedMinutes(deviceId, t.minutes, now)
+        // 额度用数据库条件自增而不是"读出来 +n 再 save"：后者在并发续批时会丢更新。
+        // 上限也一并作为**写条件**：`request` 里的"已批准 + 待审批 + 本次"是读-判-写，
+        // 两条工单同时提交时都能通过检查（各读到 0 已批准），家长连点两次同意就能把
+        // 120 分钟的单日上限顶穿 —— 孩子靠连点自助延时，正是这条上限要防的事。
+        // 影响 0 行 = 已到顶：抛异常让整个事务回滚，工单退回 PENDING，家长看到明确提示。
+        val added = usageSessionRepository.addExtendedMinutes(
+            deviceId, t.minutes, now, UsageSession.MAX_DAILY_EXTEND_MINUTES
+        )
+        if (added == 0) {
+            log.warn(
+                "usage delay rejected at cap: device={} ticket={} +{}min (max {})",
+                deviceId, ticketId, t.minutes, UsageSession.MAX_DAILY_EXTEND_MINUTES
+            )
+            throw BizException(
+                ParentErr.PARAM_ERROR,
+                "今日延时已达上限 ${UsageSession.MAX_DAILY_EXTEND_MINUTES} 分钟，本次批准未生效",
+                Audience.PARENT
+            )
+        }
         auditService.record(userId, deviceId, AuditAction.USAGE_DELAY_APPROVE, targetType = "ticket", targetId = ticketId,
             detail = "minutes=${t.minutes}")
         log.info("usage delay approved device={} ticket={} +{}min", deviceId, ticketId, t.minutes)
