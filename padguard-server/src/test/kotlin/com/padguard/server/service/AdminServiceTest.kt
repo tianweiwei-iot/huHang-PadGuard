@@ -385,7 +385,17 @@ class AdminServiceTest {
         val usageSessions: FakeUsageSessionRepo
     )
 
-    private fun fixture(activeProfiles: Set<String> = emptySet()): Fixture {
+    private fun fixture(
+        activeProfiles: Set<String> = emptySet(),
+        /**
+         * 微信退款网关替身。
+         *
+         * 退款流程最关键的约束是"先让微信受理，才允许把订单标记 REFUNDED"，
+         * 这条约束只有在"微信返回失败"时才体现出来 —— 用真实 `WeChatPayClient`
+         * （未配置 → 直接走 isConfigured=false 分支）永远覆盖不到。
+         */
+        refundClient: com.padguard.server.security.WeChatRefundClient? = null
+    ): Fixture {
         val users = FakeUserRepo()
         val devices = FakeDeviceRepo()
         val subs = FakeSubRepo()
@@ -451,7 +461,7 @@ class AdminServiceTest {
         // 公开方法签名与原本一致（f.svc.* 调用无需改动）。
         val authS = AdminAuthService(admins, jwt, adminPerm)
         val auditS = AdminAuditService(adminPerm, admins, users, auditLogs, alerts, auditService)
-        val billingS = AdminBillingService(subs, orders, users, billing, adminPerm, auditService)
+        val billingS = AdminBillingService(subs, orders, users, billing, adminPerm, auditService, refundClient)
         val rbacS = AdminRbacService(admins, adminPerm, auditService, mailService, settings, objectMapper)
         val settingsS = AdminSettingsService(adminPerm, settings, billing, objectMapper, auditService, env)
         val monitorS = AdminServerMonitorService(adminPerm, requestMetrics, runtimeLogRing, dataSource, serverProfileService)
@@ -588,6 +598,48 @@ class AdminServiceTest {
         val r = f.svc.refund("A-super", "O3")
         assertEquals(true, r["ok"])
         assertEquals(true, r["already"])
+    }
+
+    /**
+     * 微信受理失败时，订单必须**留在 PAID**。
+     *
+     * 这是"先标记后退款"那种单边账的直接反例：如果实现把 `markRefundedIfPaid`
+     * 挪到 HTTP 调用之前，这条断言会立刻红 —— 系统显示已退款、钱却没退。
+     */
+    @Test
+    fun `refund keeps order PAID when wechat rejects the request`() {
+        val gateway = object : com.padguard.server.security.WeChatRefundClient {
+            override fun isConfigured() = true
+            override fun createRefund(
+                orderNo: String, outRefundNo: String, refundFen: Int, totalFen: Int, reason: String
+            ): Map<String, String>? = null // 网络失败 / 微信拒绝
+        }
+        val f = fixture(refundClient = gateway)
+        f.orders.save(PaymentOrder(id = "O4", orderNo = "O4", userId = "u1", status = OrderStatus.PAID.name, amountFen = 9800))
+
+        assertThrows(BizException::class.java) { f.svc.refund("A-super", "O4") }
+        assertEquals(
+            OrderStatus.PAID.name, f.orders.table["O4"]!!.status,
+            "微信未受理时订单必须保持 PAID，否则就是「系统说已退、钱没退」的单边账"
+        )
+    }
+
+    /** 微信受理成功：订单置 REFUNDED，并把微信退款单号回传给调用方 */
+    @Test
+    fun `refund marks REFUNDED and returns wechat refund id when accepted`() {
+        val gateway = object : com.padguard.server.security.WeChatRefundClient {
+            override fun isConfigured() = true
+            override fun createRefund(
+                orderNo: String, outRefundNo: String, refundFen: Int, totalFen: Int, reason: String
+            ): Map<String, String>? = mapOf("refundId" to "RF-1", "status" to "PROCESSING")
+        }
+        val f = fixture(refundClient = gateway)
+        f.orders.save(PaymentOrder(id = "O5", orderNo = "O5", userId = "u1", status = OrderStatus.PAID.name, amountFen = 9800))
+
+        val r = f.svc.refund("A-super", "O5")
+        assertEquals(true, r["ok"])
+        assertEquals("RF-1", r["refundId"])
+        assertEquals(OrderStatus.REFUNDED.name, f.orders.table["O5"]!!.status)
     }
 
     // ----------------------------- 权限：告警关单闸门 -----------------------------

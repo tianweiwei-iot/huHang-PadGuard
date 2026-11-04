@@ -6,6 +6,7 @@ import com.padguard.parent.domain.repository.DeviceRepository
 import com.padguard.parent.domain.repository.PolicyRepository
 import com.padguard.parent.domain.repository.UnlockTicket
 import com.padguard.parent.notification.NotificationHelper
+import com.padguard.parent.presentation.util.RefreshGate
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -89,6 +90,16 @@ class UnlockRequestCenterViewModel @Inject constructor(
 
     private var pollJob: Job? = null
 
+    /**
+     * 刷新闸门（单飞 + 补一次，见 [RefreshGate]）。
+     *
+     * 轮询是"定时触发 + 不等待上一轮"的结构（`while (isActive) { refresh(); delay() }`），
+     * 而 [refresh] 内部自己 `launch`，所以 `delay` 到点时上一轮可能还没回来。
+     * 弱网下这会累积多个并发请求，且响应乱序落地（`_uiState.value = ...` 是直接赋值），
+     * 表现为"弹窗已经处理了又弹回来""未读数来回跳"。
+     */
+    private val refreshGate = RefreshGate()
+
     init {
         startPolling()
     }
@@ -123,38 +134,46 @@ class UnlockRequestCenterViewModel @Inject constructor(
     }
 
     fun refresh() {
+        // 单飞：见 [refreshGate]。弱网下一次「设备列表 + 每台设备的工单」可能挂到 30s 以上
+        // （OkHttp 默认超时），10s 的轮询节拍挡不住。
+        if (!refreshGate.tryEnter()) return
         viewModelScope.launch {
-            val devices = deviceRepository.getDeviceList().getOrNull() ?: return@launch
-            val nameById = devices.associate { it.id to it.name }
+            try {
+                val devices = deviceRepository.getDeviceList().getOrNull() ?: return@launch
+                val nameById = devices.associate { it.id to it.name }
 
-            val entries = devices.mapNotNull { device ->
-                val tickets = policyRepository.getUnlockTickets(device.id).getOrNull() ?: return@mapNotNull null
-                tickets.map { UnlockTicketEntry(it, nameById[device.id].orEmpty()) }
-            }.flatten().sortedByDescending { it.ticket.createdAt }
+                val entries = devices.mapNotNull { device ->
+                    val tickets = policyRepository.getUnlockTickets(device.id).getOrNull() ?: return@mapNotNull null
+                    tickets.map { UnlockTicketEntry(it, nameById[device.id].orEmpty()) }
+                }.flatten().sortedByDescending { it.ticket.createdAt }
 
-            // 弹窗只挑"待处理且本次会话没处理过"里最早的一条：
-            // 孩子可能连着提好几次，一次只弹一条，处理完再弹下一条，避免堆叠成一摞对话框。
-            val next = entries
-                .filter { it.ticket.isPending && it.ticket.id !in handledInSession }
-                .minByOrNull { it.ticket.createdAt }
+                // 弹窗只挑"待处理且本次会话没处理过"里最早的一条：
+                // 孩子可能连着提好几次，一次只弹一条，处理完再弹下一条，避免堆叠成一摞对话框。
+                val next = entries
+                    .filter { it.ticket.isPending && it.ticket.id !in handledInSession }
+                    .minByOrNull { it.ticket.createdAt }
 
-            // 家长端在后台/未启动时"孩子求解锁"完全零触达——本地通知是唯一的离屏触达手段。
-            // 这里对每条新出现的 PENDING 工单发一次本地通知（渠道已在 MainActivity 创建，
-            // 权限在登录后申请）。前台跳过：弹窗已是更强的打扰形式，双响只会让家长烦躁。
-            if (!appInForeground) {
-                entries
-                    .filter { it.ticket.isPending && it.ticket.id !in notifiedTicketIds }
-                    .forEach { entry ->
-                        notificationHelper.notifyUnlockRequest(entry.deviceName, entry.ticket.id)
-                        notifiedTicketIds.add(entry.ticket.id)
-                    }
+                // 家长端在后台/未启动时"孩子求解锁"完全零触达——本地通知是唯一的离屏触达手段。
+                // 这里对每条新出现的 PENDING 工单发一次本地通知（渠道已在 MainActivity 创建，
+                // 权限在登录后申请）。前台跳过：弹窗已是更强的打扰形式，双响只会让家长烦躁。
+                if (!appInForeground) {
+                    entries
+                        .filter { it.ticket.isPending && it.ticket.id !in notifiedTicketIds }
+                        .forEach { entry ->
+                            notificationHelper.notifyUnlockRequest(entry.deviceName, entry.ticket.id)
+                            notifiedTicketIds.add(entry.ticket.id)
+                        }
+                }
+
+                _uiState.value = _uiState.value.copy(
+                    records = entries,
+                    unreadCount = entries.count { it.ticket.isPending },
+                    popup = next
+                )
+            } finally {
+                // 期间被拒的刷新（处理工单后的刷新 / 下拉刷新）不能丢，放行一次
+                if (refreshGate.exit()) refresh()
             }
-
-            _uiState.value = _uiState.value.copy(
-                records = entries,
-                unreadCount = entries.count { it.ticket.isPending },
-                popup = next
-            )
         }
     }
 

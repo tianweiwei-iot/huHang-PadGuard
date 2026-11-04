@@ -8,6 +8,7 @@ import com.padguard.parent.domain.repository.DeviceRepository
 import com.padguard.parent.domain.repository.PolicyRepository
 import com.padguard.parent.domain.repository.UsageDelayTicket
 import com.padguard.parent.notification.NotificationHelper
+import com.padguard.parent.presentation.util.RefreshGate
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -82,6 +83,13 @@ class UsageDelayCenterViewModel @Inject constructor(
 
     private var pollJob: Job? = null
 
+    /**
+     * 刷新闸门（单飞 + 补一次，见 [RefreshGate]，与解锁申请中心同一套理由）：
+     * 轮询不等待上一轮结束，`refresh` 内部又自己 `launch`，
+     * 弱网下会累积并发请求，且响应乱序覆盖 `_uiState`，表现为"工单已处理又冒出来"。
+     */
+    private val refreshGate = RefreshGate()
+
     init {
         startPolling()
         observePush()
@@ -121,34 +129,41 @@ class UsageDelayCenterViewModel @Inject constructor(
     }
 
     fun refresh() {
+        // 单飞：见 [refreshGate]。10s 的轮询节拍挡不住 30s 的网络超时。
+        if (!refreshGate.tryEnter()) return
         viewModelScope.launch {
-            val devices = deviceRepository.getDeviceList().getOrNull() ?: return@launch
-            val nameById = devices.associate { it.id to it.name }
+            try {
+                val devices = deviceRepository.getDeviceList().getOrNull() ?: return@launch
+                val nameById = devices.associate { it.id to it.name }
 
-            val entries = devices.mapNotNull { device ->
-                val tickets = policyRepository.getUsageDelayTickets(device.id).getOrNull() ?: return@mapNotNull null
-                tickets.map { UsageDelayTicketEntry(it, nameById[device.id].orEmpty()) }
-            }.flatten().sortedByDescending { it.ticket.createdAt }
+                val entries = devices.mapNotNull { device ->
+                    val tickets = policyRepository.getUsageDelayTickets(device.id).getOrNull() ?: return@mapNotNull null
+                    tickets.map { UsageDelayTicketEntry(it, nameById[device.id].orEmpty()) }
+                }.flatten().sortedByDescending { it.ticket.createdAt }
 
-            // 弹窗只挑"待处理且本次会话没处理过"里最早的一条
-            val next = entries
-                .filter { it.ticket.isPending && it.ticket.id !in handledInSession }
-                .minByOrNull { it.ticket.createdAt }
+                // 弹窗只挑"待处理且本次会话没处理过"里最早的一条
+                val next = entries
+                    .filter { it.ticket.isPending && it.ticket.id !in handledInSession }
+                    .minByOrNull { it.ticket.createdAt }
 
-            if (!appInForeground) {
-                entries
-                    .filter { it.ticket.isPending && it.ticket.id !in notifiedTicketIds }
-                    .forEach { entry ->
-                        notificationHelper.notifyUsageDelayRequest(entry.deviceName, entry.ticket.id)
-                        notifiedTicketIds.add(entry.ticket.id)
-                    }
+                if (!appInForeground) {
+                    entries
+                        .filter { it.ticket.isPending && it.ticket.id !in notifiedTicketIds }
+                        .forEach { entry ->
+                            notificationHelper.notifyUsageDelayRequest(entry.deviceName, entry.ticket.id)
+                            notifiedTicketIds.add(entry.ticket.id)
+                        }
+                }
+
+                _uiState.value = _uiState.value.copy(
+                    records = entries,
+                    unreadCount = entries.count { it.ticket.isPending },
+                    popup = next
+                )
+            } finally {
+                // 期间被拒的刷新（处理工单后的刷新 / 下拉刷新）不能丢，放行一次
+                if (refreshGate.exit()) refresh()
             }
-
-            _uiState.value = _uiState.value.copy(
-                records = entries,
-                unreadCount = entries.count { it.ticket.isPending },
-                popup = next
-            )
         }
     }
 

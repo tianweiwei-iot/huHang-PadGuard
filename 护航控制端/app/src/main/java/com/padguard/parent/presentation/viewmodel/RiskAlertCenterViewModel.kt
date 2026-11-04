@@ -7,6 +7,7 @@ import com.padguard.parent.domain.model.AlertLevel
 import com.padguard.parent.domain.model.AlertStatus
 import com.padguard.parent.domain.repository.AlertRepository
 import com.padguard.parent.notification.NotificationHelper
+import com.padguard.parent.presentation.util.RefreshGate
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -66,6 +67,17 @@ class RiskAlertCenterViewModel @Inject constructor(
 
     private var pollJob: Job? = null
 
+    /**
+     * 刷新闸门（单飞 + 补一次，见 [RefreshGate]）。
+     *
+     * 除了"请求堆积 + 旧响应覆盖新数据"之外，这里还有一个更具体的风险：
+     * [notifiedAlertIds] 是普通 `mutableSetOf`。两个并发的刷新协程同时做
+     * "查 in → 通知 → add"，会**各发一条通知**（集合还没写入第二次的判断），
+     * 家长同一秒收到两条一模一样的"设备异常"提醒。单飞后同一时刻只有一个刷新在跑，
+     * 这个竞态自然消失，不必为此上锁。
+     */
+    private val refreshGate = RefreshGate()
+
     init {
         startPolling()
     }
@@ -91,30 +103,37 @@ class RiskAlertCenterViewModel @Inject constructor(
     }
 
     fun refresh() {
+        // 单飞：见 [refreshGate]。15s 的轮询节拍挡不住 30s 的网络超时。
+        if (!refreshGate.tryEnter()) return
         viewModelScope.launch {
-            // status 传 null = 全量（ACTIVE / ACKNOWLEDGED / CLOSED 都要）：
-            // 消息中心要能翻看历史，不能只给未处理的。
-            val alerts = alertRepository.getAlerts(deviceId = null, status = null)
-                .getOrNull()
-                ?.sortedByDescending { it.triggeredAt }
-                ?: return@launch
+            try {
+                // status 传 null = 全量（ACTIVE / ACKNOWLEDGED / CLOSED 都要）：
+                // 消息中心要能翻看历史，不能只给未处理的。
+                val alerts = alertRepository.getAlerts(deviceId = null, status = null)
+                    .getOrNull()
+                    ?.sortedByDescending { it.triggeredAt }
+                    ?: return@launch
 
-            // 后台 + 新出现的 CRITICAL 告警 → 本地通知触达家长。
-            // 只挑 CRITICAL：WARNING/INFO 是"留意"级，进消息中心即可，
-            // 每条都推送会把"真的出事"淹在噪音里。
-            if (!appInForeground) {
-                alerts
-                    .filter { it.level == AlertLevel.CRITICAL && it.status == AlertStatus.ACTIVE && it.id !in notifiedAlertIds }
-                    .forEach { alert ->
-                        notificationHelper.notifyRiskAlert(alert.id, alert.title, alert.message)
-                        notifiedAlertIds.add(alert.id)
-                    }
+                // 后台 + 新出现的 CRITICAL 告警 → 本地通知触达家长。
+                // 只挑 CRITICAL：WARNING/INFO 是"留意"级，进消息中心即可，
+                // 每条都推送会把"真的出事"淹在噪音里。
+                if (!appInForeground) {
+                    alerts
+                        .filter { it.level == AlertLevel.CRITICAL && it.status == AlertStatus.ACTIVE && it.id !in notifiedAlertIds }
+                        .forEach { alert ->
+                            notificationHelper.notifyRiskAlert(alert.id, alert.title, alert.message)
+                            notifiedAlertIds.add(alert.id)
+                        }
+                }
+
+                _uiState.value = _uiState.value.copy(
+                    alerts = alerts,
+                    unreadCount = alerts.count { it.needsAttention }
+                )
+            } finally {
+                // 期间被拒的刷新（下拉刷新 / 确认告警后的刷新）不能丢，放行一次
+                if (refreshGate.exit()) refresh()
             }
-
-            _uiState.value = _uiState.value.copy(
-                alerts = alerts,
-                unreadCount = alerts.count { it.needsAttention }
-            )
         }
     }
 

@@ -514,8 +514,16 @@ interface PaymentOrderRepository : JpaRepository<PaymentOrder, String> {
      * 原子退款标记：仅当订单仍为 PAID 时置为 REFUNDED，返回受影响行数。
      * 幂等口径与 [claimPendingOrder] 相同：管理员退款申请与退款结果回调可能并发到达，
      * 只有第一个事务能把 PAID 翻转为 REFUNDED，后到的命中 0 行（视为重复确认，直接成功返回）。
+     *
+     * ## 为什么方法自带 `@Transactional`（而不是只靠调用方）
+     * `@Modifying` 查询必须有事务上下文，否则抛 `TransactionRequiredException`。
+     * 而管理端退款**不能**再把整段包进事务：它中间要调微信退款接口（HTTP，可能 10s+），
+     * 事务一旦覆盖到那里，就是"持着数据库连接等外网"。因此退款流程被拆成
+     * "事务外调微信 → 事务内原子标记"两段，标记这半段的事务由本注解自己开。
+     * 外层若已有事务（如退款回调），REQUIRED 语义下会正常加入，行为不变。
      */
     @Modifying
+    @org.springframework.transaction.annotation.Transactional
     @Query(
         "update PaymentOrder o set o.status = :refundedStatus where o.orderNo = :orderNo and o.status = :paidStatus"
     )

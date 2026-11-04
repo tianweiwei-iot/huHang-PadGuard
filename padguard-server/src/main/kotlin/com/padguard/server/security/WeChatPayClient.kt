@@ -23,12 +23,12 @@ import java.util.UUID
 class WeChatPayClient(
     private val props: WeChatPayProperties,
     private val objectMapper: ObjectMapper
-) {
+) : WeChatRefundClient {
 
     private val log = LoggerFactory.getLogger(WeChatPayClient::class.java)
     private val http = HttpClient.newBuilder().build()
 
-    fun isConfigured(): Boolean = props.readyForPay()
+    override fun isConfigured(): Boolean = props.readyForPay()
 
     /**
      * 创建一个 APP 支付预订单，返回调起微信 SDK 所需的参数；失败返回 null。
@@ -104,7 +104,7 @@ class WeChatPayClient(
      * @param outRefundNo 商户退款单号（全局唯一，建议 "R" + 订单号；同一订单重复申请会报错）
      * @return 受理成功返回 map(refundId, status)；未配置/网络失败/微信拒绝返回 null（调用方拒绝退款）
      */
-    fun createRefund(
+    override fun createRefund(
         orderNo: String,
         outRefundNo: String,
         refundFen: Int,

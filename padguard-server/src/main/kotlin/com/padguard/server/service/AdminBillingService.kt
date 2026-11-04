@@ -9,7 +9,7 @@ import com.padguard.server.repository.PaymentOrderRepository
 import com.padguard.server.repository.SubscriptionRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.AdminPermissionService
-import com.padguard.server.security.WeChatPayClient
+import com.padguard.server.security.WeChatRefundClient
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
@@ -28,8 +28,9 @@ class AdminBillingService(
     private val billingService: BillingService,
     private val adminPerm: AdminPermissionService,
     private val auditService: AuditService,
-    // 测试桩构造未传：可空 + 默认 null；Spring 注入真实 Bean
-    private val weChatPayClient: WeChatPayClient? = null
+    // 测试桩构造未传：可空 + 默认 null；Spring 注入真实 Bean。
+    // 类型是 [WeChatRefundClient] 而不是具体客户端：退款"先微信后标记"的顺序必须可测（见 refund 注释）。
+    private val weChatPayClient: WeChatRefundClient? = null
 ) {
     private val log = LoggerFactory.getLogger(AdminBillingService::class.java)
 
@@ -144,7 +145,27 @@ class AdminBillingService(
         return base + days * 86_400_000L
     }
 
-    @Transactional
+    /**
+     * 管理员退款。
+     *
+     * ## 为什么**没有** `@Transactional`（刻意为之，别加回来）
+     * 这个方法中间要调微信退款接口（HTTP，超时上限按秒计）。早期版本整段带 `@Transactional`，
+     * 于是从"读订单"到"标记 REFUNDED"全过程都握着一个数据库连接等外网 ——
+     * 微信侧抖动一次，连接池就少一条，同时该订单行的事务快照长期不释放，
+     * 退款回调（另一个事务）撞上同一条订单只能等。
+     *
+     * 更麻烦的是失败方向：微信已经受理退款、而 `markRefundedIfPaid` 因 DB 抖动失败时，
+     * 外层事务回滚会把订单退回 PAID —— 钱出去了、订单显示未退，形成单边账。
+     *
+     * 现在的边界是：
+     * 1. 事务外：鉴权、读订单、校验状态、调微信（不占连接）；
+     * 2. 事务内：只做"PAID → REFUNDED"这一条原子条件 UPDATE（由
+     *    [com.padguard.server.repository.PaymentOrderRepository.markRefundedIfPaid] 自带事务）。
+     *
+     * 第 2 步失败时，订单仍是 PAID 而微信已退款。这不完美，但**可自愈**：
+     * `outRefundNo` 固定为 `"R" + orderNo`，微信对同一退款单号幂等，管理员再点一次即收敛。
+     * 反之（先标记后退款）则是"系统说已退、钱没退"，只能人工补，故宁可留在这个方向。
+     */
     fun refund(adminId: String, orderNo: String): Map<String, Any> {
         adminPerm.require(adminId, "billing", "refund")
         // 退款口径：订单标记 REFUNDED；订阅权益不自动回收（显性设计约定，见下）。
