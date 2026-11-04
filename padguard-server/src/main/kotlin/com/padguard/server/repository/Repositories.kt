@@ -161,6 +161,21 @@ interface DeviceRepository : JpaRepository<Device, String> {
     fun findByUserId(userId: String): List<Device>
     /** 已绑定设备数：订阅按设备数分档，绑定前要校验是否超限 */
     fun countByUserId(userId: String): Long
+
+    /** 权益闸门状态翻转（ACTIVE/SUSPENDED）：只碰一列，绝不整行 merge 覆盖并发绑定写回的 user_id/token */
+    @Modifying
+    @Transactional
+    @Query("update Device d set d.entitlementState = :state where d.id = :deviceId")
+    fun updateEntitlementState(@Param("deviceId") deviceId: String, @Param("state") state: String): Int
+
+    /**
+     * 条件清除远程锁屏标记：只在当前确为锁定时命中，防止并发窗口内家长刚好手动解锁后
+     * 被权益闸门"代理解锁"再发一条多余指令的竞态（条件 UPDATE 天然幂等）。
+     */
+    @Modifying
+    @Transactional
+    @Query("update Device d set d.remoteLocked = false where d.id = :deviceId and d.remoteLocked = true")
+    fun clearRemoteLockedIfSet(@Param("deviceId") deviceId: String): Int
     /** 在线设备数（看板指标）；注意在线态由 DeviceService 惰性超时兜底，此处为近似计数 */
     fun countByOnlineStatus(onlineStatus: String): Long
 

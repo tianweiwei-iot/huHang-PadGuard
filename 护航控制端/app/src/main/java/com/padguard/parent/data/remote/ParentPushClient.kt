@@ -70,6 +70,7 @@ class ParentPushClient @Inject constructor(
     private val usageStatsAdapter = moshi.adapter(UsageStatsDto::class.java)
     private val enrollmentAdapter = moshi.adapter(EnrollmentEventDto::class.java)
     private val usageDelayAdapter = moshi.adapter(UsageDelayEventDto::class.java)
+    private val unlockAdapter = moshi.adapter(UnlockRequestedEventDto::class.java)
     private val presenceAdapter = moshi.adapter(DevicePresenceEventDto::class.java)
     private val envelopeAdapter = moshi.adapter(PushEnvelope::class.java)
 
@@ -191,6 +192,14 @@ class ParentPushClient @Inject constructor(
                         ParentPushMessage.UsageDelayRequested(deviceId, ticketId, minutes, createdAt)
                     )
                 }
+                // 孩子发起了解锁申请：立即触发消息中心刷新（弹窗/铃铛由 refresh 收敛）。
+                // 此前服务端只落库不推，家长端只能等 10s 轮询——孩子锁屏干等、家长无感。
+                "unlock.requested" -> {
+                    val dto = unlockAdapter.fromJson(text) ?: return
+                    val deviceId = dto.deviceId ?: return
+                    val ticketId = dto.ticketId ?: return
+                    _messages.tryEmit(ParentPushMessage.UnlockRequested(deviceId, ticketId))
+                }
                 // 某条延时工单被处理（同意/拒绝/忽略）：家长端据此即时刷新审批列表
                 "usage.delay.updated" -> {
                     val dto = usageDelayAdapter.fromJson(text) ?: return
@@ -275,6 +284,13 @@ private data class DevicePresenceEventDto(val deviceId: String? = null)
 @JsonClass(generateAdapter = true)
 private data class EnrollmentEventDto(val sessionId: String?, val deviceId: String?)
 
+/** 解锁申请事件体（`unlock.requested`） */
+@JsonClass(generateAdapter = true)
+private data class UnlockRequestedEventDto(
+    val deviceId: String? = null,
+    val ticketId: String? = null
+)
+
 /**
  * 延时审批工单事件体（`usage.delay.requested` / `usage.delay.updated` 共用，
  * 各自只带自己关心的字段，其余为 null）。
@@ -302,6 +318,12 @@ sealed interface ParentPushMessage {
         val ticketId: String,
         val minutes: Int,
         val createdAt: Long
+    ) : ParentPushMessage
+
+    /** 孩子发起了解锁申请（待家长审批），仅服务端 → 家长端下行 */
+    data class UnlockRequested(
+        val deviceId: String,
+        val ticketId: String
     ) : ParentPushMessage
 
     /** 某条延时工单被家长处理（同意 / 拒绝 / 忽略），用于即时刷新审批列表 */

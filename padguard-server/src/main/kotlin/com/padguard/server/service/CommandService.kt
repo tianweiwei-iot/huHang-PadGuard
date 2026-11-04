@@ -94,6 +94,10 @@ class CommandService(
         val cmd = commandRepository.findByMsgId(msgId)
             ?: throw BizException(ParentErr.PARAM_ERROR, "指令不存在", Audience.PARENT)
         ownershipGuard.requireOwned(userId, cmd.deviceId)
+        // 家长侧也触发过期收敛：此前 sweep 只挂在 pendingForPolling（孩子端来拉指令才跑），
+        // 孩子端关机/卸载/长期离线时指令永久 PENDING，家长端一直看到"待执行"毫无 deadline。
+        // 按归属设备顺手 sweep 一次（sweepIfDue 自带节流），家长查询即收敛。
+        expiredCommandSweeper.sweepIfDue(cmd.deviceId, System.currentTimeMillis())
         val payloadMap = cmd.payloadJson?.let { json ->
             runCatching { objectMapper.readValue(json, Map::class.java) as Map<String, Any?> }
                 .getOrNull()

@@ -270,11 +270,6 @@ interface MonitorApi {
         @Query("limit") limit: Int = 20
     ): Response<ApiResponse<List<ScreenshotDto>>>
 
-    /** 获取设备实时信息 */
-    @GET("monitor/{deviceId}/info")
-    suspend fun getDeviceInfo(
-        @Path("deviceId") deviceId: String
-    ): Response<ApiResponse<DeviceDto>>
 
     /** 获取设备位置 */
     @GET("monitor/{deviceId}/location")

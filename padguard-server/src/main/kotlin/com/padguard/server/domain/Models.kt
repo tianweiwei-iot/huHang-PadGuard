@@ -148,6 +148,19 @@ class Device(
     @Column(name = "remote_locked", columnDefinition = "boolean default false")
     var remoteLocked: Boolean? = false,
     /**
+     * 订阅权益闸门状态（ACTIVE / SUSPENDED）。
+     *
+     * 修复"订阅到期后管控冻结在最后状态"的关键记账位：此前订阅只在**绑定时**校验一次
+     * （ensureCanBindForChild），到期后孩子端继续执行最后一版策略——锁屏永远锁着、
+     * 黑名单继续拦截，而家长端全部控制接口已被订阅拦截器挡住，平板只能等运营人工解锁。
+     *
+     * 闸门在**孩子端必经路径**（心跳 / 拉策略）上对比此列与实时权益：
+     * 翻转沿触发一次"放开/恢复"策略重建（版本号前进，孩子端自动拉取）。
+     * 写入走条件 UPDATE（updateEntitlementState），绝不整行 merge 覆盖并发绑定。
+     */
+    @Column(name = "entitlement_state", columnDefinition = "varchar(20) default 'ACTIVE'")
+    var entitlementState: String = "ACTIVE",
+    /**
      * 未成年人模式分龄档位：UNDER_3 / BAND_3_8 / BAND_8_12 / BAND_12_16 / BAND_16_18。
      *
      * 与策略包里的 `minorMode.ageBand` 同源，这里冗余一份是为了让家长端

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -136,56 +137,65 @@ fun AlertCenterScreen(
                 }
             }
         ) { padding ->
-            if (state.records.isEmpty() && riskAlerts.isEmpty() && delayState.records.isEmpty()) {
-                EmptyState(modifier = Modifier.padding(padding).fillMaxSize())
-                return@Scaffold
-            }
-            LazyColumn(
-                modifier = Modifier.padding(padding).fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // 风险告警分区在前（管控失效比等放行更紧急）
-                if (riskAlerts.isNotEmpty()) {
-                    item(key = "risk_header") {
-                        SectionHeader(title = "风险预警", count = riskAlerts.size)
-                    }
-                    items(riskAlerts, key = { "risk_${it.id}" }) { alert ->
-                        RiskAlertCard(
-                            alert = alert,
-                            processing = riskProcessing,
-                            onAcknowledge = { onAcknowledgeRisk(alert) }
-                        )
-                    }
+            Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+                // 加载失败横幅：失败 ≠ 暂无消息。此前弱网下接口全挂会被渲染成
+                // "暂无消息"，家长真的会以为孩子没有申请——消息中心最伤的静默失败。
+                if (state.loadFailed) {
+                    LoadFailedBanner(onRetry = onRefresh, modifier = Modifier.padding(horizontal = 16.dp))
                 }
-                if (state.records.isNotEmpty()) {
-                    item(key = "ticket_header") {
-                        SectionHeader(title = "解锁申请", count = state.records.size)
+                val allEmpty = state.records.isEmpty() && riskAlerts.isEmpty() && delayState.records.isEmpty()
+                if (allEmpty) {
+                    // 加载失败时不渲染"暂无消息"（那是欺骗性空态），只留横幅
+                    if (!state.loadFailed) EmptyState(modifier = Modifier.fillMaxSize())
+                } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // 风险告警分区在前（管控失效比等放行更紧急）
+                    if (riskAlerts.isNotEmpty()) {
+                        item(key = "risk_header") {
+                            SectionHeader(title = "风险预警", count = riskAlerts.size)
+                        }
+                        items(riskAlerts, key = { "risk_${it.id}" }) { alert ->
+                            RiskAlertCard(
+                                alert = alert,
+                                processing = riskProcessing,
+                                onAcknowledge = { onAcknowledgeRisk(alert) }
+                            )
+                        }
                     }
-                    items(state.records, key = { it.ticket.id }) { entry ->
-                        TicketCard(
-                            entry = entry,
-                            processing = state.processing,
-                            onApprove = onApprove,
-                            onReject = onReject
-                        )
+                    if (state.records.isNotEmpty()) {
+                        item(key = "ticket_header") {
+                            SectionHeader(title = "解锁申请", count = state.records.size)
+                        }
+                        items(state.records, key = { it.ticket.id }) { entry ->
+                            TicketCard(
+                                entry = entry,
+                                processing = state.processing,
+                                onApprove = onApprove,
+                                onReject = onReject
+                            )
+                        }
                     }
+                    if (delayState.records.isNotEmpty()) {
+                        item(key = "delay_header") {
+                            SectionHeader(title = "延时申请", count = delayState.records.size)
+                        }
+                        items(delayState.records, key = { "delay_${it.ticket.id}" }) { entry ->
+                            DelayTicketCard(
+                                entry = entry,
+                                processing = delayState.processing,
+                                onApprove = onApproveDelay,
+                                onReject = onRejectDelay,
+                                onDismiss = onDismissDelay
+                            )
+                        }
+                    }
+                    item { Spacer(Modifier.height(12.dp)) }
                 }
-                if (delayState.records.isNotEmpty()) {
-                    item(key = "delay_header") {
-                        SectionHeader(title = "延时申请", count = delayState.records.size)
-                    }
-                    items(delayState.records, key = { "delay_${it.ticket.id}" }) { entry ->
-                        DelayTicketCard(
-                            entry = entry,
-                            processing = delayState.processing,
-                            onApprove = onApproveDelay,
-                            onReject = onRejectDelay,
-                            onDismiss = onDismissDelay
-                        )
-                    }
                 }
-                item { Spacer(Modifier.height(12.dp)) }
             }
         }
     }
@@ -352,6 +362,31 @@ private fun EmptyState(modifier: Modifier = Modifier) {
     }
 }
 
+/** 加载失败横幅：给出明确的重试入口，而不是把失败渲染成空态 */
+@Composable
+private fun LoadFailedBanner(onRetry: () -> Unit, modifier: Modifier = Modifier) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFFFFF3E0),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+        ) {
+            Text(
+                text = "消息加载失败，可能是网络不稳定",
+                fontSize = 13.sp,
+                color = Color(0xFFE65100),
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onRetry) {
+                Text("重试", fontSize = 13.sp, color = Color(0xFFE65100), fontWeight = FontWeight.Medium)
+            }
+        }
+    }
+}
+
 @Composable
 private fun TicketCard(
     entry: UnlockTicketEntry,
@@ -512,6 +547,7 @@ private fun StatusChip(status: String) {
         "IGNORED" -> Triple("已忽略", Color(0xFFF1F5F9), Color(0xFF64748B))
         "APPROVED" -> Triple("已同意", Color(0xFFE8F5E9), Color(0xFF2E7D32))
         "REJECTED" -> Triple("已拒绝", Color(0xFFFFEBEE), Color(0xFFC62828))
+        "EXPIRED" -> Triple("已过期", Color(0xFFF1F5F9), Color(0xFF64748B))
         else -> Triple(status, Color(0xFFF1F5F9), Color(0xFF64748B))
     }
     Surface(shape = RoundedCornerShape(8.dp), color = bg) {

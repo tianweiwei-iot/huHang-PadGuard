@@ -21,6 +21,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import com.padguard.parent.data.remote.readableActionMessage
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -524,7 +525,7 @@ class ControlPolicyViewModel @Inject constructor(
         viewModelScope.launch {
             policyRepository.lockScreen(deviceId)
                 .onSuccess { _uiState.value = _uiState.value.copy(toast = "已发送锁屏指令") }
-                .onFailure { _uiState.value = _uiState.value.copy(toast = "锁屏指令发送失败") }
+                .onFailure { _uiState.value = _uiState.value.copy(toast = "锁屏指令发送失败：" + it.readableActionMessage("请检查网络后重试")) }
         }
     }
 
@@ -538,7 +539,7 @@ class ControlPolicyViewModel @Inject constructor(
         viewModelScope.launch {
             policyRepository.unlock(deviceId)
                 .onSuccess { _uiState.value = _uiState.value.copy(toast = "已解锁设备") }
-                .onFailure { _uiState.value = _uiState.value.copy(toast = "解锁失败：${it.message}") }
+                .onFailure { _uiState.value = _uiState.value.copy(toast = "解锁失败：" + it.readableActionMessage("请检查网络后重试")) }
         }
     }
 
@@ -547,7 +548,7 @@ class ControlPolicyViewModel @Inject constructor(
         viewModelScope.launch {
             policyRepository.tempUnlock(deviceId, minutes)
                 .onSuccess { _uiState.value = _uiState.value.copy(toast = "已限时放行 $minutes 分钟") }
-                .onFailure { _uiState.value = _uiState.value.copy(toast = "限时放行失败：${it.message}") }
+                .onFailure { _uiState.value = _uiState.value.copy(toast = "限时放行失败：" + it.readableActionMessage("请检查网络后重试")) }
         }
     }
 
@@ -595,7 +596,9 @@ class ControlPolicyViewModel @Inject constructor(
      * 这里统一落到 `error`（而非 toast）：错误需要显式确认，一闪而过的 toast 会被忽略。
      */
     private fun fail(action: String, cause: Throwable?) {
-        val reason = cause?.message?.takeIf { it.isNotBlank() } ?: "网络或服务异常"
+        // readableActionMessage 会按业务码翻译可执行提示（如 4001 → 引导去续费），
+        // 其余沿用原文案 —— 此前 [4001] 这类原始码直接糊在家长脸上，无法行动。
+        val reason = cause?.readableActionMessage("网络或服务异常") ?: "网络或服务异常"
         _uiState.value = _uiState.value.copy(error = "$action：$reason")
     }
 }

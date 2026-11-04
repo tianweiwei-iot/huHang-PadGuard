@@ -89,6 +89,8 @@ class ChildDeviceController(
         @RequestParam currentVersion: Int,
         @RequestAttribute("deviceId") deviceId: String
     ): Any {
+        // 权益闸门：订阅失效/恢复的翻转沿在此触发"放开/恢复"策略重建（见 syncEntitlement）。
+        policyExtensionService.syncEntitlement(deviceId)
         // 拉取必经路径上校验"子表 → 策略包"一致性：模板遗留规则、漏触发的 rebuild 都在此自愈
         policyExtensionService.ensureRebuilt(deviceId)
         return DeviceApiResponse.ok(policyService.getForChild(deviceId, currentVersion))
@@ -113,6 +115,7 @@ class ChildReportController(
     private val ingestService: IngestService,
     private val deviceService: DeviceService,
     private val commandService: CommandService,
+    private val policyExtensionService: PolicyExtensionService,
     private val fileStorageService: FileStorageService,
     private val monitorService: MonitorService,
     private val appManageService: AppManageService,
@@ -204,6 +207,9 @@ class ChildReportController(
         @RequestAttribute("deviceId") deviceId: String,
         @RequestBody hb: HeartbeatDto
     ): DeviceApiResponse<*> {
+        // 权益闸门：孩子端每 30s 心跳必经此处，订阅失效/恢复在翻转沿触发策略重建。
+        // 没有这个挂点，到期后无人触发重建（家长端接口已被订阅拦截器挡住），管控会冻结在最后状态。
+        policyExtensionService.syncEntitlement(deviceId)
         deviceService.applyHeartbeat(deviceId, hb)
         val pending = commandService.pendingForPolling(deviceId, 0).size
         return DeviceApiResponse.ok(

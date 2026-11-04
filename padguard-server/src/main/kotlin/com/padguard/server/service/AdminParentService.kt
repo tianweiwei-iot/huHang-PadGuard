@@ -28,6 +28,7 @@ class AdminParentService(
     private val billingService: BillingService,
     private val mailService: MailService,
     private val adminBillingService: AdminBillingService,
+    private val paymentOrderRepository: com.padguard.server.repository.PaymentOrderRepository,
     private val auditService: AuditService,
     private val systemSettingRepository: SystemSettingRepository,
     private val objectMapper: ObjectMapper,
@@ -222,6 +223,17 @@ class AdminParentService(
         val deviceCount = deviceRepository.countByUserId(id)
         if (deviceCount > 0) {
             throw BizException(ParentErr.PARAM_ERROR, "该账号下仍有 ${deviceCount} 台设备，请先解绑或转交设备后再删除", Audience.PARENT)
+        }
+        // 资金护栏：存在已支付未退款的订单时禁止删除——否则"钱收了、权益没了、
+        // 记录对不上人"，对账时只剩一串幽灵 userId。订单行本身要留作财务流水，
+        // 正确路径是先退款（AdminBillingService.refund）再删号。
+        val paidOrders = paymentOrderRepository.findByUserIdAndStatus(id, OrderStatus.PAID.name)
+        if (paidOrders.isNotEmpty()) {
+            throw BizException(
+                ParentErr.PARAM_ERROR,
+                "该账号存在 ${paidOrders.size} 笔已支付未退款的订单，请先处理退款后再删除",
+                Audience.PARENT
+            )
         }
         // 关联订阅一并清理
         subscriptionRepository.findByUserId(id)?.let { subscriptionRepository.delete(it) }

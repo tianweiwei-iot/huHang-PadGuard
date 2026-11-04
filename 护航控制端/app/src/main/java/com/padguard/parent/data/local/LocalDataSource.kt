@@ -704,8 +704,6 @@ class LocalDataSource @Inject constructor(
     override suspend fun updateAppBlacklist(deviceId: String, blockedPackages: List<String>): Result<Unit> =
         Result.success(Unit)
 
-    override suspend fun setAppTimeLimit(policy: AppPolicy): Result<Unit> =
-        Result.success(Unit)
 
     override suspend fun installApp(deviceId: String, appUrl: String): Result<Unit> =
         Result.success(Unit)

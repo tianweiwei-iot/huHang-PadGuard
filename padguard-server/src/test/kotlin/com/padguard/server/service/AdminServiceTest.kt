@@ -126,6 +126,18 @@ class AdminServiceTest {
 }
 
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
+    override fun updateEntitlementState(deviceId: String, state: String): Int {
+        val d = table[deviceId] ?: return 0
+        d.entitlementState = state
+        return 1
+    }
+
+    override fun clearRemoteLockedIfSet(deviceId: String): Int {
+        val d = table[deviceId] ?: return 0
+        return if (d.remoteLocked == true) { d.remoteLocked = false; 1 } else 0
+    }
+
+
         override val table = LinkedHashMap<String, Device>()
         override fun idOf(e: Device) = e.id
         override fun countGroupByUserIds(userIds: Collection<String>): List<Array<Any>> =
@@ -489,7 +501,7 @@ class AdminServiceTest {
         val rbacS = AdminRbacService(admins, adminPerm, auditService, mailService, settings, objectMapper)
         val settingsS = AdminSettingsService(adminPerm, settings, billing, objectMapper, auditService, env)
         val monitorS = AdminServerMonitorService(adminPerm, requestMetrics, runtimeLogRing, dataSource, serverProfileService)
-        val parentS = AdminParentService(users, subs, devices, adminPerm, billing, mailService, billingS, auditService, settings, objectMapper, usageSessionService)
+        val parentS = AdminParentService(users, subs, devices, adminPerm, billing, mailService, billingS, orders, auditService, settings, objectMapper, usageSessionService)
         val deviceS = AdminDeviceService(devices, users, commandService, adminPerm, auditService, usageSessionService, deviceService)
         val dashboardS = AdminDashboardService(users, devices, subs, orders, alerts, adminPerm, auditS, requestMetrics, runtimeLogRing, dataSource, serverProfileService, DashboardCache(0)) // TTL=0 即禁用缓存：单测要的是每次现算
 

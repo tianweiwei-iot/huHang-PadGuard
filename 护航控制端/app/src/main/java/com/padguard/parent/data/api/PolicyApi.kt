@@ -106,16 +106,6 @@ interface PolicyApi {
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<AppListPolicyDto>>
 
-    /**
-     * 设置单应用时长限制。
-     * 后端当前未单列"单应用"限制，/apps/limit 实际写入设备每日总时长；
-     * 此处复用同一入口，将 AppPolicy.dailyLimitMinutes 作为每日总时长写入，保持行为一致。
-     */
-    @PUT("policies/{deviceId}/apps/limit")
-    suspend fun setAppTimeLimit(
-        @Path("deviceId") deviceId: String,
-        @Body request: DailyLimitRequest
-    ): Response<ApiResponse<Unit>>
 
     // === 上网管控 ===
     @GET("policies/{deviceId}/web")

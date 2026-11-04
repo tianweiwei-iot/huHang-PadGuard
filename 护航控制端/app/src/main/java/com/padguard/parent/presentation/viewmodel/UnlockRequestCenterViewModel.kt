@@ -2,6 +2,9 @@ package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.padguard.parent.data.remote.ParentPushClient
+import com.padguard.parent.data.remote.ParentPushMessage
+import com.padguard.parent.data.remote.readableActionMessage
 import com.padguard.parent.domain.repository.DeviceRepository
 import com.padguard.parent.domain.repository.PolicyRepository
 import com.padguard.parent.domain.repository.UnlockTicket
@@ -58,13 +61,20 @@ data class UnlockCenterUiState(
     /** 最近一次操作的反馈文案（如"已忽略，可在消息中心继续处理"） */
     val actionMessage: String? = null,
     /** 处理中：按钮置灰，避免家长连点导致重复下发指令 */
-    val processing: Boolean = false
+    val processing: Boolean = false,
+    /**
+     * 最近一次加载失败。弱网下"设备列表/工单拉取失败"若静默吞掉，
+     * 页面会把"接口全挂"渲染成"暂无消息"——家长真的会以为孩子没有申请。
+     * 置位后消息中心显示失败横幅 + 重试；下一次 refresh 成功即复位。
+     */
+    val loadFailed: Boolean = false
 )
 
 @HiltViewModel
 class UnlockRequestCenterViewModel @Inject constructor(
     private val deviceRepository: DeviceRepository,
     private val policyRepository: PolicyRepository,
+    private val parentPushClient: ParentPushClient,
     private val notificationHelper: NotificationHelper
 ) : ViewModel() {
 
@@ -112,6 +122,21 @@ class UnlockRequestCenterViewModel @Inject constructor(
 
     init {
         startPolling()
+        observePush()
+    }
+
+    /**
+     * 监听服务端推送（`unlock.requested`）：孩子刚发起解锁申请就立刻刷新一次。
+     *
+     * 服务端此前只落库不推送，家长端只能靠 10s 轮询——弱网/后台场景下孩子
+     * 在锁屏页干等、家长毫无感知。推送 + 轮询兜底的双通道结构与延时中心一致。
+     */
+    private fun observePush() {
+        viewModelScope.launch {
+            parentPushClient.messages.collect { msg ->
+                if (msg is ParentPushMessage.UnlockRequested) refresh()
+            }
+        }
     }
 
     /**
@@ -149,11 +174,20 @@ class UnlockRequestCenterViewModel @Inject constructor(
         if (!refreshGate.tryEnter()) return
         viewModelScope.launch {
             try {
-                val devices = deviceRepository.getDeviceList().getOrNull() ?: return@launch
+                val devices = deviceRepository.getDeviceList().getOrNull() ?: run {
+                    // 失败不能静默：渲染成"暂无消息"会让家长以为孩子没有申请
+                    _uiState.value = _uiState.value.copy(loadFailed = true)
+                    return@launch
+                }
                 val nameById = devices.associate { it.id to it.name }
 
+                var anyTicketFetchFailed = false
                 val entries = devices.mapNotNull { device ->
-                    val tickets = policyRepository.getUnlockTickets(device.id).getOrNull() ?: return@mapNotNull null
+                    val tickets = policyRepository.getUnlockTickets(device.id).getOrNull()
+                    if (tickets == null) {
+                        anyTicketFetchFailed = true
+                        return@mapNotNull null
+                    }
                     tickets.map { UnlockTicketEntry(it, nameById[device.id].orEmpty()) }
                 }.flatten().sortedByDescending { it.ticket.createdAt }
 
@@ -179,7 +213,8 @@ class UnlockRequestCenterViewModel @Inject constructor(
                 _uiState.value = _uiState.value.copy(
                     records = entries,
                     unreadCount = entries.count { it.ticket.isPending },
-                    popup = next
+                    popup = next,
+                    loadFailed = anyTicketFetchFailed
                 )
             } finally {
                 // 期间被拒的刷新（处理工单后的刷新 / 下拉刷新）不能丢，放行一次
@@ -258,7 +293,7 @@ class UnlockRequestCenterViewModel @Inject constructor(
         }
         val message = outcome.fold(
             onSuccess = { successMessage },
-            onFailure = { e -> "操作失败：${e.message ?: "请检查网络后重试"}" }
+            onFailure = { e -> "操作失败：" + e.readableActionMessage("请检查网络后重试") }
         )
         // 只有**成功**才记"本会话已处理"。
         // 失败时工单仍是 PENDING：记进 handledInSession 会让它在本会话内永不弹窗，

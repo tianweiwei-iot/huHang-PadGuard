@@ -204,6 +204,18 @@ class BillingServiceTest {
 
     /** 设备台账：BillingService 只关心数量，无需构造完整 Device 实体。 */
     private class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
+    override fun updateEntitlementState(deviceId: String, state: String): Int {
+        val d = table[deviceId] ?: return 0
+        d.entitlementState = state
+        return 1
+    }
+
+    override fun clearRemoteLockedIfSet(deviceId: String): Int {
+        val d = table[deviceId] ?: return 0
+        return if (d.remoteLocked == true) { d.remoteLocked = false; 1 } else 0
+    }
+
+
         override val table = LinkedHashMap<String, Device>()
         override fun idOf(entity: Device) = entity.id
         override fun countGroupByUserIds(userIds: Collection<String>): List<Array<Any>> =

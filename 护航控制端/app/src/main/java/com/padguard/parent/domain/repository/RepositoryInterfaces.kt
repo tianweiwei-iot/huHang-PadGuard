@@ -366,8 +366,6 @@ interface PolicyRepository {
     /** 更新应用黑名单 */
     suspend fun updateAppBlacklist(deviceId: String, blockedPackages: List<String>): Result<Unit>
 
-    /** 设置单应用时长限制 */
-    suspend fun setAppTimeLimit(policy: AppPolicy): Result<Unit>
 
     /** 远程安装应用：下发指令，APK 由被管控端从 url 自行下载 */
     suspend fun installApp(deviceId: String, appUrl: String): Result<Unit>

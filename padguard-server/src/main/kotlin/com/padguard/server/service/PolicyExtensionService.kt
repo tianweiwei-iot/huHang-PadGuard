@@ -30,12 +30,15 @@ class PolicyExtensionService(
     private val deviceSettingRepository: DeviceSettingRepository,
     private val policyTemplateRepository: PolicyTemplateRepository,
     private val installedAppRepository: InstalledAppRepository,
+    private val subscriptionRepository: SubscriptionRepository,
+    private val commandService: CommandService,
     private val mqttGateway: MqttGateway,
     private val objectMapper: ObjectMapper,
     private val contentFilterService: ContentFilterService,
     private val auditService: AuditService
 ) {
     private val log = LoggerFactory.getLogger(PolicyExtensionService::class.java)
+
     // ---------- 时段限制 ----------
     fun listTimeRestrictions(userId: String, deviceId: String): List<TimeRestrictionDto> {
         requireOwned(userId, deviceId)
@@ -650,7 +653,68 @@ class PolicyExtensionService(
         // 于是这两项"保存成功、下发成功、设备毫无反应"，是典型的静默断链。
         // 时间管控页是家长设置休息节奏的**唯一入口**，这里就是 eyeCare 的权威来源。
         pkg["eyeCare"] = buildEyeCareSegment(settings)
+
+        // ===== 订阅权益闸门（P0）=====
+        // 设备归属家长的订阅失效（EXPIRED/REVOKED）时，把整包就地改写为「放开包」：
+        // 管控全停、监控采集停止、设备支配权归还。翻转沿由 syncEntitlement 触发 ensureRebuilt，
+        // 期望包与库存包产生漂移 → 重建 + 版本号前进 → 孩子端心跳感知新版本自动拉取。
+        if (!entitledForChild(device.userId)) {
+            EntitlementGate.applyRelease(pkg)
+        }
         return objectMapper.writeValueAsString(pkg)
+    }
+
+    /**
+     * 孩子端视角的权益判定：刷新过期态（条件 UPDATE，见 markExpiredIfStale）后读状态。
+     *
+     * - userId 为 null（未绑定归属/新建设备）或无订阅行（试用尚未初始化）→ 不设闸，
+     *   避免注册/绑定进行中的设备被误判失效；
+     * - markExpiredIfStale 只在"仍可用态且已过期"时命中，绝不覆盖并发续费刚写入的到期时间。
+     */
+    private fun entitledForChild(userId: String?): Boolean {
+        if (userId == null) return true
+        subscriptionRepository.markExpiredIfStale(userId, SubStatus.EXPIRED.name, System.currentTimeMillis())
+        val sub = subscriptionRepository.findByUserId(userId) ?: return true
+        return EntitlementGate.isEntitled(sub.status)
+    }
+
+    /**
+     * 权益闸门同步：在**孩子端必经路径**（心跳 / 拉策略）上调用。
+     *
+     * 对比设备上的闸门记账位（entitlementState）与实时权益，只在**翻转沿**做三件事：
+     * 1. 条件 UPDATE 翻转记账位（绝不整行 merge）；
+     * 2. 失效沿若设备正被远程锁屏 → 代为解锁（此时家长端控制接口已被订阅拦截器挡住，
+     *    没有这一步平板会锁死到运营人工介入）；
+     * 3. 触发 ensureRebuilt —— 期望包随权益状态变化产生漂移，自愈机制完成重建与版本前进。
+     *
+     * 并发心跳可能双触发：记账位/清锁都是条件 UPDATE（幂等），至多多发一条 TEMP_UNLOCK
+     * （重复解锁无害），不引入额外加锁。
+     */
+    fun syncEntitlement(deviceId: String): Boolean {
+        val dev = deviceRepository.findById(deviceId).orElse(null) ?: return true
+        val userId = dev.userId ?: return true
+        val entitledNow = entitledForChild(userId)
+        val wasActive = dev.entitlementState != EntitlementGate.STATE_SUSPENDED
+        if (wasActive == entitledNow) return entitledNow
+
+        deviceRepository.updateEntitlementState(
+            deviceId,
+            if (entitledNow) EntitlementGate.STATE_ACTIVE else EntitlementGate.STATE_SUSPENDED
+        )
+        if (!entitledNow && dev.remoteLocked == true) {
+            if (deviceRepository.clearRemoteLockedIfSet(deviceId) > 0) {
+                runCatching {
+                    commandService.issueCommand(deviceId, CommandType.TEMP_UNLOCK, emptyMap(), priority = "HIGH")
+                }.onFailure { log.warn("entitlement release: TEMP_UNLOCK dispatch failed: {}", it.message) }
+            }
+        }
+        ensureRebuilt(deviceId)
+        if (entitledNow) {
+            log.info("entitlement restored, rebuilding policy: deviceId={}", deviceId)
+        } else {
+            log.warn("entitlement lost, releasing controls: deviceId={} userId={}", deviceId, userId)
+        }
+        return entitledNow
     }
 
     /**

@@ -258,7 +258,7 @@ class ApiDataSource @Inject constructor(
                 } else if (body.code == 0) {
                     Result.success(body)
                 } else {
-                    Result.failure(Exception("[${(body.code)}] ${body.message}"))
+                    Result.failure(ParentBizException(body.code, "[${body.code}] ${body.message}"))
                 }
             } else {
                 val err = runCatching { resp.errorBody()?.string() }.getOrNull()
@@ -313,7 +313,7 @@ class ApiDataSource @Inject constructor(
             } else {
                 val rawBody = runCatching { resp.body()?.string() }.getOrNull()
                 val bizError = rawBody?.takeIf { it.isNotBlank() }?.let { parseBizError(it) }
-                if (bizError != null) Result.failure(Exception(bizError))
+                if (bizError != null) Result.failure(bizError)
                 else Result.success(Unit)
             }
         } catch (e: Exception) {
@@ -324,15 +324,17 @@ class ApiDataSource @Inject constructor(
     }
 
     /**
-     * 解析业务信封里的 code；非 0 返回可读错误文案，0 / 缺 code 返回 null（视为成功）。
+     * 解析业务信封里的 code；非 0 返回带 code 的异常，0 / 缺 code 返回 null（视为成功）。
      * 仅对"明确带非 0 code"的响应判失败，避免对空响应或无关 JSON 响应体误伤。
+     * 保留 code 而不是只拼文案：上层（ViewModel）要按业务码分支引导，
+     * 例如 4001（订阅过期）应引导去续费，而不是让家长把"操作失败"当网络抖动。
      */
-    private fun parseBizError(raw: String): String? = try {
+    private fun parseBizError(raw: String): ParentBizException? = try {
         val o = org.json.JSONObject(raw)
         val code = o.optInt("code", 0)
         if (code != 0) {
             val message = o.optString("message").orEmpty()
-            "[$code] ${if (message.isBlank()) "操作未被服务端接受" else message}"
+            ParentBizException(code, "[$code] ${if (message.isBlank()) "操作未被服务端接受" else message}")
         } else null
     } catch (e: Exception) {
         null
@@ -946,9 +948,6 @@ class ApiDataSource @Inject constructor(
     override suspend fun updateAppBlacklist(deviceId: String, blockedPackages: List<String>): Result<Unit> =
         exec { policyApi.updateAppBlacklist(deviceId, UpdateBlacklistRequest(blockedPackages)) }.map { Unit }
 
-    override suspend fun setAppTimeLimit(policy: AppPolicy): Result<Unit> =
-        // 后端 /apps/limit 实际写入设备每日总时长；此处复用该入口写入
-        exec { policyApi.setAppTimeLimit(policy.deviceId, DailyLimitRequest(policy.dailyLimitMinutes ?: 0)) }.map { Unit }
 
     override suspend fun installApp(deviceId: String, appUrl: String): Result<Unit> =
         Result.failure(Exception("服务端未提供远程安装接口，暂不支持。"))
@@ -1710,3 +1709,26 @@ private fun AlertDto.toDomain(): Alert = Alert(
 
 private inline fun <reified T : Enum<T>> safeEnum(value: String?, default: () -> T): T =
     if (value.isNullOrBlank()) default() else runCatching { enumValueOf<T>(value) }.getOrDefault(default())
+
+/**
+ * 服务端业务失败（HTTP 200 + `{code,message}` 信封里的非 0 code）。
+ *
+ * 早期只抛普通 Exception、把 code 拼进文案，上层无从按业务码分支 ——
+ * 最典型的是 4001（订阅过期）：家长点"锁屏/同意放行"只看到一个笼统的
+ * "操作失败：[4001] …"，不知道该去续费。现在 code 跟随异常传递，
+ * ViewModel 可据此给出可执行的引导文案（见 SUBSCRIPTION_REQUIRED_CODE）。
+ */
+class ParentBizException(val code: Int, message: String) : RuntimeException(message) {
+    companion object {
+        /** 服务端 Core.kt 的 SUBSCRIPTION_REQUIRED：未订阅 / 订阅已过期 */
+        const val CODE_SUBSCRIPTION_REQUIRED = 4001
+    }
+}
+
+/** 把业务异常翻译成"家长能照着做"的提示：订阅过期 → 引导续费；其余原样返回 */
+fun Throwable.readableActionMessage(fallback: String): String {
+    if (this is ParentBizException && code == ParentBizException.CODE_SUBSCRIPTION_REQUIRED) {
+        return "订阅已到期，请到「我的-订阅」页续费后再试"
+    }
+    return message?.takeIf { it.isNotBlank() } ?: fallback
+}

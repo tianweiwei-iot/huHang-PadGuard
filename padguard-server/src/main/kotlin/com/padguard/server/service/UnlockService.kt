@@ -11,6 +11,7 @@ import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UnlockTicketRepository
 import com.padguard.server.service.AuditAction
 import com.padguard.server.service.AuditService
+import com.padguard.server.ws.WebSocketPushService
 import org.slf4j.LoggerFactory
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
@@ -22,6 +23,7 @@ class UnlockService(
     private val deviceRepository: DeviceRepository,
     private val unlockTicketRepository: UnlockTicketRepository,
     private val commandService: CommandService,
+    private val webSocketPush: WebSocketPushService,
     private val auditService: AuditService
 ) {
     private val log = LoggerFactory.getLogger(UnlockService::class.java)
@@ -61,6 +63,24 @@ class UnlockService(
             // 其他完整性错误（如归属家长已不存在导致外键失败）仍然如实抛出。
             if (!unlockTicketRepository.existsById(requestId)) throw e
             log.info("concurrent unlock ticket ignored (already created): {}", requestId)
+            return
+        }
+        // 实时推送（与延时申请 usage.delay.requested 同口径）：孩子发起解锁申请后，
+        // 家长端若只靠 10s 轮询消息中心，弱网/后台场景下可能永远不知道——
+        // 孩子在锁屏页等着，家长却毫无感知，是"申请-审批"闭环最伤的一环。
+        // 只在**首次插入成功**时推（幂等重试不再推），避免重复打扰。
+        dev.userId?.let {
+            webSocketPush.pushToUser(
+                it,
+                mapOf(
+                    "type" to "unlock.requested",
+                    "deviceId" to deviceId,
+                    "ticketId" to ticket.id,
+                    "packageName" to ticket.packageName,
+                    "appLabel" to ticket.appLabel,
+                    "createdAt" to ticket.createdAt
+                )
+            )
         }
     }
 
@@ -73,11 +93,12 @@ class UnlockService(
      * 想再放行只能等孩子重新提交一次 —— 而孩子往往不会重提。
      */
     fun listTickets(userId: String, deviceId: String): List<UnlockTicketDto> {
+        val today = dayKey(System.currentTimeMillis())
         return listOf("PENDING", "APPROVED", "REJECTED", "IGNORED")
             .flatMap { unlockTicketRepository.findByDeviceIdAndStatus(deviceId, it) }
             .filter { it.userId == userId }
             .sortedByDescending { it.createdAt }
-            .map { toDto(it) }
+            .map { toDto(it, today) }
     }
 
     /**
@@ -162,12 +183,30 @@ class UnlockService(
         if (t.status != "PENDING" && t.status != "IGNORED") {
             throw BizException(ParentErr.PARAM_ERROR, "工单已处理（已同意或已拒绝）", Audience.PARENT)
         }
+        // 跨日作废（与延时申请 UsageDelayService 同口径）：解锁申请只在提交当日有效。
+        // 原实现没有时效——三十年前的 PENDING 工单今天照样能批准并下发 TEMP_UNLOCK；
+        // 孩子的诉求有很强的时效性（"我现在想用一下"），隔天批准没有意义还可能误放行。
+        if (dayKey(t.createdAt) != dayKey(System.currentTimeMillis())) {
+            throw BizException(ParentErr.PARAM_ERROR, "该申请已过期（仅当日有效），请让孩子重新提交", Audience.PARENT)
+        }
         return t
     }
 
-    private fun toDto(t: UnlockTicket) = UnlockTicketDto(
-        id = t.id, deviceId = t.deviceId, packageName = t.packageName, appLabel = t.appLabel,
-        durationMinutes = t.durationMinutes, reason = t.reason, status = t.status,
-        createdAt = t.createdAt, resolvedAt = t.resolvedAt
-    )
+    private fun dayKey(epochMillis: Long): String =
+        java.time.Instant.ofEpochMilli(epochMillis)
+            .atZone(com.padguard.server.common.SERVER_ZONE_ID).toLocalDate().toString()
+
+    /** [today] 由调用方传入：列表一次计算，避免每行取当日键 */
+    private fun toDto(t: UnlockTicket, today: String): UnlockTicketDto {
+        // 展示级作废：非当日仍敞开的工单在消息中心显示"已过期"（不回写库，保留原始轨迹）。
+        // 家长端按 status 展示徽标、按 isPending 过滤弹窗 —— "EXPIRED" 两条路都天然收敛。
+        val status = if ((t.status == "PENDING" || t.status == "IGNORED") && dayKey(t.createdAt) != today) {
+            "EXPIRED"
+        } else t.status
+        return UnlockTicketDto(
+            id = t.id, deviceId = t.deviceId, packageName = t.packageName, appLabel = t.appLabel,
+            durationMinutes = t.durationMinutes, reason = t.reason, status = status,
+            createdAt = t.createdAt, resolvedAt = t.resolvedAt
+        )
+    }
 }
