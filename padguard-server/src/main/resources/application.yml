@@ -199,6 +199,14 @@ spring:
             required: true
           ssl:
             enable: true
+          # 必须显式设置：JavaMail 默认**无限等待**。
+          # 重置密码是 @Transactional 且持着 users 行锁的，SMTP 主机被防火墙丢包时
+          # 会一直阻塞到 TCP 超时（常见 60s+），期间该账号的登录/登出/其它后台操作全部排队，
+          # 并发几次就能把连接池耗干净。5s 足够发一封纯文本邮件，失败也只损失"通知"本身
+          # （MailService 早就做了降级：不发信就把明文口令带回后台弹窗）。
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
 
 ---
 spring:

@@ -26,7 +26,18 @@ class WeChatPayClient(
 ) : WeChatRefundClient {
 
     private val log = LoggerFactory.getLogger(WeChatPayClient::class.java)
-    private val http = HttpClient.newBuilder().build()
+
+    /**
+     * **必须显式设置超时**。JDK HttpClient 的默认值是"无限等待"：
+     * 微信侧慢响应或网络黑洞时，下单/退款调用会一直挂住调用线程。
+     * 下单发生在 HTTP 请求线程上（家长在收银台等），退款发生在后台操作上 —
+     * 两者挂住的表现分别是"家长端一直转圈"和"运营点退款没反应"，
+     * 而且没有任何日志（连接既没成功也没失败）。
+     * 连接 5s / 单请求 15s：微信支付接口的正常耗时在百毫秒级，超时阈值留足余量。
+     */
+    private val http: HttpClient = HttpClient.newBuilder()
+        .connectTimeout(java.time.Duration.ofSeconds(5))
+        .build()
 
     override fun isConfigured(): Boolean = props.readyForPay()
 
@@ -63,6 +74,7 @@ class WeChatPayClient(
         return try {
             val req = HttpRequest.newBuilder()
                 .uri(URI.create("${props.baseUrl}$path"))
+                .timeout(java.time.Duration.ofSeconds(15))
                 .header("Authorization", auth)
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
@@ -130,6 +142,7 @@ class WeChatPayClient(
         return try {
             val req = HttpRequest.newBuilder()
                 .uri(URI.create("${props.baseUrl}$path"))
+                .timeout(java.time.Duration.ofSeconds(15))
                 .header("Authorization", WeChatPayCrypto.buildAuthorization("POST", path, body, mchId, props.serialNo!!, privateKey))
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")

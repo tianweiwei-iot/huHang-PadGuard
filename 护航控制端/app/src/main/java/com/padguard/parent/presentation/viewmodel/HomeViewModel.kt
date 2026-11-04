@@ -90,6 +90,19 @@ class HomeViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
+    /**
+     * 最近一次 WS 用量推送**落地**的时刻（单调时钟）。
+     *
+     * 今日用量有两个写入者：30 秒轮询（HTTP）与 WS 实时推送。此前它们只校验"设备是否还是当前设备"，
+     * 不校验"数据是否更新"——弱网下轮询请求挂 10 秒期间推送已把看板刷到 62 分钟，
+     * 旧响应回来（服务端快照 58 分钟）会无条件覆盖，看板数字**往回跳**，
+     * 家长会以为孩子"使用时长在减少"，且要等下一轮轮询才纠正。
+     *
+     * 这里记录推送落地时刻，轮询响应回来时若发现"发请求之后又收到过推送"，就丢弃该响应。
+     */
+    @Volatile
+    private var usagePushAppliedAt: Long = 0L
+
     init {
         // 订阅共享设备流：解绑 / 接入 / 重命名后首页即时反映，无需手动下拉刷新。
         // 否则解绑成功后首页仍显示旧设备，家长会误以为「解绑无效 / 无法解绑」。
@@ -140,6 +153,7 @@ class HomeViewModel @Inject constructor(
             selectedDevice = device,
             managementActive = policyRepository.managementActiveFlow.value[deviceId] ?: true
         )
+        usagePushAppliedAt = 0L
         loadTodayUsage(deviceId)
         loadDailyLimit(deviceId)
     }
@@ -224,6 +238,9 @@ class HomeViewModel @Inject constructor(
             // B 的名字下若还挂着 A 的今日统计（跨孩子数据串台），家长会读出错误结论。
             // 空值态交给随后的 loadTodayUsage 填充；加载失败显示"—"比显示别人的数据安全。
             _uiState.value = _uiState.value.copy(todayUsage = null, latestActivity = null)
+            // 换设备后上一台设备的推送时刻不再有参考意义，必须清零：
+            // 否则新设备的第一条轮询响应会被误判为"比推送旧"而丢弃，看板一直空着。
+            usagePushAppliedAt = 0L
             loadTodayUsage(sel)
             loadDailyLimit(sel)
         }
@@ -231,11 +248,16 @@ class HomeViewModel @Inject constructor(
 
     private fun loadTodayUsage(deviceId: String) {
         viewModelScope.launch {
+            // 记下"发请求的时刻"：响应回来时用它判断期间是否已有更新的推送落地
+            val sentAt = android.os.SystemClock.elapsedRealtime()
             statisticsRepository.getTodayUsage(deviceId)
                 .onSuccess { stats ->
                     // 弱网乱序防线：响应回来时选中的可能已是另一台设备。
                     // 不校验的话，慢的旧设备响应会覆盖新设备看板（快速切换 A→B 场景）。
                     if (_uiState.value.selectedDeviceId != deviceId) return@onSuccess
+                    // 第二道防线：请求在途期间收到过 WS 用量推送 → 这个响应是更旧的快照，
+                    // 落地会让看板数字回退（推送是毫秒级的，永远比 30s 轮询新）。
+                    if (usagePushAppliedAt > sentAt) return@onSuccess
                     val topApp = stats.appUsages.firstOrNull()
                     _uiState.value = _uiState.value.copy(
                         todayUsage = stats,
@@ -265,6 +287,8 @@ class HomeViewModel @Inject constructor(
                     val sel = _uiState.value.selectedDeviceId ?: return@collect
                     if (msg.deviceId != sel) return@collect
                     val topApp = msg.stats.appUsages.firstOrNull()
+                    // 先记时刻再写状态：让"在途的旧轮询响应"能看出期间有更新的数据落地
+                    usagePushAppliedAt = android.os.SystemClock.elapsedRealtime()
                     _uiState.value = _uiState.value.copy(
                         todayUsage = msg.stats,
                         latestActivity = topApp?.let {

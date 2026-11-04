@@ -336,6 +336,15 @@ class GuardService : Service() {
     @Volatile private var lastCommandPullAtMs: Long = 0L
 
     /**
+     * 兜底拉取"连续失败轮次"计数。
+     *
+     * 某条指令执行/回执持续失败时，游标会被刻意按住不推进（否则该指令永久丢失），
+     * 但也不能无限按住：那会让这条通道每 3 秒重试一次、日志刷屏，
+     * 并且挡住后面所有新指令。连续 [MAX_STUCK_PULL_ROUNDS] 轮后放弃本批并推进游标。
+     */
+    @Volatile private var stuckPullRounds: Int = 0
+
+    /**
      * 指令轮询游标的落盘文件。
      *
      * 必须 by lazy：实例化期 Context 尚不可用（见 [lastCommandPullAtMs] 的事故说明），
@@ -2362,18 +2371,49 @@ class GuardService : Service() {
                 Logger.w(TAG) {
                     "fallback pull: ${list.size} command(s) missed by push -> ${list.map { it.type.name }}"
                 }
+                var failed = 0
+                val failedIds = mutableListOf<String>()
                 list.forEach { cmd ->
-                    runSafely("fallbackCmd:${cmd.type.name}") {
+                    // 三级结果：true=执行且回执成功；false=执行成功但回执失败；null=执行抛异常。
+                    // 不能用外层 runSafely 一把包住再无条件推进游标 —— 那样"执行失败"和"回执失败"
+                    // 都会被吞成一次日志，而服务端此时仍把指令保持 PENDING；
+                    // 游标一旦越过该指令的创建时间，`pendingForPolling(since=新游标)` 就再也不会返回它，
+                    // 这条一次性指令（锁屏/截屏/录屏）即永久丢失，重启也补不回来。
+                    val executed = runSafely("fallbackCmd:${cmd.type.name}") {
                         // 去重在 CommandExecutor 内做（推送/轮询双通道共用漏斗）；
                         // 无论新执行还是去重忽略，都要回执，让服务端收敛指令状态
                         val ack = policyEngine.execute(cmd, deviceId)
                         runCatching { remote.sendAck(ack) }
                             .onFailure { Logger.w(TAG) { "fallback ack ${cmd.msgId} failed: $it" } }
+                            .isSuccess
+                    }
+                    if (executed != true) {
+                        failed++
+                        failedIds += cmd.msgId
                     }
                 }
-                lastCommandPullAtMs = timeProvider.now()
-                // 游标落盘：进程被回收后续接，杜绝"息屏期间下达的指令被永久跳过"
-                commandPollPrefs.edit().putLong(KEY_LAST_PULL_AT, lastCommandPullAtMs).apply()
+                if (failed > 0) stuckPullRounds++
+                if (failed == 0 || stuckPullRounds >= MAX_STUCK_PULL_ROUNDS) {
+                    // 全部成功 → 正常推进。
+                    // 连续 N 轮都执行/回执不掉同一批 → 放弃这批（否则每 3 秒重试一次、日志刷屏，
+                    // 且永久卡死的指令会挡住后面所有新指令）。放弃时打 ERROR，便于按 msgId 人工补发。
+                    if (failed > 0) {
+                        Logger.e(TAG) {
+                            "fallback pull stuck for $stuckPullRounds rounds ($failed/${list.size} not acked), " +
+                                "skipping batch: $failedIds"
+                        }
+                    }
+                    stuckPullRounds = 0
+                    lastCommandPullAtMs = timeProvider.now()
+                    // 游标落盘：进程被回收后续接，杜绝"息屏期间下达的指令被永久跳过"
+                    commandPollPrefs.edit().putLong(KEY_LAST_PULL_AT, lastCommandPullAtMs).apply()
+                } else {
+                    // 保留旧游标，下一轮把整批重新拉一遍：重复执行由 tryClaim+msgId 幂等兜底。
+                    Logger.w(TAG) {
+                        "fallback pull: $failed/${list.size} command(s) not acked, cursor held for retry " +
+                            "(round $stuckPullRounds/$MAX_STUCK_PULL_ROUNDS)"
+                    }
+                }
             }
             is ApiResult.BizError ->
                 Logger.w(TAG) { "fallback pull rejected: ${r.code} ${r.message}" }
@@ -2536,6 +2576,13 @@ class GuardService : Service() {
         /** 指令轮询游标的持久化文件（见 [lastCommandPullAtMs]） */
         private const val PREFS_COMMAND_POLL = "padguard_command_poll"
         private const val KEY_LAST_PULL_AT = "last_pull_at"
+
+        /**
+         * 兜底拉取连续失败多少轮后放弃本批（见 [stuckPullRounds]）。
+         * 指令轮询周期约 3s，20 轮 ≈ 1 分钟 —— 足够覆盖一次短暂断网/服务端抖动，
+         * 又不至于让一条永久失败的指令无限期挡住后续指令。
+         */
+        private const val MAX_STUCK_PULL_ROUNDS = 20
 
         /**
          * 游标"落在未来"的容忍窗口。

@@ -114,7 +114,10 @@ class AdminParentService(
     @Transactional
     fun suspendParent(adminId: String, id: String): Map<String, Any> {
         adminPerm.require(adminId, "parents", "suspend")
-        val u = userRepository.findById(id).orElse(null) ?: throw BizException(ParentErr.PARAM_ERROR, "家长不存在", Audience.PARENT)
+        // 行锁读：`findById` 返回的是脱管快照，随后的 save 是整行 merge，
+        // 会把并发提交的 token_version 写回旧值 —— 家长刚好点了一次"退出登录"，
+        // 已被吊销的旧令牌就会重新生效。后台所有"只改一两个字段"的写操作都走行锁读。
+        val u = userRepository.findByIdForUpdate(id) ?: throw BizException(ParentErr.PARAM_ERROR, "家长不存在", Audience.PARENT)
         u.status = "suspended"
         userRepository.save(u)
         auditServiceRecord(adminId, AdminAudit.PARENTS_SUSPEND, "parent", id, "冻结家长 ${u.phone}")
@@ -123,8 +126,12 @@ class AdminParentService(
 
     @Transactional
     fun activateParent(adminId: String, id: String): Map<String, Any> {
-        adminPerm.require(adminId, "parents", "write")
-        val u = userRepository.findById(id).orElse(null) ?: throw BizException(ParentErr.PARAM_ERROR, "家长不存在", Audience.PARENT)
+        // 解冻必须与冻结用**同一个**权限点（parents.suspend 的语义本来就是"冻结/启用"，
+        // 见 AdminModels.AREA_DEFS）。此前这里只要 parents:write，
+        // 结果是"只有编辑权的角色"能解冻别人冻结的账号，而它自己无权冻结 —— 权限倒挂，
+        // 一道已经生效的处置可以被低权限角色单方面撤销。
+        adminPerm.require(adminId, "parents", "suspend")
+        val u = userRepository.findByIdForUpdate(id) ?: throw BizException(ParentErr.PARAM_ERROR, "家长不存在", Audience.PARENT)
         u.status = "active"
         userRepository.save(u)
         auditServiceRecord(adminId, AdminAudit.PARENTS_ACTIVATE, "parent", id, "激活家长 ${u.phone}")
@@ -192,11 +199,16 @@ class AdminParentService(
     @Transactional
     fun updateParent(adminId: String, id: String, req: AdminUpdateParentRequest): Map<String, Any> {
         adminPerm.require(adminId, "parents", "write")
-        val u = userRepository.findById(id).orElse(null) ?: throw BizException(ParentErr.PARAM_ERROR, "家长不存在", Audience.PARENT)
+        val u = userRepository.findByIdForUpdate(id) ?: throw BizException(ParentErr.PARAM_ERROR, "家长不存在", Audience.PARENT)
+        // 部分更新语义：只改**请求里出现过**的字段。下面三行原来写的是
+        // `u.email = req.email?.takeIf { ... }` —— `?.` 之后仍然会把 null 赋进去，
+        // 于是"只改备注"的请求会把 email / region 一起清空。
+        // email 被清空后，重置密码的邮件通知永远发不出去（MailService 直接返回 false），
+        // 而这个损坏是静默的：页面提示"保存成功"。与上面 name 的写法对齐后才是真正的部分更新。
         req.name?.takeIf { it.isNotBlank() }?.let { u.nickname = it }
-        u.email = req.email?.takeIf { it.isNotBlank() }
-        u.region = req.region?.takeIf { it.isNotBlank() }
-        u.remark = req.remark?.takeIf { it.isNotBlank() }
+        req.email?.takeIf { it.isNotBlank() }?.let { u.email = it }
+        req.region?.takeIf { it.isNotBlank() }?.let { u.region = it }
+        req.remark?.takeIf { it.isNotBlank() }?.let { u.remark = it }
         userRepository.save(u)
         auditServiceRecord(adminId, AdminAudit.PARENTS_UPDATE, "parent", id, "修改家长资料 ${u.phone}")
         return mapOf("ok" to true)

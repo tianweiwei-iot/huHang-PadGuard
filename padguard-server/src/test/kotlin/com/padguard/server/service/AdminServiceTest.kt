@@ -166,6 +166,16 @@ class AdminServiceTest {
         override fun idOf(e: Subscription) = e.id
         override fun findByUserId(userId: String): Subscription? = table.values.firstOrNull { it.userId == userId }
         override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
+
+        /** 与真实 SQL 同语义：仅"仍是可用态且确实过期"才命中 1 行 */
+        override fun markExpiredIfStale(userId: String, expiredStatus: String, now: Long): Int {
+            val s = table.values.firstOrNull { it.userId == userId } ?: return 0
+            if (s.status != "TRIAL" && s.status != "ACTIVE") return 0
+            if (s.expiredAt >= now) return 0
+            s.status = expiredStatus
+            s.updatedAt = now
+            return 1
+        }
         override fun findByUserIdIn(userIds: Collection<String>): List<Subscription> =
             table.values.filter { it.userId in userIds }
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
@@ -226,12 +236,21 @@ class AdminServiceTest {
         override fun findPaidAmountsSince(paidStatus: String, since: Long): List<Array<Any?>> =
             table.values.filter { it.status == paidStatus && it.createdAt >= since }
                 .map { arrayOf(it.createdAt, it.amountFen) as Array<Any?> }
+
+        /** 与真实 SQL 同语义：只关闭仍为 PENDING 的订单 */
+        override fun closeIfPending(orderNo: String, closedStatus: String, pendingStatus: String): Int {
+            val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
+            if (o.status != pendingStatus) return 0
+            o.status = closedStatus
+            return 1
+        }
 }
 
     private class FakeAdminRepo : FakeJpaRepository<Admin, String>(), AdminRepository {
         override val table = LinkedHashMap<String, Admin>()
         override fun idOf(e: Admin) = e.id
         override fun findByUsername(username: String): Admin? = table.values.firstOrNull { it.username == username }
+        override fun findByIdForUpdate(id: String): Admin? = table[id]
         override fun existsByUsername(username: String) = table.values.any { it.username == username }
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
     }
@@ -731,6 +750,28 @@ class AdminServiceTest {
         assertEquals("a@b.com", u.email)
         assertEquals("上海", u.region)
         assertEquals("VIP", u.remark)
+    }
+
+    /**
+     * 部分更新语义：请求里没出现的字段必须原样保留。
+     *
+     * 旧写法 `u.email = req.email?.takeIf { it.isNotBlank() }` —— `?.` 之后仍会把 null 赋进去，
+     * 于是"只改备注"的请求会连带清空 email / region。email 被清空后该家长再也收不到
+     * 重置密码邮件（MailService 直接返回 false），而页面显示"保存成功"，属于静默数据损坏。
+     */
+    @Test
+    fun `updating only the remark must not wipe email or region`() {
+        val f = fixture()
+        seedParent(f)
+        f.users.table["parent-1"]!!.email = "keep@example.com"
+        f.users.table["parent-1"]!!.region = "北京"
+
+        f.svc.updateParent("A-super", "parent-1", AdminUpdateParentRequest(remark = "只改备注"))
+
+        val u = f.users.table["parent-1"]!!
+        assertEquals("keep@example.com", u.email, "未传 email 不得清空")
+        assertEquals("北京", u.region, "未传 region 不得清空")
+        assertEquals("只改备注", u.remark)
     }
 
     @Test

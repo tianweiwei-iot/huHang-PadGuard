@@ -119,11 +119,15 @@ object WeChatPayCrypto {
     fun downloadPlatformCertificates(
         baseUrl: String, mchId: String, serialNo: String, privateKey: PrivateKey, apiV3Key: ByteArray
     ): List<String> = runCatching {
-        val http = HttpClient.newBuilder().build()
+        val http = HttpClient.newBuilder()
+            .connectTimeout(java.time.Duration.ofSeconds(5))
+            .build()
         val path = "/v3/certificates"
         val auth = buildAuthorization("GET", path, "", mchId, serialNo, privateKey)
         val req = HttpRequest.newBuilder()
             .uri(URI.create("$baseUrl$path"))
+            // 与 WeChatPayClient 同口径：不设超时等于无限等待，证书拉取挂住会拖死整个验签初始化。
+            .timeout(java.time.Duration.ofSeconds(15))
             .header("Authorization", auth)
             .header("Accept", "application/json")
             .GET()

@@ -389,6 +389,31 @@ interface InstalledAppRepository : JpaRepository<InstalledApp, String> {
 interface SubscriptionRepository : JpaRepository<Subscription, String> {
     fun findByUserId(userId: String): Subscription?
 
+    /**
+     * 过期状态回写：**条件 UPDATE**，不是"读出来改字段再 save"。
+     *
+     * `statusOf` / `ensureActive` 都是无事务方法，`findByUserId` 返回的是**脱管快照**；
+     * 旧实现判定过期后直接 `save(sub)`，JPA merge 会整行 UPDATE，把 `expired_at` 一起写回旧值。
+     * 一旦与微信回调的 `extend`（延后到期日、置 ACTIVE）并发，就是"钱已收、订阅被打回过期"，
+     * 而 `refreshStatus` 对 EXPIRED 早退，此后**永久锁死**，只能人工改库。
+     *
+     * 条件 UPDATE 只碰 status/updated_at 两列，并且只在"此刻仍过期、且仍是可用态"时才命中：
+     * 并发续费把它改成 ACTIVE 后，本语句影响 0 行，绝不会覆盖刚写入的到期时间。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Transactional
+    @Query(
+        """
+        update Subscription s set s.status = :expiredStatus, s.updatedAt = :now
+        where s.userId = :userId and s.status in ('TRIAL', 'ACTIVE') and s.expiredAt < :now
+        """
+    )
+    fun markExpiredIfStale(
+        @Param("userId") userId: String,
+        @Param("expiredStatus") expiredStatus: String,
+        @Param("now") now: Long
+    ): Int
+
     /** 批量取订阅：后台家长列表一页 N 个账号，逐条 findByUserId 就是 N 次往返（N+1） */
     fun findByUserIdIn(userIds: Collection<String>): List<Subscription>
 
@@ -509,6 +534,30 @@ interface PaymentOrderRepository : JpaRepository<PaymentOrder, String> {
         """
     )
     fun claimTimeoutClose(@Param("orderNo") orderNo: String, @Param("now") now: Long): Int
+
+    /**
+     * 无条件关闭仍处于待支付态的订单。
+     *
+     * 使用场景：本地已建单、但向微信下单失败（未配置 / 微信 5xx / 网络超时）。
+     * 这种订单**永远不可能被支付**（用户拿不到 payParams），却会一直挂在后台"待支付"列表里，
+     * 也会让运营误判"有家长下了单但没付"。与 [claimTimeoutClose] 的区别是不要求已过 payDeadline。
+     *
+     * 自带 `@Transactional`：调用方（createOrder）刻意不在事务里 —— 建单提交后立即调外网，
+     * 失败再回来收口，两段各自成事务。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Transactional
+    @Query(
+        """
+        update PaymentOrder o set o.status = :closedStatus
+        where o.orderNo = :orderNo and o.status = :pendingStatus
+        """
+    )
+    fun closeIfPending(
+        @Param("orderNo") orderNo: String,
+        @Param("closedStatus") closedStatus: String,
+        @Param("pendingStatus") pendingStatus: String
+    ): Int
 
     /**
      * 原子退款标记：仅当订单仍为 PAID 时置为 REFUNDED，返回受影响行数。

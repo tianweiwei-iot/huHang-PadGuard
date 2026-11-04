@@ -137,9 +137,15 @@ object AppForeground {
      * 没有这个通知，后台攒下的定位请求就只能等到家长下一次下发指令才被想起。
      *
      * 只在 **0 → 1** 的边沿触发：App 内部页面互跳时计数早就大于 0，不应重复触发。
+     *
+     * 返回**移除句柄**，调用方必须在自身 stop()/onDestroy() 里调用它。
+     * 早期只提供 add、不提供 remove，于是每次守护服务重建（息屏被 ROM 杀、网络恢复广播、
+     * onTaskRemoved 重启）都会往 [listeners] 里多挂一个闭包，永不释放；
+     * 跑上一天后每次回前台会并发触发几十个协程去做同一件事，纯粹的空转与内存增长。
      */
-    fun addForegroundListener(listener: () -> Unit) {
+    fun addForegroundListener(listener: () -> Unit): () -> Unit {
         listeners.add(listener)
+        return { listeners.remove(listener) }
     }
 
     private fun notifyForeground() {

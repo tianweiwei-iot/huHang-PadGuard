@@ -155,11 +155,14 @@ class AdminRbacService(
     @Transactional
     fun updateAdmin(adminId: String, targetAdminId: String, req: AdminUpdateAdminRequest): Map<String, Any> {
         adminPerm.require(adminId, "rbac", "write")
-        val target = adminRepository.findById(targetAdminId).orElse(null)
+        // 行锁读，理由同 AdminParentService.updateParent：避免整行 merge 覆盖并发的 token_version。
+        val target = adminRepository.findByIdForUpdate(targetAdminId)
             ?: throw BizException(ParentErr.PARAM_ERROR, "管理员不存在", Audience.PARENT)
         ensureCanManageTarget(adminId, target)
         req.name?.takeIf { it.isNotBlank() }?.let { target.displayName = it }
-        target.email = req.email?.takeIf { it.isNotBlank() }
+        // 部分更新：`?.` 之后直接赋值会把未传字段写成 null（原写法），
+        // 而 email 被清空后该管理员就再也收不到重置密码邮件 —— 必须是 `?.let`。
+        req.email?.takeIf { it.isNotBlank() }?.let { target.email = it }
         val newStatus = req.status?.takeIf { it.isNotBlank() }
         if (newStatus != null) {
             if (newStatus != "active" && newStatus != "disabled") {
@@ -197,7 +200,9 @@ class AdminRbacService(
     @Transactional
     fun resetAdminPassword(adminId: String, targetAdminId: String): Map<String, Any> {
         adminPerm.require(adminId, "rbac", "reset_pwd")
-        val target = adminRepository.findById(targetAdminId).orElse(null)
+        // 行锁读：下面要改密码 + 自增令牌版本，与"该管理员自己点退出登录"是同一个字段，
+        // 无锁整行 merge 会把对方的自增吞掉（旧令牌复活）。
+        val target = adminRepository.findByIdForUpdate(targetAdminId)
             ?: throw BizException(ParentErr.PARAM_ERROR, "管理员不存在", Audience.PARENT)
         val newPwd = genPassword(systemSettingRepository, objectMapper)
         target.passwordHash = Passwords.encode(newPwd)

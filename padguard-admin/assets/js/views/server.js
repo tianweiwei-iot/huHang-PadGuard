@@ -84,7 +84,15 @@
       </div>`;
       // 拉取服务端进程内环形缓冲的真实日志（WARN/ERROR + 本服务 INFO 业务事件）
       root.querySelector("#s-logs").onclick = async () => {
-        const lines = await PG.api.serverLogs();
+        // 必须 catch：onclick 里的 async 函数没人 await，异常会变成 unhandledrejection ——
+        // 表现就是"点了刷新日志，什么都没发生，也没有任何提示"（服务端 5xx / 网络断时必现）。
+        let lines;
+        try {
+          lines = await PG.api.serverLogs();
+        } catch (e) {
+          PG.ui.toast("err", "日志刷新失败", (e && e.message) || "");
+          return;
+        }
         const box = root.querySelector("#s-logbox");
         if (!box) return;
         box.innerHTML = renderLogs(lines);

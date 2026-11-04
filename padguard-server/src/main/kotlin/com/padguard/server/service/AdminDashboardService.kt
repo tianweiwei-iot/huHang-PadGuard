@@ -70,14 +70,21 @@ class AdminDashboardService(
 
         // 首页最近操作：必须尊重 audit:read —— 没有审计查看权限的角色不应在首页看到操作流。
         val recent = if (adminPerm.can(adminId, "audit", "read")) adminAuditService.audit(adminId, null).take(6) else emptyList()
+        // 营收同口径：仪表盘把月营收 / 营收曲线 / 套餐分布和服务器状态挤在同一个响应里，
+        // 只挂 server:read 时，一个"只看服务器监控"的角色在首页能读到全部经营数据，
+        // 而它访问 /v1/admin/billing/revenue 是 403 —— 同一个数字两套口径，等于权限形同虚设。
+        // 聚合快照本身与请求者无关（走缓存），这里是**按字段裁剪**，不是再查一次库。
+        val canBilling = adminPerm.can(adminId, "billing", "read")
 
         return DashboardResponse(
             kpis = Kpis(
                 agg.parentsTotal, agg.parentsActive, agg.parentsSuspended, agg.devicesTotal, agg.devicesOnline,
-                agg.subsActive, agg.subsTrial, agg.monthRevenue, agg.serverStatus
+                agg.subsActive, agg.subsTrial,
+                if (canBilling) agg.monthRevenue else 0,
+                agg.serverStatus
             ),
-            revenueSeries = agg.revenueSeries,
-            planDist = agg.planDist,
+            revenueSeries = if (canBilling) agg.revenueSeries else emptyList(),
+            planDist = if (canBilling) agg.planDist else emptyList(),
             regionDist = agg.regionDist,
             alertsOpen = agg.alertsOpen,
             recent = recent,

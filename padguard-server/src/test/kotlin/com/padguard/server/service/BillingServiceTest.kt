@@ -99,12 +99,33 @@ class BillingServiceTest {
 
     private class FakeSubscriptionRepo : FakeJpaRepository<Subscription, String>(), SubscriptionRepository {
         override val table = LinkedHashMap<String, Subscription>()
+
+        /**
+         * 并发窗口模拟钩子：在"判定过期并写回"这一刻插入别的线程刚提交的动作。
+         * 用来复现"读快照 → 别人续费 → 本请求写回"这条时序，单靠顺序代码无法构造。
+         */
+        var beforeMarkExpired: ((String) -> Unit)? = null
         override fun idOf(entity: Subscription) = entity.id
         override fun findByUserId(userId: String): Subscription? =
             table.values.firstOrNull { it.userId == userId }
         override fun countByStatus(status: String): Long = 0L
         override fun findAllByOrderByExpiredAtDesc(): List<Subscription> = emptyList()
         override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
+
+        /**
+         * 与真实 SQL 同语义：只更新 status/updated_at（**绝不写 expiredAt**），
+         * 且仅当"仍是可用态 + 此刻确实过期"才命中。
+         * 这条语义是本轮修复的核心断言点：不能被 fake 实现"顺手"改宽。
+         */
+        override fun markExpiredIfStale(userId: String, expiredStatus: String, now: Long): Int {
+            beforeMarkExpired?.invoke(userId)
+            val s = table.values.firstOrNull { it.userId == userId } ?: return 0
+            if (s.status != "TRIAL" && s.status != "ACTIVE") return 0
+            if (s.expiredAt >= now) return 0
+            s.status = expiredStatus
+            s.updatedAt = now
+            return 1
+        }
         override fun findByUserIdIn(userIds: Collection<String>): List<Subscription> =
             table.values.filter { it.userId in userIds }
     
@@ -171,6 +192,14 @@ class BillingServiceTest {
         override fun findPaidAmountsSince(paidStatus: String, since: Long): List<Array<Any?>> =
             table.values.filter { it.status == paidStatus && it.createdAt >= since }
                 .map { arrayOf(it.createdAt, it.amountFen) as Array<Any?> }
+
+        /** 与真实 SQL 同语义：只关闭仍为 PENDING 的订单 */
+        override fun closeIfPending(orderNo: String, closedStatus: String, pendingStatus: String): Int {
+            val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
+            if (o.status != pendingStatus) return 0
+            o.status = closedStatus
+            return 1
+        }
 }
 
     /** 设备台账：BillingService 只关心数量，无需构造完整 Device 实体。 */
@@ -234,7 +263,9 @@ class BillingServiceTest {
         mockPayEnabled: Boolean = true,
         payTimeoutMinutes: Long = 30,
         verifier: PaymentVerifier = ConfigurablePaymentVerifier(true, FakeSystemSettingRepo(), ObjectMapper(), listOf()),
-        settings: FakeSystemSettingRepo = FakeSystemSettingRepo()
+        settings: FakeSystemSettingRepo = FakeSystemSettingRepo(),
+        /** 传入后替身 BillingService 的 trialInserter；为 null 时走"直接 save"的降级路径 */
+        trialInserterFactory: ((FakeSubscriptionRepo) -> TrialSubscriptionInserter)? = null
     ): Fixture {
         val subRepo = FakeSubscriptionRepo()
         val orderRepo = FakeOrderRepo()
@@ -249,7 +280,8 @@ class BillingServiceTest {
             3800, 9800, 29800,   // 月 / 季 / 年（分）
             3, 3, 5,             // 各档设备上限
             payTimeoutMinutes, mockPayEnabled, verifier, settings, ObjectMapper(),
-            orderCloser = OrderTimeoutCloser(orderRepo)  // 超时关单走真实闭合器（断言 CLOSED 落库）
+            orderCloser = OrderTimeoutCloser(orderRepo),  // 超时关单走真实闭合器（断言 CLOSED 落库）
+            trialInserter = trialInserterFactory?.invoke(subRepo)
         )
         return Fixture(svc, subRepo, orderRepo, deviceRepo)
     }
@@ -293,6 +325,84 @@ class BillingServiceTest {
         assertEquals(SubStatus.EXPIRED.name, dto.status)
         assertFalse(dto.active, "过期后必须显示不可用，否则家长端会一直显示生效中")
         assertEquals(0, dto.remainDays)
+    }
+
+    /**
+     * 并发窗口回归：本请求已读到"已过期"快照、正要写回状态时，另一事务（微信回调）刚续费成功。
+     *
+     * 旧实现是 `save(sub)` —— JPA merge 整行 UPDATE，会把快照里的旧 `expiredAt` 一并写回，
+     * 把钱已付的家长打回过期；而 refreshStatus 对 EXPIRED 早退，此后**永久锁死**。
+     * 现在改成条件 UPDATE + 命中 0 行则重读，等价于"只在自己仍然过期时才写"。
+     */
+    @Test
+    fun `stale expiry refresh must not overwrite a renewal that committed concurrently`() {
+        val f = service()
+        f.svc.statusOf("parent-1")
+        f.expire()
+
+        // 模拟并发：在 markExpiredIfStale 执行前，另一个事务已完成续费并提交
+        val renewedUntil = System.currentTimeMillis() + 30L * 86_400_000L
+        f.subs.beforeMarkExpired = { userId ->
+            val row = f.subs.table.values.first { it.userId == userId }
+            row.status = SubStatus.ACTIVE.name
+            row.plan = Plan.MONTHLY.key
+            row.expiredAt = renewedUntil
+        }
+
+        val dto = f.svc.statusOf("parent-1")
+
+        assertEquals(SubStatus.ACTIVE.name, dto.status, "刚续费的家长不能被过期刷新打回过期态")
+        assertTrue(dto.active)
+        assertEquals(renewedUntil, f.sub("parent-1").expiredAt, "到期时间不能被旧快照写回")
+        assertTrue(dto.remainDays > 0)
+    }
+
+    /**
+     * 试用插入必须走独立事务入口。
+     *
+     * 理由：调用方（markPaid / extend / manualGrant）都在事务中，就地 save 时唯一约束冲突
+     * 要到外层提交才抛，`catch (DataIntegrityViolationException)` 永远进不去，
+     * 异常还会把外层事务打成 rollback-only —— 钱收了、订阅没开。
+     * 这里断言"确实调用了独立入口"，保证后续重构不会把它改回就地 save。
+     */
+    @Test
+    fun `trial subscription is inserted through the independent transaction entry point`() {
+        var calls = 0
+        val f = service(trialInserterFactory = { repo ->
+            object : TrialSubscriptionInserter {
+                override fun insert(sub: Subscription) {
+                    calls++
+                    repo.save(sub)
+                }
+            }
+        })
+
+        f.svc.statusOf("parent-1")
+
+        assertEquals(1, calls, "试用插入必须走 REQUIRES_NEW 入口，否则并发冲突的 catch 是死代码")
+        assertEquals(1, f.subs.table.size)
+    }
+
+    /**
+     * 插入撞唯一约束时要回退读取赢家那一行，而不是把 500 抛给家长。
+     */
+    @Test
+    fun `trial insert race falls back to the winning row instead of failing the request`() {
+        val f = service(trialInserterFactory = { repo ->
+            object : TrialSubscriptionInserter {
+                override fun insert(sub: Subscription) {
+                    // 赢家（另一并发请求）已提交，随后本事务 INSERT 撞约束
+                    repo.table[sub.id] = sub
+                    throw org.springframework.dao.DataIntegrityViolationException("ux_subscriptions_user_id")
+                }
+            }
+        })
+
+        val dto = f.svc.statusOf("parent-1")
+
+        assertEquals(SubStatus.TRIAL.name, dto.status)
+        assertTrue(dto.active)
+        assertEquals(1, f.subs.table.size, "不能因为并发而留下两条订阅")
     }
 
     @Test

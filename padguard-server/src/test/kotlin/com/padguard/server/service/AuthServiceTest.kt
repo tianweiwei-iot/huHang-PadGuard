@@ -89,6 +89,16 @@ class AuthServiceTest {
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
         override fun findAllByOrderByExpiredAtDesc() = table.values.sortedByDescending { it.expiredAt }
         override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
+
+        /** 与真实 SQL 同语义：仅"仍是可用态且确实过期"才命中 1 行 */
+        override fun markExpiredIfStale(userId: String, expiredStatus: String, now: Long): Int {
+            val s = table.values.firstOrNull { it.userId == userId } ?: return 0
+            if (s.status != "TRIAL" && s.status != "ACTIVE") return 0
+            if (s.expiredAt >= now) return 0
+            s.status = expiredStatus
+            s.updatedAt = now
+            return 1
+        }
         override fun findByUserIdIn(userIds: Collection<String>): List<Subscription> =
             table.values.filter { it.userId in userIds }
     
@@ -134,6 +144,14 @@ class AuthServiceTest {
             val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
             if (o.status != "PENDING" || o.payDeadline >= now) return 0
             o.status = "CLOSED"
+            return 1
+        }
+
+        /** 与真实 SQL 同语义：只关闭仍为 PENDING 的订单 */
+        override fun closeIfPending(orderNo: String, closedStatus: String, pendingStatus: String): Int {
+            val o = table.values.firstOrNull { it.orderNo == orderNo } ?: return 0
+            if (o.status != pendingStatus) return 0
+            o.status = closedStatus
             return 1
         }
 

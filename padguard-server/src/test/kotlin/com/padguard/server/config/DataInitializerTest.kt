@@ -177,6 +177,16 @@ class DataInitializerTest {
         override fun idOf(e: Subscription) = e.id
         override fun findByUserId(userId: String): Subscription? = table.values.firstOrNull { it.userId == userId }
         override fun findByUserIdForUpdate(userId: String): Subscription? = findByUserId(userId)
+
+        /** 与真实 SQL 同语义：仅"仍是可用态且确实过期"才命中 1 行，绝不覆盖并发续费写入的 expiredAt */
+        override fun markExpiredIfStale(userId: String, expiredStatus: String, now: Long): Int {
+            val s = table.values.firstOrNull { it.userId == userId } ?: return 0
+            if (s.status != "TRIAL" && s.status != "ACTIVE") return 0
+            if (s.expiredAt >= now) return 0
+            s.status = expiredStatus
+            s.updatedAt = now
+            return 1
+        }
         override fun findByUserIdIn(userIds: Collection<String>): List<Subscription> =
             table.values.filter { it.userId in userIds }
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()

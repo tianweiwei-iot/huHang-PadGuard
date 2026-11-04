@@ -20,7 +20,17 @@
       const manualBtn = root.querySelector("#b-manual");
       if (manualBtn) manualBtn.onclick = openManual;
       const tabs = root.querySelectorAll(".tab");
-      const show = (t) => { tabs.forEach(b => b.classList.toggle("btn-primary", b.dataset.tab === t)); renderTab(root, t); };
+      const show = (t) => {
+        tabs.forEach(b => b.classList.toggle("btn-primary", b.dataset.tab === t));
+        // renderTab 内部已有 try/catch，但"取 #b-tab 节点"和"catch 里写 DOM"这两步仍在保护之外。
+        // 没有这层兜底时，任何意外都会变成一个 rejected promise（没人 await）→
+        // 界面停在"加载中…"且控制台一条 unhandledrejection，运营只会说"点了 Tab 没反应"。
+        renderTab(root, t).catch((e) => {
+          const el = root.querySelector("#b-tab");
+          if (el) el.innerHTML = '<div class="empty">加载失败，请重试</div>';
+          PG.ui.toast("err", "加载失败", (e && e.message) || "");
+        });
+      };
       tabs.forEach(b => b.onclick = () => show(b.dataset.tab));
       show("plans");
     },

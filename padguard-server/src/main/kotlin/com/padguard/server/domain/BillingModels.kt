@@ -108,7 +108,16 @@ enum class PayChannel(val label: String) {
 @Entity
 @Table(
     name = "subscriptions",
-    indexes = [Index(name = "idx_subscriptions_user", columnList = "user_id")]
+    // user_id 唯一约束必须由**实体**声明，不能只依赖 Flyway 脚本：
+    // 本项目有两条建表路径 —— 生产（PG）走 Flyway，家庭/单机部署（H2 文件库）
+    // 走 `ddl-auto=update` 且 `flyway.enabled=false`，迁移脚本根本不会执行。
+    // 只写 Flyway 的结果是：生产有约束、单机库没有；而在没有约束的库里，
+    // 并发首次访问（注册 + 首次读订阅 / 两笔回调同时入账）会为同一家长插出两条订阅，
+    // 之后所有 `findByUserId` 单条查询都抛 IncorrectResultSizeDataAccessException，
+    // 该家长的全部接口永久 500 —— 且没有任何自愈路径。
+    // 存量库若已有重复行，加约束会在启动时失败（fail-fast）：请先按
+    // scripts/diagnose_duplicate_subscription.sql 去重，而不是让服务带着脏数据跑起来。
+    uniqueConstraints = [UniqueConstraint(name = "ux_subscriptions_user_id", columnNames = ["user_id"])]
 )
 class Subscription(
     @Id var id: String = "",

@@ -101,7 +101,7 @@
       <td class="cell-sub">${U.esc(p.lastLoginAt || "—")}</td>
       <td><div class="row-actions">
         <button class="btn btn-xs" data-detail="${U.esc(p.id)}">详情</button>
-        ${p.status === "suspended" ? PG.guard("parents", "write", '<button class="btn btn-xs btn-primary" data-act="activate" data-id="' + U.esc(p.id) + '">激活</button>') : PG.guard("parents", "suspend", '<button class="btn btn-xs" data-act="suspend" data-id="' + U.esc(p.id) + '">冻结</button>')}
+        ${p.status === "suspended" ? PG.guard("parents", "suspend", '<button class="btn btn-xs btn-primary" data-act="activate" data-id="' + U.esc(p.id) + '">激活</button>') : PG.guard("parents", "suspend", '<button class="btn btn-xs" data-act="suspend" data-id="' + U.esc(p.id) + '">冻结</button>')}
         ${PG.guard("parents", "write", '<button class="btn btn-xs" data-act="edit" data-id="' + U.esc(p.id) + '">编辑</button>')}
         ${PG.guard("parents", "reset_pwd", '<button class="btn btn-xs" data-act="reset" data-id="' + U.esc(p.id) + '">重置密码</button>')}
         ${PG.guard("parents", "delete", '<button class="btn btn-xs btn-danger" data-act="del" data-id="' + U.esc(p.id) + '">删除</button>')}
@@ -234,7 +234,16 @@
 
   async function openCreate() {
     // 套餐取自服务端真实可购套餐（Mock 已清空，用 PG.Mock.PLANS 会得到空下拉）
-    const list = (await PG.api.listPlans()) || [];
+    // 必须 catch：openCreate 由按钮 onclick 直接调用（没人 await），
+    // 套餐接口 4xx/超时时异常会变成 unhandledrejection —— 点击后**毫无反应**，
+    // 运营只会以为"按钮坏了"，完全不知道是权限/网络的问题。
+    let list = [];
+    try {
+      list = (await PG.api.listPlans()) || [];
+    } catch (e) {
+      PG.ui.toast("err", "套餐加载失败", (e && e.message) || "");
+      return;
+    }
     // 付费套餐的开通需要 billing:manual（服务端 AdminParentService 强制校验）。
     // 若运营没有该权限却仍能选付费套餐，结果会是"账号已建、订阅未开"的半成功状态，
     // 界面只弹一句无权限 —— 因此这里直接不给选项，并说明去哪开通。

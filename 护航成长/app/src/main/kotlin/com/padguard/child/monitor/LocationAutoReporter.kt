@@ -54,8 +54,20 @@ class LocationAutoReporter @Inject constructor(
     @Volatile
     private var intervalMs: Long = 0L
 
+    /**
+     * 上一次尝试上报的**单调时刻**（elapsedRealtime）。
+     *
+     * 之前用 `System.currentTimeMillis()`：孩子把系统时间往回调一小时后，
+     * `now - lastAttemptAtMs` 变成负数、恒小于 intervalMs，于是**所有**周期上报与回前台补报
+     * 都被节流掉，家长端轨迹停在改时间那一刻，日志里连一行错误都没有。
+     * 单调时钟不受改时间/校时影响（含休眠计时），是节流类判断的唯一正确基准。
+     */
     @Volatile
-    private var lastAttemptAtMs: Long = 0L
+    private var lastAttemptElapsedMs: Long = 0L
+
+    /** 前台监听器的移除句柄：stop() 时必须调用，否则每次服务重建都会多挂一个 */
+    @Volatile
+    private var foregroundListener: (() -> Unit)? = null
 
     fun start() {
         if (started) return
@@ -69,12 +81,15 @@ class LocationAutoReporter @Inject constructor(
         }
         // 孩子刚打开 App 的那一刻先补一次：此时位置最新鲜，
         // 家长端"最新位置"能立刻刷新，不必等下一个周期。
-        AppForeground.addForegroundListener {
+        foregroundListener = AppForeground.addForegroundListener {
             if (intervalMs > 0) scope.launch { runCatching { reportOnce() } }
         }
     }
 
     fun stop() {
+        // 先摘监听器：否则 GuardService 每次重建都会留下一个指向旧实例的闭包（永不回收）
+        foregroundListener?.invoke()
+        foregroundListener = null
         started = false
         loopJob?.cancel()
         policyJob?.cancel()
@@ -101,9 +116,10 @@ class LocationAutoReporter @Inject constructor(
     }
 
     private suspend fun reportOnce() {
-        val now = System.currentTimeMillis()
-        if (now - lastAttemptAtMs < intervalMs) return
-        lastAttemptAtMs = now
+        // 单调时钟：见 [lastAttemptElapsedMs] 的说明（墙钟回拨会让定位永久停报）
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastAttemptElapsedMs < intervalMs) return
+        lastAttemptElapsedMs = now
         when (val outcome = collector.collectAndUpload(
             // 周期上报要求的"新鲜度"：最长按 60s 算，间隔更短就按间隔来
             freshnessMs = intervalMs.coerceAtMost(LocationCollector.DEFAULT_FRESHNESS_MS),

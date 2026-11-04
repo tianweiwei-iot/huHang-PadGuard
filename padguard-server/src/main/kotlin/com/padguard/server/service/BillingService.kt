@@ -102,7 +102,13 @@ class BillingService(
     // 微信支付客户端/校验器：生产由 Spring 注入；单测手动构造时留空（置灰该渠道），保证测试不依赖微信配置。
     private val weChatPayClient: WeChatPayClient? = null,
     private val weChatVerifier: WeChatPayVerifier? = null,
-    private val orderCloser: OrderCloser = OrderTimeoutCloser.NOOP
+    private val orderCloser: OrderCloser = OrderTimeoutCloser.NOOP,
+    /**
+     * 试用订阅插入器（独立事务）。生产由 Spring 注入 [TransactionalTrialInserter]；
+     * 单测不传 —— 内存假仓储没有事务语义，传了也验证不了，反而多一层构造噪音。
+     * 为 null 时退化为直接 save（与旧行为一致）。
+     */
+    private val trialInserter: TrialSubscriptionInserter? = null
 ) {
     private val log = LoggerFactory.getLogger(BillingService::class.java)
 
@@ -218,15 +224,38 @@ class BillingService(
         )
     }
 
-    /** 过期后状态不会自己变，读取时必须刷新，否则家长端会一直显示"生效中" */
+    /**
+     * 过期后状态不会自己变，读取时必须刷新，否则家长端会一直显示"生效中"。
+     *
+     * **不能**用"读出来改 status 再 save"：`statusOf` 是无事务方法，`findByUserId` 返回的是
+     * 脱管快照，`save` 走 merge 会整行 UPDATE，把快照里的 `expired_at` 一并写回旧值。
+     * 若此时正好有笔续费刚提交（到期日延后、status=ACTIVE），就会被这里打回"过期"，
+     * 而下面的早退分支让 EXPIRED 再也不会被刷新 —— 已付费家长被永久锁死，只能人工改库。
+     *
+     * 改为条件 UPDATE：只动 status/updated_at，且只在"此刻确实仍过期"时命中。
+     */
     private fun refreshStatus(sub: Subscription) {
         // 永久会员不受时间约束：状态机永远不进入过期分支
         if (sub.plan == Plan.PERMANENT.key) return
         if (sub.status == SubStatus.EXPIRED.name || sub.status == SubStatus.REVOKED.name) return
-        if (sub.expiredAt < System.currentTimeMillis()) {
+        val now = System.currentTimeMillis()
+        if (sub.expiredAt >= now) return
+        val changed = subscriptionRepository.markExpiredIfStale(sub.userId, SubStatus.EXPIRED.name, now)
+        if (changed > 0) {
+            // 内存对象同步成落库后的状态，供随后的 toDto 使用（不回写数据库）。
             sub.status = SubStatus.EXPIRED.name
-            sub.updatedAt = System.currentTimeMillis()
-            subscriptionRepository.save(sub)
+            sub.updatedAt = now
+        } else {
+            // 影响 0 行说明并发事务已经把它改成可用态（续费刚提交），本地快照已过期：
+            // 重读一次，避免本次响应把"刚买完的家长"报成已过期（下一次请求会自愈，但本次界面不该错）。
+            subscriptionRepository.findByUserId(sub.userId)?.let {
+                sub.plan = it.plan
+                sub.status = it.status
+                sub.deviceLimit = it.deviceLimit
+                sub.expiredAt = it.expiredAt
+                sub.updatedAt = it.updatedAt
+                sub.autoRenew = it.autoRenew
+            }
         }
     }
 
@@ -277,15 +306,17 @@ class BillingService(
             updatedAt = now
         )
         return try {
-            subscriptionRepository.save(sub)
+            // 走独立事务插入：调用方可能已在事务中（markPaid / extend / manualGrant），
+            // 就地 save 的话唯一冲突要到外层提交才抛，catch 永远不执行、且外层事务被毒化。
+            trialInserter?.insert(sub) ?: subscriptionRepository.saveAndFlush(sub)
             log.info("trial subscription created: userId={}, days={}", userId, days)
             sub
-        } catch (_: org.springframework.dao.DataIntegrityViolationException) {
+        } catch (e: org.springframework.dao.DataIntegrityViolationException) {
             // 输家回退读取赢家刚插入的订阅（唯一约束兜底语义，见上方注释）；
             // warn 记录并发创建频率，频繁出现说明注册链路存在重复触发。
             log.warn("trial subscription insert raced, falling back to existing row: userId={}", userId)
             subscriptionRepository.findByUserId(userId)
-                ?: throw IllegalStateException("subscription insert raced but row not visible: userId=$userId")
+                ?: throw IllegalStateException("subscription insert raced but row not visible: userId=$userId", e)
         }
     }
 
@@ -395,7 +426,20 @@ class BillingService(
 
     // ------------------------------------------------------------------ 下单
 
-    @Transactional
+    /**
+     * 下单。
+     *
+     * **刻意不加 `@Transactional`**：真实微信渠道要在建单后同步调微信下单接口（HTTP）。
+     * 把这段放进事务里有两个后果：
+     * 1. 持着数据库连接等外网（微信侧挂起时连接被长期占用，连接池被拖垮）；
+     * 2. 失败方向错误 —— 微信已建预支付单、本地事务随后回滚，微信侧留下一张
+     *    用 `out_trade_no` 永远对不上账的孤儿单。
+     *
+     * 现在拆成"提交建单 → 事务外调渠道"：建单用 `saveAndFlush`，它自带的事务在返回前提交，
+     * 撞号异常也因此在**本方法内**可捕获（旧写法在 @Transactional 里 flush，异常抛出时
+     * 事务已 rollback-only，只能翻译成提示，无法再补救）。
+     * 渠道下单失败则立即把这张单收口成 CLOSED（用户拿不到 payParams，它永远付不了）。
+     */
     fun createOrder(userId: String, req: CreateOrderRequest): CreateOrderResponse {
         val plan = Plan.of(req.plan)
             ?: throw BizException(ParentErr.PARAM_ERROR, "套餐不存在", Audience.PARENT)
@@ -433,17 +477,14 @@ class BillingService(
             createdAt = now,
             payDeadline = now + payTimeoutMinutes * 60_000L
         )
-        paymentOrderRepository.save(order)
         log.info("order created: no={}, userId={}, plan={}, amount={}fen", order.orderNo, userId, plan.key, order.amountFen)
         // 第八轮 P2-5：newOrderNo 先查后写仍有微窗口（两事务同秒取到同一候选号且互相未提交），
         // 撞 unique 约束会抛 DataIntegrityViolation → 家长看到 500。
-        // 注意：本方法 @Transactional，标记 rollback-only 后同事务内重试已无意义，
-        // 因此这里只把异常翻译成明确的业务提示（家长重新点一次即成功），而非生硬的 500。
+        // 这里用 saveAndFlush 让 INSERT 立刻打出：方法本身没有事务，异常在方法体内抛出，
+        // 可以直接翻译成明确的业务提示（家长重新点一次即成功），而不是生硬的 500。
         try {
-            paymentOrderRepository.flush()
+            paymentOrderRepository.saveAndFlush(order)
         } catch (_: org.springframework.dao.DataIntegrityViolationException) {
-            // 翻译为明确业务提示而非 500（事务已 rollback-only，同事务内重试无意义）。
-            // 留 warn 便于运维观察撞号频率——频繁出现说明 newOrderNo 熵不足，需扩号段。
             log.warn("order create raced on orderNo: userId={}, regenerating hint", userId)
             throw BizException(ParentErr.PARAM_ERROR, "下单冲突，请重新提交", Audience.PARENT)
         }
@@ -451,8 +492,23 @@ class BillingService(
         // 真实微信支付：向微信下单并取回调所需的 payParams；其余渠道（示例/代开通）无 payParams。
         var payParams: Map<String, Any?>? = null
         if (weChatAvailable && !mockPayEnabled()) {
-            payParams = weChatPayClient?.createAppOrder(order.orderNo, order.amountFen, "护航成长-${plan.label}")
-                ?: throw BizException(ParentErr.PARAM_ERROR, "微信下单失败，请稍后重试", Audience.PARENT)
+            payParams = try {
+                weChatPayClient?.createAppOrder(order.orderNo, order.amountFen, "护航成长-${plan.label}")
+            } catch (e: Exception) {
+                log.warn("微信下单异常，订单转入关闭: no={}, err={}", order.orderNo, e.message)
+                null
+            }
+            if (payParams == null) {
+                // 订单已落库，但用户拿不到调起支付的参数 —— 这张单永远付不了，立即收口，
+                // 否则后台"待支付"列表会堆满永远不会成交的单据，运营无法分辨真伪。
+                val closed = runCatching {
+                    paymentOrderRepository.closeIfPending(
+                        order.orderNo, OrderStatus.CLOSED.name, OrderStatus.PENDING.name
+                    )
+                }.getOrDefault(0)
+                log.warn("微信下单失败，订单已关闭: no={}, closed={}", order.orderNo, closed)
+                throw BizException(ParentErr.PARAM_ERROR, "微信下单失败，请稍后重试", Audience.PARENT)
+            }
         }
         return CreateOrderResponse(
             orderNo = order.orderNo,
@@ -569,9 +625,20 @@ class BillingService(
         // 行锁把续费串行化——第二个事务读到的是第一个事务提交后的新 expiredAt，
         // 不会出现"后提交者覆盖前者、付两笔钱只延长一个月"的丢更新。
         val sub = subscriptionRepository.findByUserIdForUpdate(userId)
-            ?: synchronized(this) {
-                // 无行可锁（首单）：双重检查防止并发首单创建两条订阅（单实例部署口径）。
-                subscriptionRepository.findByUserId(userId) ?: createTrial(userId)
+            ?: run {
+                // 无行可锁（首单）：createTrial 在**独立事务**里 INSERT 并提交，
+                // user_id 唯一约束保证只有一个事务能插入成功，输家回退读取赢家那一行。
+                //
+                // 旧实现用 `synchronized(this)` 做"双重检查"：它在代码块结束就释放，
+                // 而此时外层事务尚未提交 —— 第二个线程进来照样看不到这一行、照样去插，
+                // 进程内锁在这里挡不住任何东西；多实例部署更是完全无效。
+                // 真正起作用的只有数据库唯一约束。
+                createTrial(userId)
+                // 重新在**本事务**内加行锁读：拿到的才是受管实体。
+                // 若直接用 createTrial 的返回值，那是一个已脱管对象（内层事务已关闭），
+                // 下面 save 会走 merge 整行 UPDATE。
+                subscriptionRepository.findByUserIdForUpdate(userId)
+                    ?: throw IllegalStateException("trial created but row not visible: userId=$userId")
             }
         val base = maxOf(sub.expiredAt, now)
         val newExpire = plusMonths(base, months)
@@ -593,7 +660,17 @@ class BillingService(
         return statusOf(userId)
     }
 
-    /** 模拟支付：仅开发环境开启，生产必须关闭，否则等于绕过收费（S16 补归属校验） */
+    /**
+     * 模拟支付：仅开发环境开启，生产必须关闭，否则等于绕过收费（S16 补归属校验）。
+     *
+     * **必须有 `@Transactional`**：本方法内部调 [markPaid]，而 markPaid 是同类调用，
+     * 不经过 Spring 代理、它自己的 `@Transactional` 不会生效。没有事务时
+     * `claimPendingOrder`（`@Modifying`，必须有事务）会直接抛 TransactionRequiredException → 500；
+     * 即使侥幸落到各自独立的事务里，"置 PAID"与"延长订阅"也不再原子 ——
+     * 订单已 PAID 而 extend 失败时，后续回调在 markPaid 开头就被判为"已结算"直接返回，
+     * 这笔钱对应的权益**永远不会被开通**。事务由本方法开启后，整段才是原子的。
+     */
+    @Transactional
     fun mockPay(userId: String, orderNo: String): SubscriptionDto {
         if (!mockPayEnabled()) {
             throw BizException(ParentErr.PARAM_ERROR, "模拟支付未开启", Audience.PARENT)
