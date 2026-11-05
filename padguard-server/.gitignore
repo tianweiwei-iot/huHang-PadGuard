@@ -22,4 +22,7 @@ guard.*
 # mosquitto 口令文件（服务器上生成，含凭据哈希）
 mosquitto/passwd
 # 运行时自动生成的 JWT 密钥（首次启动生成并写入 config/jwt-secret.txt，绝不入库/进镜像）
-config/
+# 必须写成 `/config/`（锚定本模块根）：裸写 `config/` 会连带匹配源码包
+# `src/main/kotlin/com/padguard/server/config/`，该包下**新增的类会被静默排除在提交之外**
+# （已跟踪文件不受影响，所以只有新文件"提交后不见了"才暴露，极易漏掉）。
+/config/

@@ -32,8 +32,20 @@ class User(
      * JWT 是无状态的，"退出登录"本身没有任何服务端动作 —— 令牌在过期前一直有效。
      * 版本号是让"吊销"真正生效的最小代价方案：请求进来时拿令牌里的 ver 与这一列比对，
      * 落后即拒绝。历史令牌没有 ver 声明，按 0 处理，与本列默认值一致。
+     *
+     * 默认值必须写在注解上：生产（PostgreSQL + Flyway）由 V2026110301 建列为
+     * `BIGINT NOT NULL DEFAULT 0`；单机/家庭部署走 ddl-auto=update（flyway 关闭），
+     * Hibernate 补列时若没有默认值，只会加出一列**可空**的 bigint，存量行全被填成 NULL，
+     * 而本字段是 Kotlin 非空基本类型 Long —— 读任一老账号即
+     * `Null value was assigned to a property of primitive type`，
+     * 表现为「所有存量家长账号登录 500」，新注册账号却完全正常（极难复现的升级故障）。
+     *
+     * 兜底还有一层：[com.padguard.server.config.SchemaColumnRepair] 启动时把已存在的 NULL 回填为 0，
+     * 让**已经坏掉的库**也能自愈，而不只是保证新库不再坏。
      */
-    @Column(name = "token_version") var tokenVersion: Long = 0,
+    @Column(name = "token_version")
+    @ColumnDefault("0")
+    var tokenVersion: Long = 0,
     /**
      * 连续密码错误次数。
      *

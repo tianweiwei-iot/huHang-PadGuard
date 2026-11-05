@@ -61,7 +61,11 @@ _*.jpg
 
 # ===================== 本地密钥与运行时数据库（严禁入库） =====================
 # 明文 JWT 签名密钥等凭据，泄露即高危安全事件（public 仓库尤其禁止）
-config/
+# 必须锚定到仓库根：裸写 `config/` 会连带匹配源码包
+# `padguard-server/src/main/kotlin/com/padguard/server/config/`，
+# 该包下新增的类会被静默排除在提交之外（已跟踪文件不受影响，所以问题很隐蔽）。
+# 各模块的运行时配置目录另有显式规则（见下方 `padguard-server/config/`）。
+/config/
 # 本地 H2 数据库与运行产物，非源码
 # 必须写成 `/data/`（锚定仓库根）：裸写 `data/` 会连带匹配源码目录
 # `护航控制端/app/src/main/java/com/padguard/parent/data/`，
