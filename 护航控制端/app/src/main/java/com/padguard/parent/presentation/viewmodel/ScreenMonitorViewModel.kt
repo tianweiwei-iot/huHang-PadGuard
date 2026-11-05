@@ -72,6 +72,15 @@ data class ScreenMonitorUiState(
      * 而孩子端缺 MediaProjection 授权恰恰是最常见的原因。
      */
     val liveHint: String? = null,
+    /**
+     * 孩子端 Android 主版本号（如 10 / 14），未知时为 null。
+     *
+     * 用途只有一个：判断这台设备**有没有可能**免授权看屏。
+     * 零弹窗通道依赖 `AccessibilityService.takeScreenshot()`，那是 **API 30（Android 11）** 才有的能力；
+     * 低于它的设备只能走 MediaProjection，系统必然弹一次「是否允许录制屏幕」。
+     * 不提前说明的话，家长会把这个必然动作当成故障。
+     */
+    val deviceAndroidMajor: Int? = null,
     /** 平板当前是否处于家长发起的远程锁屏状态；false 时按钮显示"锁屏"，true 时显示"解锁" */
     val remoteLocked: Boolean = false,
     val screenshotHistory: List<ScreenshotData> = emptyList(),
@@ -133,12 +142,34 @@ class ScreenMonitorViewModel @Inject constructor(
                 .onSuccess { list ->
                     val mine = list.firstOrNull { it.deviceId == deviceId || it.id == deviceId }
                     mine?.let {
-                        _uiState.value = _uiState.value.copy(remoteLocked = it.remoteLocked)
+                        _uiState.value = _uiState.value.copy(
+                            remoteLocked = it.remoteLocked,
+                            deviceAndroidMajor = it.osVersion?.trim()?.takeWhile { c -> c.isDigit() }?.toIntOrNull()
+                        )
                     }
                 }
             _uiState.value = _uiState.value.copy(isLoading = false)
             startLiveStream()
         }
+    }
+
+    /**
+     * 老系统「必然要弹一次授权」的预期说明。
+     *
+     * 零弹窗看屏依赖 `AccessibilityService.takeScreenshot()`，该 API 自 **Android 11（API 30）** 起才有。
+     * 更早的机型（本项目的存量平板就停在 Android 10）无论无障碍是否开启，都只能走 MediaProjection，
+     * 而 MediaProjection 的授权是系统隐私红线，设备所有者（DO）也绕不过去。
+     *
+     * 不提前说明的后果，我们在现场见过：家长点「实时看屏」，平板上弹出一个系统框，
+     * 家长以为"上次不是能看吗，怎么又要授权"，把它当成 bug 来报。
+     */
+    private fun showLegacyCaptureExpectation() {
+        val major = _uiState.value.deviceAndroidMajor ?: return
+        if (major >= 11) return
+        _uiState.value = _uiState.value.copy(
+            liveHint = "这台平板是 Android $major，系统不支持免授权看屏：平板上会弹出" +
+                "「是否允许录制屏幕」，需要孩子点一次「立即开始」。同一次开机内不会重复弹出。"
+        )
     }
 
     /**
@@ -151,6 +182,10 @@ class ScreenMonitorViewModel @Inject constructor(
         if (deviceId.isBlank()) return
         liveJob?.cancel()
         liveJob = viewModelScope.launch {
+            // 开流前先把"这台设备上必然会发生的那一次授权"讲清楚。
+            // 与"迟迟没有画面"的提示是两回事：那个是异常兜底，这个是**预期说明**——
+            // Android 10 及更早的机型没有无障碍截屏能力，弹授权不是故障，而是系统限制。
+            showLegacyCaptureExpectation()
             // 连续"没出画"的次数：用来做指数退避，避免平板离线时每 5 秒一次开流
             // （一小时 720 次）把服务端和孩子端一起打满。
             var noFrameAttempts = 0
