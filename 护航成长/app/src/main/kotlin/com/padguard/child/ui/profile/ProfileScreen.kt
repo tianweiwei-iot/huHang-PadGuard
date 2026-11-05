@@ -52,11 +52,12 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.child.ui.components.GlyphKind
 import com.padguard.child.ui.settings.ServerConfigDialog
+import com.padguard.child.permission.SpecialPermission
 import android.graphics.BitmapFactory
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import android.provider.Settings
+import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import android.net.Uri
@@ -101,11 +102,22 @@ fun ProfileScreen(
         // 操作闸门无障碍服务的开启属于"改动系统设置"，必须先过家长密码闸门。
         // 闸门放行（密码未启用 / 处于解锁窗口）才跳转；否则 Gate 已拉起解锁界面，原动作中止。
         if (viewModel.ensureGuardUnlocked(context)) {
-            runCatching {
-                context.startActivity(
-                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
+            // 走 SpecialPermission 的统一跳转：它会带上 EXTRA_COMPONENT_NAME 尽力直达本服务详情
+            // （原生与部分 ROM 认得），识别不了的 ROM 自动降级到无障碍列表页，并处理
+            // ActivityNotFoundException —— 直接 startActivity 一个裸 Action 在定制 ROM 上会抛异常，
+            // 表现为"点了没反应"。
+            val intent = SpecialPermission.openSettings(context, SpecialPermission.ACCESSIBILITY)
+            if (intent == null) {
+                Toast.makeText(
+                    context,
+                    "本机没有可打开的无障碍设置页，请手动进入「设置 → 无障碍」开启护航成长",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                    .onFailure {
+                        Toast.makeText(context, "打开无障碍设置失败：${it.message}", Toast.LENGTH_LONG).show()
+                    }
             }
         }
     }
@@ -270,10 +282,15 @@ private fun ProfileContent(
             item {
                 ProtectionLevelCard(state = state)
             }
-            // 操作密码闸门基础设施告警：密码已启用但无障碍服务未开 → 拦截失效，必须引导开启
-            if (state.guardInfraWarning) {
+            // 操作密码闸门基础设施告警：密码已启用但无障碍服务未开 → 拦截失效，必须引导开启；
+            // 另一种形态是"开关开着但服务没连上"——此时不该让家长再去设置里重新勾选，
+            // 文案与动作都不同，必须分开呈现，否则会把"等系统重绑"误导成"你配置错了"。
+            if (state.guardInfraWarning || state.guardInfraDetached) {
                 item {
-                    GuardInfraWarningBanner(onOpen = onOpenGuardA11y)
+                    GuardInfraWarningBanner(
+                        detached = state.guardInfraDetached,
+                        onOpen = onOpenGuardA11y
+                    )
                 }
             }
             // 非设备所有者（软管控）：如实告知防护边界 + 升级入口
@@ -918,7 +935,7 @@ private fun DiagnosticRow(label: String, value: String, ok: Boolean) {
  * 跳转无障碍设置开启服务。
  */
 @Composable
-private fun GuardInfraWarningBanner(onOpen: () -> Unit) {
+private fun GuardInfraWarningBanner(detached: Boolean, onOpen: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
@@ -930,17 +947,23 @@ private fun GuardInfraWarningBanner(onOpen: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "操作密码闸门未完全生效",
+                text = if (detached) "操作闸门正在重新连接" else "操作密码闸门未完全生效",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
             Text(
-                text = "已启用操作密码，但「操作闸门无障碍服务」尚未在系统设置中开启。在此期间孩子可从设置 / 通知栏绕过密码，请尽快开启。",
+                text = if (detached) {
+                    "无障碍服务已在系统设置中开启，但系统还没把它和本应用连上。通常几十秒内会自行恢复；" +
+                        "若长时间停在这里，请点下方按钮把服务关闭再重新开启。"
+                } else {
+                    "已启用操作密码，但「操作闸门无障碍服务」尚未在系统设置中开启。" +
+                        "在此期间孩子可从设置 / 通知栏绕过密码，请尽快开启。"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
             TextButton(onClick = onOpen) {
-                Text(text = "去开启无障碍服务")
+                Text(text = if (detached) "重新连接无障碍服务" else "去开启无障碍服务")
             }
         }
     }

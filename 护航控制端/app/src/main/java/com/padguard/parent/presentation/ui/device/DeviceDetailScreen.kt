@@ -437,6 +437,17 @@ private fun GuardianHealthCard(device: Device) {
                         color = PadGuardColors.WarningRed
                     )
                 }
+                // 无障碍单独告警：它与守护进程是两条独立链路 —— 进程活着但无障碍被关/没连上时，
+                // 看板若只显示一个红点，家长既不知道后果也不知道该做什么。
+                // 注意 a11yAlive 为 null 是"孩子端版本过旧未上报"，不能当成 false 报警。
+                if (a11yAlive == false) {
+                    Text(
+                        "⚠ 操作闸门无障碍服务未在运行：孩子可从系统设置绕过操作密码、卸载本应用。" +
+                            "请在孩子端「我的」页按提示重新开启；若已开启仍显示异常，在该页点「重新连接」。",
+                        fontSize = 12.sp,
+                        color = PadGuardColors.WarningRed
+                    )
+                }
             }
         }
     }

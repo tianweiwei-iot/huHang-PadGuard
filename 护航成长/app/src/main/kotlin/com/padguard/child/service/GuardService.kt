@@ -313,6 +313,14 @@ class GuardService : Service() {
     @Volatile private var lastHeartbeatOk = false
 
     /**
+     * 上一次真正投递出去的常驻通知正文。
+     *
+     * 主循环约 2 秒一拍，正文却几分钟才变一次；用它做去重，避免无意义的跨进程 notify
+     * （见 [updateNotification]）。null = 尚未投递过，首拍必然投递。
+     */
+    private var lastNotificationText: String? = null
+
+    /**
      * 上次兜底拉取指令的时刻（见 [drainPendingCommands]）。
      *
      * ## 为什么必须持久化
@@ -1077,8 +1085,14 @@ class GuardService : Service() {
                         val live = runCatching { GuardHeartbeat.readLiveView(applicationContext) }.getOrNull()
                         if (live != null && System.currentTimeMillis() <= live.deadlineWallMs) {
                             if (!accessibilityScreenshot.isAvailable()) {
-                                a11yCapabilityHealer.ensureEnabled()
-                                a11yCapabilityHealer.healIfNeeded()
+                                // 只有 DO 才有资格静默补/重绑；非 DO 设备上这两个调用必然空转，
+                                // 却会每 10 秒刷一条"无法自动开启"的日志 —— 看屏一次几十条噪音，
+                                // 真正有用的行会被淹掉。非 DO 的缺失由 PermissionHealthChecker 按 5 分钟
+                                // 周期诚实上报，不需要在这里重复喊。
+                                if (admin.isDeviceOwner()) {
+                                    a11yCapabilityHealer.ensureEnabled()
+                                    a11yCapabilityHealer.healIfNeeded()
+                                }
                             }
                         }
                     }
@@ -2222,6 +2236,8 @@ class GuardService : Service() {
 
         try {
             ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), fgsType())
+            // 建立"已投递"基线：否则主循环的第一拍会立刻把同一份内容再投递一次。
+            lastNotificationText = notificationText()
         } catch (e: Exception) {
             // API 31+ 从后台启动前台服务会抛 ForegroundServiceStartNotAllowedException。
             // Device Owner 身份下系统会豁免，但降级到普通 DEVICE_ADMIN 时确实可能被拒。
@@ -2278,6 +2294,25 @@ class GuardService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.guard_notification_title))
+            .setContentText(notificationText())
+            .setSmallIcon(R.drawable.ic_guard_notification)
+            .setContentIntent(tapIntent)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .build()
+    }
+
+    /**
+     * 常驻通知的正文（唯一会变化的部分）。
+     *
+     * 抽成独立函数是为了让 [updateNotification] 能以它作为"内容是否变化"的判据 ——
+     * 通知里其余字段（标题 / 图标 / PendingIntent）都是常量。
+     */
+    private fun notificationText(): String {
         val modeText = getString(
             when {
                 online && lastHeartbeatOk -> R.string.guard_state_online
@@ -2289,28 +2324,33 @@ class GuardService : Service() {
         // 防护未就绪时，通知栏要**明说**，不能让家长以为"守护中"就等于"卸载需要密码"。
         // 事故现场就是这样：通知写着"护航成长守护中"，孩子长按图标一次就全删干净了。
         val shield = uninstallDefense.shield
-        val text = if (shield != null && shield.needsParentAttention) {
+        return if (shield != null && shield.needsParentAttention) {
             getString(R.string.guard_notification_text_unguarded)
         } else {
             getString(R.string.guard_notification_text, modeText, admin.controlMode.value.name)
         }
-
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.guard_notification_title))
-            .setContentText(text)
-            .setSmallIcon(R.drawable.ic_guard_notification)
-            .setContentIntent(tapIntent)
-            .setOngoing(true)
-            .setShowWhen(false)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
     }
 
+    /**
+     * 刷新常驻通知。
+     *
+     * ## 为什么要去重
+     * 本方法挂在主循环上（约 2 秒一拍），原先**每拍都无条件 notify**：
+     * 系统日志里可见 `enqueueNotificationInternal ... id=1001` 每 2 秒一条，
+     * 一天近 5 万次跨进程投递；通知内容实际上几分钟才变一次。
+     * 这既耗电、又会在部分 ROM 上把本应用标记成"频繁通知"，
+     * 还让 logcat 被自己的噪音淹没（排查无障碍掉线时深受其害）。
+     *
+     * 现在以正文为签名，内容没变直接返回。首次进入前台由 [enterForeground]
+     * 用同一份正文建立"已投递"基线，不会重复投递。
+     */
     private fun updateNotification() {
+        val text = notificationText()
+        if (text == lastNotificationText) return
         runCatching {
             getSystemService(NotificationManager::class.java)
                 ?.notify(NOTIFICATION_ID, buildNotification())
+            lastNotificationText = text
         }
     }
 

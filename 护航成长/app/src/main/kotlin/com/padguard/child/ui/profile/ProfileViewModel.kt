@@ -135,7 +135,10 @@ class ProfileViewModel @Inject constructor(
                     // 而不是误以为策略已下发就一定能落地。can() 是单一事实来源。
                     ownerCapabilities = buildOwnerCapabilityMatrix(admin),
                     // 操作闸门基础设施告警：密码已启用，但操作闸门无障碍服务未开 → 系统级拦截失效
-                    guardInfraWarning = guardPassword.isEnabledNow() && !GuardA11y.isEnabled(context)
+                    guardInfraWarning = guardPassword.isEnabledNow() && !GuardA11y.isEnabled(context),
+                    // 开关开着但服务没连上：与"未开启"是两回事，文案与动作都不同（见 ProfileScreen 横幅）
+                    guardInfraDetached = guardPassword.isEnabledNow() &&
+                        GuardA11y.isEnabled(context) && !GuardA11y.isAlive(context)
                 )
             }
                 .flowOn(Dispatchers.IO)
@@ -380,7 +383,14 @@ data class ProfileUiState(
      * 操作闸门基础设施告警：家长已启用操作密码，但「操作闸门无障碍服务」未在系统设置开启，
      * 此时系统级拦截失效，孩子可从设置/通知栏绕过密码。需在「我的」页弹出引导横幅。
      */
-    val guardInfraWarning: Boolean = false
+    val guardInfraWarning: Boolean = false,
+    /**
+     * 无障碍**已开启但没有连上**（开关还在、服务对象不在）。
+     *
+     * 与 [guardInfraWarning] 分开的原因：这不需要家长重新授权，等系统重绑或重启服务即可，
+     * 文案若沿用"未开启"，家长会去做一次无意义的设置操作。
+     */
+    val guardInfraDetached: Boolean = false
 )
 
 /** 设备所有者(DO/PO)专属能力的可用性状态，供「我的」页能力矩阵逐项如实展示 */

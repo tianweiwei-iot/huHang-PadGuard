@@ -139,12 +139,18 @@ enum class SpecialPermission(
             .setData(Uri.fromParts("package", context.packageName, null))
         ACCESSIBILITY -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
             // 尽力深链到本应用无障碍服务详情（见枚举注释）；识别不了的 ROM 静默降级为列表页。
+            //
+            // 必须放**真正的 ComponentName 对象**：`EXTRA_COMPONENT_NAME` 的契约就是 Parcelable。
+            // 之前这里塞的是 `flattenToString()` 的字符串 —— 系统设置若用 `getParcelableExtra`
+            // 取值会直接 ClassCastException（表现为"点了去开启，设置页闪一下就没了"），
+            // 用 `getStringExtra` 的 ROM 则拿到 null、退回列表页。
+            // 换成 ComponentName 后最坏情况也只是"不深链"，绝不会把设置页搞崩。
             putExtra(
                 Intent.EXTRA_COMPONENT_NAME,
                 ComponentName(
                     context.packageName,
                     "com.padguard.child.guard.OperationGuardAccessibilityService"
-                ).flattenToString()
+                )
             )
         }
     }

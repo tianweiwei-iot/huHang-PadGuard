@@ -14,6 +14,7 @@ import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.admin.OpResult
 import com.padguard.core.engine.guard.GuardMasterSwitch
+import com.padguard.child.permission.PermissionGranter
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -46,12 +47,37 @@ class PermissionHealthChecker @Inject constructor(
     private val logRepository: LogRepository,
     private val authRepository: AuthRepository,
     private val guardMasterSwitch: GuardMasterSwitch,
-    private val remote: RemoteDataSource
+    private val remote: RemoteDataSource,
+    private val granter: PermissionGranter
 ) {
 
     private val component = ComponentName(context, OperationGuardAccessibilityService::class.java)
     private val flat = component.flattenToString()
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    /**
+     * 应用真正需要守住的运行时权限 —— **直接复用** [PermissionGranter.requiredPermissions]。
+     *
+     * ## 为什么不能另写一份清单（2026-11-05 线上复盘）
+     * 本类原先自带一份常量清单，里面列了 `READ_PHONE_STATE` —— 而该权限在合规瘦身时
+     * 已从 AndroidManifest 删除。后果不是"多检查一项"这么轻：
+     * `checkSelfPermission` 对**未声明**的权限恒返回 DENIED，于是 [computeRecovered] 里
+     * "runtime" **永远**被计入"当前缺失"，`recoveredCaps = prev - now` 永远算不出 runtime 恢复 →
+     * 一旦因别的原因（控制权降级、设备管理员被停用）上报过 `PERMISSION_REVOKED`，
+     * 这条告警就**再也不会被自动关闭**，家长端永久挂着一条消除不掉的"权限被撤销"。
+     * 存储权限也有同款问题：manifest 里标了 `maxSdkVersion=32`，Android 13+ 上同样恒未授予。
+     *
+     * [PermissionGranter.requiredPermissions] 已经把"版本差异 + 是否真的声明"编码进了一份清单，
+     * 这里只管复用，绝不再造第二份口径。
+     */
+    private val criticalRuntimePermissions: List<String>
+        get() = granter.requiredPermissions
+
+    /** 当前缺失的关键运行时权限（版本与声明均已对齐，不会出现"恒缺失"的幽灵项）。 */
+    private fun missingCriticalRuntimePermissions(): List<String> =
+        criticalRuntimePermissions.filter {
+            context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
 
     suspend fun check() = withContext(Dispatchers.Default) {
         if (!guardMasterSwitch.active.value) return@withContext // 暂停管控时本就不需要这些权限
@@ -77,9 +103,21 @@ class PermissionHealthChecker @Inject constructor(
     private suspend fun checkAccessibility(): Boolean {
         if (isA11yEnabled()) {
             prefs.edit().putBoolean(KEY_A11Y_EVER, true).apply()
-            return true
+            // 开关开着只说明"用户没关"，不代表服务在跑。分三种结局：
+            // 已连上 / 刚断开（给容忍窗口）/ 长时间连不上（按不可用上报）。
+            if (GuardA11y.isAlive(context)) {
+                clearDetachedSince()
+                return true
+            }
+            healDetachedService()
+            if (GuardA11y.isAlive(context)) {
+                clearDetachedSince()
+                return true
+            }
+            return handlePersistentDetach()
         }
         // 无障碍未启用：DO 优先静默重启用；非 DO 诚实告警引导重新授权
+        clearDetachedSince()
         val ever = prefs.getBoolean(KEY_A11Y_EVER, false)
         if (admin.isDeviceOwner()) {
             runCatching { healer.ensureEnabled() }
@@ -93,6 +131,75 @@ class PermissionHealthChecker @Inject constructor(
         } else {
             raiseDroppedAlert("无障碍服务", ever, "accessibility")
             false
+        }
+    }
+
+    /**
+     * 「开关开着、服务却没连上」的处置。
+     *
+     * ## 为什么必须与「未开启」分开
+     * 两者的家长动作完全不同：未开启要去系统设置重新勾选；没连上则**不需要家长做任何事**
+     * ——系统一般会在进程被杀后自动重绑，DO 设备还能强制重绑。
+     * 历史上把两者混成一个布尔值，于是"服务好端端跑着"也会被判成掉线（见 [GuardA11y] 类注释）；
+     * 反过来，若只认开关不认连接，则"开关还在、绑定已死"的真故障会完全静默。
+     *
+     * ## 处置分级
+     * - 已连上：什么都不做（绝大多数情况）；
+     * - 没连上 + DO：走 [AccessibilityCapabilityHealer.rebindIfDetached] 强制重绑（内部限频）；
+     * - 没连上 + 非 DO：只留痕。此时既不能代开也不能代绑，且**不能**上报
+     *   "权限被撤销"——开关确实还在，报给家长只会造成误判。
+     */
+    private suspend fun healDetachedService() {
+        if (GuardA11y.isAlive(context)) return
+        Logger.w(TAG) { "a11y switch ON but service not attached; attempting bounded rebind" }
+        if (!admin.isDeviceOwner()) {
+            Logger.w(TAG) {
+                "no Device Owner: cannot rebind silently; waiting for system rebind " +
+                    "(if it never reconnects, ask guardian to re-toggle the service in Settings)"
+            }
+            return
+        }
+        runCatching { healer.rebindIfDetached() }
+            .onFailure { Logger.w(TAG, it) { "a11y rebind failed" } }
+    }
+
+    /**
+     * 长时间「开着却没连上」的兜底判定。
+     *
+     * ## 为什么要给容忍窗口而不是立刻告警
+     * 进程被杀后系统重绑通常在秒级完成，DO 设备的强制重绑也会带来几秒空窗；
+     * 若第一拍就上报"无障碍已关闭"，家长会在什么都没发生的情况下收到一条高危告警
+     * —— 之前那种"狼来了"式的误报正是本次要消灭的对象。
+     * 因此只有**持续**超过 [DETACHED_TOLERANCE_MS] 仍未连上，才认定为真的不可用。
+     *
+     * ## 判定为不可用的后果
+     * 返回 false 会让调用方把 "a11y" 计入缺失能力集合，从而：
+     * - 上报一条**文案准确**的告警（点明"已开启但未连接"，而不是含糊的"未开启"）；
+     * - 恢复连接后由边沿触发自动关闭该告警（见 [computeRecovered]）。
+     */
+    private suspend fun handlePersistentDetach(): Boolean {
+        val now = System.currentTimeMillis()
+        val since = prefs.getLong(KEY_DETACHED_SINCE, 0L)
+        if (since == 0L) {
+            prefs.edit().putLong(KEY_DETACHED_SINCE, now).apply()
+            Logger.i(TAG) { "a11y detached, starting tolerance window" }
+            return true
+        }
+        if (now - since < DETACHED_TOLERANCE_MS) return true
+        Logger.w(TAG) {
+            "a11y enabled but still detached after ${(now - since) / 1000}s; treating as unavailable"
+        }
+        raiseDroppedAlert(
+            name = "无障碍服务（已开启但系统未连上）",
+            ever = true,
+            key = "a11y_detached"
+        )
+        return false
+    }
+
+    private fun clearDetachedSince() {
+        if (prefs.getLong(KEY_DETACHED_SINCE, 0L) != 0L) {
+            prefs.edit().remove(KEY_DETACHED_SINCE).apply()
         }
     }
 
@@ -129,9 +236,7 @@ class PermissionHealthChecker @Inject constructor(
      */
     fun healRuntimePermissions(): Int {
         if (!guardMasterSwitch.active.value) return 0
-        val missing = CRITICAL_RUNTIME_PERMISSIONS.filter {
-            context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
-        }
+        val missing = missingCriticalRuntimePermissions()
         if (missing.isEmpty()) return 0
         // 非 DO/PO：无权代为授予，仅记录待恢复项供 UI 引导
         if (!admin.hasOwnerPrivileges()) {
@@ -189,7 +294,7 @@ class PermissionHealthChecker @Inject constructor(
         val now = mutableSetOf<String>()
         if (!a11yOk) now += "a11y"
         if (!overlayOk) now += "overlay"
-        if (CRITICAL_RUNTIME_PERMISSIONS.any { context.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }) {
+        if (missingCriticalRuntimePermissions().isNotEmpty()) {
             now += "runtime"
         }
         val recovered = computeResolveCategories(a11yOk, overlayOk, prev, now)
@@ -246,7 +351,18 @@ class PermissionHealthChecker @Inject constructor(
         private const val KEY_OVERLAY_EVER = "overlay_ever"
         /** 当前缺失能力集合（"a11y"/"overlay"/"runtime"），边沿触发恢复即关闭告警的依据 */
         private const val KEY_DROPPED = "dropped_caps"
+
+        /** "开关开着但服务没连上"的起始时刻；连上或确认关闭即清除 */
+        private const val KEY_DETACHED_SINCE = "a11y_detached_since"
         private const val ALERT_INTERVAL_MS = 6 * 60 * 60 * 1000L
+
+        /**
+         * 「开着却没连上」的容忍窗口。
+         *
+         * 系统重绑通常秒级完成，强制重绑也有几秒空窗；给足 10 分钟再判定"真的不可用"，
+         * 避免把一次正常的进程重建误报成"无障碍已关闭"。
+         */
+        private const val DETACHED_TOLERANCE_MS = 10 * 60 * 1000L
 
         /**
          * 是否需上报告警（纯判定，便于单测）。DO 形态下若静默自愈后已恢复启用则不报，
@@ -280,20 +396,5 @@ class PermissionHealthChecker @Inject constructor(
             if ("runtime" in recoveredCaps) set += "PERMISSION_REVOKED"
             return set
         }
-
-        /**
-         * 应用声明且运行期可能被系统自动回收的关键危险权限。仅用于 DO 形态下的自愈再授予；
-         * 与 AndroidManifest 中声明的危险权限保持一致。SYSTEM_ALERT_WINDOW / PACKAGE_USAGE_STATS
-         * 等无法经 DPM 授予，故不在此列（由无障碍/悬浮窗自检与 UI 引导覆盖）。
-         */
-        private val CRITICAL_RUNTIME_PERMISSIONS = listOf(
-            android.Manifest.permission.ACCESS_FINE_LOCATION,
-            android.Manifest.permission.ACCESS_COARSE_LOCATION,
-            android.Manifest.permission.READ_PHONE_STATE,
-            android.Manifest.permission.CAMERA,
-            android.Manifest.permission.RECORD_AUDIO,
-            android.Manifest.permission.READ_EXTERNAL_STORAGE,
-            android.Manifest.permission.WRITE_EXTERNAL_STORAGE
-        )
     }
 }

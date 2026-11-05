@@ -193,6 +193,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        // 存活状态立刻置死：解绑/被关闭的**那一秒**就要反映到心跳、桌面门禁与卸载防护，
+        // 不能等 2 分钟心跳过期。服务重建时 onServiceConnected 会重新置活。
+        GuardA11y.markDead()
         // 与 attach 严格配对：服务销毁后通道必须立即失效，否则弱引用之外的
         // 任何残留都会让调用方误判"通道可用"而在投影链路上多等一轮超时。
         accessibilityScreenshot.detach(this)
@@ -229,6 +232,11 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         watchdogJob = scope.launch {
             while (isActive) {
                 delay(LOCK_WATCH_INTERVAL_MS)
+                // 心跳续约（内部按 30s 节流，不产生额外磁盘压力）。
+                // 这里是"服务还活着"最稳定的证据来源：只要本循环在跑，
+                // GuardA11y.isAlive 就不该过期 —— 缺了这一行，服务连接满 2 分钟后
+                // 全端都会认为无障碍已死亡（2026-11-05 线上误判的根因）。
+                GuardA11y.markAliveTick(this@OperationGuardAccessibilityService)
                 // 整机管控暂停时不重拉锁屏、不续系统锁：设备应完全可用
                 if (!guardMasterSwitch.active.value) continue
                 // ---- 解锁自愈：App 侧已解锁，但系统锁还没撤成 ----
@@ -298,6 +306,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
 
     private fun handleAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        // 收到窗口事件本身就是"服务确实在工作"的最强证据。
+        // 这里是看门狗之外的第二条续约通道：即便看门狗循环因故停止，
+        // 只要还有窗口事件在被分发，存活判定就不会误翻转为"已死亡"。
+        GuardA11y.markAliveTick(this)
         // 整机管控暂停：无障碍拦截全部解除，设备回到完全可用（家长/操作员可自由进设置）。
         // 这是"取消应用管控后设备应可正常使用"的正确落点——释放设备由总开关驱动，
         // 而非只清空应用黑白名单（名单与拦截是两套独立机制）。
