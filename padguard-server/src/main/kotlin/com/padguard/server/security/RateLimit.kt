@@ -13,9 +13,11 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * 匿名可爆破入口的限流闸门（S14）。
  *
- * 覆盖四个入口：家长登录 `/v1/auth/login/password`、后台登录 `/v1/admin/login`、
- * 孩子端绑定 `/api/v1/device/bind`（绑定码可匿名穷举）与 `/api/v1/device/bind-by-account`
- * （家长密码可匿名穷举，与登录同型爆破面，一并收口）。
+ * 覆盖七个入口：家长登录 `/v1/auth/login/password`、家长注册 `/v1/auth/register`、
+ * 后台登录 `/v1/admin/login`、孩子端绑定 `/api/v1/device/bind`（绑定码可匿名穷举）与
+ * `/api/v1/device/bind-by-account`（家长密码可匿名穷举，与登录同型爆破面，一并收口），
+ * 以及 `/v1/auth/login/sms` 与 `/v1/auth/sms/send` 两个匿名短信端点（F-02）。
+ * 其中注册是唯一"匿名即可写库"的入口，限流同时挡住批量建号刷试用与手机号枚举。
  *
  * 维度：**IP + 账号双计数**。只按 IP 限，同一 NAT（家庭路由器很常见）下一个孩子端
  * 重装重试几次就把全家 IP 打满；只按账号限，攻击者换 IP 绕过。两者独立计数互不影响。
@@ -54,6 +56,10 @@ class RateLimit(private val props: RateLimitProperties) {
         "admin_login" -> props.adminLogin
         "bind" -> props.bind
         "bind_by_account" -> props.bindByAccount
+        "register" -> props.register
+        "login_sms" -> props.loginSms
+        "sms_send" -> props.smsSend
+        "billing_notify" -> props.billingNotify
         else -> DEFAULT_LIMIT
     }
 

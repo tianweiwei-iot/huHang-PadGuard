@@ -25,6 +25,13 @@ data class StatisticsUiState(
     val isLoading: Boolean = false,
     /** 是否至少成功取到一份数据：用于区分"真 0 分钟"与"接口失败后的默认 0" */
     val hasData: Boolean = false,
+    /**
+     * 最近一次成功取到统计数据的时刻（墙钟毫秒）。
+     *
+     * 刷新失败时页面仍会显示上一次的数字，但**必须让家长知道这份数字是什么时候的**：
+     * 否则"今日已用 42 分钟"可能是三小时前的快照，家长据此判断"还能不能玩"就是错的。
+     */
+    val lastSuccessAt: Long? = null,
     val error: String? = null
 )
 
@@ -57,13 +64,17 @@ class StatisticsViewModel @Inject constructor(
                 dailies = report.dailyUsages
             }
 
+            val anySuccess = todayResult.isSuccess || weekResult.isSuccess
             _uiState.value = _uiState.value.copy(
                 todayMinutes = todayMin,
                 weeklyMinutes = weeklyMin,
                 dailyUsages = dailies,
                 topApps = tops,
                 isLoading = false,
-                hasData = todayResult.isSuccess || weekResult.isSuccess,
+                hasData = anySuccess,
+                // 只有真的取到数据才刷新时刻；失败时保留上一次的时刻，
+                // 让角标能如实说出"这份旧数据是哪一刻的"。
+                lastSuccessAt = if (anySuccess) System.currentTimeMillis() else _uiState.value.lastSuccessAt,
                 // 两份都失败才是整页失败；只挂一份时保留已取到的数据，仅提示部分失败
                 error = when {
                     todayResult.isFailure && weekResult.isFailure ->

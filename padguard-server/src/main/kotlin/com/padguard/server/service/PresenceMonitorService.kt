@@ -1,5 +1,7 @@
 package com.padguard.server.service
 
+import com.padguard.server.config.TraceIds
+
 import com.padguard.server.repository.DeviceRepository
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -53,7 +55,10 @@ class PresenceMonitorService(
     }
 
     @Scheduled(fixedDelayString = "\${padguard.presence.scan-interval-ms:1000}")
-    fun scan() {
+    fun scan() = TraceIds.withNewTrace("sched") { scanInternal() }
+
+    /** 原扫描逻辑；公开入口只负责给每次调度一个独立 traceId（见 TraceIdFilter 说明）。 */
+    private fun scanInternal() {
         val timedOut = runCatching { registry.takeTimedOut() }
             .onFailure { log.error("presence scan failed", it) }
             .getOrDefault(emptyList())

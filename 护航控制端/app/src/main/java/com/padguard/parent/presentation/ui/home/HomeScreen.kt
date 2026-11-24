@@ -18,6 +18,10 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -30,9 +34,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.padguard.parent.domain.model.*
+import com.padguard.parent.presentation.ui.components.HighRiskAction
+import com.padguard.parent.presentation.ui.components.HighRiskActions
+import com.padguard.parent.presentation.ui.components.HighRiskConfirmDialog
 import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.presentation.ui.components.SoftHeroCard
 import com.padguard.parent.presentation.ui.components.SoftIconBadge
+import com.padguard.parent.presentation.ui.components.StaleDataHint
 import com.padguard.parent.presentation.ui.components.AppIcon
 import com.padguard.parent.presentation.ui.theme.OutlineSoft
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
@@ -79,6 +87,8 @@ fun HomeScreen(
     val devices = uiState.devices
     val selectedDevice = uiState.selectedDevice
     val deviceId = selectedDevice?.id.orEmpty()
+    // 首页「整机管控」开关一拨即下发：暂停方向会让全部防护失效，必须先确认（R-P3-2）
+    var pendingRisk by remember { mutableStateOf<HighRiskAction?>(null) }
 
     // 回到首页（ON_RESUME）即刷新设备列表：孩子端改名 / 用量上报后，
     // 家长端回首页能即时拉到三端一致的最新数据（服务端→家长端同步）。
@@ -104,10 +114,23 @@ fun HomeScreen(
             // === 1. 顶部标题栏 ===
             item { HomeTopBar(userName = uiState.userName, unreadCount = unreadAlertCount, onBellClick = onNavigateToAlerts) }
 
-            // 刷新失败但仍有历史数据：不整页替换（会丢掉仍可用的看板），
-            // 只挂一条可重试的窄提示，说明"当前显示的是上次数据"。
-            if (uiState.error != null && devices.isNotEmpty()) {
-                item { InlineRefreshError(message = uiState.error, onRetry = onRefresh) }
+            // 刷新失败但仍有历史数据：不整页替换（会丢掉仍可用的看板），只挂一条可重试的窄提示。
+            // 两类数据源各自可能失败：设备/限额（error）与看板用量（usageError），合成一条说明。
+            // **只在"仅用量失败"时给时间戳**——它记录的是看板数字的新鲜度，
+            // 限额失败时拿它当"这份数据是哪一刻的"是错的。
+            val failedSections = buildList {
+                if (uiState.error != null) add("设备与限额")
+                if (uiState.usageError != null) add("今日用量")
+            }
+            if (failedSections.isNotEmpty() && devices.isNotEmpty()) {
+                item {
+                    StaleDataHint(
+                        message = failedSections.joinToString("、") + " 本次未更新",
+                        lastSuccessAt = if (uiState.error == null) uiState.lastSuccessAt else null,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        onRetry = onRefresh
+                    )
+                }
             }
 
             // === 2. 空态 / 加载态 / 失败态：三者必须分开 ===
@@ -147,7 +170,15 @@ fun HomeScreen(
                 item {
                     ManagementActiveHomeCard(
                         active = uiState.managementActive,
-                        onToggle = onSetManagementActive,
+                        onToggle = { wantActive ->
+                            if (wantActive) {
+                                onSetManagementActive(true)
+                            } else {
+                                pendingRisk = HighRiskActions.pauseManagement(selectedDevice?.name) {
+                                    onSetManagementActive(false)
+                                }
+                            }
+                        },
                         modifier = Modifier.padding(horizontal = 16.dp)
                     )
                 }
@@ -160,6 +191,7 @@ fun HomeScreen(
                     TodayUsageModule(
                         usedMinutes = uiState.todayUsage?.totalUsageMinutes ?: 0,
                         dailyLimitMinutes = uiState.effectiveDailyLimitMinutes,
+                        extendedMinutes = uiState.extendedMinutes,
                         appUsages = uiState.todayUsage?.appUsages ?: emptyList(),
                         childName = uiState.childName,
                         onModuleClick = { if (deviceId.isNotEmpty()) onNavigateToUsageDetail(deviceId) },
@@ -201,6 +233,8 @@ fun HomeScreen(
             }
         }
     }
+
+    HighRiskConfirmDialog(action = pendingRisk, onDismiss = { pendingRisk = null })
 }
 
 // ==================== 子组件 ====================
@@ -371,18 +405,25 @@ private fun OfflineAlertBanner(deviceName: String) {
 @Composable
 private fun TodayUsageModule(
     usedMinutes: Int,
+    /** 家长在「时间管控」页配置的基础每日额度，不含当日加时 */
     dailyLimitMinutes: Int,
+    /** 当日累计加时（家长批准的延时 / 整机使用时间解锁），来自服务端 UsageSession */
+    extendedMinutes: Int = 0,
     appUsages: List<com.padguard.parent.domain.model.AppUsage>,
     onModuleClick: () -> Unit,
     onLimitClick: () -> Unit,
     childName: String = "",
     modifier: Modifier = Modifier
 ) {
-    // 真实每日限额：服务端返回 0 表示「未设置」，不应伪装成 1 分钟。
-    val hasLimit = dailyLimitMinutes > 0
-    val remaining = (dailyLimitMinutes - usedMinutes).coerceAtLeast(0)
-    val fraction = if (hasLimit) (usedMinutes.toFloat() / dailyLimitMinutes.toFloat()).coerceIn(0f, 1f) else 0f
-    val overLimit = hasLimit && usedMinutes > dailyLimitMinutes
+    // 真实每日限额 = 家长配置的基础额度 + 当日已批准的加时。
+    // 只算基础额度时，家长同意加 30 分钟后首页「每日限额 / 剩余」纹丝不动，
+    // 却被服务端按新额度判到期（显示"已超出限额"）——三端口径必须一致。
+    // 服务端返回 0 表示「未设置」，不应伪装成 1 分钟。
+    val totalLimit = dailyLimitMinutes + extendedMinutes
+    val hasLimit = totalLimit > 0
+    val remaining = (totalLimit - usedMinutes).coerceAtLeast(0)
+    val fraction = if (hasLimit) (usedMinutes.toFloat() / totalLimit.toFloat()).coerceIn(0f, 1f) else 0f
+    val overLimit = hasLimit && usedMinutes > totalLimit
 
     SoftHeroCard(
         modifier = modifier.fillMaxWidth(),
@@ -425,14 +466,17 @@ private fun TodayUsageModule(
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = if (!hasLimit) "未设置每日限额"
-                        else if (overLimit) "已超出限额 ${TimeFormat.formatDurationFromMinutes(usedMinutes - dailyLimitMinutes)}"
+                        else if (overLimit) "已超出限额 ${TimeFormat.formatDurationFromMinutes(usedMinutes - totalLimit)}"
                         else "剩余 ${TimeFormat.formatDurationFromMinutes(remaining)}",
                         color = Color.White.copy(alpha = 0.95f),
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = if (hasLimit) "每日限额 ${TimeFormat.formatDurationFromMinutes(dailyLimitMinutes)}" else "每日限额：未设置",
+                        text = if (hasLimit) {
+                            "每日限额 ${TimeFormat.formatDurationFromMinutes(totalLimit)}" +
+                                if (extendedMinutes > 0) "（含加时 $extendedMinutes 分钟）" else ""
+                        } else "每日限额：未设置",
                         color = Color.White.copy(alpha = 0.8f),
                         style = MaterialTheme.typography.labelSmall
                     )
@@ -784,44 +828,6 @@ private fun LatestActivityCard(activityText: String, modifier: Modifier = Modifi
     }
 }
 
-/**
- * 空状态：当前账号尚未绑定任何孩子设备。
- *
- * 设计取舍：无设备时看板与管控卡均无数据，与其渲染「存在却点击无反应」的失效卡片，
- * 不如直接给出明确的引导入口（跳转设备页生成绑定码），消除隐性空操作陷阱。
- */
-/** 刷新失败但仍有缓存数据时的窄提示（带重试）。 */
-@Composable
-private fun InlineRefreshError(message: String, onRetry: () -> Unit) {
-    Surface(
-        modifier = Modifier
-            .padding(horizontal = 16.dp)
-            .fillMaxWidth(),
-        color = MaterialTheme.colorScheme.errorContainer,
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Default.CloudOff,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onErrorContainer,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "刷新失败，当前显示上次数据（$message）",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(onClick = onRetry) { Text("重试") }
-        }
-    }
-}
-
 /** 首次加载中：不展示"还没有绑定设备"，避免把加载态谎报成空态。 */
 @Composable
 private fun LoadingDeviceState() {
@@ -884,6 +890,12 @@ private fun DeviceLoadErrorState(message: String, onRetry: () -> Unit) {
     }
 }
 
+/**
+ * 空状态：当前账号尚未绑定任何孩子设备。
+ *
+ * 设计取舍：无设备时看板与管控卡均无数据，与其渲染「存在却点击无反应」的失效卡片，
+ * 不如直接给出明确的引导入口（跳转设备页生成绑定码），消除隐性空操作陷阱。
+ */
 @Composable
 private fun EmptyDeviceState(onAddDevice: () -> Unit) {
     SoftCard(onClick = onAddDevice, modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth()) {

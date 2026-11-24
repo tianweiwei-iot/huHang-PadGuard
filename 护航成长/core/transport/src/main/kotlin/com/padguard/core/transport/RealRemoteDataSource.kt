@@ -2,6 +2,7 @@ package com.padguard.core.transport
 
 import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
+import android.content.Context
 import com.padguard.core.data.model.BehaviorLog
 import com.padguard.core.data.model.BindResult
 import com.padguard.core.data.model.Command
@@ -66,7 +67,8 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.ConcurrentLinkedQueue
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -87,6 +89,7 @@ import javax.inject.Singleton
  */
 @Singleton
 class RealRemoteDataSource @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val api: PadGuardApi,
     private val caller: ApiCaller,
     private val mqtt: MqttTransport,
@@ -108,12 +111,13 @@ class RealRemoteDataSource @Inject constructor(
     private var pollingJob: Job? = null
 
     /**
-     * MQTT 发布失败的回执重试队列（内存态）。
-     * 之所以不落库：回执丢失的后果是服务端显示"执行中"，而 CommandRecord 表里
-     * 已有完整执行留痕，服务端可通过下一次心跳的 pendingCommandCount 对账补偿。
-     * 落库会带来"重启后重发大量陈旧回执"的噪音，收益不成正比。
+     * 指令回执重试队列（磁盘态，R-P1-5）。
+     * 进程被杀后重启首轮 flush 补发，闭合"回执丢失→服务端指令卡执行中"的离线红线回路。
+     * 之所以用 JSON-Lines 落盘而非仅内存：内存队列在进程被杀后全部丢失，指令闭环断裂。
      */
-    private val ackRetryQueue = ConcurrentLinkedQueue<CommandAck>()
+    private val ackOutbox = AckOutbox(File(context.filesDir, "padguard_ack_outbox.jsonl"), json)
+    /** flush 互斥：保证 drain→发送→remove 原子，避免并发 flush 重复取同一批回执。 */
+    private val ackFlushMutex = Mutex()
 
     @Volatile
     private var lastPollAt: Long = 0L
@@ -261,7 +265,7 @@ class RealRemoteDataSource @Inject constructor(
         //      家长端显示"已开启"、平板上纹丝不动，且永远不会自愈。
         //
         // 因此不能只依赖 MQTT：必须周期性用 HTTPS 心跳把服务端真实版本号取回来。
-        // 频率取 4 次（约 1 分钟一次 @15s 心跳），兼顾流量与纠偏延迟。
+        // 频率取 2 次（约 30 秒一次 @15s 心跳），兼顾流量与纠偏延迟。
         val forceHttps = heartbeatSeq % HTTPS_RECONCILE_EVERY == 0
         if (forceHttps) {
             Logger.v(TAG) { "heartbeat #$heartbeatSeq routed to HTTPS for policy version reconciliation" }
@@ -302,8 +306,8 @@ class RealRemoteDataSource @Inject constructor(
             api.ack(AckUploadRequest(credentials.deviceId, listOf(ack)))
         }
         if (!result.isSuccess) {
-            ackRetryQueue.offer(ack)
-            Logger.w(TAG) { "ack ${ack.msgId} queued for retry (queue=${ackRetryQueue.size})" }
+            ackOutbox.enqueue(ack)
+            Logger.w(TAG) { "ack ${ack.msgId} queued for disk retry" }
             return false
         }
         return true
@@ -378,6 +382,30 @@ class RealRemoteDataSource @Inject constructor(
             "file",
             "$shotId.jpg",
             jpeg.toRequestBody("image/jpeg".toMediaType())
+        )
+        return caller.call("screenshot") {
+            api.uploadScreenshot(
+                shotId = shotId.toRequestBody(textType),
+                capturedAt = capturedAt.toString().toRequestBody(textType),
+                triggerType = triggerType.toRequestBody(textType),
+                file = filePart
+            )
+        }
+    }
+
+    override suspend fun uploadScreenshot(
+        shotId: String,
+        capturedAt: Long,
+        triggerType: String,
+        file: java.io.File
+    ): ApiResult<ScreenshotAck> {
+        val textType = "text/plain".toMediaType()
+        // 与 uploadMedia 同口径：asRequestBody(File) 是流式 body，
+        // 上传期间按块读盘，不把整张图读进堆（B22）。
+        val filePart = MultipartBody.Part.createFormData(
+            "file",
+            file.name.ifBlank { "$shotId.jpg" },
+            file.asRequestBody("image/jpeg".toMediaTypeOrNull())
         )
         return caller.call("screenshot") {
             api.uploadScreenshot(
@@ -533,13 +561,26 @@ class RealRemoteDataSource @Inject constructor(
     private fun ensurePollingLoop() {
         if (pollingJob?.isActive == true) return
         pollingJob = scope.launch {
+            // 限频、非阻塞地尝试恢复 MQTT：见下方注释，绝不允许同步 connect 阻塞存活信号节奏。
+            var nextMqttRetryAt = 0L
             while (isActive) {
                 val intervalMs = settings.pollingIntervalSec.value * 1000L
                 if (settings.mode.value == TransportMode.POLLING && credentials.isBound) {
                     val parked = runPollingRound()
-                    // 每轮结束尝试恢复 MQTT：校园网切换后端口可能重新放通
-                    if (mqtt.connect()) {
-                        Logger.i(TAG) { "mqtt recovered, leaving polling mode" }
+                    // 限频、非阻塞地尝试恢复 MQTT：
+                    // 1. Paho 已开启 isAutomaticReconnect —— 连接真正断开时它会在内部自动重连，
+                    //    此处只在「初始连不上 / 想切回 MQTT 模式」时兜底，无需每轮都阻塞等待；
+                    // 2. 关键修复：原先每轮都「同步」调用 mqtt.connect()，而 broker 不可达时
+                    //    connect 要等满 20s 连接超时，会把存活信号间隔从 ~20s 拉长到 ~40s，
+                    //    逼近甚至越过 presence 自适应超时（1.8×间隔，首周期更低），造成
+                    //    POLLING 降级模式下周期性被判离线、家长端看到「一会在线一会掉线」。
+                    //    改为后台限频尝试：存活信号（HTTP 长轮询）每轮照常发出，节奏不受拖累。
+                    val now = timeProvider.now()
+                    if (now >= nextMqttRetryAt) {
+                        nextMqttRetryAt = now + MQTT_RECOVER_MIN_INTERVAL_MS
+                        scope.launch {
+                            if (mqtt.connect()) Logger.i(TAG) { "mqtt recovered, leaving polling mode" }
+                        }
                     }
                     // 长轮询生效时，服务端已经替我们"等过"了一轮：返回后立刻发起下一次，
                     // 指令从入库到被取走只剩一次 RTT。未挂起（旧服务端 / 请求失败）才退避，
@@ -581,21 +622,17 @@ class RealRemoteDataSource @Inject constructor(
         return parked
     }
 
-    private suspend fun flushAckRetryQueue() {
-        if (ackRetryQueue.isEmpty()) return
-        val batch = mutableListOf<CommandAck>()
-        while (batch.size < ACK_RETRY_BATCH) {
-            batch.add(ackRetryQueue.poll() ?: break)
-        }
+    private suspend fun flushAckRetryQueue() = ackFlushMutex.withLock {
+        val batch = ackOutbox.drain(ACK_RETRY_BATCH)
         if (batch.isEmpty()) return
         val result = caller.callIgnoringData("ack-retry") {
             api.ack(AckUploadRequest(credentials.deviceId, batch))
         }
         if (!result.isSuccess) {
-            // 放回队列，下一轮再试；此处不做无限增长保护是因为
-            // 指令量本身受服务端下发频率约束，队列长度天然有界
-            batch.forEach { ackRetryQueue.offer(it) }
+            // 留盘，下一轮再试；指令量受服务端下发频率约束，队列长度天然有界。
+            Logger.w(TAG) { "ack retry failed, kept ${batch.size} on disk for next flush" }
         } else {
+            ackOutbox.remove(batch)
             Logger.i(TAG) { "flushed ${batch.size} pending acks" }
         }
     }
@@ -615,11 +652,16 @@ class RealRemoteDataSource @Inject constructor(
         /**
          * 每多少次心跳强制走一次 HTTPS 做策略版本对账。
          *
-         * 4 次 ≈ 1 分钟（心跳间隔 15s）：既不会明显增加流量，
-         * 又能保证家长改完策略后最坏 1 分钟内设备自动纠偏。
-         * 取 1 会导致 MQTT 形同虚设（每条心跳都回落 HTTPS），不可取。
+         * 默认 2 次 ≈ 30 秒（心跳间隔 15s）：把家长改完策略后设备自动纠偏的
+         * 最坏盲窗从 1 分钟压到 30 秒，同时不会让 MQTT 形同虚设
+         * （每条心跳都回落 HTTPS 才是取 1 才会出现的问题，本值 ≥ 2 不会）。
+         *
+         * 为什么必须保留这条对账心跳：MQTT 心跳是单向 publish（QoS0）无响应体，
+         * 推送又走 MQTT，broker 假活（TCP 半开 / 进程僵死）时策略推送会静默丢失、
+         * 且本地版本对账永远为 0 不触发 —— 家长端显示"已开启"、平板上纹丝不动且永不自愈。
+         * 周期性 HTTPS 心跳把服务端真实版本号取回来，是"假在线不脱管"的最后一道闸。
          */
-        private const val HTTPS_RECONCILE_EVERY = 4
+        private const val HTTPS_RECONCILE_EVERY = 2
 
         /**
          * 长轮询挂起时长。
@@ -636,5 +678,15 @@ class RealRemoteDataSource @Inject constructor(
          * 下一轮就会变成紧密循环空转刷屏，因此退回普通轮询周期做退避。
          */
         private const val LONG_POLL_PARKED_THRESHOLD_MS = 1_000L
+
+        /**
+         * POLLING 降级模式下，后台尝试恢复 MQTT 的最小间隔。
+         *
+         * 不能每轮都试：每轮 runPollingRound 已是一次 20s 长轮询（存活信号源），
+         * 若再同步 connect（失败要等 20s 连接超时）会把存活信号拖到 ~40s 而离线横跳。
+         * 这里只兜底「初始连不上 + 成功后切回 MQTT 模式」，真断线靠 Paho 的
+         * isAutomaticReconnect 自动重连，30s 探一次足够且零阻塞。
+         */
+        private const val MQTT_RECOVER_MIN_INTERVAL_MS = 30_000L
     }
 }

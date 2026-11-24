@@ -43,8 +43,8 @@ import org.springframework.web.multipart.MultipartFile
 @RequestMapping("/v1/files")
 class FilesController(
     private val fileStorageService: FileStorageService,
-    private val uploadedFileRepository: com.padguard.server.repository.UploadedFileRepository,
-    private val deviceRepository: com.padguard.server.repository.DeviceRepository,
+    // 归属判定规则已于 2026-11-18 下沉到 service.FileAccessService（Controller 不再直连 Repository）
+    private val fileAccessService: com.padguard.server.service.FileAccessService,
     // 可选注入（纯单测可直构）：媒体 URL 签名验签与匿名强制签名闸门
     private val mediaUrlSigner: com.padguard.server.security.MediaUrlSigner? = null,
     @org.springframework.beans.factory.annotation.Value("\${padguard.media.require-signature:false}")
@@ -75,9 +75,17 @@ class FilesController(
             request.getAttribute("fileViewerDeviceId") != null
         if (hasCredentials) {
             // 有凭证：按精确归属校验（签名不能替凭证提权，防止泄漏的签名链接越过归属规则）
-            val denied = ownershipDenied(request, id)
-            if (denied != null) return denied
-        } else if (requireSignature && !signatureValid && isDeviceOwnedFile(id)) {
+            if (fileAccessService.resolveOwnership(
+                    request.getAttribute("fileViewerUserId") as? String,
+                    request.getAttribute("fileViewerDeviceId") as? String,
+                    id
+                ) == com.padguard.server.service.FileAccessService.Verdict.DENY
+            ) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(ApiResponse.fail<Any>(ParentErr.FORBIDDEN, "无权访问该文件"))
+            }
+        } else if (requireSignature && !signatureValid && fileAccessService.isDeviceOwnedFile(id)) {
             // 匿名强制签名闸门（默认关）：开启后，设备上行敏感文件（截图/录屏/录音）
             // 不再依赖"128 位 id 不可穷举"这一唯一防线，匿名访问必须持有效签名。
             // 家长发布的共享素材（ownerUserId 独有）不在此列——孩子端图片库匿名加载依赖它。
@@ -85,6 +93,13 @@ class FilesController(
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(ApiResponse.fail<Any>(ParentErr.FORBIDDEN, "请使用有效凭证或签名链接访问"))
+        } else if (!hasCredentials && !requireSignature && fileAccessService.isDeviceOwnedFile(id)) {
+            // 闸门未开且匿名访问设备私有媒体：仅依赖 128 位 fileId 不可穷举这一道防线。
+            // 补访问审计（R-P2-15），便于事后追溯异常批量访问；不改放行语义，避免破坏现有客户端。
+            log.info(
+                "anonymous access to device-owned media (signature gate off): fileId={} remote={}",
+                id, request.remoteAddr
+            )
         }
         // 无凭证且闸门未开：维持能力 URL 语义（历史行为，见 FileAccessInterceptor 注释）
 
@@ -106,7 +121,11 @@ class FilesController(
         // 配合 nginx 的 X-Content-Type-Options:nosniff 双保险。
         val declared = runCatching { MediaType.parseMediaType(meta.contentType) }
             .getOrNull()
-        val safeInline = declared != null && INLINE_SAFE_TYPES.any { declared.isCompatibleWith(it) }
+        // 显式排除 SVG：`image/svg+xml` 能匹配 `image/*` 通配符，但 SVG 在浏览器里是 XML 文档，
+        // 内联打开时 <script> 与 /admin 同源执行。历史文件/旧版本客户端已落盘的 SVG 也必须降级。
+        val subtype = declared?.subtype?.lowercase().orEmpty()
+        val neverInline = subtype == "svg+xml" || subtype.endsWith("+xml")
+        val safeInline = declared != null && !neverInline && INLINE_SAFE_TYPES.any { declared.isCompatibleWith(it) }
         val type = if (safeInline) declared!! else MediaType.APPLICATION_OCTET_STREAM
         val disposition = if (safeInline) "inline" else "attachment"
 
@@ -127,74 +146,6 @@ class FilesController(
     /** Content-Disposition 头里的文件名必须干净：去引号/反斜杠/换行，防止响应头注入。 */
     private fun headerSafeName(name: String): String =
         name.replace(Regex("[\"\\\\\\r\\n]"), "_").take(200).ifBlank { "file" }
-
-    /**
-     * 归属校验：凭证认得出身份时才拦，认不出则不拦（见 [com.padguard.server.security.FileAccessInterceptor]）。
-     *
-     * 三条放行规则，缺一都会造成回归：
-     * 1. 文件没有归属记录（本次改造之前上传的历史数据）→ 放行，否则老截图会集体打不开；
-     * 2. 请求没带任何可识别凭证（孩子端图片库加载 URL）→ 放行，否则素材图全 404；
-     * 3. 归属匹配 → 放行。
-     * 除此之外一律 403：家长不能下载别人家设备的截图，别的设备也不能拿走本机的录音录屏。
-     *
-     * ## 为什么必须额外加"家长拥有该设备"这条判定
-     * 孩子端上报截图 / 录屏 / 录音时只认设备令牌，**拿不到家长 userId**，
-     * 因此这些文件的 `owner_user_id` 恒为 null，只有 `device_id` 有值。
-     * 而家长下载时带的是家长 JWT，识别出来的是 `viewerUserId`、没有 `viewerDeviceId`。
-     * 于是三条规则全部落空（规则 1 因 device_id 非空不成立、规则 2 有凭证、规则 3 比对的是 null 与家长 ID），
-     * 结果是**家长下载自家孩子设备的截图/录屏必定被 403** ——
-     * 表现为"录屏成功、回放入口也在，但保存图片/视频时提示 HTTP 403"。
-     * 这条判定把"设备归属该家长"补上，既修好了功能，也没有放宽跨用户越权。
-     */
-    private fun ownershipDenied(
-        request: jakarta.servlet.http.HttpServletRequest,
-        fileId: String
-    ): ResponseEntity<Any>? {
-        val viewerUserId = request.getAttribute("fileViewerUserId") as? String
-        val viewerDeviceId = request.getAttribute("fileViewerDeviceId") as? String
-        if (viewerUserId == null && viewerDeviceId == null) return null
-
-        val owner = uploadedFileRepository.findById(fileId).orElse(null) ?: return null
-        val ownerUserId = owner.ownerUserId
-        val ownerDeviceId = owner.deviceId
-
-        val allow = when {
-            // 历史文件（早期版本上传，无归属记录）→ 放行，否则老素材集体打不开
-            ownerUserId.isNullOrBlank() && ownerDeviceId.isNullOrBlank() -> true
-            // 家长主动上传的素材（只有 ownerUserId、无 ownerDeviceId）：通过「信息发布」主动分享给孩子，
-            // 必须放行孩子端下载，否则家长发的图片 / 视频会 403。
-            // fileId 为随机 128 位不可穷举（能力 URL），与历史文件同一安全级别。
-            ownerUserId != null && ownerDeviceId.isNullOrBlank() -> true
-            // 归属匹配（家长下载自己上传的 / 孩子下载自己设备产生的）
-            viewerUserId != null && ownerUserId == viewerUserId -> true
-            viewerDeviceId != null && ownerDeviceId == viewerDeviceId -> true
-            // 家长下载自家设备上行的文件（截图/录屏/录音归属只记了 deviceId）
-            viewerUserId != null && !ownerDeviceId.isNullOrBlank() && ownsDevice(viewerUserId, ownerDeviceId) -> true
-            else -> false
-        }
-        if (allow) return null
-        log.warn("file access denied: fileId={} viewerUser={} viewerDevice={}", fileId, viewerUserId, viewerDeviceId)
-        return ResponseEntity.status(HttpStatus.FORBIDDEN)
-            .contentType(MediaType.APPLICATION_JSON)
-            .body(ApiResponse.fail<Any>(ParentErr.FORBIDDEN, "无权访问该文件"))
-    }
-
-    /**
-     * 设备是否属于该家长。
-     *
-     * 用 [com.padguard.server.repository.DeviceRepository.findByUserId] 而不是再加一个 exists 查询：
-     * 单个家长的设备数是十以内的量级，全量取出比对与一次点查开销相当，
-     * 且这里只在"归属字段对不上"时才走到，不是下载主路径。
-     */
-    private fun ownsDevice(userId: String, deviceId: String): Boolean =
-        runCatching { deviceRepository.findByUserId(userId).any { it.id == deviceId } }
-            .onFailure { log.warn("device ownership check failed: user={} device={} err={}", userId, deviceId, it.message) }
-            .getOrDefault(false)
-
-    /** 该文件是否为孩子端设备上行（截图/录屏/录音）——匿名强制签名闸门的适用范围。 */
-    private fun isDeviceOwnedFile(fileId: String): Boolean =
-        runCatching { uploadedFileRepository.findById(fileId).orElse(null)?.deviceId != null }
-            .getOrDefault(false)
 
     /**
      * 客户端未声明 Content-Type 时按扩展名兜底。
@@ -237,20 +188,21 @@ class ParentMediaUploadController(private val fileStorageService: FileStorageSer
         @RequestParam("file") file: MultipartFile
     ): ApiResponse<FileUploadDto> {
         if (file.isEmpty) {
-            return ApiResponse.fail(ParentErr.PARAM_ERROR, "文件为空，请重新选择")
+            // 第 4 轮修正：原为 return ApiResponse.fail(...)，返回 HTTP 200 + code=1001，
+            // 绕过了全局异常映射 —— 网关/监控按 HTTP 语义会把"空文件"当成功请求。
+            // 改为抛 BizException 后统一映射为 400（PARAM_ERROR），家长端 exec 的
+            // HTTP 非 2xx 分支与业务码分支都能正确展示失败原因，行为不变。
+            throw com.padguard.server.common.BizException(
+                com.padguard.server.common.ParentErr.PARAM_ERROR, "文件为空，请重新选择", com.padguard.server.common.Audience.PARENT
+            )
         }
-        // 上传类型黑名单（第八轮评估 P1-A）：本产品只承载媒体/音频/视频/APK 分发，
-        // 一切可被浏览器执行的格式（HTML/SVG/JS 等）一律拒绝——它们一旦落盘，
-        // 即使下载侧已强制 attachment，仍会被搬进各种渲染路径制造存储型 XSS。
-        val name = file.originalFilename ?: ""
-        val ext = name.substringAfterLast('.', "").lowercase()
-        if (ext in BLOCKED_EXTENSIONS) {
-            return ApiResponse.fail(ParentErr.PARAM_ERROR, "不支持上传 .$ext 类型的文件")
-        }
-        val mime = file.contentType?.takeIf { it.isNotBlank() && it != "*/*" }
-            ?: guessContentType(file.originalFilename)
-        if (mime.substringBefore(';').trim().lowercase() in BLOCKED_MIME_TYPES) {
-            return ApiResponse.fail(ParentErr.PARAM_ERROR, "不支持上传该类型的文件")
+        // 上传类型黑名单统一收在 FileStorageService：孩子端头像/截图/媒体三条入口
+        // 也必须走同一份规则，不能只在家长入口挡住 HTML/SVG/JS。
+        val mime = com.padguard.server.service.FileStorageService.resolveMime(file.originalFilename, file.contentType)
+        com.padguard.server.service.FileStorageService.unsafeUploadReason(file.originalFilename, mime)?.let { reason ->
+            throw com.padguard.server.common.BizException(
+                com.padguard.server.common.ParentErr.PARAM_ERROR, reason, com.padguard.server.common.Audience.PARENT
+            )
         }
         // 流式落盘：上限 200MB 的文件若走 file.bytes 会整块进堆，两三个并发上传即可 OOM
         // （见 FileStorageService.storeStream 的说明）。这里只占一个 64KB 缓冲区。
@@ -269,40 +221,8 @@ class ParentMediaUploadController(private val fileStorageService: FileStorageSer
     }
 
     companion object {
-        /**
-         * 按扩展名推断 MIME。
-         * 部分 Android 文件选择器返回通配类型，原样存下来后孩子端拿到的类型不可播/不可渲染。
-         */
-        fun guessContentType(name: String?): String {
-            val ext = name?.substringAfterLast('.', "")?.lowercase() ?: return "application/octet-stream"
-            return when (ext) {
-                "apk" -> "application/vnd.android.package-archive"
-                "png" -> "image/png"
-                "jpg", "jpeg" -> "image/jpeg"
-                "gif" -> "image/gif"
-                "webp" -> "image/webp"
-                "mp3" -> "audio/mpeg"
-                "m4a", "aac" -> "audio/mp4"
-                "wav" -> "audio/wav"
-                "ogg" -> "audio/ogg"
-                "mp4" -> "video/mp4"
-                "3gp" -> "video/3gpp"
-                "webm" -> "video/webm"
-                else -> "application/octet-stream"
-            }
-        }
-
-        /** 上传黑名单：可执行/可渲染脚本的扩展名（存储型 XSS 源头，见 upload 注释）。 */
-        private val BLOCKED_EXTENSIONS = setOf(
-            "html", "htm", "xhtml", "shtml", "svg", "js", "mjs", "css", "xml",
-            "json", "swf", "hta", "jsp", "asp", "aspx", "php", "exe", "bat", "cmd", "ps1", "sh"
-        )
-
-        /** 上传黑名单：MIME 层兜底（防止改扩展名绕过）。 */
-        private val BLOCKED_MIME_TYPES = setOf(
-            "text/html", "application/xhtml+xml", "image/svg+xml",
-            "text/javascript", "application/javascript", "application/x-javascript",
-            "text/xml", "application/xml", "application/x-shockwave-flash"
-        )
+        /** 兼容既有调用点；规则本体在 FileStorageService，避免两处漂移。 */
+        fun guessContentType(name: String?): String =
+            com.padguard.server.service.FileStorageService.guessContentType(name)
     }
 }

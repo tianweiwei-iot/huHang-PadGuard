@@ -3,10 +3,14 @@ package com.padguard.parent.presentation.viewmodel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.padguard.parent.data.remote.ParentPushClient
+import com.padguard.parent.data.remote.ParentPushMessage
+import com.padguard.parent.domain.model.AgreementStatus
 import com.padguard.parent.domain.model.AppUploadMeta
 import com.padguard.parent.domain.model.Device
 import com.padguard.parent.domain.model.DeviceFunctionConfig
 import com.padguard.parent.domain.model.DevicePermissionConfig
+import com.padguard.parent.domain.model.MediaSource
 import com.padguard.parent.domain.model.AppUpgradeItem
 import com.padguard.parent.domain.model.DistributableApp
 import com.padguard.parent.domain.model.LocationInfo
@@ -27,6 +31,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -53,6 +58,21 @@ data class DeviceDetailUiState(
     val isLoading: Boolean = false,
     val toast: String? = null,
     val error: String? = null,
+    /**
+     * 最近一次成功读到设备详情的时刻（墙钟毫秒）。
+     *
+     * 详情页里"守护进程 / 无障碍 / 链路"都是**设备当下的状态**。刷新失败时这些 chip 仍按旧值渲染，
+     * 家长看到"一切正常"可能是一小时前的事实——而这页恰恰是判断"管控还有没有效"的入口。
+     */
+    val lastSuccessAt: Long? = null,
+    /**
+     * 使用授权协议签署凭证（说明书 §5.4）。
+     *
+     * null = 本次尚未查询到结果（请求失败或还在加载）；非 null 时 `signed=false`
+     * 只代表**服务端没有凭证**，不表示孩子拒绝同意。
+     * 刻意不并入 [error]：这是次要合规信息，查询失败不该把整页挂成错误横幅。
+     */
+    val agreement: AgreementStatus? = null,
     // === 设备管理面板 ===
     val adminSheet: DeviceAdminSheet? = null,
     val permissions: DevicePermissionConfig? = null,
@@ -116,11 +136,23 @@ class DeviceDetailViewModel @Inject constructor(
     private val locationRepository: LocationRepository,
     private val statisticsRepository: StatisticsRepository,
     private val policyRepository: PolicyRepository,
+    private val parentPushClient: ParentPushClient,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
     /** 未成年人模式配置是否成功读取过一次（失败时禁止写入，防默认值覆盖服务端配置） */
     private var minorModeLoaded = false
+
+    /**
+     * 上一次从设备列表轮询看到的「低频实时字段」指纹。
+     * 详情页原本只在 init 拉一次，孩子端改资料 / 守护进程掉线 / 操作密码补设后，
+     * 家长停在详情页看到的全是几分钟前甚至更旧的快照。10 秒列表轮询本来就有这些字段，
+     * 这里靠指纹比对把它们变成重拉触发条件，而不是每轮都发 4 个请求。
+     */
+    private var lastDetailFingerprint: String? = null
+
+    /** 串行化详情重拉：WS 快路径与列表兜底可能同一拍到达，只保留最后一次。 */
+    private var detailRefreshJob: Job? = null
 
     private val deviceId: String = savedStateHandle.get<String>("deviceId").orEmpty()
 
@@ -130,20 +162,45 @@ class DeviceDetailViewModel @Inject constructor(
     init {
         loadDeviceDetail()
         loadMinorMode()
-        // 在线态跟随设备列表实时翻转：详情页原本只在进入时拉一次 getDeviceDetail，
-        // 之后孩子端断电/重连都不会更新 —— 家长停在详情页时看到的可能是几分钟前的状态。
-        // 这里只同步"上下线"这一个字段，其它字段仍以详情接口为准（详情页有更多专属信息）。
+        // 在线态跟随设备列表实时翻转：只就地改上下线，不触发整页重拉。
+        // 其余实时字段（孩子资料 / 守护健康度 / 操作密码 / 防护等级 / 电量）靠指纹比对：
+        // 10 秒列表轮询本来就会带回这些值，变化时才静默重拉详情（含用量/位置/合规凭证），
+        // 既不每轮发 4 个请求，也不会让家长停在详情页时一直看旧快照。
         viewModelScope.launch {
             deviceRepository.observeDeviceList().collect { list ->
                 val fresh = list.firstOrNull { it.id == deviceId } ?: return@collect
-                val current = _uiState.value.device ?: return@collect
-                if (current.onlineStatus == fresh.onlineStatus) return@collect
-                _uiState.value = _uiState.value.copy(
-                    device = current.copy(
-                        onlineStatus = fresh.onlineStatus,
-                        lastOnlineTime = fresh.lastOnlineTime
+                val fingerprint = fresh.detailFingerprint()
+
+                val current = _uiState.value.device
+                if (current != null &&
+                    (current.onlineStatus != fresh.onlineStatus || current.lastOnlineTime != fresh.lastOnlineTime)
+                ) {
+                    _uiState.value = _uiState.value.copy(
+                        device = current.copy(
+                            onlineStatus = fresh.onlineStatus,
+                            lastOnlineTime = fresh.lastOnlineTime
+                        )
                     )
-                )
+                }
+
+                if (lastDetailFingerprint == null) {
+                    // 首帧只记基线：init 发起的详情请求已在途，不该再叠一次
+                    lastDetailFingerprint = fingerprint
+                    return@collect
+                }
+                if (fingerprint == lastDetailFingerprint) return@collect
+                lastDetailFingerprint = fingerprint
+                loadDeviceDetail(silent = true)
+            }
+        }
+        // 孩子端改姓名/昵称/头像的秒级快路径：服务端写完库即推 device.profile.updated。
+        // 此前该 type 无人消费，首页 ≤10s 变新、详情页仍停在进页面那一刻，同 App 内自相矛盾。
+        // 列表指纹是推送丢失时的兜底，两条路径都会走同一个静默重拉（串行去重）。
+        viewModelScope.launch {
+            parentPushClient.messages.collect { msg ->
+                if (msg is ParentPushMessage.DeviceProfileUpdated && msg.deviceId == deviceId) {
+                    loadDeviceDetail(silent = true)
+                }
             }
         }
         // 订阅整机管控开关态（跨页面共享）：详情页与首页卡片读同一份，保证两处一致。
@@ -155,30 +212,51 @@ class DeviceDetailViewModel @Inject constructor(
         }
     }
 
-    fun loadDeviceDetail() {
+    /**
+     * @param silent 后台静默重拉（WS 快路径 / 列表指纹兜底）：不闪整页加载态、不因一次
+     *               抖动把整页挂成「刷新失败」，失败时保留上一次成功的数据与 chip 状态。
+     *               手动点「重试」仍走非静默，需要看到明确的错误横幅。
+     */
+    fun loadDeviceDetail(silent: Boolean = false) {
         if (deviceId.isBlank()) return
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
-            deviceRepository.getDeviceDetail(deviceId)
-                .onSuccess { device ->
-                    _uiState.value = _uiState.value.copy(
-                        device = device,
-                        // 以服务端派生值为准：冷启动时也能正确反映「设备操作密码是否已设」，
-                        // 不再依赖 setGuardPassword 的会话内乐观标记。
-                        guardPasswordSet = device.guardPasswordSet
-                    )
-                    launch {
-                        statisticsRepository.getTodayUsage(deviceId)
-                            .onSuccess { _uiState.value = _uiState.value.copy(todayUsage = it) }
+        // 串行：WS 与列表轮询可能同一拍到达；手动重试也要能取消在途的静默请求。
+        detailRefreshJob?.cancel()
+        detailRefreshJob = viewModelScope.launch {
+            try {
+                if (!silent) _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+                deviceRepository.getDeviceDetail(deviceId)
+                    .onSuccess { device ->
+                        _uiState.value = _uiState.value.copy(
+                            device = device,
+                            // 以服务端派生值为准：冷启动时也能正确反映「设备操作密码是否已设」，
+                            // 不再依赖 setGuardPassword 的会话内乐观标记。
+                            guardPasswordSet = device.guardPasswordSet,
+                            // 设备详情是本页一切 chip / 面板的时间基准：读到了才更新"哪一刻的数据"。
+                            lastSuccessAt = System.currentTimeMillis()
+                        )
+                        launch {
+                            statisticsRepository.getTodayUsage(deviceId)
+                                .onSuccess { _uiState.value = _uiState.value.copy(todayUsage = it) }
+                        }
+                        launch {
+                            locationRepository.getDeviceLocation(deviceId)
+                                .onSuccess { _uiState.value = _uiState.value.copy(location = it) }
+                                .onFailure { /* 位置获取失败不阻塞详情页 */ }
+                        }
+                        // 合规凭证是独立数据源：失败只让这一行不显示，不影响设备详情主流程，
+                        // 也不写进页面级 error（否则一次次要接口抖动会把整页挂成"刷新失败"）。
+                        launch {
+                            deviceRepository.getAgreementStatus(deviceId)
+                                .onSuccess { _uiState.value = _uiState.value.copy(agreement = it) }
+                                .onFailure { _uiState.value = _uiState.value.copy(agreement = null) }
+                        }
                     }
-                    launch {
-                        locationRepository.getDeviceLocation(deviceId)
-                            .onSuccess { _uiState.value = _uiState.value.copy(location = it) }
-                            .onFailure { /* 位置获取失败不阻塞详情页 */ }
-                    }
-                }
-                .onFailure { _uiState.value = _uiState.value.copy(error = it.message) }
-            _uiState.value = _uiState.value.copy(isLoading = false)
+                    .onFailure { if (!silent) _uiState.value = _uiState.value.copy(error = it.message) }
+            } finally {
+                // 无论哪种模式都收尾：若首次非静默加载被后续的静默重拉取消，
+                // 这里保证 isLoading 不会永久卡在 true。
+                _uiState.value = _uiState.value.copy(isLoading = false)
+            }
         }
     }
 
@@ -218,9 +296,20 @@ class DeviceDetailViewModel @Inject constructor(
      * 这里复用 [issueTracked] 追踪设备执行结果并给出可读提示。
      */
     fun setManagementActive(active: Boolean) {
+        // 防连点：整机管控是高风险开关（暂停会释放全部管控），UI 卡片已按 managementBusy
+        // 禁用按钮，但此前该字段从未置位，等于防连点形同虚设——快速双击会下发两条
+        // SET_MANAGEMENT_ACTIVE。与水印/操作密码开关同款：入口判重 + 置位，两路复位。
+        if (_uiState.value.managementBusy) return
+        _uiState.value = _uiState.value.copy(managementBusy = true)
         issueTracked(
             actionName = if (active) "恢复管控" else "暂停管控",
-            doneWord = if (active) "恢复管控" else "释放整机"
+            doneWord = if (active) "恢复管控" else "释放整机",
+            onSettled = { result ->
+                // 注意：managementActive 的权威值由 repository 的 managementActiveFlow 驱动，
+                // 这里不按 result.executed 覆写开关（HTTP 失败时 repository 已回滚并经 Flow 推回；
+                // 设备执行失败时保留家长意图的乐观态，靠 toast 如实提示），只负责复位 busy。
+                _uiState.value.copy(managementBusy = false)
+            }
         ) { policyRepository.setManagementActive(deviceId, active) }
     }
 
@@ -476,18 +565,29 @@ class DeviceDetailViewModel @Inject constructor(
         }
     }
 
-    fun uploadApp(bytes: ByteArray, meta: AppUploadMeta, fileName: String) {
+    /**
+     * 上传 APK 到应用库。
+     *
+     * [apk] 是流式来源（已落盘），本方法负责在结束（成功/失败/协程取消）时
+     * `close()` 删除 cache 副本 —— 早期传的是整份 `ByteArray`，
+     * 200MB 安装包在堆里就是一次 OOM 事故。
+     */
+    fun uploadApp(apk: MediaSource, meta: AppUploadMeta) {
         _uiState.value = _uiState.value.copy(uploading = true)
         viewModelScope.launch {
-            deviceRepository.uploadAppCatalog(deviceId, bytes, meta, fileName)
-                .onSuccess {
-                    _uiState.value = _uiState.value.copy(uploading = false, toast = "已上传到应用库：${meta.appName}")
-                    loadDistributableApps()
-                }
-                .onFailure {
-                    _uiState.value = _uiState.value.copy(uploading = false)
-                    showToast(it.message ?: "上传失败")
-                }
+            try {
+                deviceRepository.uploadAppCatalog(deviceId, apk, meta)
+                    .onSuccess {
+                        _uiState.value = _uiState.value.copy(uploading = false, toast = "已上传到应用库：${meta.appName}")
+                        loadDistributableApps()
+                    }
+                    .onFailure {
+                        _uiState.value = _uiState.value.copy(uploading = false)
+                        showToast(it.message ?: "上传失败")
+                    }
+            } finally {
+                runCatching { apk.close() }
+            }
         }
     }
 
@@ -671,3 +771,24 @@ class DeviceDetailViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(toast = message)
     }
 }
+
+/**
+ * 设备详情页关心的「低频实时字段」指纹（纯函数，便于 JVM 单测钉死字段集合）。
+ *
+ * 刻意排除三类字段，否则会退化成每 10 秒重拉一次详情：
+ * - `onlineStatus` / `lastOnlineTime`：后者每次心跳都刷新，10 秒列表轮询每轮都会变；
+ *   在线态由 collect 就地同步，本就不需要走重拉。
+ * - `latitude` / `longitude`：由独立的实时位置接口负责，列表里常年为 null。
+ * - `id` / `deviceId`：主键恒定，变化意味着换设备而非资料更新。
+ *
+ * 保留电量：详情页展示电量，孩子端上报粒度较粗（百分比），变化频率远低于 10 秒。
+ * 分隔符用控制字符而非 `|`，避免孩子把昵称写成 `a|b` 这种内容时产生指纹碰撞。
+ */
+internal fun Device.detailFingerprint(): String = listOf(
+    name, model, osVersion, appVersion,
+    childName, childNickname, childAvatar,
+    groupId, groupName, sceneType,
+    remoteLocked, guardPasswordSet, sceneMode, controlMode, protectionLevel,
+    daemonAlive, a11yAlive, daemonLost, daemonOnlineState, lastRestartReason, permissionVersion,
+    batteryLevel
+).joinToString("\u0001")

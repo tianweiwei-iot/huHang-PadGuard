@@ -50,6 +50,7 @@ import com.padguard.child.guard.AppAccessGateDialog
 import com.padguard.child.guard.AppAccessNoPasswordDialog
 import com.padguard.child.guard.AppAccessReason
 import com.padguard.child.guard.DeviceOwnerEnforcer
+import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.ui.lock.LockTaskSupport
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
@@ -83,9 +84,42 @@ class KidHomeActivity : ComponentActivity() {
     @Inject
     lateinit var deviceOwnerEnforcer: DeviceOwnerEnforcer
 
+    /** 锁定态（供"按 HOME 回桌面"时自我检查，见 [onCreate] 里的兜底 collect）。 */
+    @Inject
+    lateinit var lockController: com.padguard.core.engine.lock.LockController
+
+    /** 上次因"锁定态回到桌面"重拉锁屏的时刻（单调钟），用于防止锁屏页异常自退导致的重拉热循环 */
+    private var lastLockRedisplayAtMs = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // 锁屏兜底（**不依赖无障碍**）：孩子按 HOME 回到本桌面时，若此刻处于锁定态，
+        // 立刻把锁屏页拉回前台。
+        //
+        // 为什么必须有这一层：锁屏防逃逸的主通道是「无障碍看门狗 500ms 一拍重拉」，
+        // 而 EMUI 一键清理/省电策略会把无障碍服务停掉 —— 那一拍不再存在，
+        // 孩子按一次 HOME 就回到本桌面，锁屏彻底消失且无人重拉（管控真空直到家长发现）。
+        // 本 Activity 是 HOME 入口，只要它 RESUMED 就一定会走到这里，与无障碍是否存活无关。
+        //
+        // 节流说明：锁屏页正常在前台时本 Activity 处于 PAUSED，collect 已被
+        // repeatOnLifecycle 取消，不会重复拉起；加一道 1.5s 间隔只是兜住
+        // "锁屏页 onResume 后因职责变化立即 finish"这类异常自退，避免热循环。
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                lockController.state.collect { st ->
+                    if (!st.locked || LockScreenActivity.visible) return@collect
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (now - lastLockRedisplayAtMs < LOCK_REDISPLAY_MIN_INTERVAL_MS) return@collect
+                    lastLockRedisplayAtMs = now
+                    com.padguard.core.common.Logger.i("KidHomeActivity") {
+                        "home resumed while device locked -> re-show lock screen (a11y-independent)"
+                    }
+                    LockScreenActivity.show(this@KidHomeActivity, st.primaryDetail)
+                }
+            }
+        }
 
         // DO 受控态 Kiosk：仅当 [DeviceOwnerEnforcer.kioskActive] 为真（DO 且锁定）时，
         // 把本桌面用 LockTask 真锁死 —— 系统禁用手势/返回/最近任务，连"退出锁屏"都做不到。
@@ -109,6 +143,11 @@ class KidHomeActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    private companion object {
+        /** 重拉锁屏的最小间隔：只用于兜住锁屏页异常自退的热循环，正常路径不依赖它 */
+        const val LOCK_REDISPLAY_MIN_INTERVAL_MS = 1_500L
     }
 }
 

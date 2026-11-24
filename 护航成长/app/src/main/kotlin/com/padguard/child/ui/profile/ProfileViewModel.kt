@@ -1,15 +1,12 @@
 package com.padguard.child.ui.profile
 
 import android.app.admin.DevicePolicyManager
-import android.app.AppOpsManager
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
-import android.os.PowerManager
-import android.os.Process
 import android.os.StatFs
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -17,11 +14,13 @@ import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.repository.PolicyRepository
 import com.padguard.core.data.model.policy.AppListMode
 import com.padguard.core.data.model.policy.ControlMode
+import com.padguard.core.data.model.policy.ManagementMode
 import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.child.guard.GuardA11y
 import com.padguard.child.guard.GuardGate
 import com.padguard.child.guard.GuardPasswordManager
+import com.padguard.child.permission.SpecialPermission
 import com.padguard.core.common.Logger
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
@@ -34,6 +33,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -53,7 +54,9 @@ class ProfileViewModel @Inject constructor(
     private val policyRepository: PolicyRepository,
     private val guardPassword: GuardPasswordManager,
     /** 上网防护通道运行态（真实状态，供「隐私与安全」展示） */
-    private val webGuardVpn: com.padguard.child.guard.WebGuardVpnController
+    private val webGuardVpn: com.padguard.child.guard.WebGuardVpnController,
+    /** 无障碍静默自愈能力（DO 或装机时 adb 授权 WRITE_SECURE_SETTINGS），供授权总览如实展示 */
+    private val a11yHealer: com.padguard.child.guard.AccessibilityCapabilityHealer
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ProfileUiState())
@@ -61,6 +64,25 @@ class ProfileViewModel @Inject constructor(
 
     /** 当前生效的服务器地址（「更多 → 服务器地址」可修改并持久化）。 */
     val serverUrl: StateFlow<String> = transportSettings.baseUrl
+
+    /** 家长当前选择的管控模式；null 表示老设备尚未选过（入口分流会补弹二选一页）。 */
+    val managementMode: StateFlow<ManagementMode?> = authRepository.managementMode
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    /**
+     * 随时切换管控模式。只改模式键本身——另一档已授予的权限、已下发的策略配置一律不动，
+     * 这正是"两档并行、互不影响"。切到硬管控但设备尚无 DO 时，由页面引导完成预置
+     * （App 无法自行提权为设备所有者）。
+     *
+     * 切回硬管控时必须撤销旧的 DO 跳过标记：否则入口分流会把它当成"已知风险仍继续"，
+     * 直接跳过预置页，结果就是选了硬管控却没有 DO、能力全部落空。
+     */
+    fun setManagementMode(mode: ManagementMode) {
+        viewModelScope.launch {
+            if (mode == ManagementMode.HARD) authRepository.clearDeviceOwnerPromptAck()
+            authRepository.setManagementMode(mode)
+        }
+    }
 
     fun setServerUrl(url: String) {
         transportSettings.setBaseUrl(url)
@@ -87,58 +109,42 @@ class ProfileViewModel @Inject constructor(
                 authRepository.isChildLoggedIn
             ) { b, nickname, avatar, policy, childLoggedIn ->
                 val (name, sn, bound, deviceName, creds) = b
-                val adminState = detectAdminState()
                 val appPolicy = policy.app
-                ProfileUiState(
-                    loaded = true,
-                    studentName = name,
-                    childNickname = nickname,
-                    childAvatar = avatar,
-                    isChildLoggedIn = childLoggedIn,
-                    deviceSn = sn.ifBlank { Build.SERIAL ?: "未识别" },
-                    deviceName = deviceName,
-                    isBound = bound,
-                    account = creds.first,
-                    accountPassword = creds.second,
-                    deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
-                    androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-                    storage = readStorage(),
-                    battery = readBattery(),
-                    adminState = adminState,
-                    deviceAdminActive = adminState != AdminState.NONE,
-                    isDeviceOwner = adminState == AdminState.OWNER,
-                    usageStatsGranted = isUsageStatsGranted(),
-                    batteryOptimizationWhitelisted = isBatteryOptimizationWhitelisted(),
-                    webGuardActive = webGuardVpn.isActive(),
-                    // ---------- 应用管控自检 ----------
-                    // 家长最常问的是"我禁了应用，孩子还是能打开"。答案其实由三件事共同决定，
-                    // 缺一件就静默失效，而界面上原本一点提示都没有：
-                    //   1. 名单有没有真的收到（下发了 0 条 = 家长端根本没配置成功）；
-                    //   2. 拿不拿得到前台包名（没开"使用情况访问"就永远探不到）；
-                    //   3. 有没有 DO/PO（隐藏/挂起应用只有 DO/PO 能做，设备管理员做不到）。
-                    // 把三项摊开显示，家长不用猜就能知道该补哪一项。
-                    appListModeLabel = when (appPolicy.mode) {
-                        AppListMode.BLACKLIST -> "黑名单"
-                        AppListMode.WHITELIST -> "白名单"
-                    },
-                    appListCount = if (appPolicy.mode == AppListMode.BLACKLIST) {
-                        appPolicy.blacklist.size
-                    } else {
-                        appPolicy.whitelist.size
-                    },
-                    appSystemRuleCount = appPolicy.systemAppRules.size,
-                    canHideApps = admin.can(Capability.HIDE_PACKAGES),
-                    canSuspendApps = admin.can(Capability.SUSPEND_PACKAGES),
-                    // ---------- 设备所有者(DO/PO)专属能力矩阵 ----------
-                    // 这些能力在存量 C 端平板（无 DO）下由 engine 层逐条回执 UNSUPPORTED 降级，
-                    // 这里把它们逐项摊开，让家长/孩子一眼看出"哪些管控在本机根本不生效"，
-                    // 而不是误以为策略已下发就一定能落地。can() 是单一事实来源。
-                    ownerCapabilities = buildOwnerCapabilityMatrix(admin),
-                    // 操作闸门基础设施告警：密码已启用，但操作闸门无障碍服务未开 → 系统级拦截失效
-                    guardInfraWarning = guardPassword.isEnabledNow() && !GuardA11y.isEnabled(context),
-                    // 开关开着但服务没连上：与"未开启"是两回事，文案与动作都不同（见 ProfileScreen 横幅）
-                    guardInfraDetached = guardPassword.isEnabledNow() &&
-                        GuardA11y.isEnabled(context) && !GuardA11y.isAlive(context)
+                // 设备实时状态统一由 readRealtimeState() 采集、applyTo() 覆盖，
+                // 与 ON_RESUME 的 refresh() 共用同一份字段集合（单点定义）。
+                // 旧写法在这里逐项手写实时字段、refresh() 里又手写一遍且漏了
+                // guardInfraWarning/guardInfraDetached —— 家长重开无障碍返回后，
+                // 总览已显示"全部已开启"，顶部却仍挂着"操作闸门未完全生效"。
+                readRealtimeState().applyTo(
+                    ProfileUiState(
+                        loaded = true,
+                        studentName = name,
+                        childNickname = nickname,
+                        childAvatar = avatar,
+                        isChildLoggedIn = childLoggedIn,
+                        deviceSn = sn.ifBlank { Build.SERIAL ?: "未识别" },
+                        deviceName = deviceName,
+                        isBound = bound,
+                        account = creds.first,
+                        accountPassword = creds.second,
+                        deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
+                        androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+                        // storage / battery 同属实时读数，已收口进 readRealtimeState()（R29），
+                        // 此处不再手写，避免 combine 首帧与 refresh 又分叉。
+                        // ---------- 应用管控自检 ----------
+                        // 名单有没有真的收到 / 拿不拿得到前台包名 / 有没有 DO/PO，三项摊开。
+                        // 能力矩阵与闸门横幅属于设备实时状态，统一交给 readRealtimeState()。
+                        appListModeLabel = when (appPolicy.mode) {
+                            AppListMode.BLACKLIST -> "黑名单"
+                            AppListMode.WHITELIST -> "白名单"
+                        },
+                        appListCount = if (appPolicy.mode == AppListMode.BLACKLIST) {
+                            appPolicy.blacklist.size
+                        } else {
+                            appPolicy.whitelist.size
+                        },
+                        appSystemRuleCount = appPolicy.systemAppRules.size
+                    )
                 )
             }
                 .flowOn(Dispatchers.IO)
@@ -273,29 +279,108 @@ class ProfileViewModel @Inject constructor(
         }.getOrDefault(AdminState.NONE)
     }
 
-    private fun isUsageStatsGranted(): Boolean {
-        // 真实检测「使用情况访问」权限：Android 把它放在 AppOps 的 PACKAGE_USAGE_STATS，
-        // 普通 checkSelfPermission 拿不到，必须用 AppOpsManager.checkOpNoThrow。
-        // 之前写死返回 false，导致「我的」页永远显示未授权、孩子也拿不到真实时长。
-        val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager ?: return false
-        return runCatching {
-            appOps.checkOpNoThrow(
-                AppOpsManager.OPSTR_GET_USAGE_STATS,
-                Process.myUid(),
-                context.packageName
-            ) == AppOpsManager.MODE_ALLOWED
-        }.getOrDefault(false)
+    /**
+     * 「使用情况访问」只读单一事实源，禁止在本页再手写一套 AppOps 判定。
+     *
+     * 历史上这里用 `AppOpsManager.checkOpNoThrow`（API 29 起已废弃、Q+ 带额外的
+     * uid/包名归属校验）且取 `Process.myUid()`，而 [SpecialPermission] 与前台应用探测
+     * 用的是 `unsafeCheckOpNoThrow` + `applicationInfo.uid`。同一次系统查询出现两套口径：
+     * 定制 ROM 上一旦结果不同，「我的」页会在同一屏里同时显示
+     * 「授权总览：全部已开启」与「安全状态：使用情况访问 未开启 / 无法拦截」，
+     * 家长端还会收到一条恢复不了的假 `USAGE_ACCESS_LOST` 告警 —— 正是
+     * 「权限明明开了还显示未开 / 反复提示」最直接的成因。
+     */
+    private fun isUsageStatsGranted(): Boolean =
+        SpecialPermission.USAGE_STATS.isGranted(context)
+
+    /**
+     * 电池优化白名单同样只读单一事实源。
+     *
+     * 旧实现与 [SpecialPermission.BATTERY_OPTIMIZATION] 在 API 29 上行为等价，
+     * 但保留第二份手写就意味着「以后改一处必漏另一处」；一并收口，
+     * 让授权总览、安全状态行、周期自检永远拿同一个答案。
+     */
+    private fun isBatteryOptimizationWhitelisted(): Boolean =
+        SpecialPermission.BATTERY_OPTIMIZATION.isGranted(context)
+
+    /**
+     * 本机授权目录的实时统计，供「我的 → 授权总览」卡片展示。
+     *
+     * 读的是同一份 [SpecialPermission] 目录，而不是 UI 里写死的一串权限名：
+     * 目录新增一项时，装机清单、补开页、掉失自检与这里会同时出现，
+     * 不会留下「代码已经引导、界面还在说旧的那几项」这种会误导家长的滞后。
+     *
+     * 不可检测项（厂商私有开关）的 [SpecialPermission.isGranted] 恒 false，
+     * 不能算成普通的「已确认缺失」待办，单列 [AuthorizationSummary.noStateApiCount]，
+     * 由 UI 用「需您到设置页确认」如实表达，不冒充已开启也不谎报异常。
+     *
+     * 2026-11-12 修正：旧实现把这类项**塞进** `missingLabels`（`else -> true`），
+     * 于是华为真机上 `missingCount` 永远 ≥ 1 —— 首页状态卡永远显示
+     * 「待办：后台运行」「点进去可一键逐项补齐」，"当前全部已开启"这个分支永不可达。
+     * 家长开完所有能查的权限，回来仍被叫去开一个早开过的开关，正是「反复提示 /
+     * 明明开了还显示未开」的首页版。现在待办清单只收可检测且确实未授予的项，
+     * 无状态项由独立计数如实单列，两套口径不再互相污染。
+     */
+    private fun readAuthorizationSummary(): AuthorizationSummary {
+        val perms = SpecialPermission.applicable(context, admin.hasOwnerPrivileges())
+        val missing = perms.filter { perm -> perm.detectable && !perm.isGranted(context) }
+        return AuthorizationSummary(
+            total = perms.size,
+            missingLabels = missing.map { it.label },
+            noStateApiCount = perms.count { !it.detectable },
+            silentHealEnabled = a11yHealer.canSilentHeal()
+        )
     }
 
     /**
-     * 真实检测电池优化白名单状态。
-     * isIgnoringBatteryOptimizations 在 API 23+ 可用；个别 OEM 定制ROM 可能抛异常，
-     * 此时按"未加白名单"处理（引导用户去确认，比假装已豁免安全）。
+     * 采集「设备实时状态」：系统设置页里随时可变、且不是任何 Flow 发射源的读数。
+     *
+     * 口径**单点定义**：combine 首帧与 [refresh] 的 ON_RESUME 复检都走这里，
+     * 再由 [RealtimeState.applyTo] 一次性覆盖到 [ProfileUiState]。
+     * 旧实现把实时字段在两处各手写一遍，refresh 漏了 `guardInfraWarning` /
+     * `guardInfraDetached` 与 DO 能力矩阵 —— 家长在系统设置重开无障碍返回后，
+     * 授权总览已刷新成「全部已开启」，顶部横幅却仍挂着「操作密码闸门未完全生效」，
+     * 同屏自相矛盾，且要等某个 DataStore 流恰好 emit 才纠正。
      */
-    private fun isBatteryOptimizationWhitelisted(): Boolean {
-        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
-        return runCatching { pm.isIgnoringBatteryOptimizations(context.packageName) }
-            .getOrDefault(false)
+    private fun readRealtimeState(): RealtimeState {
+        val adminState = detectAdminState()
+        val a11yEnabled = GuardA11y.isEnabled(context)
+        val passwordEnabled = guardPassword.isEnabledNow()
+        return RealtimeState(
+            adminState = adminState,
+            deviceAdminActive = adminState != AdminState.NONE,
+            isDeviceOwner = adminState == AdminState.OWNER,
+            usageStatsGranted = isUsageStatsGranted(),
+            batteryOptimizationWhitelisted = isBatteryOptimizationWhitelisted(),
+            webGuardActive = webGuardVpn.isActive(),
+            authorizationSummary = readAuthorizationSummary(),
+            canHideApps = admin.can(Capability.HIDE_PACKAGES),
+            canSuspendApps = admin.can(Capability.SUSPEND_PACKAGES),
+            ownerCapabilities = buildOwnerCapabilityMatrix(admin),
+            // 未开启 / 已开启但没连上是两种结局，文案与家长动作都不同，必须分开。
+            guardInfraWarning = passwordEnabled && !a11yEnabled,
+            guardInfraDetached = passwordEnabled && a11yEnabled && !GuardA11y.isAlive(context),
+            // 电量/存储会随充电、安装应用随时变化，ON_RESUME 必须重读，
+            // 否则家长开完权限返回时同屏出现「权限已刷新、电量冻结在进页面那一刻」。
+            storage = readStorage(),
+            battery = readBattery()
+        )
+    }
+
+    /**
+     * 页面重新可见时刷新「设备实时状态」。
+     *
+     * ## 为什么必须有
+     * [state] 由 DataStore / 策略流的 combine 驱动，而设备管理员、使用情况访问、
+     * 电池白名单、VPN 运行态、授权目录状态都是**系统设置页里随时可变**的读数，
+     * 不是任何 Flow 的发射源。家长在「权限引导」里开完开关返回「我的」页时，
+     * 若没有这一步，卡片仍显示开启前的旧状态 —— 表现就是"明明开了，界面还说未开启"。
+     *
+     * 只覆盖 [RealtimeState] 定义的实时字段：其余字段（昵称 / 设备名 / 名单统计等）
+     * 仍以 combine 的全量快照为准，两条路径不会互相覆盖成脏数据。
+     */
+    fun refresh() {
+        _state.value = readRealtimeState().applyTo(_state.value)
     }
 
     /**
@@ -320,6 +405,39 @@ class ProfileViewModel @Inject constructor(
         CapabilityStatus("Kiosk 纯净桌面", admin.can(Capability.LOCK_TASK), "需设备所有者(DO)"),
         CapabilityStatus("禁用 USB 调试 / 数据", admin.can(Capability.GLOBAL_SETTINGS), "需 DO（仅生产构建生效）")
     )
+}
+
+/**
+ * 「授权总览」卡片的目录化统计。
+ *
+ * 全字段都来自 [com.padguard.child.permission.SpecialPermission]，
+ * 刻意不携带 Android 类型，便于 UI 直接渲染、也便于 JVM 层做契约校验。
+ */
+data class AuthorizationSummary(
+    /** 本机适用的授权项总数（含已开启的、也含无状态接口的厂商开关） */
+    val total: Int = 0,
+    /**
+     * 真实待办：当前**可检测且确实未授予**的项展示名。
+     * 刻意不含无状态接口的厂商开关 —— 它们恒 false，混进来会让"全部已开启"永不出现。
+     */
+    val missingLabels: List<String> = emptyList(),
+    /**
+     * 本机是否具备「无障碍被清理停用后静默写回」能力：
+     * DO，或装机时经 adb 授予 WRITE_SECURE_SETTINGS（第三十二轮源头修复）。
+     * 家长必须能一眼看出这台平板被一键清理后是"自动恢复"还是"需人工重开"，
+     * 否则装了修复包却漏了装机授权，会误以为问题已解决。
+     */
+    val silentHealEnabled: Boolean = false,
+    /**
+     * 本机适用、但无公开状态查询接口的厂商开关项数。
+     * 这是**独立统计**，不是 [missingLabels] 的子集：它们不是待办，只作如实提示。
+     */
+    val noStateApiCount: Int = 0
+) {
+    /** 真实待办数（只数可检测缺失项）；华为等定制 ROM 上开齐后可为 0 */
+    val missingCount: Int get() = missingLabels.size
+    /** 与 [missingCount] 同义：待办清单里每一项都能被 API 明确判定，不再做减法 */
+    val detectableMissingCount: Int get() = missingCount
 }
 
 data class ProfileUiState(
@@ -390,8 +508,59 @@ data class ProfileUiState(
      * 与 [guardInfraWarning] 分开的原因：这不需要家长重新授权，等系统重绑或重启服务即可，
      * 文案若沿用"未开启"，家长会去做一次无意义的设置操作。
      */
-    val guardInfraDetached: Boolean = false
+    val guardInfraDetached: Boolean = false,
+    /** 授权目录的实时汇总（总数 / 缺失项 / 无状态接口项），目录驱动而非写死文案 */
+    val authorizationSummary: AuthorizationSummary = AuthorizationSummary()
 )
+
+/**
+ * 「设备实时状态」的**单点定义**。
+ *
+ * 这些读数都能在系统设置页里被家长随时改动，却不是任何 Flow 的发射源，
+ * 因此 combine 首帧与 ON_RESUME 的 refresh() 必须都覆盖它们。
+ * 旧实现在两处各手写一份字段列表，refresh 漏了闸门横幅两项与 DO 能力矩阵，
+ * 导致「明明开了还显示未开 / 警告一直不消失」。现在由 [applyTo] 统一收口：
+ * 新增实时字段只需改这一处，两条路径自然同步（JVM 单测锁死字段集合）。
+ *
+ * 刻意做成 internal + 全默认值：单测可直接构造，无需 Android 上下文或 Hilt。
+ */
+internal data class RealtimeState(
+    val adminState: AdminState = AdminState.NONE,
+    val deviceAdminActive: Boolean = false,
+    val isDeviceOwner: Boolean = false,
+    val usageStatsGranted: Boolean = false,
+    val batteryOptimizationWhitelisted: Boolean = false,
+    val webGuardActive: Boolean = false,
+    val authorizationSummary: AuthorizationSummary = AuthorizationSummary(),
+    val canHideApps: Boolean = false,
+    val canSuspendApps: Boolean = false,
+    val ownerCapabilities: List<CapabilityStatus> = emptyList(),
+    /** 已启用操作密码但无障碍未开 → 横幅「操作密码闸门未完全生效」 */
+    val guardInfraWarning: Boolean = false,
+    /** 无障碍已开但服务没连上 → 横幅「操作闸门正在重新连接」 */
+    val guardInfraDetached: Boolean = false,
+    /** 本机存储占用、电量：同样只在系统侧变化、不是任何 Flow 的发射源（R29 补收口）。 */
+    val storage: String = "未知",
+    val battery: String = "未知"
+) {
+    /** 覆盖实时字段，保留 state 上的非实时字段（昵称 / 设备名 / 名单统计等）。 */
+    fun applyTo(state: ProfileUiState): ProfileUiState = state.copy(
+        adminState = adminState,
+        deviceAdminActive = deviceAdminActive,
+        isDeviceOwner = isDeviceOwner,
+        usageStatsGranted = usageStatsGranted,
+        batteryOptimizationWhitelisted = batteryOptimizationWhitelisted,
+        webGuardActive = webGuardActive,
+        authorizationSummary = authorizationSummary,
+        canHideApps = canHideApps,
+        canSuspendApps = canSuspendApps,
+        ownerCapabilities = ownerCapabilities,
+        guardInfraWarning = guardInfraWarning,
+        guardInfraDetached = guardInfraDetached,
+        storage = storage,
+        battery = battery
+    )
+}
 
 /** 设备所有者(DO/PO)专属能力的可用性状态，供「我的」页能力矩阵逐项如实展示 */
 data class CapabilityStatus(

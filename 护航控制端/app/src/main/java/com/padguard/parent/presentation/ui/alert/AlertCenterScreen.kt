@@ -50,6 +50,7 @@ import com.padguard.parent.domain.model.AlertLevel
 import com.padguard.parent.domain.model.AlertStatus
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.ui.components.AppSoftBackground
+import com.padguard.parent.presentation.ui.components.StaleDataHint
 import com.padguard.parent.presentation.ui.theme.PrimaryBlue
 import com.padguard.parent.presentation.ui.theme.PrimaryBlueDeep
 import com.padguard.parent.presentation.ui.theme.TextSecondary
@@ -96,6 +97,8 @@ fun AlertCenterScreen(
     riskAlerts: List<Alert> = emptyList(),
     riskUnreadCount: Int = 0,
     riskProcessing: Boolean = false,
+    /** 风险告警最近一次拉取失败的原因；null = 成功（或还没加载过） */
+    riskError: String? = null,
     onAcknowledgeRisk: (Alert) -> Unit = {},
     // 延时申请分区（根层 UsageDelayCenterViewModel 驱动，与解锁工单同层级）
     delayState: UsageDelayCenterUiState = UsageDelayCenterUiState(),
@@ -138,15 +141,27 @@ fun AlertCenterScreen(
             }
         ) { padding ->
             Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-                // 加载失败横幅：失败 ≠ 暂无消息。此前弱网下接口全挂会被渲染成
-                // "暂无消息"，家长真的会以为孩子没有申请——消息中心最伤的静默失败。
-                if (state.loadFailed) {
-                    LoadFailedBanner(onRetry = onRefresh, modifier = Modifier.padding(horizontal = 16.dp))
+                // 三个数据源（解锁申请 / 延时申请 / 风险告警）各自独立拉取，各自可能失败。
+                // 合成一条角标、只说明"哪几块本次没更新"：三块的新鲜度各不相同，
+                // 给一个统一时间戳反而是误导。此前只有解锁申请有横幅，另外两块失败
+                // 会被渲染成"没有消息"——消息中心最伤的静默失败。
+                val failedSections = buildList {
+                    if (state.loadFailed) add("解锁申请")
+                    if (delayState.error != null) add("延时申请")
+                    if (riskError != null) add("风险告警")
+                }
+                if (failedSections.isNotEmpty()) {
+                    StaleDataHint(
+                        message = "${failedSections.joinToString("、")} 本次未更新",
+                        lastSuccessAt = null,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        onRetry = onRefresh
+                    )
                 }
                 val allEmpty = state.records.isEmpty() && riskAlerts.isEmpty() && delayState.records.isEmpty()
                 if (allEmpty) {
-                    // 加载失败时不渲染"暂无消息"（那是欺骗性空态），只留横幅
-                    if (!state.loadFailed) EmptyState(modifier = Modifier.fillMaxSize())
+                    // 加载失败时不渲染"暂无消息"（那是欺骗性空态），只留角标
+                    if (failedSections.isEmpty()) EmptyState(modifier = Modifier.fillMaxSize())
                 } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -359,31 +374,6 @@ private fun EmptyState(modifier: Modifier = Modifier) {
         Text("暂无消息", fontSize = 15.sp, color = TextSecondary)
         Spacer(Modifier.height(4.dp))
         Text("孩子提交解锁申请或设备出现异常时会出现在这里", fontSize = 13.sp, color = TextSecondary.copy(alpha = 0.7f))
-    }
-}
-
-/** 加载失败横幅：给出明确的重试入口，而不是把失败渲染成空态 */
-@Composable
-private fun LoadFailedBanner(onRetry: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = Color(0xFFFFF3E0),
-        modifier = modifier.fillMaxWidth()
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
-        ) {
-            Text(
-                text = "消息加载失败，可能是网络不稳定",
-                fontSize = 13.sp,
-                color = Color(0xFFE65100),
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(onClick = onRetry) {
-                Text("重试", fontSize = 13.sp, color = Color(0xFFE65100), fontWeight = FontWeight.Medium)
-            }
-        }
     }
 }
 

@@ -10,6 +10,7 @@ import com.padguard.server.domain.PaymentOrder
 import com.padguard.server.domain.Plan
 import com.padguard.server.domain.SubStatus
 import com.padguard.server.domain.Subscription
+import com.padguard.server.domain.SystemSetting
 import com.padguard.server.domain.User
 import com.padguard.server.dto.CreateOrderRequest
 import com.padguard.server.dto.PayRequest
@@ -277,7 +278,9 @@ class BillingServiceTest {
         verifier: PaymentVerifier = ConfigurablePaymentVerifier(true, FakeSystemSettingRepo(), ObjectMapper(), listOf()),
         settings: FakeSystemSettingRepo = FakeSystemSettingRepo(),
         /** 传入后替身 BillingService 的 trialInserter；为 null 时走"直接 save"的降级路径 */
-        trialInserterFactory: ((FakeSubscriptionRepo) -> TrialSubscriptionInserter)? = null
+        trialInserterFactory: ((FakeSubscriptionRepo) -> TrialSubscriptionInserter)? = null,
+        /** 微信验签器替身；为 null 时该渠道置灰（与生产未配置时一致） */
+        weChatVerifier: com.padguard.server.security.WeChatPayVerifier? = null
     ): Fixture {
         val subRepo = FakeSubscriptionRepo()
         val orderRepo = FakeOrderRepo()
@@ -293,7 +296,8 @@ class BillingServiceTest {
             3, 3, 5,             // 各档设备上限
             payTimeoutMinutes, mockPayEnabled, verifier, settings, ObjectMapper(),
             orderCloser = OrderTimeoutCloser(orderRepo),  // 超时关单走真实闭合器（断言 CLOSED 落库）
-            trialInserter = trialInserterFactory?.invoke(subRepo)
+            trialInserter = trialInserterFactory?.invoke(subRepo),
+            weChatVerifier = weChatVerifier
         )
         return Fixture(svc, subRepo, orderRepo, deviceRepo)
     }
@@ -691,6 +695,46 @@ class BillingServiceTest {
         assertEquals(59, zoned.minute)
     }
 
+    @Test
+    fun `renewals chaining from month end keep the month-end anchor`() {
+        // 月末续费收缩回归：LocalDate.plusMonths 会把 1/31 夹到 2/28，
+        // 若再以 2/28 为基准续费就得到 3/28 —— 每次续费都少几天，年卡用户几年后
+        // 会发现"明明按月续费，到期日却从 31 号悄悄漂到 28 号"。
+        // 正解是月末锚定：基准日若是所在月最后一天，目标日也取目标月最后一天。
+        val f = service()
+        f.svc.statusOf("parent-1")
+        val zone = ZoneId.systemDefault()
+        // 未来月末（相对测试运行时刻）作为已购到期日，模拟"每月底到期"的用户
+        f.sub().expiredAt = LocalDate.of(2027, 1, 31).atTime(23, 59, 59, 999_000_000)
+            .atZone(zone).toInstant().toEpochMilli()
+
+        // 连续两次各续 1 个月：1/31 → 2/28 → 应到 3/31
+        f.svc.extend("parent-1", 1, Plan.MONTHLY.key)
+        f.svc.extend("parent-1", 1, Plan.MONTHLY.key)
+
+        val expiryDate = Instant.ofEpochMilli(f.sub().expiredAt).atZone(zone).toLocalDate()
+        assertEquals(
+            LocalDate.of(2027, 3, 31), expiryDate,
+            "月末连续续费必须保持月末锚点：1/31→2/28→3/31；" +
+                "旧实现 1/31→2/28→3/28 会让家长每次续费都少几天"
+        )
+    }
+
+    @Test
+    fun `non-month-end renewals advance by the same day of month`() {
+        // 反向对照：普通日期续费不受月末锚定影响，必须严格按同一天顺延。
+        val f = service()
+        f.svc.statusOf("parent-1")
+        val zone = ZoneId.systemDefault()
+        f.sub().expiredAt = LocalDate.of(2027, 1, 15).atTime(23, 59, 59, 999_000_000)
+            .atZone(zone).toInstant().toEpochMilli()
+
+        f.svc.extend("parent-1", 1, Plan.MONTHLY.key)
+
+        val expiryDate = Instant.ofEpochMilli(f.sub().expiredAt).atZone(zone).toLocalDate()
+        assertEquals(LocalDate.of(2027, 2, 15), expiryDate, "15 号续费应到 2/15，不能被月末逻辑误伤")
+    }
+
     // ------------------------------------------------------------ 套餐
 
     @Test
@@ -848,5 +892,175 @@ class BillingServiceTest {
 
         assertEquals(3800, f.svc.amountFenOf(Plan.MONTHLY))
         assertEquals(9800, f.svc.amountFenOf(Plan.QUARTERLY))
+    }
+
+    // ------------------------------------------------------------ 退款回收权益（G-01）
+
+    @Test
+    fun `revokeRightsOnRefund revokes an active subscription and is idempotent`() {
+        val f = service()
+        f.svc.statusOf("parent-1") // 自动开通 TRIAL 订阅
+        f.svc.revokeRightsOnRefund("parent-1")
+
+        assertEquals(SubStatus.REVOKED.name, f.sub().status, "退款即回收：订阅应被置为 REVOKED")
+        assertTrue(f.sub().expiredAt > 0, "退款回收应清掉到期时间")
+
+        // 幂等：再次调用对已回收订阅不应抛异常，且保持 REVOKED
+        f.svc.revokeRightsOnRefund("parent-1")
+        assertEquals(SubStatus.REVOKED.name, f.sub().status)
+    }
+
+    @Test
+    fun `revokeRightsOnRefund skips expired and missing subscriptions`() {
+        val f = service()
+        f.svc.statusOf("parent-1")
+
+        // 已过期（非 ACTIVE/TRIAL）的订阅不应被翻成 REVOKED
+        f.sub().status = SubStatus.EXPIRED.name
+        f.svc.revokeRightsOnRefund("parent-1")
+        assertEquals(SubStatus.EXPIRED.name, f.sub().status, "已过期订阅不应被翻成 REVOKED")
+
+        // 无订阅的用户：安全 no-op，不抛异常
+        f.svc.revokeRightsOnRefund("ghost-user")
+    }
+
+    // ---------------------------------------- 微信回调金额比对（官方接入规范第 4 步）
+
+    /** 微信回调入口测试用的固定报文与头（stub 端与调用端必须逐字一致，按 equals 精确匹配） */
+    private val notifyRawBody = "{}"
+    private val notifyHeaders = mapOf("Wechatpay-Signature" to "x")
+
+    /** 订单表以 id 为 key，按 orderNo 查必须走 values（既有用例同口径） */
+    private fun Fixture.orderOf(orderNo: String): PaymentOrder =
+        orders.table.values.first { it.orderNo == orderNo }
+
+    /** 微信验签器替身：verifyAndParse 恒返回预设结果（验签链路有独立的协议级测试约束） */
+    private fun stubVerifier(result: com.padguard.server.security.WeChatNotifyResult?): com.padguard.server.security.WeChatPayVerifier =
+        org.mockito.Mockito.mock(com.padguard.server.security.WeChatPayVerifier::class.java).also {
+            // 不用 any() matcher：Kotlin 非空参数会把 any() 的 null 拦成 NPE；
+            // 用具体参数按 equals 精确匹配（调用端传的就是上面这两个常量）。
+            org.mockito.Mockito.doReturn(result).`when`(it).verifyAndParse(notifyRawBody, notifyHeaders)
+        }
+
+    @Test
+    fun `微信回调金额与订单不符必须拒绝入账且订单保持 PENDING`() {
+        val verifier = stubVerifier(null)
+        val f = service(weChatVerifier = verifier)
+        val realNo = f.orderVia("WECHAT")
+        // 用真实单号但金额差 1 分（错账场景：商户号被多系统共用/配串时另一系统的回调撞上本系统单号）
+        org.mockito.Mockito.doReturn(
+            com.padguard.server.security.WeChatNotifyResult(realNo, "wx-tx-1", totalFen = 1L)
+        ).`when`(verifier).verifyAndParse(notifyRawBody, notifyHeaders)
+
+        val ex = assertThrows(BizException::class.java) {
+            f.svc.handleWeChatNotify(notifyRawBody, notifyHeaders)
+        }
+        assertEquals(ParentErr.ORDER_STATE_INVALID, ex.code, "金额不符属于订单状态类拒绝，不能放行")
+        assertEquals(
+            OrderStatus.PENDING.name, f.orderOf(realNo).status,
+            "拒绝入账后订单必须保持 PENDING，等人工对账 —— 不能悄悄关单也不能误入账"
+        )
+    }
+
+    @Test
+    fun `微信回调金额一致正常入账（金额比对不误伤正常回调）`() {
+        val verifier = stubVerifier(null)
+        val f = service(weChatVerifier = verifier)
+        val realNo = f.orderVia("WECHAT")
+        val amountFen = f.orderOf(realNo).amountFen
+        org.mockito.Mockito.doReturn(
+            com.padguard.server.security.WeChatNotifyResult(realNo, "wx-tx-1", totalFen = amountFen.toLong())
+        ).`when`(verifier).verifyAndParse(notifyRawBody, notifyHeaders)
+
+        val dto = f.svc.handleWeChatNotify(notifyRawBody, notifyHeaders)
+        assertTrue(dto.paid, "金额一致的正常回调必须照常入账，比对逻辑不能误伤")
+        assertEquals(OrderStatus.PAID.name, f.orderOf(realNo).status)
+    }
+
+    // ---------------------------------------- 退款回调幂等：不得撤销新订阅
+
+    private fun refundVerifier(orderNo: String): com.padguard.server.security.WeChatPayVerifier =
+        org.mockito.Mockito.mock(com.padguard.server.security.WeChatPayVerifier::class.java).also {
+            org.mockito.Mockito.doReturn(
+                com.padguard.server.security.WeChatRefundNotifyResult(orderNo, null, "refund-1")
+            ).`when`(it).verifyRefundAndParse(notifyRawBody, notifyHeaders)
+        }
+
+    @Test
+    fun `重复退款回调不得撤销退款后新购恢复的订阅`() {
+        val f = service(weChatVerifier = refundVerifier("order-refunded"))
+        f.orders.table["old"] = PaymentOrder(
+            id = "old", orderNo = "order-refunded", userId = "parent-1",
+            channel = PayChannel.WECHAT.name, status = OrderStatus.REFUNDED.name, amountFen = 3800
+        )
+        f.subs.table["new"] = Subscription(
+            id = "new", userId = "parent-1", plan = Plan.MONTHLY.key,
+            status = SubStatus.ACTIVE.name, expiredAt = System.currentTimeMillis() + 86_400_000L
+        )
+
+        val res = f.svc.handleWeChatRefundNotify(notifyRawBody, notifyHeaders)
+
+        assertTrue(res["ok"] as Boolean, "已 REFUNDED 的回调仍应幂等确认成功")
+        assertEquals(
+            SubStatus.ACTIVE.name, f.subs.table["new"]!!.status,
+            "旧订单的延迟/重投回调不得把家长后来新购恢复的订阅再次停服"
+        )
+    }
+
+    @Test
+    fun `首次退款回调 PAID 转 REFUNDED 仍必须回收权益`() {
+        val f = service(weChatVerifier = refundVerifier("order-paid"))
+        f.orders.table["paid"] = PaymentOrder(
+            id = "paid", orderNo = "order-paid", userId = "parent-1",
+            channel = PayChannel.WECHAT.name, status = OrderStatus.PAID.name, amountFen = 3800
+        )
+        f.subs.table["sub"] = Subscription(
+            id = "sub", userId = "parent-1", plan = Plan.MONTHLY.key,
+            status = SubStatus.ACTIVE.name, expiredAt = System.currentTimeMillis() + 86_400_000L
+        )
+
+        f.svc.handleWeChatRefundNotify(notifyRawBody, notifyHeaders)
+
+        assertEquals(OrderStatus.REFUNDED.name, f.orderOf("order-paid").status)
+        assertEquals(
+            SubStatus.REVOKED.name, f.subs.table["sub"]!!.status,
+            "真正完成退款的那一次仍必须立即停服，否则既退钱又白用"
+        )
+    }
+
+    // ------------------------------------------- 生产 mockPay 总闸（P0-1，2026-11-18）
+
+    @Test
+    fun `DB cannot enable mock pay when deployment config disables it`() {
+        val settings = FakeSystemSettingRepo()
+        settings.save(SystemSetting(key = "admin.settings", valueJson = """{"mockPay":true}"""))
+        val f = service(mockPayEnabled = false, settings = settings)
+        val orderNo = f.order("MONTHLY")
+
+        val ex = assertThrows(BizException::class.java) { f.svc.mockPay("parent-1", orderNo) }
+        assertTrue(ex.message.orEmpty().contains("模拟支付未开启"))
+
+        // 验签侧必须同样 fail closed：DB 里的 true 不能越过部署配置
+        val verifier = ConfigurablePaymentVerifier(false, settings, ObjectMapper(), emptyList())
+        assertFalse(verifier.verify("WECHAT", "{}", emptyMap()))
+    }
+
+    @Test
+    fun `dev config still allows mock pay and DB can turn it off`() {
+        val on = FakeSystemSettingRepo().apply {
+            save(SystemSetting(key = "admin.settings", valueJson = """{"mockPay":true}"""))
+        }
+        assertTrue(ConfigurablePaymentVerifier(true, on, ObjectMapper(), emptyList()).verify("WECHAT", "{}", emptyMap()))
+        assertEquals(
+            SubStatus.ACTIVE.name,
+            service(mockPayEnabled = true, settings = on).let { f ->
+                f.svc.mockPay("parent-1", f.order("MONTHLY")).status
+            }
+        )
+
+        val off = FakeSystemSettingRepo().apply {
+            save(SystemSetting(key = "admin.settings", valueJson = """{"mockPay":false}"""))
+        }
+        assertFalse(ConfigurablePaymentVerifier(true, off, ObjectMapper(), emptyList()).verify("WECHAT", "{}", emptyMap()))
     }
 }

@@ -62,6 +62,10 @@ class AdminService(
 
     fun deleteParent(adminId: String, id: String) = parentService.deleteParent(adminId, id)
 
+    /** 注销账号（不可逆，含关联数据清理与订单脱敏；权限/二次确认在 AdminParentService 内） */
+    fun eraseParent(adminId: String, id: String, confirmPhone: String) =
+        parentService.eraseParent(adminId, id, confirmPhone)
+
     // ============================ 设备 ============================
     fun listDevices(adminId: String, keyword: String?, online: String?, page: Int = 1, size: Int = 20) =
         deviceService.listDevices(adminId, keyword, online, page, size)

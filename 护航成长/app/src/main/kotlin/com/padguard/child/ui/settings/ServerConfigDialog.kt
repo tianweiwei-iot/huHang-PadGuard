@@ -22,6 +22,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.padguard.core.transport.EndpointSafety
+import com.padguard.core.transport.Verdict
 
 /**
  * 「高级设置」弹窗：拆分编辑服务器 地址 / 端口 / 接口前缀，保存时拼回完整 baseUrl。
@@ -51,6 +53,13 @@ fun ServerConfigDialog(
                 val built = buildServerConfig(host, port, path, scheme)
                 if (built == null) {
                     error = "请填写有效的服务器地址与端口（1–65535）"
+                    return@TextButton
+                }
+                // 运行期安全闸门：公网明文（http:// 公网 IP/域名）直接在弹窗拦截，
+                // 不交给 TransportSettings 落盘。与 app 构建守卫、TransportSettings.setBaseUrl 三道防线。
+                val verdict = EndpointSafety.check(built)
+                if (verdict is Verdict.Rejected) {
+                    error = verdict.reason
                     return@TextButton
                 }
                 onSave(built)
@@ -149,7 +158,10 @@ private fun parseServerConfig(raw: String): ServerConfig {
     val pathPart = if (slash >= 0) noScheme.substring(slash) else "/"
     val colon = authority.indexOf(':')
     val host = if (colon >= 0) authority.substring(0, colon) else authority
-    val port = if (colon >= 0) authority.substring(colon + 1) else "8090"
+    // 无显式端口时按协议取默认端口。release 出厂地址是无端口的 https 域名，
+    // 旧实现一律补 8090：用户打开「高级设置」什么都不改点保存，地址就被改成
+    // https://<域名>:8090/...，直接连不上服务端。
+    val port = if (colon >= 0) authority.substring(colon + 1) else if (scheme == "https") "443" else "80"
     return ServerConfig(host = host, port = port, path = pathPart, scheme = scheme)
 }
 

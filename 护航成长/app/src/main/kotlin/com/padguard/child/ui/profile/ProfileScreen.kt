@@ -20,9 +20,11 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
@@ -31,12 +33,16 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,6 +59,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.child.ui.components.GlyphKind
 import com.padguard.child.ui.settings.ServerConfigDialog
 import com.padguard.child.permission.SpecialPermission
+import com.padguard.core.data.model.policy.ManagementMode
 import android.graphics.BitmapFactory
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -78,6 +85,10 @@ fun ProfileScreen(
     viewModel: ProfileViewModel = hiltViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val managementMode by viewModel.managementMode.collectAsStateWithLifecycle()
+    // 从系统设置页返回时重读设备实时状态（见 ProfileViewModel.refresh）。
+    // 不挂这条，家长刚开完的开关在「我的」页仍显示旧值，看起来像"授权没生效"。
+    RefreshDeviceStateOnResume(viewModel)
     val serverUrl by viewModel.serverUrl.collectAsState()
     var showServerDialog by remember { mutableStateOf(false) }
     var serverInput by remember { mutableStateOf("") }
@@ -124,6 +135,8 @@ fun ProfileScreen(
 
     ProfileContent(
         state = state,
+        managementMode = managementMode,
+        onChooseManagementMode = { viewModel.setManagementMode(it) },
         onPermissionGuide = onPermissionGuide,
         onOpenGuardA11y = openGuardA11ySettings,
         onSetServer = {
@@ -246,6 +259,9 @@ fun ProfileScreen(
 @Composable
 private fun ProfileContent(
     state: ProfileUiState,
+    /** 家长在装机首启 /「我的」页选择的管控模式 */
+    managementMode: ManagementMode?,
+    onChooseManagementMode: (ManagementMode) -> Unit,
     onPermissionGuide: (String) -> Unit,
     onOpenGuardA11y: () -> Unit,
     onSetServer: () -> Unit,
@@ -278,9 +294,17 @@ private fun ProfileContent(
                     style = MaterialTheme.typography.headlineSmall
                 )
             }
-            // 防护等级状态条：一眼看清当前是「设备所有者硬管控」还是「软管控」（软管控为默认，DO 设备自动升级）
+            // 管控模式状态条：以家长选择为准，同时如实标注设备的 DO 能力是否已生效
             item {
-                ProtectionLevelCard(state = state)
+                ProtectionLevelCard(state = state, mode = managementMode)
+            }
+            // 两档并行：随时切换，另一档的授权与配置一律保留
+            item {
+                ManagementModeCard(
+                    mode = managementMode,
+                    onChoose = onChooseManagementMode,
+                    onHardGuide = { onPermissionGuide("device_admin") }
+                )
             }
             // 操作密码闸门基础设施告警：密码已启用但无障碍服务未开 → 拦截失效，必须引导开启；
             // 另一种形态是"开关开着但服务没连上"——此时不该让家长再去设置里重新勾选，
@@ -293,9 +317,11 @@ private fun ProfileContent(
                     )
                 }
             }
-            // 非设备所有者（软管控）：如实告知防护边界 + 升级入口
-            // 首轮状态未读完前不渲染：此时 adminState 恒为默认 NONE，会把 DO 设备也报成"软管控"
-            if (state.loaded && state.adminState != AdminState.OWNER) {
+            // 只在"确选软管控且设备无 DO 能力"时强调绕过风险；
+            // 选硬管控但尚未预置的情况由状态条直接标注"待预置"，不重复挂横幅。
+            if (state.loaded && managementMode == ManagementMode.SOFT &&
+                state.adminState != AdminState.OWNER
+            ) {
                 item {
                     SoftControlRiskBanner(onUpgrade = { onPermissionGuide("device_admin") })
                 }
@@ -318,6 +344,36 @@ private fun ProfileContent(
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
                 )
+            }
+            // 授权总览入口：下面 SecurityCard 是 4 行固定快览，覆盖不了悬浮窗、无障碍、
+            // 安装未知应用、精确闹钟、通知、厂商自启动等项。掉失后 App 内原本没有补开入口，
+            // 只能重装或碰运气。这里给一个统一入口，页面本身由 SpecialPermission 目录驱动。
+            //
+            // 卡片文案同样由目录实时计算：旧版把权限名写死在字符串里，等于全 App 第 5 份
+            // 手写清单 —— 目录新增一项时，代码已经引导、界面却还在念旧名单，会误导家长。
+            item {
+                val summary = state.authorizationSummary
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPermissionGuide("all") },
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.06f)
+                    )
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                        Text(
+                            text = "补授权中心（权限总览）",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = authorizationSummaryText(summary),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                }
             }
             item {
                 SecurityCard(
@@ -382,7 +438,7 @@ private fun CredentialsCard(state: ProfileUiState, onClear: () -> Unit) {
             Text(text = "账号与密码", style = MaterialTheme.typography.titleMedium)
             if (state.account.isBlank()) {
                 Text(
-                    text = "未记录。登录或绑定时勾选「记住账号密码」后显示在此。",
+                    text = "未记录。登录或绑定时勾选「记住账号」后显示在此。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
@@ -970,11 +1026,11 @@ private fun GuardInfraWarningBanner(detached: Boolean, onOpen: () -> Unit) {
 }
 
 /**
- * 防护等级状态条。
+ * 管控模式状态条。
  *
- * 一眼告知当前管控强度：设备所有者(DO/PO) = 硬管控（防卸载 / 防停止 / 防改时间系统级锁定）；
- * 其余（普通设备管理员 / 无管理员）= 软管控（功能正常，但设置里可被卸载 / 停止 / 改时间）。
- * 与 [ProfileViewModel.detectAdminState] 同源，避免界面与运行时口径脱节。
+ * 以家长选择（ManagementMode）为准，叠加设备实际权限等级（[ProfileViewModel.detectAdminState]）：
+ * 选软管控时不因设备已是 DO 就误报"硬管控"；选硬管控但尚未预置时明确标注"待预置"。
+ * 避免"界面说硬管控、实际没锁死"或"设备有 DO、家长选了软管控却显示硬管控"这类误导。
  */
 private data class LevelVisual(
     val bg: Color,
@@ -984,7 +1040,7 @@ private data class LevelVisual(
 )
 
 @Composable
-private fun ProtectionLevelCard(state: ProfileUiState) {
+private fun ProtectionLevelCard(state: ProfileUiState, mode: ManagementMode?) {
     // 首轮状态未读完：给中性"检测中"，不要先按软管控申报一遍再翻牌
     if (!state.loaded) {
         Card(
@@ -1018,23 +1074,38 @@ private fun ProtectionLevelCard(state: ProfileUiState) {
         }
         return
     }
-    val isHard = state.adminState == AdminState.OWNER
+    val isOwner = state.adminState == AdminState.OWNER
+    // 只有"家长选了硬管控"且"设备确实是 DO"才算硬管控已生效；
+    // 设备是 DO 但家长选软管控时，硬管控增强已被 DeviceOwnerEnforcer 闸门关掉，界面必须如实显示软管控。
+    val hardActive = mode == ManagementMode.HARD && isOwner
     // 配色走主题容器色而不是硬编码浅绿/浅黄：硬编码浅底在深色模式下会变成
     // 一块"发光"的浅色卡片（文字仍是深色，虽可读但与整页割裂），
     // 且 MaterialTheme 换肤后完全跟不上。primaryContainer / errorContainer 两套主题都有定义。
-    val v = if (isHard) {
-        LevelVisual(
+    val v = when {
+        mode == null -> LevelVisual(
+            bg = MaterialTheme.colorScheme.surfaceVariant,
+            fg = MaterialTheme.colorScheme.onSurfaceVariant,
+            title = "管控模式：待选择",
+            subtitle = "请在下方选定硬管控或软管控，两者可随时切换"
+        )
+        mode == ManagementMode.SOFT -> LevelVisual(
+            bg = MaterialTheme.colorScheme.secondaryContainer,
+            fg = MaterialTheme.colorScheme.onSecondaryContainer,
+            title = "当前模式：软管控",
+            subtitle = if (isOwner) "设备具备 DO 能力但硬管控增强未启用；计时/应用/看屏正常"
+            else "计时/监控/资讯正常，但设置里可被卸载/停止/改时间"
+        )
+        isOwner -> LevelVisual(
             bg = MaterialTheme.colorScheme.primaryContainer,
             fg = MaterialTheme.colorScheme.onSurface,
-            title = "防护等级：设备所有者硬管控",
+            title = "当前模式：硬管控（已生效）",
             subtitle = "防卸载 / 防停止 / 防改时间 已由系统级锁定"
         )
-    } else {
-        LevelVisual(
+        else -> LevelVisual(
             bg = MaterialTheme.colorScheme.errorContainer,
             fg = MaterialTheme.colorScheme.onErrorContainer,
-            title = "防护等级：软管控（非设备所有者）",
-            subtitle = "计时/监控/资讯正常，但设置里可被卸载/停止/改时间"
+            title = "当前模式：硬管控（待预置）",
+            subtitle = "设备尚未成为设备所有者，系统级锁定未生效，请按下方预置指引操作"
         )
     }
     Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = v.bg)) {
@@ -1046,7 +1117,7 @@ private fun ProtectionLevelCard(state: ProfileUiState) {
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Icon(
-                imageVector = if (isHard) Icons.Filled.VerifiedUser else Icons.Filled.Warning,
+                imageVector = if (hardActive) Icons.Filled.VerifiedUser else Icons.Filled.Warning,
                 contentDescription = null,
                 tint = v.fg,
                 modifier = Modifier.size(28.dp)
@@ -1054,6 +1125,64 @@ private fun ProtectionLevelCard(state: ProfileUiState) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = v.title, style = MaterialTheme.typography.titleMedium, color = v.fg, fontWeight = FontWeight.SemiBold)
                 Text(text = v.subtitle, style = MaterialTheme.typography.bodySmall, color = v.fg.copy(alpha = 0.85f))
+            }
+        }
+    }
+}
+
+/**
+ * 管控模式切换卡。
+ *
+ * 两档并行：切换只改管理模式的持久化键，另一档已授予的权限与已下发的策略配置一律保留，
+ * 家长可以反复试错而不会丢掉配好的时间 / 应用 / 看屏规则。切到硬管控后若设备尚未成为 DO，
+ * 页面给出预置指引入口（App 自身无法提权，见 DoProvisioningScreen）。
+ */
+@Composable
+private fun ManagementModeCard(
+    mode: ManagementMode?,
+    onChoose: (ManagementMode) -> Unit,
+    onHardGuide: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "管控模式切换",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "硬管控依赖设备所有者(DO)，系统级锁死卸载 / 强停 / 改时间；软管控靠无障碍 + 悬浮窗 + 设备管理器。" +
+                    "两档授权与配置分别保留，切换互不清除。",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = { onChoose(ManagementMode.HARD) },
+                    modifier = Modifier.weight(1f),
+                    enabled = mode != ManagementMode.HARD
+                ) {
+                    Text(text = if (mode == ManagementMode.HARD) "当前：硬管控" else "切换硬管控")
+                }
+                OutlinedButton(
+                    onClick = { onChoose(ManagementMode.SOFT) },
+                    modifier = Modifier.weight(1f),
+                    enabled = mode != ManagementMode.SOFT
+                ) {
+                    Text(text = if (mode == ManagementMode.SOFT) "当前：软管控" else "切换软管控")
+                }
+            }
+            if (mode == ManagementMode.HARD) {
+                TextButton(onClick = onHardGuide) {
+                    Text(text = "查看设备所有者预置指引")
+                }
             }
         }
     }
@@ -1296,6 +1425,60 @@ private fun AboutRow(label: String, value: String) {
         Text(text = label, style = MaterialTheme.typography.bodySmall)
         Text(text = value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
     }
+}
+
+/**
+ * 页面重新可见时刷新「设备实时状态」。
+ *
+ * 授权开关都在系统设置页里拨，[ProfileViewModel.state] 的 combine 只订阅了
+ * DataStore / 策略流，收不到任何通知；不在这里主动重读，家长从设置页返回后
+ * 看到的仍是开启前的旧状态（"明明开了，界面还说未开启"）。
+ *
+ * `addObserver` 会立即把新观察者补齐到当前生命周期状态，通常会同步补发一次
+ * `ON_RESUME` —— 这里正好拿它做首帧的即时读数，无需额外初始化调用。
+ * （与授权向导 `ResumeEffect` 刻意丢弃首帧不同：那里首帧会误触发流水线推进。）
+ */
+@Composable
+private fun RefreshDeviceStateOnResume(viewModel: ProfileViewModel) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refresh()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+}
+
+/**
+ * 授权总览文案 —— 全部取自 [AuthorizationSummary]，不写死任何权限名。
+ *
+ * 抽成纯函数（只依赖 data class，无 Android / Compose 类型）是为了让"目录改了 UI
+ * 文案会不会跟着改"这件事可被 JVM 测试锁住，而不是靠人工回归。
+ */
+internal fun authorizationSummaryText(summary: AuthorizationSummary): String {
+    if (summary.total == 0) return "本机没有需要额外确认的授权项。"
+    val pending = summary.missingCount
+    val status = when {
+        pending > 0 -> "当前仍缺 $pending 项。"
+        summary.noStateApiCount > 0 ->
+            "可检测项已全部开启；另有 ${summary.noStateApiCount} 项厂商开关需您到设置页确认" +
+                "（系统不提供状态查询，确认开启后无需反复操作）。"
+        else -> "当前全部已开启；若某项被系统关闭，本页会提示并带您补开。"
+    }
+    val head = "本机共 ${summary.total} 项需确认的授权，$status" +
+        if (summary.silentHealEnabled) {
+            " 一键清理停用无障碍后可在 1~3 分钟内自动恢复。"
+        } else {
+            " 本机未开启「清理后自动恢复」：被一键清理停用无障碍后需手动重开" +
+                "（装机时经 USB 授权 WRITE_SECURE_SETTINGS 可开启）。"
+        }
+    // 「待办清单 + 一键补齐」只在真有可检测待办时才给。
+    // 旧实现无条件拼接，于是华为真机上（厂商开关恒被算进待办）家长开完所有能查的权限后，
+    // 首页仍永远显示「待办：后台运行」「点进去可一键逐项补齐」—— 反复提示的视觉源头。
+    if (pending == 0) return head
+    return head + "待办：${summary.missingLabels.joinToString("、")}。" +
+        "点进去可一键逐项补齐，办完一项自动跳下一项。"
 }
 
 /** 读取自身安装包版本；取不到时如实返回「未知」，不编造版本号。 */

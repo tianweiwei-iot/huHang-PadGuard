@@ -25,7 +25,11 @@
       明文传输开关保持 true —— 与孩子端同一决策，不是遗漏：
       家庭/校园局域网部署时服务端跑在内网（http + tcp），关掉会让家长端直接连不上；
       公网部署由 Nginx 终止 TLS，填 https:// 域名即走加密，本开关不影响其安全性。
-      唯一的风险是"用户误把公网地址写成 http://"，那属于配置错误而非本开关造成。
+      历史注释把"用户误把公网地址写成 http://"归为配置错误、未做防护。现已补三道防线：
+        1) 构建期：:app 的 BASE_URL 由 -PBASE_URL / 环境变量注入，release 拒绝明文公网地址；
+        2) 保存时：EndpointSafety 在登录页/我的页保存地址前校验，公网必须 HTTPS；
+        3) 发请求前：HostSelectionInterceptor 与 ParentPushClient(WS) 各自复核，拒绝即失败。
+      因此这里保留 true 只服务于「回环/私网 http」这一既定私有化口径，不再等于放行公网明文。
       若将来只支持云部署，可改为 networkSecurityConfig 按域名白名单放开。
     -->
     <application

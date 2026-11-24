@@ -20,6 +20,5 @@ dependencyResolutionManagement {
 rootProject.name = "PadGuardParent"
 include(":app")
 include(":core:common")
-include(":core:network")
-include(":core:database")
-include(":core:ui")
+// core:network / core:database / core:ui 为无源码空壳，已删除（2026-11-18）；
+// 其传递依赖已改由 :app 直接声明，见 app/build.gradle.kts。

@@ -3,6 +3,25 @@ package com.padguard.server.domain
 import jakarta.persistence.*
 
 @Entity
+@Table(
+    name = "user_sessions",
+    indexes = [
+        Index(name = "idx_user_sessions_jti", columnList = "refresh_jti", unique = true),
+        Index(name = "idx_user_sessions_user", columnList = "user_id, revoked")
+    ]
+)
+class UserSession(
+    @Id var id: String = "",
+    @Column(name = "user_id") var userId: String = "",
+    @Column(name = "device_label") var deviceLabel: String? = null,
+    @Column(name = "refresh_jti") var refreshJti: String = "",
+    @Column(name = "created_at") var createdAt: Long = 0,
+    @Column(name = "last_refreshed_at") var lastRefreshedAt: Long = 0,
+    @Column(name = "revoked") var revoked: Boolean = false,
+    @Column(name = "revoked_at") var revokedAt: Long? = null
+)
+
+@Entity
 @Table(name = "device_groups")
 class DeviceGroup(
     @Id var id: String = "",
@@ -246,9 +265,9 @@ class DeviceSetting(
      *
      * 只在**无 Device Owner** 时有意义：有 DO 时管控由系统完成（隐藏/挂起），
      * 根本走不到"打开"这一步；无 DO 时由无障碍服务在启动受管控应用时要求密码。
-     * 默认 false —— 白名单模式下每开一个应用都输密码对多数家庭过重，是否开启由家长决定。
+     * 默认 true（R-P2-19）：默认 BLACKLIST 模式下新装应用天然"已授权"，若默认关则非 DO 设备"装完即玩"（APP-04）；默认开可杜绝该漏洞，家长可显式关闭回落名单口径。
      */
-    @Column(name = "require_password_on_launch") var requirePasswordOnLaunch: Boolean? = false,
+    @Column(name = "require_password_on_launch") var requirePasswordOnLaunch: Boolean? = true,
     @Column(name = "web_blocked_urls", columnDefinition = "text") var webBlockedUrls: String? = null,
     /**
      * 内容管控：搜索引擎强制安全搜索。
@@ -420,7 +439,45 @@ class AuditLog(
     @Column(name = "detail", columnDefinition = "text") var detail: String? = null,
     @Column(name = "result") var result: String = "SUCCESS",
     @Column(name = "ip") var ip: String? = null,
+    /** 防篡改哈希（SHA-256 over 整行规范化内容）；迁移前历史行该列为 NULL，不参与完整性校验。 */
+    @Column(name = "hash") var hash: String? = null,
     @Column(name = "created_at") var createdAt: Long = 0
+)
+
+/**
+ * 申诉工单：未成年人管控场景下，家长/监护人对管控动作（误锁、误判、过度采集等）提出异议的受理通道。
+ * 合规 P0（M16-6）：可提交、可查询处理状态、有响应时限与人工复核入口。
+ */
+@Entity
+@Table(name = "appeals")
+class Appeal(
+    @Id var id: String = "",
+    @Column(name = "user_id", nullable = false) var userId: String = "",
+    @Column(name = "device_id") var deviceId: String? = null,
+    @Column(name = "subject", nullable = false) var subject: String = "",
+    @Column(name = "detail", columnDefinition = "text") var detail: String? = null,
+    @Column(name = "contact") var contact: String? = null,
+    @Column(name = "status", nullable = false) var status: String = "OPEN",
+    @Column(name = "created_at", nullable = false) var createdAt: Long = 0,
+    @Column(name = "updated_at", nullable = false) var updatedAt: Long = 0
+)
+
+/**
+ * 账号注销请求：冷静期 + 凭证复核，到期或确认后级联清除全部个人数据（PIPL 删除权）。
+ * 不直接硬删 user 行（会触发订阅/订单外键），而是「匿名化 + 级联清除设备数据」，等同删除效果且无 FK 风险。
+ */
+@Entity
+@Table(name = "account_deletion_requests")
+class AccountDeletionRequest(
+    @Id var id: String = "",
+    @Column(name = "user_id", nullable = false) var userId: String = "",
+    @Column(name = "ticket", nullable = false) var ticket: String = "",
+    @Column(name = "reason") var reason: String? = null,
+    @Column(name = "status", nullable = false) var status: String = "PENDING",
+    @Column(name = "requested_at", nullable = false) var requestedAt: Long = 0,
+    @Column(name = "execute_at", nullable = false) var executeAt: Long = 0,
+    @Column(name = "cancelled", nullable = false) var cancelled: Boolean = false,
+    @Column(name = "cancelled_at") var cancelledAt: Long? = null
 )
 
 /**

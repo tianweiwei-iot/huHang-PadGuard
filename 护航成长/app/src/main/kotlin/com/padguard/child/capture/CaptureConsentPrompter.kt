@@ -7,7 +7,10 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.padguard.child.AppForeground
+import com.padguard.child.ConsoleState
+import com.padguard.child.notify.NotificationDelivery
 import com.padguard.core.common.Logger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 屏幕采集请求的统一派发口。
@@ -48,6 +51,15 @@ object CaptureConsentPrompter {
     private const val LAUNCH_CONFIRM_DELAY_MS = 1_500L
 
     /**
+     * 授权引导最小间隔（单调钟 + 高水位）。服务端 `MonitorService.reconcileLiveSessions`
+     * 每 8s 用**新 msgId** 重发一次 LIVE_VIEW_START，端上幂等去重挡不住；若采集通道未就绪，
+     * 旧实现每一条都会弹一次授权页/通知，孩子端表现为「反复要我确认」。
+     */
+    private const val PROMPT_COOLDOWN_MS = 60_000L
+
+    private val lastPromptAtMs = AtomicLong(Long.MIN_VALUE)
+
+    /**
      * 派发一条采集请求。
      *
      * @param silentIfBackground 后台态下是否静默（不弹通知）。
@@ -55,8 +67,41 @@ object CaptureConsentPrompter {
      */
     fun dispatch(context: Context, captureIntent: Intent, silentIfBackground: Boolean = false): Boolean {
         if (ScreenCaptureSession.hasToken()) {
+            // 已授权：静默复用，不受节流限制（这是家长每次看屏的正常路径）。
+            // 顺手撤掉上一轮指令 / 上一个进程留下的引导通知：普通通知不会因为"令牌
+            // 已经拿到了"自动消失，不撤就会一直挂着"请确认屏幕采集授权"，看起来像没授权成功。
+            clear(context)
             ScreenCaptureService.startAuthorized(context, captureIntent)
             return true
+        }
+        // 没有可用凭据：是否允许向当前设备持有者弹确认框，取决于此刻是否处于「家长控制台 / 授权引导」
+        // 在场（[com.padguard.child.ConsoleState.isManagementVisible]）。
+        //
+        // 孩子正常使用设备（隐藏态）时**绝不打扰孩子**——看屏授权必须在装机或家长经「补授权」
+        // 入口主动完成时取得，使用期不再依赖孩子确认。此时静默返回 false（采集不执行），
+        // 家长侧会看到看屏/录屏指令失败，并由家长去补授权入口重新确认屏幕采集。
+        // （见需求：使用过程中就不要指望孩子确认授权了。）
+        if (!ConsoleState.isManagementVisible) {
+            Logger.i(TAG) {
+                "capture token missing during normal child use; skip child prompt. " +
+                    "parent must re-grant via 补授权 entry"
+            }
+            clear(context)
+            return false
+        }
+        // 通知被系统关闭、此刻又不在前台：既发不出引导通知、也拉不起授权页。
+        // 此时占用一次 60 秒节流额度毫无意义，还会把权限恢复后的第一次补发一并吞掉（R34）。
+        if (!AppForeground.isForeground && !NotificationDelivery.canDeliver(context, CHANNEL_ID)) {
+            Logger.w(TAG) {
+                "capture consent prompt impossible: app backgrounded and notifications disabled"
+            }
+            return false
+        }
+        // 家长在场（揭示会话 / 一次性授权流程）：沿用原逻辑，由家长在系统确认框点「立即开始」。
+        // 同一轮自愈重发只打扰一次。
+        if (!claimPromptSlot()) {
+            Logger.i(TAG) { "consent prompt throttled: waiting for a11y rebind / child confirmation" }
+            return false
         }
         // 平板此刻正被使用（本应用在前台）→ 直接拉起授权页，孩子只需点一次"立即开始"；
         // 只有真正没人用平板时才退化成通知引导。二者缺一不可：
@@ -127,6 +172,11 @@ object CaptureConsentPrompter {
             Logger.e(TAG) { "NotificationManager unavailable, cannot prompt capture consent" }
             return
         }
+        // notify() 在通知被关时静默丢弃且不抛异常，别把"调用过"当成"送达了"（R34）
+        if (!NotificationDelivery.canDeliver(context, CHANNEL_ID)) {
+            Logger.w(TAG) { "notifications disabled; capture consent notification withheld" }
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = android.app.NotificationChannel(
                 CHANNEL_ID, "屏幕采集授权", NotificationManager.IMPORTANCE_HIGH
@@ -150,7 +200,9 @@ object CaptureConsentPrompter {
         // 解锁瞬间就能看到并确认屏幕采集授权（2026-10-21 修复"通知点不了"的体验兜底）。
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("护航守护")
-            .setContentText("为实时守护做准备，请确认屏幕采集授权")
+            .setContentText(
+                capturePromptText(CaptureConsent.requested(context), CaptureConsent.granted(context))
+            )
             .setSmallIcon(context.applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_menu_gallery)
             .setContentIntent(pi)
             .setFullScreenIntent(pi, true)
@@ -164,10 +216,47 @@ object CaptureConsentPrompter {
             .onFailure { Logger.e(TAG, it) { "failed to post capture consent notification" } }
     }
 
-    /** 授权完成后清掉引导通知，避免孩子看到一条已经过期的提醒 */
+    /**
+     * 占用一次「打扰孩子」的额度。用单调钟 + 高水位，避免墙钟回拨让
+     * `now - last` 恒为负、去抖窗口永不自愈（与端上其它短时窗同一口径）。
+     */
+    private fun claimPromptSlot(): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        while (true) {
+            val last = lastPromptAtMs.get()
+            // 单调钟回拨 / 首次：重置高水位后放行，绝不把窗口永久钉死
+            val tooSoon = last != Long.MIN_VALUE && last <= now && now - last < PROMPT_COOLDOWN_MS
+            if (tooSoon) return false
+            if (lastPromptAtMs.compareAndSet(last, now)) return true
+        }
+    }
+
+    /**
+     * 清掉引导通知。**刻意不复位节流**：本方法在授权成功与孩子点「取消」时都会被调用，
+     * 若在此复位，孩子一取消就会被 8s 一次的服务端重发立刻再弹一次框。
+     * 授权成功后 [ScreenCaptureSession.hasToken] 为真走静默分支，本就用不到节流额度。
+     */
     fun clear(context: Context) {
         runCatching {
             context.getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID)
         }
     }
 }
+
+/**
+ * 引导通知正文（纯顶层函数，零 Android 依赖，便于 JVM 单测锁定）。
+ *
+ * ## 为什么必须区分"从没授权过"和"授权过但令牌失效"
+ * MediaProjection 的凭据是**进程内**的 IBinder：进程被杀 / 平板重启后必然作废
+ * （[CaptureConsentStore.loadProjectionConsent] 也只在同进程内允许复用），
+ * 系统要求重新点一次"立即开始"——这是 Android 的隐私红线，Device Owner 也绕不过。
+ * 旧文案对两种情况一律写"请确认屏幕采集授权"，家长就会认定"我装机时明明授权过了，
+ * 怎么又说没授权"，反复回去重装/重授权也修不好。改成人话如实说明：这是重启后的
+ * 重新确认，不是授权被清空、更不是装机没做。
+ */
+internal fun capturePromptText(everRequested: Boolean, everGranted: Boolean): String =
+    if (everRequested && everGranted) {
+        "平板重启后需重新确认屏幕采集授权"
+    } else {
+        "为实时守护做准备，请确认屏幕采集授权"
+    }

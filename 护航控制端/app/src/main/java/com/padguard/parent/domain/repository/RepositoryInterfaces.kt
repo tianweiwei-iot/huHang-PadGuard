@@ -5,8 +5,13 @@ import com.padguard.parent.data.model.PlanDto
 import com.padguard.parent.data.model.OrderDto
 import com.padguard.parent.data.model.CreateOrderResponse
 import com.padguard.parent.data.model.PayChannelDto
+import com.padguard.parent.data.model.AppealDto
+import com.padguard.parent.data.model.DataExportDto
+import com.padguard.parent.data.model.DeletionRequestDto
+import com.padguard.parent.data.model.GuardianConsentStatusDto
 import com.padguard.parent.data.model.AppListPolicyDto
 import com.padguard.parent.data.model.EyeProtectionDto
+import com.padguard.parent.data.model.DeviceLogDto
 import android.graphics.Bitmap
 import com.padguard.parent.domain.model.*
 import kotlinx.coroutines.flow.Flow
@@ -39,6 +44,21 @@ interface AuthRepository {
     /** 退出登录 */
     suspend fun logout(): Result<Unit>
 
+    /**
+     * 自助修改登录密码。
+     *
+     * 为什么需要它：账号初始密码与运营在后台「重置密码」生成的，都是服务端随机强口令，
+     * 各处提示都写着"请登录后尽快修改"，但缺少这条链路时家长根本无从修改 ——
+     * 只能一直对着截图里的随机串输入，或每次忘记都再找一次客服。
+     *
+     * 实现层责任：成功后服务端会吊销该账号的**全部**旧令牌（含本机）并返回新令牌对，
+     * 仓储必须立即落盘，否则下一个请求就会被判未授权。
+     *
+     * @return 成功即表示新密码已生效、新令牌已落盘；失败时 [Result.exceptionOrNull]
+     *         的 message 已是可直接上屏的中文原因（如"原密码不正确""新密码不能与原密码相同"）。
+     */
+    suspend fun changePassword(oldPassword: String, newPassword: String): Result<Unit>
+
     /** 刷新 Token */
     suspend fun refreshToken(): Result<User>
 
@@ -60,6 +80,18 @@ interface DeviceRepository {
 
     /** 获取设备详情 */
     suspend fun getDeviceDetail(deviceId: String): Result<Device>
+
+    /**
+     * 查询设备「使用授权协议」签署凭证（说明书 §5.4）。
+     * 失败/查不到都不应影响设备详情主流程，调用方须单独处理。
+     */
+    suspend fun getAgreementStatus(deviceId: String): Result<AgreementStatus>
+
+    /**
+     * 拉取设备某一类上报日志（按时间倒序，最多 [limit] 条）。
+     * 家长端「通知记录」用 type=NOTIFICATION_COLLECTED 取孩子端代收的系统通知（仅包名 + 标题，不含正文）。
+     */
+    suspend fun getDeviceLogs(deviceId: String, type: String, limit: Int = 200): Result<List<DeviceLogDto>>
 
     /** 绑定设备（扫码/手动输入） */
     suspend fun bindDevice(deviceId: String, alias: String?): Result<Device>
@@ -146,9 +178,8 @@ interface DeviceRepository {
     /** 上传 APK 到应用库（应用分发 / 远程升级的源头）；返回落库后的应用条目 */
     suspend fun uploadAppCatalog(
         deviceId: String,
-        bytes: ByteArray,
-        meta: AppUploadMeta,
-        fileName: String
+        apk: MediaSource,
+        meta: AppUploadMeta
     ): Result<DistributableApp>
 
     /** 从应用库删除一个 APK */
@@ -278,12 +309,11 @@ interface MessageRepository {
      *
      * 家长手里的素材都在本机相册或文件里，孩子端访问不到家长的手机，
      * 必须先落到服务端才能随消息下发。
+     *
+     * 入参是[流式来源][MediaSource]而非 `ByteArray`：视频动辄几百 MB，
+     * 整个读进内存会让家长端在上传刚开始时就被系统 OOM 杀掉。
      */
-    suspend fun uploadMedia(
-        fileName: String,
-        contentType: String,
-        bytes: ByteArray
-    ): Result<UploadedMedia>
+    suspend fun uploadMedia(source: MediaSource): Result<UploadedMedia>
 }
 
 /** 上传完成的素材：url 直接下发给孩子端，fileName 用于界面回显与"撤掉重选" */
@@ -431,12 +461,10 @@ interface PolicyRepository {
     /** 设置单个应用的每日使用时长上限（分钟，0 = 不限制） */
     suspend fun setAppLimit(deviceId: String, packageName: String, minutes: Int): Result<Unit>
 
-    /** 远程安装本地选取的 APK：先上传到服务端拿到地址，再下发安装指令 */
+    /** 远程安装本地选取的 APK：先流式上传到服务端拿到地址，再下发安装指令 */
     suspend fun installLocalApk(
         deviceId: String,
-        fileName: String,
-        contentType: String,
-        bytes: ByteArray,
+        apk: MediaSource,
         packageName: String,
         appName: String? = null
     ): Result<Unit>
@@ -601,6 +629,12 @@ interface PolicyRepository {
     // === 平板使用计时会话（三端时间一致） ===
     /** 读取孩子端当前使用计时会话，含服务端锚定的剩余时长（与家长端/孩子端同一份） */
     suspend fun getUsageSession(deviceId: String): Result<UsageSession>
+
+    /**
+     * 家长发起「开始计时」：孩子端弹出确认框，孩子确认后才开始今日计时（未确认不计时）。
+     * 幂等：PENDING 重发（催办）、CONFIRMED 原样返回。
+     */
+    suspend fun requestUsageStart(deviceId: String): Result<Unit>
 
     // === 未成年人模式（合规底座） ===
     /** 读取未成年人模式当前配置 */
@@ -878,4 +912,44 @@ interface BillingRepository {
 
     /** 示例支付：真实渠道接入后由支付回调代替 */
     suspend fun mockPay(orderNo: String): Result<SubscriptionDto>
+}
+
+/**
+ * 数据主体权利 / 合规仓库（对应服务端 ParentDataRightsController）。
+ *
+ * 服务端端点早已就绪，但客户端此前零接线——导出/撤回/注销/申诉在法律意义上不可用。
+ * 这里补齐家长端调用面；DTO 直接复用（纯展示数据，不套领域模型，同 BillingRepository）。
+ * deviceIds 为空表示名下全部设备。
+ */
+interface ComplianceRepository {
+    /** 撤回采集授权，返回受影响设备数。 */
+    suspend fun withdrawConsent(deviceIds: List<String>? = null): Result<Int>
+
+    /** 恢复采集授权，返回受影响设备数。 */
+    suspend fun reinstateConsent(deviceIds: List<String>? = null): Result<Int>
+
+    /** 导出本账号全部个人数据。 */
+    suspend fun exportData(): Result<DataExportDto>
+
+    /** 不满十四周岁监护人单独同意留痕（申报出生日期，不是实名核验）。 */
+    suspend fun submitUnder14GuardianConsent(
+        deviceId: String, childBirthDate: String, consentTextVersion: String
+    ): Result<GuardianConsentStatusDto>
+
+    suspend fun guardianConsentStatus(deviceId: String): Result<GuardianConsentStatusDto?>
+
+    /** 提交注销请求，返回含冷静期凭证的响应。 */
+    suspend fun requestDeletion(reason: String? = null): Result<DeletionRequestDto>
+
+    /** 凭凭证确认注销（不可撤销）。 */
+    suspend fun confirmDeletion(ticket: String): Result<Unit>
+
+    /** 冷静期内取消注销。 */
+    suspend fun cancelDeletion(ticket: String): Result<Unit>
+
+    /** 提交申诉，返回申诉单号。 */
+    suspend fun submitAppeal(deviceId: String?, subject: String, detail: String?, contact: String?): Result<String>
+
+    /** 本人申诉列表。 */
+    suspend fun listAppeals(): Result<List<AppealDto>>
 }

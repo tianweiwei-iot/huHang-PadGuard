@@ -38,6 +38,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.child.ui.settings.ServerConfigDialog
 
@@ -60,6 +62,7 @@ fun BindScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val serverUrl by viewModel.serverUrl.collectAsState()
     var showAdvanced by remember { mutableStateOf(false) }
+
     LaunchedEffect(state.step) {
         if (state.step == BindStep.Success) onBound()
     }
@@ -72,6 +75,7 @@ fun BindScreen(
     }
     BindContent(
         state = state,
+        viewModel = viewModel,
         onCodeChanged = viewModel::onCodeChanged,
         onSubmit = viewModel::submit,
         onInputAccount = viewModel::goToInputAccount,
@@ -105,6 +109,7 @@ fun BindScreen(
 @Composable
 private fun BindContent(
     state: BindUiState,
+    viewModel: BindViewModel,
     onCodeChanged: (String) -> Unit,
     onSubmit: () -> Unit,
     onInputAccount: () -> Unit,
@@ -122,6 +127,11 @@ private fun BindContent(
     onStartNfc: () -> Unit,
     onAdvancedSettings: () -> Unit
 ) {
+    // 绑定成功后若需激活设备管理员，由本 launcher 拉起系统「激活设备管理员」确认框；
+    // 无论确认或取消，返回后都推进到成功页（未激活则由守护服务后续持续引导）。
+    val deviceAdminLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { viewModel.advanceToSuccess() }
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
@@ -173,6 +183,10 @@ private fun BindContent(
                 )
                 BindStep.Submitting, BindStep.Waiting -> WaitingStep(
                     isSubmitting = state.step == BindStep.Submitting
+                )
+                BindStep.DeviceAdmin -> DeviceAdminStep(
+                    onActivate = { deviceAdminLauncher.launch(viewModel.deviceAdminIntent()) },
+                    onSkip = viewModel::advanceToSuccess
                 )
                 BindStep.Failed -> FailedStep(
                     message = state.errorMessage ?: "绑定失败",
@@ -467,6 +481,79 @@ private fun WaitingStep(isSubmitting: Boolean) {
             text = "请家长在家长端 App 中查看「设备绑定请求」并点击确认",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+/**
+ * 绑定成功后的「激活设备管理员」引导步（2026-11-11 卸载防护复盘补丁）。
+ *
+ * ## 为什么必须有这一步
+ * 绑定只完成"连服务器 + 存凭据"，并不激活设备管理员。若跳过，孩子端只是个普通 App，
+ * 长按 / 进设置即可直接卸载（现场"未解绑却能卸载"的根因）。设备管理员是**非 DO 机型**
+ * 上唯一能竖起的卸载防线：激活后系统要求"先停用管理员才能卸载"，并把"停用页"交给软门拦截。
+ *
+ * ## 不可硬阻塞
+ * 部分厂商 ROM 上系统确认框可能不弹或被管家拦截；若此处把流程卡死，孩子会困在绑定页。
+ * 因此提供「稍后」出口——跳过则由守护服务的卸载防御模块持续告警并引导补激活（治本仍需 DO）。
+ */
+@Composable
+private fun DeviceAdminStep(
+    onActivate: () -> Unit,
+    onSkip: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier.verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            text = "最后一步：开启防卸载保护",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "为防止孩子直接卸载本应用，请在此将「护航成长」设为设备管理员。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                )
+                Text(
+                    text = "系统会弹出确认框，请点「激活」。后续要卸载时需先停用本设备管理员，" +
+                        "而停用会被家长密码与管理告警拦下。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+            }
+        }
+        Button(
+            onClick = onActivate,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text(text = "去激活设备管理员", style = MaterialTheme.typography.titleSmall)
+        }
+        OutlinedButton(
+            onClick = onSkip,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text(text = "稍后再说", style = MaterialTheme.typography.titleSmall)
+        }
+        Text(
+            text = "提示：未激活设备管理员时，本应用可被孩子直接在设置中卸载。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error.copy(alpha = 0.85f),
             textAlign = TextAlign.Center
         )
     }

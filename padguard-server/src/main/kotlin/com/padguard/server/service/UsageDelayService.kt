@@ -41,7 +41,8 @@ class UsageDelayService(
     private val commandService: CommandService,
     private val webSocketPush: WebSocketPushService,
     private val deviceService: DeviceService,
-    private val auditService: AuditService
+    private val auditService: AuditService,
+    private val expirer: UsageDelayExpirer
 ) {
     private val log = LoggerFactory.getLogger(UsageDelayService::class.java)
 
@@ -51,24 +52,36 @@ class UsageDelayService(
      * 校验：今日计时必须已开始；档位须落 [UsageSession.DELAY_OPTIONS]；
      * 同一设备不允许存在未结（PENDING）工单，避免重复提交；
      * 已批准 + 待审批 + 本次申请不得超过 [UsageSession.MAX_DAILY_EXTEND_MINUTES]。
+     *
+     * ## 并发闸门（第 5 批）
+     * 「查 PENDING → 判空 → 插工单」原本是 check-then-act：两个并发事务各读不到对方
+     * 未提交的 PENDING 行，就会各插一张工单，家长连点同意即变成两笔可批准时长。
+     * 根治需要 `(device_id, status)` 部分唯一索引（改表，未授权），这里改为在**任何
+     * PENDING 查询之前**先对 `usage_sessions` 行加 `PESSIMISTIC_WRITE` 行锁：同一设备的
+     * 申请被数据库排成一列，锁随本方法的事务提交释放，后到者必然看到先到者已提交的工单。
+     * 锁在数据库里，多副本同样有效；也不用 JVM 本地锁——那会在「锁内、事务提交在外」
+     * 的窗口里失效，且多副本根本不共享。
      */
     @Transactional
     fun request(deviceId: String, minutes: Int): UsageDelayTicketDto {
         val now = System.currentTimeMillis()
         val today = dayKey(now)
-        val session = usageSessionRepository.findByDeviceId(deviceId)
+        val session = usageSessionRepository.findByDeviceIdForUpdate(deviceId)
         if (session == null || session.startEpoch == null || session.dayKey != today) {
             throw BizException(ParentErr.PARAM_ERROR, "今日计时尚未开始，无法申请延时")
         }
         if (minutes !in UsageSession.DELAY_OPTIONS) {
             throw BizException(ParentErr.PARAM_ERROR, "非法的延时档位：$minutes 分钟")
         }
-        if (usageDelayRepository.findByDeviceIdAndStatus(deviceId, "PENDING").isNotEmpty()) {
+        // 一次查询同时用于「已有待审」与累计上限，不再重复查一遍库。
+        val pendingTickets = usageDelayRepository.findByDeviceIdAndStatus(deviceId, "PENDING")
+        if (pendingTickets.isNotEmpty()) {
             throw BizException(ParentErr.PARAM_ERROR, "已有待审核的延时申请，请等待家长处理")
         }
-        // 单日累计上限 = 已批准（已计入 session.extendedMinutes）+ 待审批 + 本次申请，
-        // 三者一并计入，防止孩子反复提交绕过上限。
-        val pending = usageDelayRepository.findByDeviceIdAndStatus(deviceId, "PENDING").sumOf { it.minutes }
+        // 单日累计上限 = 已批准（已计入 session.extendedMinutes）+ 待审批 + 本次申请。
+        // 上面已保证无 PENDING，pending 实际恒为 0；保留求和是让上限口径显式可见，
+        // 且将来若放开"多条待审"也无需再改这里。硬防线仍在 approve 的条件自增 CAS。
+        val pending = pendingTickets.sumOf { it.minutes }
         val approved = session.extendedMinutes
         if (approved + pending + minutes > UsageSession.MAX_DAILY_EXTEND_MINUTES) {
             throw BizException(
@@ -91,17 +104,21 @@ class UsageDelayService(
             detail = "minutes=$minutes")
         log.info("usage delay requested device={} minutes={} ticket={}", deviceId, minutes, ticket.id)
 
-        userId?.let {
-            webSocketPush.pushToUser(
-                it,
-                mapOf(
-                    "type" to "usage.delay.requested",
-                    "deviceId" to deviceId,
-                    "ticketId" to ticket.id,
-                    "minutes" to minutes,
-                    "createdAt" to now
+        // 对外副作用挂到提交之后：本方法仍在 @Transactional 内，事务回滚时
+        // 不能让家长端收到一条数据库里并不存在的待审申请（见 EnrollmentService 同型说明）。
+        userId?.let { ownerId ->
+            afterCommit {
+                webSocketPush.pushToUser(
+                    ownerId,
+                    mapOf(
+                        "type" to "usage.delay.requested",
+                        "deviceId" to deviceId,
+                        "ticketId" to ticket.id,
+                        "minutes" to minutes,
+                        "createdAt" to now
+                    )
                 )
-            )
+            }
         }
         return toDto(ticket)
     }
@@ -120,7 +137,9 @@ class UsageDelayService(
         val ticketDay = dayKey(t.createdAt)
         val session = usageSessionRepository.findByDeviceId(deviceId)
         if (ticketDay != today) {
-            usageDelayRepository.claimReject(ticketId, now)
+            // 独立事务作废：紧随其后的 BizException 会回滚 approve 外层事务，
+            // 若在这里直接 claimReject，作废会被一起撤销、工单永远留在 PENDING。
+            expirer.expire(ticketId, now)
             log.info(
                 "usage delay expired (ticket day {} != today {}): device={} ticket={}",
                 ticketDay, today, deviceId, ticketId
@@ -128,7 +147,7 @@ class UsageDelayService(
             throw BizException(ParentErr.PARAM_ERROR, "该延时申请已过期（非今日申请），请让孩子重新提交", Audience.PARENT)
         }
         if (session == null || session.dayKey != today) {
-            usageDelayRepository.claimReject(ticketId, now)
+            expirer.expire(ticketId, now)
             log.info("usage delay expired (stale session dayKey): device={} ticket={}", deviceId, ticketId)
             throw BizException(ParentErr.PARAM_ERROR, "该延时申请已过期（非今日申请），请让孩子重新提交", Audience.PARENT)
         }
@@ -162,9 +181,9 @@ class UsageDelayService(
             detail = "minutes=${t.minutes}")
         log.info("usage delay approved device={} ticket={} +{}min", deviceId, ticketId, t.minutes)
 
-        userId.let {
+        afterCommit {
             webSocketPush.pushToUser(
-                it,
+                userId,
                 mapOf(
                     "type" to "usage.delay.updated",
                     "deviceId" to deviceId,
@@ -197,15 +216,17 @@ class UsageDelayService(
         )
         log.info("usage delay rejected device={} ticket={}", deviceId, ticketId)
 
-        webSocketPush.pushToUser(
-            userId,
-            mapOf(
-                "type" to "usage.delay.updated",
-                "deviceId" to deviceId,
-                "ticketId" to ticketId,
-                "status" to "REJECTED"
+        afterCommit {
+            webSocketPush.pushToUser(
+                userId,
+                mapOf(
+                    "type" to "usage.delay.updated",
+                    "deviceId" to deviceId,
+                    "ticketId" to ticketId,
+                    "status" to "REJECTED"
+                )
             )
-        )
+        }
     }
 
     /**
@@ -221,24 +242,46 @@ class UsageDelayService(
         auditService.record(userId, deviceId, AuditAction.USAGE_DELAY_DISMISS, targetType = "ticket", targetId = ticketId)
         log.info("usage delay dismissed device={} ticket={}", deviceId, ticketId)
 
-        webSocketPush.pushToUser(
-            userId,
-            mapOf(
-                "type" to "usage.delay.updated",
-                "deviceId" to deviceId,
-                "ticketId" to ticketId,
-                "status" to "IGNORED"
+        afterCommit {
+            webSocketPush.pushToUser(
+                userId,
+                mapOf(
+                    "type" to "usage.delay.updated",
+                    "deviceId" to deviceId,
+                    "ticketId" to ticketId,
+                    "status" to "IGNORED"
+                )
             )
-        )
+        }
     }
 
     /** 列出该设备全部工单（含已处理），供家长端消息中心翻看历史 */
     fun listTickets(userId: String, deviceId: String): List<UsageDelayTicketDto> {
+        // R40 IDOR 修复：与同构的 UnlockService.listTickets 对齐——必须先校验设备归属，
+        // 不能只靠下方 `.filter { it.userId == userId }` 兜底返回 200 空列表。
+        // 否则任意登录家长可拿他人 deviceId 探测设备是否存在（IDOR 探测面），
+        // 且与全系统"跨用户访问他人设备一律 403"的行为不一致。
+        // 边界测试（ParentEndpointOwnershipBoundaryTest）实测：修复前跨用户返回 200。
+        requireOwned(userId, deviceId)
         return listOf("PENDING", "APPROVED", "REJECTED", "IGNORED")
             .flatMap { usageDelayRepository.findByDeviceIdAndStatus(deviceId, it) }
             .filter { it.userId == userId }
             .sortedByDescending { it.createdAt }
             .map { toDto(it) }
+    }
+
+    /**
+     * 设备归属校验（与 [DeviceOwnershipGuard.requireOwned] 同语义）。
+     *
+     * 本类有 4 处单测直接构造，故不注入新组件，复用已注入的 [deviceRepository]；
+     * 逻辑与 [ownedOpen] 中的校验完全同构，抽出来消除重复、避免再次漏抄。
+     */
+    private fun requireOwned(userId: String, deviceId: String) {
+        val dev = deviceRepository.findById(deviceId).orElse(null)
+            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+        if (dev.userId != userId) {
+            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
+        }
     }
 
     /** 当前等待家长审批的延时分钟数（PENDING 工单之和），供会话 DTO 透传给两端 */
@@ -249,11 +292,7 @@ class UsageDelayService(
      * 取出"仍可处理"的工单：PENDING 或 IGNORED（忽略非终态，必须和 PENDING 同等对待）。
      */
     private fun ownedOpen(userId: String, deviceId: String, ticketId: String): UsageDelayTicket {
-        val dev = deviceRepository.findById(deviceId).orElse(null)
-            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
-        if (dev.userId != userId) {
-            throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
-        }
+        requireOwned(userId, deviceId)
         val t = usageDelayRepository.findByIdAndDeviceId(ticketId, deviceId)
             ?: throw BizException(ParentErr.PARAM_ERROR, "工单不存在", Audience.PARENT)
         if (t.status != "PENDING" && t.status != "IGNORED") {

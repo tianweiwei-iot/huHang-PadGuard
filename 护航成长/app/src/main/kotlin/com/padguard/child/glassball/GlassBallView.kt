@@ -28,11 +28,12 @@ import kotlin.math.hypot
  * - 文字三行：上「已用 X 分」、中「剩余大字（mm:ss / 分钟）」、下「剩余 X 分」；
  * - 待审态：进度环琥珀色呼吸脉冲，中行改显「待审」。
  *
- * ## 交互（点击/双击/拖拽，全部手写判定）
+ * ## 交互（点击/双击/长按/拖拽，全部手写判定）
  * 单击 = 家长验证入口（隐藏形态下家长唯一触点，保留原能力）；双击 = 申请延时对话框；
+ * 长按 = 暂停计时确认对话框（2026-11-18 新增）；
  * 位移超过 [ViewConfiguration] 触摸容差后转为窗口拖拽（按增量回调控制器更新
- * LayoutParams），抬手吸附最近边缘。三者互斥：一旦判为拖拽，抬手不再派发点击，
- * 避免"拖完弹一下对话框"。
+ * LayoutParams），抬手吸附最近边缘。三者互斥：一旦判为拖拽或长按，抬手不再派发点击，
+ * 避免"拖完弹一下对话框"/"确认暂停后又弹延时框"。
  */
 class GlassBallView(context: Context) : View(context) {
 
@@ -45,12 +46,18 @@ class GlassBallView(context: Context) : View(context) {
         private set
     var pendingDelayMinutes: Int = 0
         private set
+    /** 计时暂停中：展示冻结值与恢复提示（与锁屏页口径一致） */
+    var timerPaused: Boolean = false
+        private set
 
     /** 单击：唤起家长验证入口（隐藏形态下家长唯一触点，保留原能力） */
     var onSingleTap: (() -> Unit)? = null
 
     /** 双击：弹出申请延时对话框 */
     var onDoubleTap: (() -> Unit)? = null
+
+    /** 长按（600ms）：弹出暂停计时确认对话框 */
+    var onLongPress: (() -> Unit)? = null
 
     /** 拖拽中：本帧位移增量（dx/dy，像素），控制器据此平移窗口 */
     var onDragDelta: ((dx: Float, dy: Float) -> Unit)? = null
@@ -110,6 +117,28 @@ class GlassBallView(context: Context) : View(context) {
     private var lastTapY = 0f
     private val singleTapRunnable = Runnable { onSingleTap?.invoke() }
 
+    /**
+     * 长按判定：与单击/双击共用一次按下，但**一旦触发就吞掉整次手势**。
+     * 用 postDelayed 而不是 Handler 的 what 消息：视图附加到悬浮窗口后
+     * Runnable 随视图消息队列走，detach 时 removeCallbacks 即可彻底撤销。
+     */
+    private val longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong()
+        .coerceAtLeast(LONG_PRESS_MIN_MS)
+    private val longPressRunnable = Runnable {
+        if (longPressPending && !dragging) {
+            longPressPending = false
+            longPressFired = true
+            onLongPress?.invoke()
+        }
+    }
+    private var longPressPending = false
+    private var longPressFired = false
+
+    private fun clearLongPress() {
+        longPressPending = false
+        removeCallbacks(longPressRunnable)
+    }
+
     /** 待审呼吸脉冲相位（0..1），由属性动画平滑推进 */
     private var pulsePhase = 0f
     private var pulseAnimator: ValueAnimator? = null
@@ -121,7 +150,13 @@ class GlassBallView(context: Context) : View(context) {
     }
 
     /** 控制器每秒调用：刷新展示数据（主线程） */
-    fun render(usedMinutes: Int, remainingLabel: String, remainingRatio: Float, pendingDelayMinutes: Int) {
+    fun render(
+        usedMinutes: Int,
+        remainingLabel: String,
+        remainingRatio: Float,
+        pendingDelayMinutes: Int,
+        timerPaused: Boolean = false
+    ) {
         var changed = false
         if (this.usedMinutes != usedMinutes) { this.usedMinutes = usedMinutes; changed = true }
         if (this.remainingLabel != remainingLabel) { this.remainingLabel = remainingLabel; changed = true }
@@ -129,6 +164,7 @@ class GlassBallView(context: Context) : View(context) {
         if (this.pendingDelayMinutes != pendingDelayMinutes) {
             this.pendingDelayMinutes = pendingDelayMinutes; changed = true
         }
+        if (this.timerPaused != timerPaused) { this.timerPaused = timerPaused; changed = true }
         // 待审态呼吸动画：进入时启动、退出时停止（约 1.2s 一个呼吸周期）
         if (pendingDelayMinutes > 0) startPulse() else stopPulse()
         if (changed || pendingDelayMinutes > 0) invalidate()
@@ -233,11 +269,15 @@ class GlassBallView(context: Context) : View(context) {
         } else {
             "已用 ${usedMinutes}分"
         }
-        val centerText = if (pending) "待审" else remainingLabel
-        val bottomText = if (pending) {
-            "家长审核中"
-        } else {
-            "剩余 ${remainingLabel}"
+        val centerText = when {
+            timerPaused -> "已暂停"
+            pending -> "待审"
+            else -> remainingLabel
+        }
+        val bottomText = when {
+            timerPaused -> "继续计时后恢复"
+            pending -> "家长审核中"
+            else -> "剩余 $remainingLabel"
         }
 
         val topY = cy - ballRadius * 0.34f
@@ -281,15 +321,22 @@ class GlassBallView(context: Context) : View(context) {
                 downRawX = event.rawX
                 downRawY = event.rawY
                 dragging = false
+                longPressFired = false
+                longPressPending = true
+                removeCallbacks(longPressRunnable)
+                postDelayed(longPressRunnable, longPressTimeoutMs)
             }
 
             MotionEvent.ACTION_MOVE -> {
+                // 长按已触发：后续位移不再驱动拖拽，避免确认框弹出后玻璃球乱跑
+                if (longPressFired) return true
                 val totalDx = event.rawX - downRawX
                 val totalDy = event.rawY - downRawY
                 if (!dragging && hypot(totalDx, totalDy) > touchSlop) {
                     dragging = true
-                    // 进入拖拽即取消悬而未决的单击判定，避免"拖一下又弹对话框"
+                    // 进入拖拽即取消悬而未决的单击/长按判定
                     removeCallbacks(singleTapRunnable)
+                    clearLongPress()
                     Logger.v(TAG) { "glass ball drag start" }
                 }
                 if (dragging) {
@@ -307,6 +354,10 @@ class GlassBallView(context: Context) : View(context) {
                     onDragEnd?.invoke()
                     return true
                 }
+                // 长按已消费本次手势：不派发单击/双击，也不重置 lastTapAtMs
+                val wasLongPress = longPressFired
+                clearLongPress()
+                if (wasLongPress) return true
                 // 未拖拽 → 点击/双击判定（手写，见 lastTapAtMs 注释）
                 val now = android.os.SystemClock.uptimeMillis()
                 val dx = event.rawX - lastTapX
@@ -333,6 +384,7 @@ class GlassBallView(context: Context) : View(context) {
                     onDragEnd?.invoke()
                 }
                 removeCallbacks(singleTapRunnable)
+                clearLongPress()
             }
         }
         return true
@@ -340,6 +392,7 @@ class GlassBallView(context: Context) : View(context) {
 
     override fun onDetachedFromWindow() {
         removeCallbacks(singleTapRunnable)
+        clearLongPress()
         stopPulse()
         super.onDetachedFromWindow()
     }
@@ -367,6 +420,9 @@ class GlassBallView(context: Context) : View(context) {
 
         /** 单击/双击判定窗口：与系统 ViewConfiguration.getDoubleTapTimeout() 同量级 */
         const val DOUBLE_TAP_TIMEOUT_MS = 300L
+
+        /** 长按暂停的最短门槛：系统默认 500ms 偏短，容易在拖动犹豫时误触发 */
+        const val LONG_PRESS_MIN_MS = 600L
 
         /** 待审呼吸动画单程时长（REVERSE 往复 ≈ 一个完整呼吸周期） */
         const val PULSE_CYCLE_MS = 600L

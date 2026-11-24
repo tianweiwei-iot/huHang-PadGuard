@@ -6,6 +6,7 @@ import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
 import com.padguard.server.dto.CreateOrderRequest
 import com.padguard.server.dto.PayRequest
+import com.padguard.server.security.RateLimit
 import com.padguard.server.service.BillingService
 import com.fasterxml.jackson.databind.ObjectMapper
 import jakarta.servlet.http.HttpServletRequest
@@ -30,7 +31,9 @@ import org.springframework.web.bind.annotation.RestController
 @RequestMapping("/v1/billing")
 class BillingController(
     private val billingService: BillingService,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    /** 匿名回调端点必须频控：限制伪造签名头触发的 RSA 验签 CPU / 1MB body 带宽放大。 */
+    private val rateLimit: RateLimit
 ) {
 
     /** 可购买套餐（价格来自配置，运营可调） */
@@ -102,6 +105,9 @@ class BillingController(
      */
     @PostMapping("/notify")
     fun notify(request: HttpServletRequest): ApiResponse<*> {
+        // 频控先于任何 body 读取 / 验签：匿名端点若被高频伪造签名头打满，
+        // 每次都会走到 SHA256withRSA 验签（CPU 密集），成为带宽+CPU 放大器。
+        rateLimit.require("billing_notify", request)
         // 限定读取体积：支付回调报文极小（通常 < 1KB），无上限的 readBytes() 可被恶意超大请求
         // 撑爆堆内存（DoS）。这里按 1MB 上限流式读取，超限即拒绝。
         val rawBody = readBoundedBody(request, MAX_NOTIFY_BODY_BYTES)
@@ -128,6 +134,7 @@ class BillingController(
      */
     @PostMapping("/refund-notify")
     fun refundNotify(request: HttpServletRequest): ApiResponse<*> {
+        rateLimit.require("billing_notify", request)
         val rawBody = readBoundedBody(request, MAX_NOTIFY_BODY_BYTES)
         val headers = request.headerNames?.toList().orEmpty()
             .associateWith { request.getHeader(it) }

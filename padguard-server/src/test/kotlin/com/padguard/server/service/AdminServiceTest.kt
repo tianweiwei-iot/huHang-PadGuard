@@ -263,6 +263,11 @@ class AdminServiceTest {
         override fun idOf(e: Admin) = e.id
         override fun findByUsername(username: String): Admin? = table.values.firstOrNull { it.username == username }
         override fun findByIdForUpdate(id: String): Admin? = table[id]
+        override fun touchLastLoginAt(id: String, ts: Long): Int {
+            val a = table[id] ?: return 0
+            a.lastLoginAt = ts
+            return 1
+        }
         override fun existsByUsername(username: String) = table.values.any { it.username == username }
         override fun countByStatus(status: String) = table.values.count { it.status == status }.toLong()
     }
@@ -286,6 +291,19 @@ class AdminServiceTest {
         override fun findByUserIdAndDeviceIdAndStatus(userId: String, deviceId: String, status: String, pageable: Pageable) = emptyList<Alert>()
         override fun findByUserIdAndDeviceId(userId: String, deviceId: String, pageable: Pageable) = emptyList<Alert>()
         override fun countByUserIdAndStatusAndDeviceId(userId: String, status: String, deviceId: String) = 0L
+        // 告警状态机在本测试只经 closeAlert 走到 RESOLVED 一条路径，必须真实生效；
+        // 其余条件 UPDATE 不在覆盖范围，0 = 幂等无操作即可（真实语义在 AlertServiceTest 的假仓储里）。
+        override fun acknowledgeIfActive(id: String, userId: String, at: Long): Int = 0
+        override fun closeIfOpen(id: String, userId: String, at: Long): Int = 0
+        override fun appendCloseNoteIfStillClosed(id: String, suffix: String): Int = 0
+        override fun closeActiveByCategory(deviceId: String, category: String, at: Long): Int = 0
+        override fun resolveIfNotResolved(id: String, at: Long): Int {
+            val a = table[id] ?: return 0
+            if (a.status == "RESOLVED") return 0
+            a.status = "RESOLVED"
+            a.resolvedAt = at
+            return 1
+        }
         override fun deleteByDeviceId(deviceId: String): Int {
             val before = table.size
             table.values.removeIf { it.deviceId == deviceId }
@@ -337,6 +355,28 @@ class AdminServiceTest {
             table.values.filter { it.deviceId == deviceId }.sortedBy { it.createdAt }
         override fun findPendingForPolling(deviceId: String, status: String, now: Long, cursor: Long, pageable: Pageable) = emptyList<Command>()
         override fun findExpiredPending(deviceId: String, status: String, now: Long) = emptyList<Command>()
+        /** F01 CAS 的内存等价实现：只有仍是 PENDING 才改写并返回影响行数 1 */
+        override fun markExpiredIfPending(id: String, pending: String, expired: String): Int {
+            val cmd = table[id] ?: return 0
+            if (cmd.status != pending) return 0
+            cmd.status = expired
+            return 1
+        }
+        override fun applyAckIfOpen(
+            msgId: String, deviceId: String, terminal: Collection<String>, status: String,
+            executedAt: Long?, errorCode: String?, errorMessage: String?
+        ): Int {
+            val cmd = table.values.firstOrNull { it.msgId == msgId && it.deviceId == deviceId } ?: return 0
+            if (cmd.status in terminal) return 0
+            cmd.status = status
+            cmd.executedAt = executedAt
+            cmd.errorCode = errorCode
+            cmd.errorMessage = errorMessage
+            return 1
+        }
+        // W2 补发查询：本组测试不涉及补发，恒返回空/0 即可保持原有断言语义
+        override fun findRedeliverablePending(deviceId: String, status: String, now: Long, maxAttempts: Int, types: Collection<String>, pageable: Pageable) = emptyList<Command>()
+        override fun tryRefreshForRedelivery(id: String, status: String, now: Long, newExpiresAt: Long): Int = 0
         override fun deleteByDeviceId(deviceId: String): Int {
             val before = table.size
             table.values.removeIf { it.deviceId == deviceId }
@@ -357,12 +397,20 @@ class AdminServiceTest {
         // E11：保留期清理查询
         override fun findReceivedAtBefore(ts: Long): List<Screenshot> =
             table.values.filter { it.receivedAt < ts }
+        override fun markExpiredIfPending(deviceId: String, shotId: String, pending: String, expired: String): Int {
+            val row = table.values.firstOrNull {
+                it.deviceId == deviceId && it.shotId == shotId && it.status == pending
+            } ?: return 0
+            row.status = expired
+            return 1
+        }
     }
 
     private class FakeUsageSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionRepository {
         override val table = LinkedHashMap<String, UsageSession>()
         override fun idOf(e: UsageSession) = e.deviceId
         override fun findByDeviceId(deviceId: String): UsageSession? = table.values.firstOrNull { it.deviceId == deviceId }
+        override fun findByDeviceIdForUpdate(deviceId: String): UsageSession? = findByDeviceId(deviceId)
         override fun deleteByDeviceId(deviceId: String): Int {
             val before = table.size
             table.values.removeIf { it.deviceId == deviceId }
@@ -380,6 +428,60 @@ class AdminServiceTest {
         s.updatedAt = now
         return 1
     }
+
+    // 与 rebaseExpiredSession 的 JPQL 逐字对齐：只在「确实已耗尽」时重设起点。
+    override fun rebaseExpiredSession(
+        deviceId: String, dayKey: String, now: Long,
+        quotaMinutes: Int, minutes: Int, minuteMs: Long
+    ): Int {
+        val s = table[deviceId] ?: return 0
+        val start = s.startEpoch ?: return 0
+        if (s.dayKey != dayKey) return 0
+        val baseline = (quotaMinutes + s.extendedMinutes - minutes) * minuteMs
+        if (now - start - s.restAccumulatedMs <= baseline) return 0
+        s.startEpoch = now + s.restAccumulatedMs - baseline
+        s.updatedAt = now
+        return 1
+    }
+
+    @Synchronized
+    override fun appendRestIfUnchanged(
+        deviceId: String, dayKey: String, delta: Long, newRestIds: String,
+        now: Long, oldAccum: Long, oldRestIds: String
+    ): Int {
+        val s = table[deviceId] ?: return 0
+        if (s.dayKey != dayKey || s.restAccumulatedMs != oldAccum || s.restIds != oldRestIds) return 0
+        s.restAccumulatedMs = oldAccum + delta
+        s.restIds = newRestIds
+        s.updatedAt = now
+        return 1
+    }
+
+        @Synchronized
+        override fun insertIfAbsent(deviceId: String, dayKey: String, startEpoch: Long, quotaMinutes: Int, now: Long): Int {
+            if (table.containsKey(deviceId)) return 0
+            table[deviceId] = UsageSession(
+                deviceId = deviceId, dayKey = dayKey, startEpoch = startEpoch,
+                quotaMinutes = quotaMinutes, createdAt = now, updatedAt = now
+            )
+            return 1
+        }
+
+        @Synchronized
+        override fun startFreshIfStale(deviceId: String, dayKey: String, startEpoch: Long, quotaMinutes: Int, now: Long): Int {
+            val s = table[deviceId] ?: table.values.firstOrNull { it.deviceId == deviceId } ?: return 0
+            if (s.dayKey == dayKey && s.startEpoch != null) return 0
+            s.dayKey = dayKey
+            s.startEpoch = startEpoch
+            s.quotaMinutes = quotaMinutes
+            s.extendedMinutes = 0
+            s.lastDelayEpoch = null
+            s.restAccumulatedMs = 0
+            s.restIds = ""
+            if (s.createdAt == 0L) s.createdAt = now
+            s.updatedAt = now
+            return 1
+        }
     }
 
     private class FakePolicyRepo : FakeJpaRepository<Policy, String>(), PolicyRepository {
@@ -463,20 +565,30 @@ class AdminServiceTest {
             com.padguard.server.stream.ScreenStreamHub(),
             // 批量导入的按行事务模板：构造即可，本 fixture 的用例不走导入路径，
             // 真正的导入原子性由 DeviceImportTest 用内存 H2 覆盖。
+            // 用真事务状态：解绑现在在 txTemplate 内持键锁，mock manager 返回 null 状态会触发 Kotlin 非空检查。
             org.springframework.transaction.support.TransactionTemplate(
-                Mockito.mock(org.springframework.transaction.PlatformTransactionManager::class.java)
+                Mockito.mock(org.springframework.transaction.PlatformTransactionManager::class.java).apply {
+                    Mockito.`when`(
+                        getTransaction(
+                            org.mockito.ArgumentMatchers.any(org.springframework.transaction.TransactionDefinition::class.java)
+                                ?: org.springframework.transaction.support.DefaultTransactionDefinition()
+                        )
+                    ).thenAnswer { org.springframework.transaction.support.SimpleTransactionStatus() }
+                }
             )
         )
         // UsageSessionService 用真实实现驱动 B1/B2 的"今日用量"派生（走假 usageSessionRepo）。
         // usageDelayService 在 list 路径不触发，以 mock 占位。
         val usageSessionService =
-            UsageSessionService(usageSessions, deviceSettingRepo, deviceService, Mockito.mock(UsageDelayService::class.java))
+            UsageSessionService(usageSessions, deviceSettingRepo, deviceService, Mockito.mock(UsageDelayService::class.java), Mockito.mock(UsageStartRequestService::class.java))
         // 真实 RBAC 闸门，与 AdminService 共享同一份 admin 仓储 —— 权限事实一致。
         val adminPerm = AdminPermissionService(admins, overrides, FakeCustomRoleRepo(), objectMapper)
-        val sweeper = ExpiredCommandSweeper(commands, screenshots, objectMapper)
+        // W2：补发服务用默认配置 + 假仓储（findRedeliverablePending 恒空），不改变本组用例语义
+        val commandRedelivery = CommandRedeliveryService(commands)
+        val sweeper = ExpiredCommandSweeper(commands, screenshots, objectMapper, commandRedelivery)
         val commandService = CommandService(
             devices, commands, mqtt, objectMapper, sweeper, auditService,
-            com.padguard.server.security.DeviceOwnershipGuard(devices)
+            com.padguard.server.security.DeviceOwnershipGuard(devices), commandRedelivery
         )
         // 密钥仅用于构造；createAdmin 不签发令牌，不会真正用到。
         val jwt = JwtTokenProvider("padguard-unit-test-secret-0123456789abcdef", 120, 30)
@@ -496,7 +608,7 @@ class AdminServiceTest {
         // W25：AdminService 已拆分为多个领域 @Service，门面仅做委托。测试直接构造各子服务，
         // 公开方法签名与原本一致（f.svc.* 调用无需改动）。
         val authS = AdminAuthService(admins, jwt, adminPerm)
-        val auditS = AdminAuditService(adminPerm, admins, users, auditLogs, alerts, auditService)
+        val auditS = AdminAuditService(adminPerm, admins, users, auditLogs, alerts, auditService, ws)
         val billingS = AdminBillingService(subs, orders, users, billing, adminPerm, auditService, refundClient)
         val rbacS = AdminRbacService(admins, adminPerm, auditService, mailService, settings, objectMapper)
         val settingsS = AdminSettingsService(adminPerm, settings, billing, objectMapper, auditService, env)

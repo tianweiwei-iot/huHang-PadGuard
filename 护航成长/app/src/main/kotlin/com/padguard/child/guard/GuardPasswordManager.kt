@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.withLock
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 import javax.inject.Inject
@@ -107,8 +108,17 @@ class GuardPasswordManager @Inject constructor(
      * 主线程安全的状态快照。由 init 中订阅 DataStore Flow 持续刷新，
      * 所有 `*Now()` 方法只读它，绝不挂起。
      */
-    @Volatile
-    private var snapshot = Snapshot()
+    /**
+     * 主线程安全的状态快照。由 init 中订阅 DataStore Flow 持续刷新（[setSnapshot]），
+     * 所有 `*Now()` 方法只读它，绝不挂起。
+     *
+     * 用 [AtomicReference] 而非 `@Volatile var` + `copy`：快照更新是「读-改-写」，
+     * `@Volatile` 只保证可见性、**不保证该组合原子**。无障碍主线程回调的
+     * [revokeAppAccessIfNot] 与 IO 线程的 [grantAppAccess] 并发时，
+     * 两次 `snapshot.copy(...)` 可能交错，使 `appAccessPkg` 残留旧值 → 受控应用被免密打开。
+     * [AtomicReference.getAndUpdate] 把读改写锁成原子，彻底消除该竞态。
+     */
+    private val snapshotRef = AtomicReference(Snapshot())
 
     private data class Snapshot(
         val enabled: Boolean = false,
@@ -162,7 +172,7 @@ class GuardPasswordManager @Inject constructor(
     init {
         // 持续把 DataStore 最新值镜像到 @Volatile 快照，避免主线程 runBlocking 读导致的 ANR。
         scope.launch {
-            store.data.collect { prefs -> snapshot = snapshotFrom(prefs) }
+            store.data.collect { prefs -> snapshotRef.set(snapshotFrom(prefs)) }
         }
     }
 
@@ -178,9 +188,9 @@ class GuardPasswordManager @Inject constructor(
     suspend fun isUnlocked(): Boolean = isUnlocked(store.data.first())
 
     /** 同步快捷读取：无障碍服务在主线程事件回调里用，避免挂起（只读 @Volatile 快照）。 */
-    fun isUnlockedNow(): Boolean = snapshot.isUnlocked()
+    fun isUnlockedNow(): Boolean = snapshotRef.get().isUnlocked()
 
-    fun isEnabledNow(): Boolean = snapshot.enabled
+    fun isEnabledNow(): Boolean = snapshotRef.get().enabled
 
     /**
      * 服务端下发的密码哈希（PBKDF2 格式，见 [protocolHash]），存入前用 Android Keystore 二次加密，
@@ -309,7 +319,7 @@ class GuardPasswordManager @Inject constructor(
     )
 
     /** 同步读：当前是否处于"失败过多锁定期"，无障碍回调用（只读 @Volatile 快照）。 */
-    fun isLockedOutNow(): Boolean = snapshot.isLockedOut()
+    fun isLockedOutNow(): Boolean = snapshotRef.get().isLockedOut()
 
     /**
      * 同步读：该应用当前是否已被家长验证放行（只读 @Volatile 快照，主线程判定用）。
@@ -317,7 +327,7 @@ class GuardPasswordManager @Inject constructor(
      * 注意这**不是** [isUnlockedNow]：解锁窗口放行的是安装/卸载/改设置这类设备操作，
      * 而这里放行的是「打开这一个应用」，两者不可互相推导。
      */
-    fun isAppAccessGrantedNow(pkg: String): Boolean = snapshot.isAppAccessGranted(pkg)
+    fun isAppAccessGrantedNow(pkg: String): Boolean = snapshotRef.get().isAppAccessGranted(pkg)
 
     /**
      * 授予对**单个应用**的访问放行（家长在门禁里输对密码之后调用）。
@@ -343,11 +353,13 @@ class GuardPasswordManager @Inject constructor(
             it[KEY_APP_ACCESS_UNTIL_ELAPSED] = untilElapsed
             it[KEY_APP_ACCESS_UNTIL] = untilWall
         }
-        snapshot = snapshot.copy(
-            appAccessPkg = pkg,
-            appAccessUntilElapsed = untilElapsed,
-            appAccessUntilWall = untilWall
-        )
+        snapshotRef.getAndUpdate {
+            it.copy(
+                appAccessPkg = pkg,
+                appAccessUntilElapsed = untilElapsed,
+                appAccessUntilWall = untilWall
+            )
+        }
     }
 
     /**
@@ -360,10 +372,10 @@ class GuardPasswordManager @Inject constructor(
      * 若等 DataStore 落盘，这一帧的判定读到的仍是旧快照。
      */
     fun revokeAppAccessIfNot(pkg: String) {
-        val granted = snapshot.appAccessPkg
+        val granted = snapshotRef.get().appAccessPkg
         if (granted.isEmpty() || granted == pkg) return
         Logger.d(TAG) { "app access grant revoked: left $granted, now $pkg" }
-        snapshot = snapshot.copy(appAccessPkg = "", appAccessUntilElapsed = 0L, appAccessUntilWall = 0L)
+        snapshotRef.getAndUpdate { it.copy(appAccessPkg = "", appAccessUntilElapsed = 0L, appAccessUntilWall = 0L) }
         scope.launch {
             runCatching {
                 store.edit {
@@ -382,7 +394,7 @@ class GuardPasswordManager @Inject constructor(
             it[KEY_APP_ACCESS_UNTIL_ELAPSED] = 0L
             it[KEY_APP_ACCESS_UNTIL] = 0L
         }
-        snapshot = snapshot.copy(appAccessPkg = "", appAccessUntilElapsed = 0L, appAccessUntilWall = 0L)
+        snapshotRef.getAndUpdate { it.copy(appAccessPkg = "", appAccessUntilElapsed = 0L, appAccessUntilWall = 0L) }
     }
 
     /** 解锁：开启一个时间窗口，期间允许安装/卸载/改设置（双时钟写入）。 */
@@ -408,7 +420,7 @@ class GuardPasswordManager @Inject constructor(
             it[KEY_APP_ACCESS_UNTIL] = 0L
             it[KEY_APP_ACCESS_UNTIL_ELAPSED] = 0L
         }
-        snapshot = snapshot.copy(appAccessPkg = "", appAccessUntilElapsed = 0L, appAccessUntilWall = 0L)
+        snapshotRef.getAndUpdate { it.copy(appAccessPkg = "", appAccessUntilElapsed = 0L, appAccessUntilWall = 0L) }
     }
 
     /** 跳到解锁界面（APP 内部发起下载/安装/卸载/设置前、或无障碍拦截时由家长在 App 内调起）。 */

@@ -42,7 +42,7 @@ object UninstallEntryDetector {
     )
 
     /**
-     * 该窗口是否是「可能卸载应用」的入口。
+     * 单桌面版本（保留旧签名，便于调用方与测试按"当前默认桌面"传参）。
      *
      * @param pkg 窗口所属包名（无障碍事件里的 `packageName`）
      * @param className 窗口类名（无障碍事件里的 `className`）
@@ -54,6 +54,34 @@ object UninstallEntryDetector {
         className: String,
         launcherPackage: String?,
         launcherHomeClass: String?
+    ): Boolean = isUninstallSurface(
+        pkg = pkg,
+        className = className,
+        launcherHomeClasses = if (launcherPackage != null && launcherHomeClass != null) {
+            mapOf(launcherPackage to launcherHomeClass)
+        } else {
+            emptyMap()
+        }
+    )
+
+    /**
+     * 多桌面版本（R-P2-8）：一次传入"桌面包名 → 主页类名"。
+     *
+     * ## 为什么不能只认"当前默认桌面"
+     * 早期实现只解析 `resolveActivity(CATEGORY_HOME, MATCH_DEFAULT_ONLY)` 拿到的那**一个**包，
+     * 于是有两个漏判口子：
+     * 1. **装了多个桌面**（系统桌面 + 第三方桌面 + 儿童桌面）时，只有默认那一个被 arm；
+     *    孩子把默认桌面切成另一个（设置里能改，且不需要任何权限），长按卸载就走通了；
+     * 2. **运行期切换默认桌面**后，无障碍服务里缓存的值是服务连接那一刻解析的，
+     *    不重启服务就永远指向旧包名 —— 同样等于没有防护。
+     *
+     * 现在由服务把"所有声明了 CATEGORY_HOME 的包"都 arm 进来，并在窗口事件里定期重解析，
+     * 两个口子一起堵。判定口径完全不变：仍然只比包名与类名，不读界面内容。
+     */
+    fun isUninstallSurface(
+        pkg: String,
+        className: String,
+        launcherHomeClasses: Map<String, String>
     ): Boolean {
         if (pkg.isBlank()) return false
         val cls = className.trim()
@@ -62,14 +90,12 @@ object UninstallEntryDetector {
         if (cls.isNotEmpty() && UNINSTALL_CLASS_HINTS.any { it in cls.lowercase() }) return true
 
         // ② 桌面弹出的浮层（长按菜单 / 文件夹 / 桌面设置）
-        if (launcherPackage == null || pkg != launcherPackage) return false
+        val homeClass = launcherHomeClasses[pkg] ?: return false
         // 桌面主页本身绝不拦（否则孩子一按 HOME 就被弹密码框，设备直接不可用）
         if (cls.isEmpty()) return false
-        if (launcherHomeClass.isNullOrBlank()) {
-            // 解析不到主页类名时无法区分"主页"与"浮层"，只保留第 ① 条，避免把桌面整体拦死
-            return false
-        }
-        return !sameActivity(cls, launcherHomeClass)
+        // 该桌面的主页类名未知时无法区分"主页"与"浮层"，只保留第 ① 条，避免把桌面整体拦死
+        if (homeClass.isBlank()) return false
+        return !sameActivity(cls, homeClass)
     }
 
     /**

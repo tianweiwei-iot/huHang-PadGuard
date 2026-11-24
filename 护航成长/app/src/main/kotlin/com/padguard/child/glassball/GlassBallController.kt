@@ -98,6 +98,7 @@ class GlassBallController @Inject constructor(
         val view = GlassBallView(context)
         view.onSingleTap = { openParentGate() }
         view.onDoubleTap = { openDelayDialog() }
+        view.onLongPress = { openPauseConfirm() }
         // 增量回调：视图侧已完成基准换算，控制器只做窗口平移
         view.onDragDelta = { dx, dy -> onDragDelta(dx, dy) }
         view.onDragEnd = { onDragEnd() }
@@ -248,38 +249,46 @@ class GlassBallController @Inject constructor(
      * 会话激活 → 服务端基线插值；未激活 → 策略额度回退。
      */
     private fun renderNow() {
-        val view = ball ?: return
-        val session = usageSessionManager.state.value
+        // 渲染异常一律兜住：本方法在 SupervisorJob(Dispatchers.Main) 作用域内被秒级 ticker
+        // 与两个 StateFlow 收集器直接调用，而该作用域未挂 CoroutineExceptionHandler。
+        // 一旦内部抛异常（数据形态异常/算术边界等）既无 handler 又无 try/catch，会冒泡到主线程
+        // uncaughtExceptionHandler → 整个进程（含 GuardService）崩溃，守护可用性 fail-open。
+        // 单次渲染失败只记日志，绝不中断主循环或击垮进程。
+        runCatching {
+            val view = ball ?: return@runCatching
+            val session = usageSessionManager.state.value
 
-        val usedMinutes: Int
-        val remainingLabel: String
-        val ratio: Float
-        if (session.active) {
-            val remainingMs = usageSessionManager.liveRemainingMs()
-            val quotaMinutes = session.quotaMinutes.coerceAtLeast(0)
-            usedMinutes = (quotaMinutes - remainingMs / 60_000.0).roundToInt().coerceAtLeast(0)
-            remainingLabel = formatRemaining(remainingMs)
-            ratio = if (quotaMinutes > 0) {
-                (remainingMs / (quotaMinutes * 60_000.0)).toFloat().coerceIn(0f, 1f)
+            val usedMinutes: Int
+            val remainingLabel: String
+            val ratio: Float
+            if (session.active) {
+                val remainingMs = usageSessionManager.liveRemainingMs()
+                val quotaMinutes = session.quotaMinutes.coerceAtLeast(0)
+                usedMinutes = (quotaMinutes - remainingMs / 60_000.0).roundToInt().coerceAtLeast(0)
+                remainingLabel = formatRemaining(remainingMs)
+                ratio = if (quotaMinutes > 0) {
+                    (remainingMs / (quotaMinutes * 60_000.0)).toFloat().coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
             } else {
-                0f
+                val fallback = fallbackStatus
+                usedMinutes = fallback?.usedMinutes ?: 0
+                remainingLabel = fallback?.let { formatRemaining(it.remainingMinutes * 60_000L) } ?: "--:--"
+                ratio = if (fallback != null && fallback.quotaMinutes > 0) {
+                    (fallback.remainingMinutes.toFloat() / fallback.quotaMinutes).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
             }
-        } else {
-            val fallback = fallbackStatus
-            usedMinutes = fallback?.usedMinutes ?: 0
-            remainingLabel = fallback?.let { formatRemaining(it.remainingMinutes * 60_000L) } ?: "--:--"
-            ratio = if (fallback != null && fallback.quotaMinutes > 0) {
-                (fallback.remainingMinutes.toFloat() / fallback.quotaMinutes).coerceIn(0f, 1f)
-            } else {
-                0f
-            }
-        }
-        view.render(
-            usedMinutes = usedMinutes,
-            remainingLabel = remainingLabel,
-            remainingRatio = ratio,
-            pendingDelayMinutes = session.pendingDelayMinutes
-        )
+            view.render(
+                usedMinutes = usedMinutes,
+                remainingLabel = remainingLabel,
+                remainingRatio = ratio,
+                pendingDelayMinutes = session.pendingDelayMinutes,
+                timerPaused = session.paused
+            )
+        }.onFailure { Logger.e(TAG, it) { "render glass ball failed" } }
     }
 
     /** 剩余时长格式：≥60 分钟显示「N 分」，否则 mm:ss */
@@ -314,6 +323,17 @@ class GlassBallController @Inject constructor(
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { context.startActivity(intent) }
             .onFailure { Logger.e(TAG, it) { "open GlassBallDialogActivity failed" } }
+    }
+
+    /**
+     * 长按：弹出「暂停计时」确认框。只负责唤起，真正的状态转移在对话框里
+     * 由 UsageSessionManager.pause(MANUAL) 完成 —— 避免误触即暂停。
+     */
+    private fun openPauseConfirm() {
+        val intent = Intent(context, TimerPauseDialogActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(intent) }
+            .onFailure { Logger.e(TAG, it) { "open TimerPauseDialogActivity failed" } }
     }
 
     companion object {

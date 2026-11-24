@@ -33,6 +33,7 @@ import java.util.concurrent.TimeUnit
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @ActiveProfiles("local")
 @TestPropertySource(properties = [
+    "padguard.storage.dir=build/test-uploads",
     "spring.datasource.url=jdbc:h2:mem:policyver;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;LOCK_TIMEOUT=10000",
     "spring.jpa.hibernate.ddl-auto=create-drop",
     "padguard.jwt.secret=policy-version-test-secret-key-32-bytes",

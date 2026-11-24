@@ -6,11 +6,14 @@ import com.padguard.parent.domain.model.Alert
 import com.padguard.parent.domain.model.AlertLevel
 import com.padguard.parent.domain.model.AlertStatus
 import com.padguard.parent.domain.repository.AlertRepository
+import com.padguard.parent.data.remote.ParentPushClient
+import com.padguard.parent.data.remote.ParentPushMessage
 import com.padguard.parent.notification.NotificationHelper
 import com.padguard.parent.presentation.util.RefreshGate
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -46,13 +49,24 @@ data class RiskAlertUiState(
     /** 最近一次操作的反馈文案（如"已确认"） */
     val actionMessage: String? = null,
     /** 确认中：按钮置灰，避免连点重复请求 */
-    val processing: Boolean = false
+    val processing: Boolean = false,
+    /**
+     * 最近一次拉取告警失败的原因；null = 最近一次成功。
+     *
+     * 此前失败路径是 `?: return@launch` —— 状态一点都不动，页面把"接口挂了"
+     * 原样渲染成"暂无告警"。家长看到"没有风险"就放心了，而真相可能是根本没拉到。
+     * 消息中心这种"没有消息 = 好消息"的页面，静默失败是最伤人的一种。
+     */
+    val error: String? = null,
+    /** 最近一次成功拉到告警的时刻（墙钟毫秒），用于说明"这份列表是哪一刻的" */
+    val lastSuccessAt: Long? = null
 )
 
 @HiltViewModel
 class RiskAlertCenterViewModel @Inject constructor(
     private val alertRepository: AlertRepository,
-    private val notificationHelper: NotificationHelper
+    private val notificationHelper: NotificationHelper,
+    private val parentPushClient: ParentPushClient
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(RiskAlertUiState())
@@ -80,6 +94,30 @@ class RiskAlertCenterViewModel @Inject constructor(
 
     init {
         startPolling()
+        observeAlertPush()
+    }
+
+    /** 账号切换时清空 A 的告警记录/未读/去重集合，防止残留到 B 的会话（详见 Unlock VM 同名方法）。 */
+    fun resetForSessionChange() {
+        notifiedAlertIds.clear()
+        refreshGate.reset()
+        _uiState.value = RiskAlertUiState()
+    }
+
+    /**
+     * 告警推送快路径：服务端建警（`alert.new`）或自愈批量关单（`alert.resolved`）时即刻全量重拉。
+     *
+     * 此前本页只有 15s 轮询，告警产生与"修好了"两个方向都要等下一拍——孩子端权限自愈后
+     * 服务端已关单并推 `alert.resolved`，家长端铃铛却最长红 15 秒，正是"明明开了还显示未开"的
+     * 最后一公里。推送丢失时 15s 轮询仍是兜底（[startPolling]），二者职责清晰。
+     * 收敛靠 [refreshGate] 单飞：告警风暴下多条推送叠加也只会串行刷新，不会并发堆积或旧响应覆盖新数据。
+     */
+    private fun observeAlertPush() {
+        viewModelScope.launch {
+            parentPushClient.messages.collect { msg ->
+                if (msg is ParentPushMessage.AlertsChanged) refresh()
+            }
+        }
     }
 
     private fun startPolling() {
@@ -109,10 +147,17 @@ class RiskAlertCenterViewModel @Inject constructor(
             try {
                 // status 传 null = 全量（ACTIVE / ACKNOWLEDGED / CLOSED 都要）：
                 // 消息中心要能翻看历史，不能只给未处理的。
-                val alerts = alertRepository.getAlerts(deviceId = null, status = null)
-                    .getOrNull()
-                    ?.sortedByDescending { it.triggeredAt }
-                    ?: return@launch
+                val result = alertRepository.getAlerts(deviceId = null, status = null)
+                val fetched = result.getOrNull()
+                if (fetched == null) {
+                    // 失败必须留痕：静默返回会让"接口挂了"看起来像"孩子一切正常"。
+                    // 已有的 alerts 不清空（旧列表仍可翻看），只挂出"这份数据没更新"的信号。
+                    _uiState.value = _uiState.value.copy(
+                        error = result.exceptionOrNull()?.message ?: "告警拉取失败，请稍后重试"
+                    )
+                    return@launch
+                }
+                val alerts = fetched.sortedByDescending { it.triggeredAt }
 
                 // 后台 + 新出现的 CRITICAL 告警 → 本地通知触达家长。
                 // 只挑 CRITICAL：WARNING/INFO 是"留意"级，进消息中心即可，
@@ -128,7 +173,9 @@ class RiskAlertCenterViewModel @Inject constructor(
 
                 _uiState.value = _uiState.value.copy(
                     alerts = alerts,
-                    unreadCount = alerts.count { it.needsAttention }
+                    unreadCount = alerts.count { it.needsAttention },
+                    error = null,
+                    lastSuccessAt = System.currentTimeMillis()
                 )
             } finally {
                 // 期间被拒的刷新（下拉刷新 / 确认告警后的刷新）不能丢，放行一次
@@ -150,6 +197,8 @@ class RiskAlertCenterViewModel @Inject constructor(
             val outcome = try {
                 alertRepository.acknowledgeAlert(alert.id)
             } catch (t: Throwable) {
+                // 退出页面/切账号的取消不是操作失败：放行后不写错误态、不误取消通知。
+                if (t is CancellationException) throw t
                 Result.failure(t)
             }
             // 无论成败都取消通知：失败时下轮轮询会因 notifiedAlertIds 已记录而不再补发，

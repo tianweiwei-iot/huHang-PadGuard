@@ -127,6 +127,23 @@ class PolicyEngine @Inject constructor(
     private val alertedKeys = mutableSetOf<String>()
     private var alertDayKey = ""
 
+    /**
+     * 篡改自检里「持续为真、检测层又没有自身闩锁」的状态型告警，在**上报层**做边沿去重：
+     * 只在「上一轮没有 → 本轮出现」那一拍上报；状态消失即复位，下次再出现仍会报。
+     *
+     * 为什么收在 [scanTamper] 而不是给每个 Detector 加字段：这里是**唯一**把 TamperFinding
+     * 变成 RiskEvent 的出口，检测层每轮重新构造 findings 是正常语义，不该被改。
+     * 旧实现对每个 finding 无条件 `raise`，而服务端 `createFromEvent` 按 eventId 去重、
+     * 不按类别去重 —— 开发者选项开着、Wi-Fi 挂代理、debug 包装到已绑定设备、凭据被清
+     * （CONTROL_LOST）都会每轮自检新建一条 ACTIVE 告警，家长端红点只增不减，
+     * 正是「反复提示 / 一直提示」的直接来源之一。
+     *
+     * 事件型（尝试卸载、打开黑名单应用、改时间）刻意**不**进本集合：家长要看次数。
+     * HOME_CHANGED / ROOT_DETECTED / a11y / usageStats 在检测层已有各自闩锁，也不进。
+     */
+    private val tamperEdgeLock = Any()
+    private var prevStatefulTamper: Set<String> = emptySet()
+
     // ==================== 全量策略落地 ====================
 
     /** 用本地缓存的当前策略执行一次全量下发 */
@@ -270,11 +287,20 @@ class PolicyEngine @Inject constructor(
      * @param dailyLimitExpired 日总时长是否已由服务端权威会话判定为耗尽
      *        （true 时统一经 [LockReason.DAILY_LIMIT] 锁屏；本地采样累计不再参与日总时长判定，
      *         以换取三端（家长端 / 孩子端 / 服务端）时间严格一致）
+     * @param awaitingStart 新的一天尚未确认「开始计时」（已绑定且时间管控开启、会话未 active）。
+     *        true 时挂 [LockReason.AWAITING_START] 等待页：未确认期间不计时、不消耗额度，
+     *        但设备不可自由使用。由 GuardService 从会话管理器算出后传入（须叠加"已绑定"，
+     *        未绑定设备不挂——等待页对未绑定设备没有意义）。
+     * @param timerPaused 计时已暂停（熄屏自动暂停 / 长按悬浮球确认暂停）。
+     *        true 时挂 [LockReason.TIMER_PAUSED]：恢复计时前设备不可操作。
+     *        该原因不受临时解锁抑制，只有会话 resume() 能解除。
      */
     suspend fun tick(
         foregroundPackage: String?,
         screenOn: Boolean,
-        dailyLimitExpired: Boolean = false
+        dailyLimitExpired: Boolean = false,
+        awaitingStart: Boolean = false,
+        timerPaused: Boolean = false
     ): EngineTick {
         // 未成年人模式的分龄基线在这里派生一次，让下面的限额/护眼判定
         // 与 applyAll 走的是同一份口径。若各自读原始策略，会出现
@@ -437,6 +463,28 @@ class PolicyEngine @Inject constructor(
             )
         }
 
+        // ---------- 3.6 等待「开始计时」确认 ----------
+        // 新的一天经孩子确认才开始计时（家长端可主动发起/催办）。未确认期间保持等待页：
+        // 不计时、不消耗额度，但也不放行 —— "一直不确认"不能成为绕过。
+        // 与 DAILY_LIMIT 互斥（awaitingStart 只在会话未 active 时为 true，
+        // 而 isExpired() 在 !active 时恒 false，两者不会同时成立）。
+        if (awaitingStart && policy.appLimit.enabled) {
+            autoReasons[LockReason.AWAITING_START] = LockDetail(
+                text = "今日使用计时尚未开始，这是每天使用前的例行确认（并非故障），点「开始计时」后开始记录使用时间"
+            )
+        }
+
+        // ---------- 3.55 暂停计时（停止计时期间不可操作） ----------
+        // 与 AWAITING_START 一样走 syncAutoReasons 差集：暂停瞬间由 UsageSessionManager
+        // 直接 requestLock 立即生效，之后每轮由这里重派生，避免"手动挂了又被差集解掉"。
+        // 刻意不看 policy.appLimit.enabled：暂停是设备级硬锁，家长关掉时长管控时
+        // 会话侧会在下一次刷新清除暂停态，在此之前宁可多锁一轮也不放行。
+        if (timerPaused) {
+            autoReasons[LockReason.TIMER_PAUSED] = LockDetail(
+                text = "计时已暂停，点「继续计时」后恢复使用"
+            )
+        }
+
         // ---------- 4. 一次性同步自动原因 ----------
         // 用差集同步而不是逐个 request/release：
         // 逐个调用会在"时段刚结束、限额刚触发"的瞬间出现锁定态短暂为空，导致锁屏页闪一下
@@ -458,6 +506,45 @@ class PolicyEngine @Inject constructor(
         )
     }
 
+    /**
+     * 下一次时段状态翻转的绝对时间（R-P2-6，供 app 层设精确闹钟）。
+     *
+     * 息屏进入 Doze 后，守护服务的 `delay()` 不会唤醒 CPU —— 只靠轮询会让
+     * "21:00 开始锁机"实际拖到下一次系统唤醒。app 层据此排一次
+     * `setExactAndAllowWhileIdle`，到点立刻复查。
+     */
+    suspend fun nextScheduleTransition(atMillis: Long = timeProvider.now()): Long? =
+        scheduleEvaluator.nextTransitionAt(policyRepository.getPolicy().schedule, atMillis)
+
+    /**
+     * 多窗口下"该拦谁"的只读预判（R-P2-10）。
+     *
+     * ## 解决什么
+     * 分屏时同时有两个 resumed 的应用。旧实现只把"最后被点过的那个"当作前台，
+     * 于是另一半屏幕上的被禁/超额应用既不计时、也不进入拦截判定 ——
+     * 孩子把游戏和计算器并排开着，游戏就能一直玩下去。
+     *
+     * ## 为什么单独做成只读预判，而不是让 [tick] 一次判多个
+     * [tick] 带有**副作用**（累计每应用时长、记启动次数、推进护眼与会话状态）。
+     * 对多个候选各跑一次 tick 会把同一个采样周期的时长重复计入，等于凭空吃掉孩子的额度。
+     * 因此这里只做判定（[AppLimitEnforcer.evaluate] 与纯函数判定），
+     * 由调用方把选中的包**作为唯一前台**交给 [tick]，计时仍然只发生一次。
+     *
+     * @return 应当优先拦截的包名；都不该拦时返回 null（调用方回落到"最近 resumed 的那个"）
+     */
+    suspend fun blockedForegroundAmong(candidates: List<String>): String? {
+        if (candidates.size <= 1) return null
+        val policy = minorModeEnforcer.deriveBaseline(policyRepository.getPolicy())
+        val kiosk = kioskEnforcer.runtime()
+        return decideMultiWindowPriority(
+            candidates = candidates,
+            app = policy.app,
+            kiosk = kiosk,
+            tempUnlocked = { pkg -> lockController.isTempUnlockActive(pkg) },
+            limitVerdict = { pkg -> appLimitEnforcer.evaluate(policy.appLimit, pkg) }
+        )
+    }
+
     // ==================== 篡改自检 ====================
 
     /**
@@ -470,11 +557,24 @@ class PolicyEngine @Inject constructor(
         val policy = policyRepository.getPolicy()
         // systemLock 必须一起传：debug 构建/救援通道会主动解除调试类限制，
         // 缺了它 TamperDetector 只能按默认策略判定，把"按设计解除"误报成 POLICY_APPLY_FAILED。
-        val findings = tamperDetector.detect(policy.security, policy.systemLock)
+        // isDeviceBound 区分「debug 构建在开发/未绑定测试机」与「误部署到真实受管子设备」，后者才告警。
+        val bound = authRepository.getDeviceId().isNotBlank()
+        val findings = tamperDetector.detect(policy.security, policy.systemLock, isDeviceBound = bound)
         if (findings.isEmpty()) return emptyList()
 
         val deviceId = authRepository.getDeviceId()
+        val currentTypes = findings.mapTo(HashSet()) { it.type.name }
+        val freshStateful = synchronized(tamperEdgeLock) {
+            val statefulNow = currentTypes.intersect(STATEFUL_TAMPER_TYPES)
+            val fresh = statefulNow - prevStatefulTamper
+            // 无论本轮是否上报都要更新基线：状态持续为真时下一轮不再报，
+            // 状态消失后再出现时又是一次「从无到有」，能正确再报一次。
+            prevStatefulTamper = statefulNow
+            fresh
+        }
         findings.forEach { finding ->
+            val typeName = finding.type.name
+            if (typeName in STATEFUL_TAMPER_TYPES && typeName !in freshStateful) return@forEach
             logRepository.raise(
                 type = finding.type,
                 level = finding.level,
@@ -578,6 +678,53 @@ class PolicyEngine @Inject constructor(
 
         /** 业务时区：与 UsageRepository.dayKey / 服务端 StatisticsService 保持完全一致 */
         private const val BIZ_ZONE = "Asia/Shanghai"
+
+        /**
+         * 走「边沿上报」的状态型篡改类别：条件会持续为真，但状态本身没有恢复动作，
+         * 重复上报只会把家长端告警列表刷满。新增 Detector 时若产出的是持续型信号，
+         * 必须登记到这里；若是一次性行为事件，则**不要**登记。
+         */
+        internal val STATEFUL_TAMPER_TYPES = setOf(
+            RiskType.DEVELOPER_OPTIONS_ENABLED.name,
+            RiskType.USB_DEBUG_ENABLED.name,
+            RiskType.DEBUG_BUILD_ACTIVE.name,
+            RiskType.PROXY_DETECTED.name,
+            RiskType.CONTROL_LOST.name
+        )
+
+        /** 纯函数：本轮该上报的状态型类别 = 本轮新出现的 ∩ 白名单。便于 JVM 单测锁死边沿语义。 */
+        internal fun freshStatefulTamper(prev: Set<String>, current: Set<String>): Set<String> =
+            (current - prev).intersect(STATEFUL_TAMPER_TYPES)
+
+        /**
+         * 分屏（多窗口）时"该优先拦谁"的纯逻辑（R-P2-10）。
+         *
+         * 判据与 [tick] 的内联判定同源：黑名单兜底 → Kiosk 降级白名单 → 单应用限额，
+         * 但**只判定不计时**（[limitVerdict] 由调用方注入只读的 evaluate）。
+         * 顺序即优先级：黑名单/纯桌面是家长明确的"不许用"，比"时长超了"更该先拦。
+         *
+         * 为什么临时放行要在最外层统一跳过：家长刚点"同意再玩一会儿"，
+         * 若这里仍按黑名单/限额返回该包，拦截页会在下一个采样点立刻盖上，
+         * 家长端显示"已同意"而孩子端毫无变化。
+         */
+        internal suspend fun decideMultiWindowPriority(
+            candidates: List<String>,
+            app: AppPolicy,
+            kiosk: com.padguard.core.engine.enforcer.KioskRuntime,
+            tempUnlocked: (String) -> Boolean,
+            limitVerdict: suspend (String) -> LimitVerdict
+        ): String? {
+            for (pkg in candidates) {
+                if (pkg.isBlank()) continue
+                if (tempUnlocked(pkg)) continue
+                if (decideBlacklistBlock(pkg, app, tempUnlocked = false).first != null) return pkg
+                if (decideKioskBlock(pkg, kiosk, tempUnlocked = false)) return pkg
+                val verdict = limitVerdict(pkg)
+                // DAILY_TOTAL 走服务端权威会话（见 tick 注释），本地这一路不重复判定。
+                if (verdict is LimitVerdict.Blocked && verdict.reason != LimitReason.DAILY_TOTAL) return pkg
+            }
+            return null
+        }
 
         /**
          * Kiosk 降级态下的前台拦截判定（纯函数，便于 JVM 单测）。

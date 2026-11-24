@@ -43,7 +43,10 @@ class BindActivity : ComponentActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
-            scannedCode = result.data?.getStringExtra(QrScanActivity.EXTRA_CODE)
+            val raw = result.data?.getStringExtra(QrScanActivity.EXTRA_CODE)
+            // 与 NFC 路径统一走归一化：仅取数字、必须恰好 6 位，否则视为无效码忽略，
+            // 避免扫码下发的字母/7–8 位码被 onCodeChanged 静默截断成错误码直接提交。
+            scannedCode = raw?.let { extractCodeFromPayload(it) }
         }
     }
 
@@ -142,17 +145,23 @@ class BindActivity : ComponentActivity() {
         return code
     }
 
-    /** 从 NDEF 文本负载里取出绑定码：支持 `padguard://bind?code=XXX` 与裸码。 */
+    /**
+     * 从 NDEF 文本负载里取出绑定码：支持 `padguard://bind?code=XXX` 与裸码。
+     *
+     * 归一化口径与手动输入 [BindViewModel.onCodeChanged] 保持一致（仅取数字），
+     * 且必须恰好 6 位才接受——避免扫码/NFC 下发的字母或 7–8 位码被静默截断成错误码后直接提交。
+     * 格式不符时返回 null，由上层忽略本次扫描（用户可重扫或手动输入），而非静默提交错误码。
+     */
     private fun extractCodeFromPayload(payload: String): String? {
         // NDEF 文本记录前缀可能带语言码/状态码字节，先去掉不可打印前缀
         val text = payload.replace(Regex("^[^a-zA-Z0-9:/?=&]+"), "").trim()
-        if (text.startsWith("padguard://")) {
-            val code = android.net.Uri.parse(text).getQueryParameter("code")
-            return code
+        val rawCode = if (text.startsWith("padguard://")) {
+            android.net.Uri.parse(text).getQueryParameter("code").orEmpty()
+        } else {
+            text
         }
-        // 裸绑定码（如家长端写入的纯 6 位码）
-        val bare = text.filter { it.isLetterOrDigit() }
-        return if (bare.length in 6..8) bare else null
+        val digits = rawCode.filter { it.isDigit() }
+        return if (digits.length == 6) digits else null
     }
 
     companion object {

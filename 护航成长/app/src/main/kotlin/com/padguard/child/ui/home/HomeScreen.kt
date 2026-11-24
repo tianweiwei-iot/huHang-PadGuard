@@ -96,6 +96,9 @@ private fun HomeContent(
                 statusLabel = state.statusLabel,
                 isOnline = state.isOnline
             )
+            // 合规告知（P0-6）：孩子端须明确展示"被监管中"。无论未成年人模式是否开启，
+            // 该提示常驻首页顶部，让孩子清楚本设备处于家长守护下；详细边界见家长端《管控能力说明》。
+            SupervisedHint()
             // 放在「今日使用」正上方：额度是按分龄档位算出来的，
             // 先看到"为什么是这个额度"，再看额度本身，孩子才不会觉得数字是随机的。
             MinorModeBanner(state.minorMode)
@@ -115,6 +118,51 @@ private fun HomeContent(
                 onRequestUnlock = onRequestUnlock
             )
             Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
+
+/**
+ * 「被监管中」常驻提示（P0-6 合规告知）。
+ *
+ * 放在首页顶部、未成年人模式横幅之前，确保孩子一进首页就看到本设备处于家长守护下。
+ * 文案只做"告知"，不展开技术边界（详细降级边界在家长端《管控能力说明》里，避免首页信息过载）。
+ */
+@Composable
+private fun SupervisedHint() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Filled.ChildCare,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "本设备处于家长守护中",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "使用时长、应用与位置由家长远程守护；管控边界详见家长端《管控能力说明》。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
         }
     }
 }

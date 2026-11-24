@@ -396,6 +396,22 @@ class MockRemoteDataSource @Inject constructor(
         return ApiResult.Success(ScreenshotAck(shotId = shotId, accepted = true), timeProvider.now())
     }
 
+    override suspend fun uploadScreenshot(
+        shotId: String,
+        capturedAt: Long,
+        triggerType: String,
+        file: java.io.File
+    ): ApiResult<ScreenshotAck> {
+        simulateNetwork<ScreenshotAck>()?.let { return it }
+        val kb = (file.length() / 1024).toInt()
+        _stats.value = _stats.value.copy(
+            screenshotCount = _stats.value.screenshotCount + 1,
+            lastScreenshotKb = kb
+        )
+        Logger.i(TAG) { "screenshot accepted: $shotId ${kb}KB trigger=$triggerType (file)" }
+        return ApiResult.Success(ScreenshotAck(shotId = shotId, accepted = true), timeProvider.now())
+    }
+
     override suspend fun uploadMedia(
         taskId: String,
         durationSeconds: Int,

@@ -39,6 +39,10 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 @AutoConfigureMockMvc
 @ActiveProfiles("local")
 @TestPropertySource(properties = [
+    "padguard.storage.dir=build/test-uploads",
+    // 集成测试会在几秒内为每个用例开一个家长账号；真实注册频控（默认 6 次/分钟/IP）
+    // 是给生产拦批量建号的，不该干预用例本身——频控行为由 RateLimitTest 单测覆盖。
+    "padguard.ratelimit.register=200",
     "spring.datasource.url=jdbc:h2:mem:itest;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE",
     "spring.jpa.hibernate.ddl-auto=create-drop",
     "padguard.jwt.secret=integration-test-secret-key-32-bytes-minimum-ok",
@@ -74,7 +78,7 @@ class CriticalLinkIntegrationTest {
                 )
             )
         }
-        parentToken = jwt.createAccessToken(parentId)
+        parentToken = jwt.createAccessToken(parentId, 0L)
 
         // 超级管理员（全权限）
         val superId = "A-itest-super"
@@ -147,8 +151,10 @@ class CriticalLinkIntegrationTest {
                 .content(objectMapper.writeValueAsString(mapOf("phone" to "13900000002", "password" to "Test@12345")))
                 .accept(MediaType.APPLICATION_JSON)
         ).andExpect(status().`isOk`).andReturn()
-        assertTrue(reg.response.contentAsString.contains("13900000002") || reg.response.status == 200,
-            "家长注册应成功")
+        // 修复恒真断言：上一行已断言 status=200，原来的 `|| status == 200` 会让
+        // 响应内容完全错误也永远通过。这里只校验响应体，并带上实际内容便于定位。
+        assertTrue(reg.response.contentAsString.contains("13900000002"),
+            "家长注册响应应回显手机号，实际=${reg.response.contentAsString}")
 
         // 孩子端按账号绑定
         val bindBody = mapOf(

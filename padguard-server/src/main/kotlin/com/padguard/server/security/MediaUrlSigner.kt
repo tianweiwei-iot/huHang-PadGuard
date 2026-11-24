@@ -27,9 +27,13 @@ import javax.crypto.spec.SecretKeySpec
  * `padguard.media.require-signature` 闸门控制（默认关），待客户端全面升级后开启，
  * 与短信登录闸门同一治理思路。
  *
- * ## 为什么与 JWT 共用密钥
+ * ## 为什么用派生子密钥而不是 JWT 密钥本体
  * JWT 密钥已有"配置注入 → 本地文件随机生成持久化"的完整生命周期（见 [JwtTokenProvider]），
- * 复用避免再维护一份密钥文件；签名域分离（"file|" 前缀）保证两处签名不可互换。
+ * 复用它的密钥文件避免再维护一份。但两处签名**不能共用同一把密钥材料**：
+ * 任何一个签名域被攻破（如某个 JWT 实现缺陷泄漏了签名原语），另一个域会被连带伪造。
+ * 这里用 HMAC(jwtSecret, "media-url-signing-v1") 派生独立子密钥——JWT 侧没有这个域分隔符，
+ * 即使攻击者拿到 JWT 签名能力也推不出媒体子密钥（反之亦然），密钥文件仍是唯一需要落盘维护的。
+ * 注意：子密钥派生串更换 = 全部已下发签名 URL 立即失效（有 TTL，客户端刷新列表即恢复）。
  */
 @Component
 class MediaUrlSigner(
@@ -38,6 +42,17 @@ class MediaUrlSigner(
 ) {
 
     private val log = LoggerFactory.getLogger(MediaUrlSigner::class.java)
+
+    /**
+     * 媒体签名独立子密钥（HKDF 风格的 HMAC 派生）。
+     * 与 JWT 签名密钥域分离：JWT 侧不含 "media-url-signing-v1" 域分隔符，
+     * 拿到 JWT 签名能力无法推导出本密钥，反之亦然。
+     */
+    private val mediaKey: ByteArray = run {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(jwt.signingSecret().toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        mac.doFinal("media-url-signing-v1".toByteArray(Charsets.UTF_8))
+    }
 
     /** 给 /v1/files/{id} 形态的 URL 附加短期签名；非文件 URL 原样返回。 */
     fun sign(url: String, ttlMillis: Long = urlTtlHours * 3_600_000L): String {
@@ -64,7 +79,7 @@ class MediaUrlSigner(
 
     private fun hmac(fileId: String, expMs: Long): String {
         val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(jwt.signingSecret().toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        mac.init(SecretKeySpec(mediaKey, "HmacSHA256"))
         return mac.doFinal("file|$fileId|$expMs".toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
     }

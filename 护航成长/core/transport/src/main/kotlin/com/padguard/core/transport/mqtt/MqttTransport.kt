@@ -2,11 +2,15 @@ package com.padguard.core.transport.mqtt
 
 import android.content.Context
 import com.padguard.core.common.Logger
+import com.padguard.core.transport.BuildConfig
 import com.padguard.core.transport.TransportMode
 import com.padguard.core.transport.TransportSettings
+import com.padguard.core.transport.UplinkSigner
 import com.padguard.core.transport.http.CredentialStore
+import com.padguard.core.transport.security.CertPinTrustManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -28,6 +32,7 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions
 import org.eclipse.paho.client.mqttv3.MqttMessage
 import org.eclipse.paho.client.mqttv3.persist.MqttDefaultFilePersistence
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
@@ -87,8 +92,7 @@ class MqttTransport @Inject constructor(
     )
     val inbound: SharedFlow<MqttInbound> = _inbound.asSharedFlow()
 
-    @Volatile
-    private var consecutiveFailures = 0
+    private val consecutiveFailures = AtomicInteger(0)
 
     /**
      * 建立连接。幂等：已连接时直接返回 true。
@@ -99,18 +103,22 @@ class MqttTransport @Inject constructor(
             Logger.d(TAG) { "skip mqtt connect: device not bound yet" }
             return false
         }
-        if (client?.isConnected == true) return true
-
         val deviceId = credentials.deviceId
         val tenant = credentials.tenantId
         val broker = settings.mqttBroker.value
+
+        // 快速路径必须同时比对 clientBroker：broker 地址运行时会被服务端下发变更，
+        // 只判 isConnected 的话，旧 broker 仍可达时 connect() 直接短路返回 true，
+        // 新地址**进程重启前永远不生效**——正是 clientBroker 字段注释要防的场景，
+        // 原先只是漏了把快速路径也纳入该检查。
+        if (client?.isConnected == true && clientBroker == broker) return true
 
         return try {
             withContext(Dispatchers.IO) {
                 // broker 与缓存不一致时**必须重建**：Paho 的 broker 地址在构造时绑定，
                 // 复用旧实例等于继续连旧地址（详见 clientBroker 注释）。
                 val mqttClient = client?.takeIf { clientBroker == broker } ?: run {
-                    client?.let { stale -> runCatching { stale.close(true) } }
+                    client?.let { stale -> runCatching { stale.close(true) }.onFailure { Logger.w(TAG, it) { "mqtt stale client close failed" } } }
                     createClient(broker, deviceId).also {
                         client = it
                         clientBroker = broker
@@ -121,16 +129,21 @@ class MqttTransport @Inject constructor(
                 subscribeAll(mqttClient, tenant, deviceId)
                 publishOnlineStatus(tenant, deviceId)
             }
-            consecutiveFailures = 0
+            consecutiveFailures.set(0)
             _connected.value = true
             settings.setMode(TransportMode.MQTT)
             Logger.i(TAG) { "mqtt connected: $broker" }
             true
+        } catch (e: CancellationException) {
+            // 取消不是连接失败：服务停止 / 换账号 / 网络恢复重连都会取消本 suspend，
+            // 若计入 consecutiveFailures，几次取消就能把通道永久降级到 POLLING，
+            // 且该计数只在下次成功 connect 时才清零（见成功分支）。结构化并发纪律：原样上抛。
+            throw e
         } catch (e: Exception) {
             _connected.value = false
-            consecutiveFailures++
-            Logger.w(TAG, e) { "mqtt connect failed (#$consecutiveFailures)" }
-            if (consecutiveFailures >= MAX_FAILURE_BEFORE_DEGRADE) {
+            val failures = consecutiveFailures.incrementAndGet()
+            Logger.w(TAG, e) { "mqtt connect failed (#$failures)" }
+            if (failures >= MAX_FAILURE_BEFORE_DEGRADE) {
                 settings.setMode(TransportMode.POLLING)
             }
             false
@@ -162,7 +175,11 @@ class MqttTransport @Inject constructor(
         if (mqttClient == null || !mqttClient.isConnected) return false
         return runCatching {
             withContext(Dispatchers.IO) {
-                val message = MqttMessage(payload.toByteArray()).apply {
+                // R-P0-3：上行应用层签名。有 hmacSecret 时把 payload 包成带 HMAC 的信封，
+                // 无密钥（未绑定 / mock）时退回明文。遗嘱离线报文不走这里（见 buildConnectOptions），
+                // 服务端对"未签名且 online=false"的 status 单独豁免。
+                val out = UplinkSigner.wrap(payload, credentials.hmacSecret) ?: payload
+                val message = MqttMessage(out.toByteArray()).apply {
                     this.qos = qos
                     isRetained = retain
                 }
@@ -179,6 +196,10 @@ class MqttTransport @Inject constructor(
 
     private fun createClient(broker: String, deviceId: String): MqttAsyncClient {
         val persistenceDir = File(context.filesDir, PERSISTENCE_DIR).apply { mkdirs() }
+        // 重建客户端前先显式停止旧 ping sender（其持有的 AlarmManager 闹钟 + 广播接收器），
+        // 否则 broker 变更 / 反复重连会累积旧的定时 PINGREQ 与接收器（资源泄漏 + 重复心跳）。
+        // disconnect() 已走同一 stop() 范式，这里补齐「仅重建、未 disconnect」分支。
+        pingSender?.stop()
         val sender = AlarmPingSender(context).also { pingSender = it }
         return MqttAsyncClient(
             normalizeBrokerUri(broker),
@@ -236,7 +257,13 @@ class MqttTransport @Inject constructor(
                 Logger.i(TAG) { "mqtt tls: trusting provisioned CA (${caFile.name})" }
                 sslCtx.socketFactory
             } else {
-                javax.net.ssl.SSLContext.getDefault().socketFactory
+                // P0-1 证书固定（与 OkHttp 同源）：静态 pin 来自 BuildConfig.CERT_PINS；
+                // 为空时走 TOFU 兜底（首次可信握手记下公钥，未知签发者即拒），
+                // 阻断导入自定义 CA 的主动中间人对 MQTT 指令通道的解密观测。
+                CertPinTrustManager.sslContext(
+                    context,
+                    CertPinTrustManager.parsePins(BuildConfig.CERT_PINS)
+                ).socketFactory
             }
         }.getOrElse {
             Logger.w(TAG, it) { "mqtt tls socket factory build failed, falling back to system default" }
@@ -268,7 +295,7 @@ class MqttTransport @Inject constructor(
 
         override fun connectComplete(reconnect: Boolean, serverURI: String?) {
             _connected.value = true
-            consecutiveFailures = 0
+            consecutiveFailures.set(0)
             if (!reconnect) return
             // 自动重连不会恢复订阅关系，必须手动补订，否则表现为"在线但收不到指令"
             scope.launch {
@@ -278,14 +305,30 @@ class MqttTransport @Inject constructor(
                 runCatching {
                     subscribeAll(mqttClient, tenant, deviceId)
                     publishOnlineStatus(tenant, deviceId)
-                }.onFailure { Logger.w(TAG) { "resubscribe after reconnect failed: ${it.message}" } }
-                Logger.i(TAG) { "mqtt reconnected to $serverURI, subscriptions restored" }
+                }.onSuccess {
+                    // Paho 自动重连成功且订阅已恢复：必须主动切回 MQTT。
+                    // 轮询循环里 connect() 命中 isConnected 快速路径时不会再调 setMode(MQTT)，
+                    // 少了这一步 mode 会永久停在 POLLING：心跳上报错报通道，且 HTTP 端 fatal 时
+                    // isOnline() 会把一条仍能收发指令的设备误判为整机离线。
+                    settings.setMode(TransportMode.MQTT)
+                    Logger.i(TAG) { "mqtt reconnected to $serverURI, subscriptions restored, back to mqtt mode" }
+                }.onFailure { error ->
+                    // 自动重连成功但订阅没恢复 = "在线却收不到指令"。立即降级到轮询，
+                    // 否则 MQTT 与 HTTP 两条通道同时空窗，家长端只能看到设备永久离线。
+                    Logger.w(TAG, error) { "resubscribe after reconnect failed, falling back to polling" }
+                    settings.setMode(TransportMode.POLLING)
+                }
             }
         }
 
         override fun connectionLost(cause: Throwable?) {
             _connected.value = false
-            Logger.w(TAG, cause) { "mqtt connection lost" }
+            // Paho 的 isAutomaticReconnect 只负责传输层重试：broker 长时间不可达时，
+            // 旧实现 mode 仍停在 MQTT，而 HTTP 轮询循环只在 POLLING 下运行 ——
+            // 两条下行通道一起停摆且不会自愈。先切 POLLING 让存活信号/指令拉取接管，
+            // 轮询循环内的限频 connect() 成功后再由 connect() 切回 MQTT。
+            settings.setMode(TransportMode.POLLING)
+            Logger.w(TAG, cause) { "mqtt connection lost, transport degraded to polling" }
         }
 
         override fun messageArrived(topic: String?, message: MqttMessage?) {
@@ -319,26 +362,33 @@ class MqttTransport @Inject constructor(
         publish(MqttTopics.upStatus(tenant, deviceId), ONLINE_PAYLOAD, MqttTopics.QOS_RELIABLE, retain = true)
     }
 
-    /** 把 Paho 的 listener 回调桥接成挂起函数 */
+    /** 把 Paho 的 listener 回调桥接成挂起函数。返回值无消费方，签名即 Unit。 */
     private suspend fun awaitToken(
         opName: String,
         block: (IMqttActionListener) -> Unit
-    ): IMqttToken = suspendCancellableCoroutine { cont: CancellableContinuation<IMqttToken> ->
-        val listener = object : IMqttActionListener {
-            override fun onSuccess(asyncActionToken: IMqttToken?) {
-                if (cont.isActive) cont.resume(asyncActionToken ?: return)
-            }
+    ) {
+        suspendCancellableCoroutine { cont: CancellableContinuation<Unit> ->
+            val listener = object : IMqttActionListener {
+                override fun onSuccess(asyncActionToken: IMqttToken?) {
+                    // IMqttActionListener 契约允许 token 为 null（MqttAsyncClient 的
+                    // userContext 回调路径就会传 null）。原实现 `cont.resume(token ?: return)`
+                    // 在 token 为 null 时**既不 resume 也不 fail**：continuation 永久悬挂，
+                    // 而调用方（connect/disconnect）持着 connectMutex —— 一次命中即
+                    // 后续所有 connect() 永久卡死。resume Unit 即可，token 本就无人使用。
+                    if (cont.isActive) cont.resume(Unit)
+                }
 
-            override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
-                if (cont.isActive) {
-                    cont.resumeWith(
-                        Result.failure(exception ?: IllegalStateException("mqtt $opName failed"))
-                    )
+                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                    if (cont.isActive) {
+                        cont.resumeWith(
+                            Result.failure(exception ?: IllegalStateException("mqtt $opName failed"))
+                        )
+                    }
                 }
             }
-        }
-        runCatching { block(listener) }.onFailure {
-            if (cont.isActive) cont.resumeWith(Result.failure(it))
+            runCatching { block(listener) }.onFailure {
+                if (cont.isActive) cont.resumeWith(Result.failure(it))
+            }
         }
     }
 

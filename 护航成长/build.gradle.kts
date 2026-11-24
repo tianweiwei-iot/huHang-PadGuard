@@ -21,15 +21,17 @@ plugins {
 //     IllegalArgumentException: this and base files have different roots。
 //     → 输出路径必须与项目位于同一盘符（历史配置写死 D:，项目迁到 E: 后即因此失败）。
 //
-// 因此：输出根目录 = <项目所在盘符>:/builds/padguard，默认自动推导；
+// 因此：仅 Windows 且项目路径含非 ASCII 时才重定向到 <盘符>:/builds/padguard；
 //       可用 gradle.properties 的 padguard.build.root 覆盖（不同盘符会快速失败并给出提示）。
-//       若项目本身已位于纯 ASCII 路径，则不做任何重定向，保持 Gradle 默认 build/ 行为。
+//       Linux/macOS（含 CI 的 ubuntu-latest）不受 Windows classpath/盘符问题影响，
+//       一律保持 Gradle 默认 build/ —— 否则 preflight 无法用统一规则找到测试产物。
 // ---------------------------------------------------------------------------
+val isWindowsHost = System.getProperty("os.name").lowercase().contains("windows")
 val projectPath = rootProject.projectDir.absolutePath
 val projectDrive = projectPath.substringBefore(':')
 
-if (projectPath.all { it.code < 0x80 }) {
-    logger.lifecycle("PadGuard: 项目路径为纯 ASCII，使用 Gradle 默认构建目录。")
+if (!isWindowsHost || projectPath.all { it.code < 0x80 }) {
+    logger.lifecycle("PadGuard: 非 Windows 或纯 ASCII 路径，使用 Gradle 默认构建目录。")
 } else {
     val buildRoot = rootProject.file(
         providers.gradleProperty("padguard.build.root").orNull ?: "$projectDrive:/builds/padguard"

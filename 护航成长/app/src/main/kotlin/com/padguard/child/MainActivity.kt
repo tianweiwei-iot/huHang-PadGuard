@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -17,7 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.padguard.child.BuildConfig
+import com.padguard.child.ConsoleState
 import com.padguard.child.agreement.AgreementDialogHost
 import com.padguard.child.agreement.AgreementSessionState
 import com.padguard.child.bind.BindActivity
@@ -25,15 +26,18 @@ import com.padguard.child.consent.OneTimeConsentScreen
 import com.padguard.child.hidden.AppHider
 import com.padguard.child.login.ChildLoginScreen
 import com.padguard.child.permission.DoProvisioningScreen
+import com.padguard.child.permission.ManagementModeChoiceScreen
 import com.padguard.child.permission.PermissionGranter
 import com.padguard.child.service.GuardService
 import com.padguard.child.ui.nav.PadGuardApp
 import com.padguard.child.ui.theme.PadGuardTheme
 import com.padguard.core.common.Logger
 import com.padguard.core.data.model.policy.ControlMode
+import com.padguard.core.data.model.policy.ManagementMode
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import dagger.hilt.android.AndroidEntryPoint
+import java.util.UUID
 import javax.inject.Inject
 
 private const val TAG = "EntryRouter"
@@ -56,12 +60,18 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var appHider: AppHider
 
-    /** 家长经悬浮卡密码验证后启动本界面时携带，标记这是一个"家长揭示会话"而非普通进入。 */
+    /**
+     * 是否由**已鉴权路径**（悬浮卡密码验证 / 服务端 REVEAL_MANAGEMENT_UI 指令）进入。
+     *
+     * 绝不能信任 Intent 里的布尔 extra：MainActivity 虽已 non-exported，但桌面 alias 是
+     * 导出的，外部 App 可显式启动 alias 并透传 EXTRA_REVEAL=true。现在 extra 只携带
+     * 进程内一次性令牌，由 [newRevealToken] 在鉴权通过后签发、[consumeRevealToken] 消费即失效。
+     */
     private var isRevealSession: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        isRevealSession = intent.getBooleanExtra(EXTRA_REVEAL, false)
+        isRevealSession = consumeRevealToken(intent.getStringExtra(EXTRA_REVEAL))
         enableEdgeToEdge()
         setContent {
             PadGuardTheme {
@@ -84,6 +94,20 @@ class MainActivity : ComponentActivity() {
      * - [onDestroy]：正常退出管理（覆盖前者的兜底）。
      * 非揭示会话（正常装机、隐藏态被 finish）绝不触发，否则会把装机的孩子端入口一并藏掉。
      */
+    /**
+     * singleTop 复用已有实例时不会走 onCreate：远程揭示指令若落在控制台已打开的时刻，
+     * 必须在这里刷新会话态，否则令牌被消费掉却仍按旧状态渲染（可能是孩子隐藏态）。
+     */
+    override fun onNewIntent(newIntent: Intent) {
+        super.onNewIntent(newIntent)
+        intent = newIntent
+        val revealed = consumeRevealToken(newIntent.getStringExtra(EXTRA_REVEAL))
+        if (revealed != isRevealSession) {
+            isRevealSession = revealed
+            recreate()
+        }
+    }
+
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         if (isRevealSession) appHider.hideManagementUi()
@@ -95,18 +119,44 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        /** 由 [com.padguard.child.hidden.FloatingActionActivity] 启动时携带，表明家长已验证。 */
+        /**
+         * 携带一次性揭示令牌（**不是布尔值**）。签发方只有两处：
+         * [com.padguard.child.hidden.FloatingActionActivity] 密码校验通过后、
+         * [com.padguard.child.service.GuardService] 收到服务端家长鉴权的 REVEAL_MANAGEMENT_UI 后。
+         */
         const val EXTRA_REVEAL = "com.padguard.child.extra.REVEAL"
+
+        @Volatile
+        private var pendingRevealToken: String? = null
+
+        /** 鉴权通过后签发；只保存在进程内存，重启即失效，外部 App 无法伪造。 */
+        @JvmStatic
+        fun newRevealToken(): String = UUID.randomUUID().toString().also { pendingRevealToken = it }
+
+        /** 消费即清除：同一令牌即使被重放，第二次也返回 false。 */
+        @JvmStatic
+        private fun consumeRevealToken(token: String?): Boolean {
+            if (token.isNullOrBlank()) return false
+            val expected = pendingRevealToken ?: return false
+            pendingRevealToken = null
+            return expected == token
+        }
     }
 }
 
 /**
  * 启动分流（首次安装 / 每次冷启动都会走到这里）：
  *
+ * 0. 装机首启尚未选择管控模式 → 二选一页（[ManagementModeChoiceScreen]：硬管控走 DO 预置，软管控走三件套）；
  * 1. 未登录家庭账号 → 登录页（手机号+密码，复用家长端账号）；
- * 2. 一次性授权未完成 → 授权页（**装机路径上唯一需要家长做决定的界面**，见 [OneTimeConsentScreen]）；
+ * 2. 一次性授权未完成 → 授权页（见 [OneTimeConsentScreen]）；
  * 3. 未绑定设备 → 跳 BindActivity（扫码 / 验证码 / NFC 绑定家长）；
  * 4. 全部就绪 → 进 NavHost 主页。
+ *
+ * ## 硬 / 软两档并行
+ * 第 0 步的选择是**用户意图**（ManagementMode），与设备实际权限等级（ControlMode）解耦：
+ * 选硬管控才进入 DO 预置引导；选软管控直接跳过，不再被发布包的强制 DO 首步拦截。
+ * 两档授权与配置各自保留，后续在「我的」页可随时切换，互不清除。
  *
  * ## 为什么授权排在绑定之前
  * 绑定要扫家长端的二维码，而扫码需要相机权限。若授权排在绑定之后，
@@ -139,24 +189,67 @@ private fun EntryRouter(
     val agreed by authRepository.isAgreementAccepted.collectAsState(initial = null)
     val controlMode by admin.controlMode.collectAsStateWithLifecycle()
     // 家长是否已明确跳过设备管理员引导：为 true 时不再因「DA 未激活」强制弹回授权页
-    val daPromptAck by authRepository.isDeviceAdminPromptAck.collectAsState(initial = false)
+    // 这四条与上面三条一样来自 DataStore，首帧 initial 必须是 null（未知），不能用 false。
+    // 旧写法只有 consentDone/loggedIn/isBound 进了 Splash gate：那三条到达后本帧就会走
+    // 入口分流，而 doPromptAck=false 会误弹 DO 预置页、reauthRequired=false 会先走隐藏态
+    // 分支执行 finish() 把 Activity 关掉 —— 真实值随后到达也来不及重组（授权页一闪就没）。
+    val daPromptAck by authRepository.isDeviceAdminPromptAck.collectAsState(initial = null)
     // 装机授权完成后某项被关掉，需家长重新勾选（见 AuthorizationKeeper）
-    val reauthRequired by authRepository.reauthRequired.collectAsState(initial = false)
+    val reauthRequired by authRepository.reauthRequired.collectAsState(initial = null)
     // 家长是否已显式跳过「设备所有者(DO)」预置引导：为 true 时不再因「未成为 DO」卡在强制首步
-    val doPromptAck by authRepository.isDeviceOwnerPromptAck.collectAsState(initial = false)
-    // 发布包才强制 DO 预置；debug 构建保留软降级（开发机常多账号 / 已 DO，强制会卡死联调）
-    val isRelease = BuildConfig.BUILD_TYPE == "release"
-    val isDeviceOwner = controlMode == ControlMode.DEVICE_OWNER
+    val doPromptAck by authRepository.isDeviceOwnerPromptAck.collectAsState(initial = null)
+    // 装机首启选择的管控模式：initial=null 表示"尚未读到"（Splash 等齐），
+    // 读到后 mode 仍为 null 才表示"家长确实没选过"→ 弹二选一页。二者必须分开，否则首帧抢跑。
+    val managementState by authRepository.managementState.collectAsState(initial = null)
+    // DO 与 PO 都具备所有者级权限，都能静默授权/加固；旧写法只认 DO，
+    // 导致 PO 设备选了硬管控后永远卡在预置页（明明已经具备所需权限）。
+    val isDeviceOwner = controlMode == ControlMode.DEVICE_OWNER ||
+        controlMode == ControlMode.PROFILE_OWNER
+    // 只有家长明确选了硬管控才走 DO 预置；软管控不再被任何版本的强制首步拦截。
+    val hardSelected = managementState?.mode == ManagementMode.HARD
     val context = LocalContext.current
 
-    when {
-        // 任一流尚未就绪前先显示启动页，避免裸奔
-        consentDone == null || loggedIn == null || isBound == null -> Splash()
+    // 家长操作态标记：一次性授权流程（含 reauth 补授权）、登录页与揭示会话（家长控制台）在场时为真，
+    // 隐藏态（孩子正常使用平板，MainActivity 已销毁）为假。供 [CaptureConsentPrompter] 判定
+    // "此刻能否向设备持有者弹看屏确认框"，确保孩子使用中不被打扰（见需求：使用过程不指望孩子确认授权）。
+    // 用 DisposableEffect 在场期间置真、销毁时（onDispose）复位为假——避免家长关闭控制台后
+    // 残留 true 导致后续孩子正常使用设备时仍被弹确认框。
+    // 登录页 / 绑定页同样是「家长在场」，注释里的口径必须落到判据上。
+    val parentUiVisible = managementState?.mode == null ||
+        reauthRequired == true ||
+        consentDone == false ||
+        loggedIn == false ||
+        isBound == false ||
+        (!admin.isAdminActive() && daPromptAck != true) ||
+        isRevealSession
+    // 实时写入：各 DataStore 流首帧取的是 collectAsState 的 initial（多为 null/false），
+    // 旧实现只在 DisposableEffect(Unit) 里写一次，真实值到达后标记会永久停在首帧的错误状态，
+    // 于是家长在场时 CaptureConsentPrompter 判 !isManagementVisible 直接 return，
+    // 补授权 / 看屏确认框静默不弹（"点了没反应"）。
+    LaunchedEffect(parentUiVisible) {
+        ConsoleState.setManagementVisible(parentUiVisible)
+    }
+    // 离场复位仍用常量 key：拆开写，避免 parentUiVisible 变化时 onDispose 造成瞬时 false 窗口。
+    DisposableEffect(Unit) {
+        onDispose { ConsoleState.setManagementVisible(false) }
+    }
 
-        // 发布包强制首步：设备所有者（Device Owner）。核心承诺（防卸载 / 静默安装 /
-        // 禁止恢复出厂）全部依赖 DO；未开 DO 时这些能力在系统层面不可用，必须先预置。
-        // 仅发布包强制；家长显式确认已知风险（doPromptAck）或已为 DO 时放行。
-        isRelease && !isDeviceOwner && !doPromptAck -> DoProvisioningScreen()
+    when {
+        // 任一流尚未就绪前先显示启动页，避免裸奔。
+        // 八条 Flow 都必须等齐：任何一个用 initial=false 抢跑，都会在真实值到达前
+        // 作出「跳过 / 隐藏 / 弹预置页」这类不可撤销的决策（R36）。
+        // managementState 用对象包住"已读到"，与"家长确实没选"区分开。
+        consentDone == null || loggedIn == null || isBound == null ||
+            agreed == null || daPromptAck == null || reauthRequired == null ||
+            doPromptAck == null || managementState == null -> Splash()
+
+        // 装机首启第 0 步：家长还没选过管控模式，先二选一（登录 / 授权 / 绑定之前）。
+        managementState?.mode == null -> ManagementModeChoiceScreen()
+
+        // 家长选了硬管控，但设备尚未成为 DO → 进入预置引导。
+        // 选软管控时本分支恒不命中，DO 预置与三件套授权互不打扰（两档真正并行）。
+        // doPromptAck 兼容老版本已显式放行过的设备，避免升级后突然被拦。
+        hardSelected && !isDeviceOwner && doPromptAck != true -> DoProvisioningScreen()
 
         // ① 未登录家庭账号：登录页（复用家长端账号体系）
         loggedIn == false -> ChildLoginScreen()
@@ -176,7 +269,7 @@ private fun EntryRouter(
         //    少了这条，在激活页点不了「激活」的机型（ROM 阉割 / 已被其它管理员占用）上，
         //    这里会变成"每次冷启动都把家长弹回授权页"的死循环，体验上就是
         //    "设备管理员这项怎么都授权不了，还退不出去"。
-        consentDone == false || (!admin.isAdminActive() && !daPromptAck) ->
+        consentDone == false || (!admin.isAdminActive() && daPromptAck != true) ->
             OneTimeConsentScreen(autoStart = consentDone == true)
 
         // ③ 已登录但未绑定设备：跳绑定流程（扫码 / 验证码 / NFC 绑定家长）
@@ -205,15 +298,24 @@ private fun EntryRouter(
                 PadGuardApp()
 
                 // DO/PO 之后也能补齐：装机时若还不是设备所有者，
-                // 这里会在切成 DO 的那一刻补上静默授权与加固基线。
-                // 以 controlMode 为 key，确保只在身份真正变化时触发一次。
-                LaunchedEffect(controlMode) {
-                    if (controlMode == ControlMode.DEVICE_OWNER || controlMode == ControlMode.PROFILE_OWNER) {
-                        try {
+                // 这里会在切成所有者的那一刻补上静默授权与加固基线。
+                // key 必须同时含 controlMode 与 hardSelected：否则家长从软管控切到硬管控、
+                // 设备身份没变时不会回补；反之只看模式也会在身份变化前空转。
+                LaunchedEffect(controlMode, hardSelected) {
+                    val hasOwnerPrivileges = controlMode == ControlMode.DEVICE_OWNER ||
+                        controlMode == ControlMode.PROFILE_OWNER
+                    if (!hasOwnerPrivileges) return@LaunchedEffect
+                    try {
+                        if (hardSelected) {
+                            // 硬管控：静默授权 + 加固基线（禁恢复出厂/安全模式/改时间等）
                             permissionGranter.grantAll()
-                        } catch (e: Exception) {
-                            Logger.e(TAG, e) { "DO 加固回补失败" }
+                        } else {
+                            // 软管控：只补运行时权限。grantAll 会施加硬管控专属加固基线，
+                            // 绕过家长选择，且切回软档后没有对应的撤销路径。
+                            permissionGranter.ensureGranted()
                         }
+                    } catch (e: Exception) {
+                        Logger.e(TAG, e) { "owner privileges backfill failed" }
                     }
                 }
 

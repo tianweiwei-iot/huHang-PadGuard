@@ -71,6 +71,7 @@ import com.padguard.parent.domain.model.GeofenceConfig
 import com.padguard.parent.domain.model.LocationInfo
 import com.padguard.parent.domain.model.MapProvider
 import com.padguard.parent.domain.model.MapViewMode
+import com.padguard.parent.presentation.ui.components.StaleDataHint
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.util.TimeFormat
 import com.padguard.parent.presentation.viewmodel.LocationViewModel
@@ -206,6 +207,16 @@ fun LocationScreen(
                     onClick = viewModel::locateNow,
                     modifier = Modifier.fillMaxWidth()
                 )
+                Spacer(modifier = Modifier.height(8.dp))
+                // 合规边界必须如实告知（R-P3-11）：儿童向 App 申请后台定位不符合应用商店家庭政策，
+                // 因此孩子端**只在屏幕开启且在使用时**采集，息屏/后台闲置期间不采。
+                // 不写清楚，家长会把"息屏时位置不动"误判成"定位坏了 / 孩子关机了"。
+                Text(
+                    text = "位置只在孩子平板「屏幕开启且正在使用」时更新。息屏或后台闲置期间不再采集，" +
+                        "此处会停留在最后一次上报的位置，围栏进出提醒也可能相应延后。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
             }
 
             // 下方内容区：地址/电量、地图与视图切换、围栏管理、轨迹时间线等其余功能保持不变。
@@ -217,6 +228,16 @@ fun LocationScreen(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                // 位置读取失败此前**完全没有提示**（`error` 字段无人消费）：地图照旧画着上一个点，
+                // 家长分不清那是此刻的位置还是一小时前的。这里把失败与"这份坐标是哪一刻的"一并说明。
+                if (uiState.error != null && uiState.location != null) {
+                    StaleDataHint(
+                        message = uiState.error,
+                        lastSuccessAt = uiState.lastSuccessAt,
+                        onRetry = viewModel::refreshLocation
+                    )
+                }
+
                 DeviceLocationInfoCard(
                     location = uiState.location,
                     geofences = uiState.geofences,

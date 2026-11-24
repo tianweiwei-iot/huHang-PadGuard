@@ -14,6 +14,7 @@ import com.padguard.server.repository.AlertRepository
 import com.padguard.server.repository.AuditLogRepository
 import com.padguard.server.repository.UserRepository
 import com.padguard.server.security.AdminPermissionService
+import com.padguard.server.ws.WebSocketPushService
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
@@ -29,7 +30,8 @@ class AdminAuditService(
     private val userRepository: UserRepository,
     private val auditLogRepository: AuditLogRepository,
     private val alertRepository: AlertRepository,
-    private val auditService: AuditService
+    private val auditService: AuditService,
+    private val webSocketPush: WebSocketPushService
 ) {
     private val log = LoggerFactory.getLogger(AdminAuditService::class.java)
 
@@ -182,10 +184,30 @@ class AdminAuditService(
         adminPerm.require(adminId, "audit", "write")
         val alert = alertRepository.findById(id).orElse(null)
             ?: throw BizException(ParentErr.PARAM_ERROR, "告警不存在", Audience.PARENT)
-        alert.status = "RESOLVED"
-        alert.resolvedAt = System.currentTimeMillis()
-        alertRepository.save(alert)
+        // 状态迁移用条件 UPDATE（仅非 RESOLVED → RESOLVED，已 RESOLVED 幂等跳过），
+        // 不能整行 save：那会把并发方（家长 acknowledge / 自愈关单）刚写的状态用旧快照覆盖回去。
+        val updated = alertRepository.resolveIfNotResolved(id, System.currentTimeMillis())
         auditService.record(adminId, null, "ALERT_CLOSE", targetType = "alert", targetId = id, detail = "处理告警 ${alert.title}")
+        // 后台关单后推 alert.resolved：家长端铃铛/消息中心收到即秒级刷新（有 15s 轮询兜底）。
+        // 此前只改库不推，家长端要等下一轮轮询才看到红点消失，两个管理入口状态不一致。
+        // 推送挂 afterCommit：本方法带 @Transactional，提交前推送会在回滚时留下"幽灵已解决"通知；
+        // 与 AlertService.resolveActiveByCategory 的推送口径保持一致（同一 type + deviceId/category/count）。
+        val uid = alert.userId
+        val deviceId = alert.deviceId
+        val category = alert.category.orEmpty()
+        afterCommit {
+            runCatching {
+                uid?.let { u ->
+                    webSocketPush.pushToUser(u, mapOf(
+                        "type" to "alert.resolved",
+                        "deviceId" to deviceId,
+                        "category" to category,
+                        "count" to 1
+                    ))
+                }
+            }.onFailure { log.warn("push alert.resolved after admin close failed: id={} err={}", id, it.message) }
+        }
+        if (updated == 0) log.info("alert {} already RESOLVED before admin close, idempotent skip", id)
         return mapOf("ok" to true)
     }
 }

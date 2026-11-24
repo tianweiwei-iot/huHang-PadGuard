@@ -62,7 +62,7 @@ def check_root(java_root: str, module_dir: str) -> int:
             with open(p, "rb") as f:
                 text = f.read().decode("utf-8", "replace")
             m = PKG_RE.search(text)
-            physical = os.path.relpath(dirpath, java_root).replace("\\", ".")
+            physical = os.path.relpath(dirpath, java_root).replace("\\", ".").replace("/", ".")
             if not m:
                 print(f"[FAIL] 无 package 声明: {os.path.relpath(p, REPO)}")
                 bad += 1

@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -69,13 +71,23 @@ class LocationAutoReporter @Inject constructor(
     @Volatile
     private var foregroundListener: (() -> Unit)? = null
 
+    /**
+     * [reportOnce] 临界区锁。10s loop tick 与前台 0→1 边缘回调可能在极短窗口内同时进入，
+     * 两者都通过节流判断后各自上报同一位置点（流量浪费 + 轨迹出现近似重复点）。
+     * 串行化"节流判定 + 采集上报"，保证后到者看到前者已更新的节流基准。
+     */
+    private val reportMutex = Mutex()
+
     fun start() {
         if (started) return
         started = true
         Logger.i(TAG) { "starting periodic location reporter" }
         policyJob = scope.launch {
             policyRepository.observePolicy()
-                .map { it.monitoring.locationIntervalSec }
+                // 撤回同意时策略包带着 consentRevoked=true，这里直接把周期定位关掉。
+                // 不能只依赖 MonitoringEnforcer 的收敛快照：本类历史上就是直接读原始策略的，
+                // 两处口径不一致会让"已撤回"仍按原间隔上传位置。
+                .map { if (it.monitoring.consentRevoked) 0 else it.monitoring.locationIntervalSec }
                 .distinctUntilChanged()
                 .collect { seconds -> applyInterval(seconds) }
         }
@@ -116,18 +128,22 @@ class LocationAutoReporter @Inject constructor(
     }
 
     private suspend fun reportOnce() {
-        // 单调时钟：见 [lastAttemptElapsedMs] 的说明（墙钟回拨会让定位永久停报）
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastAttemptElapsedMs < intervalMs) return
-        lastAttemptElapsedMs = now
-        when (val outcome = collector.collectAndUpload(
-            // 周期上报要求的"新鲜度"：最长按 60s 算，间隔更短就按间隔来
-            freshnessMs = intervalMs.coerceAtMost(LocationCollector.DEFAULT_FRESHNESS_MS),
-            minDistanceMeters = MIN_MOVE_METERS
-        )) {
-            LocationOutcome.Success -> Logger.d(TAG) { "periodic location reported" }
-            LocationOutcome.Skipped -> Unit // 静止不动，不上报（省流量且不刷屏轨迹）
-            is LocationOutcome.Failure -> Logger.w(TAG) { "periodic location failed: ${outcome.kind}" }
+        reportMutex.withLock {
+            // 撤回同意后 intervalMs=0；在持锁后再判一次，挡住策略切换瞬间已排队的采集。
+            if (intervalMs <= 0L) return
+            // 单调时钟：见 [lastAttemptElapsedMs] 的说明（墙钟回拨会让定位永久停报）
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastAttemptElapsedMs < intervalMs) return
+            lastAttemptElapsedMs = now
+            when (val outcome = collector.collectAndUpload(
+                // 周期上报要求的"新鲜度"：最长按 60s 算，间隔更短就按间隔来
+                freshnessMs = intervalMs.coerceAtMost(LocationCollector.DEFAULT_FRESHNESS_MS),
+                minDistanceMeters = MIN_MOVE_METERS
+            )) {
+                LocationOutcome.Success -> Logger.d(TAG) { "periodic location reported" }
+                LocationOutcome.Skipped -> Unit // 静止不动，不上报（省流量且不刷屏轨迹）
+                is LocationOutcome.Failure -> Logger.w(TAG) { "periodic location failed: ${outcome.kind}" }
+            }
         }
     }
 

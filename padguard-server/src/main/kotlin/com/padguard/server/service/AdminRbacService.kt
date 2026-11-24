@@ -69,6 +69,7 @@ class AdminRbacService(
      */
     @Transactional
     fun createRole(adminId: String, req: AdminRoleCreateRequest): Map<String, Any> {
+        adminPerm.requireSuper(adminId) // 权限结构只能由 super 变更：rbac:write/assign 可委托，委托后自我提权
         adminPerm.require(adminId, "rbac", "write")
         adminPerm.createRole(req.id, req.name, req.description, req.privileges)
         auditService.record(adminId, null, "RBAC_ROLE_CREATE", targetType = "role", targetId = req.id, detail = "新建角色 ${req.name}")
@@ -79,6 +80,7 @@ class AdminRbacService(
 
     @Transactional
     fun deleteRole(adminId: String, roleId: String): Map<String, Any> {
+        adminPerm.requireSuper(adminId) // 权限结构只能由 super 变更：rbac:write/assign 可委托，委托后自我提权
         adminPerm.require(adminId, "rbac", "write")
         adminPerm.deleteRole(roleId)
         auditService.record(adminId, null, "RBAC_ROLE_DELETE", targetType = "role", targetId = roleId, detail = "删除角色 $roleId")
@@ -87,6 +89,7 @@ class AdminRbacService(
 
     @Transactional
     fun saveRole(adminId: String, role: AdminRolePrivilegesDto): Map<String, Any> {
+        adminPerm.requireSuper(adminId) // 权限结构只能由 super 变更：rbac:write/assign 可委托，委托后自我提权
         adminPerm.require(adminId, "rbac", "write")
         adminPerm.saveRolePrivileges(role.id, role.privileges)
         auditService.record(adminId, null, "RBAC_ROLE_SAVE", targetType = "role", targetId = role.id, detail = "保存角色权限 ${role.id}")
@@ -98,6 +101,7 @@ class AdminRbacService(
      */
     @Transactional
     fun resetRolePrivileges(adminId: String, roleId: String): Map<String, Any> {
+        adminPerm.requireSuper(adminId) // 权限结构只能由 super 变更：rbac:write/assign 可委托，委托后自我提权
         adminPerm.require(adminId, "rbac", "write")
         adminPerm.resetRolePrivileges(roleId)
         auditService.record(adminId, null, "RBAC_ROLE_RESET", targetType = "role", targetId = roleId, detail = "还原角色权限 $roleId")
@@ -137,6 +141,7 @@ class AdminRbacService(
 
     @Transactional
     fun assignRole(adminId: String, targetAdminId: String, roleId: String): Map<String, Any> {
+        adminPerm.requireSuper(adminId) // 权限结构只能由 super 变更：rbac:write/assign 可委托，委托后自我提权
         adminPerm.require(adminId, "rbac", "assign")
         ensureNotEscalatingToSuper(adminRepository, adminId, roleId)
         if (!adminPerm.allRoleKeys().contains(roleId)) {
@@ -204,6 +209,11 @@ class AdminRbacService(
         // 无锁整行 merge 会把对方的自增吞掉（旧令牌复活）。
         val target = adminRepository.findByIdForUpdate(targetAdminId)
             ?: throw BizException(ParentErr.PARAM_ERROR, "管理员不存在", Audience.PARENT)
+        // R41：与 assignRole / updateAdmin / deleteAdmin 同一条跨级护栏。
+        // 只挂 rbac:reset_pwd 闸门而不校验目标等级，被授权的非 super 可以重置 super 的密码，
+        // 并从返回值直接拿到明文 → 登录超管账号完成提权（改角色、退款、注销全放开）。
+        // 与另外三个写操作保持同一语义：跨级不可管理，连"只知道明文"的机会也不给。
+        ensureCanManageTarget(adminId, target)
         val newPwd = genPassword(systemSettingRepository, objectMapper)
         target.passwordHash = Passwords.encode(newPwd)
         // 密码已变更，旧令牌必须立即作废：否则拿到旧令牌的人仍能以该管理员身份操作后台。
@@ -224,7 +234,9 @@ class AdminRbacService(
         if (newPassword.length < 8) {
             throw BizException(ParentErr.PARAM_ERROR, "新密码至少 8 位", Audience.PARENT)
         }
-        val admin = adminRepository.findById(adminId).orElse(null)
+        // 行锁读：下面整行 save 会写回 tokenVersion，必须与 logout/login 的并发写串行化，
+        // 否则两端同时操作会把刚 +1 的版本号覆盖回旧值，让改密"踢下线"失效。
+        val admin = adminRepository.findByIdForUpdate(adminId)
             ?: throw BizException(ParentErr.UNAUTHORIZED, "管理员不存在", Audience.PARENT)
         if (!Passwords.matches(currentPassword, admin.passwordHash)) {
             throw BizException(ParentErr.UNAUTHORIZED, "当前密码错误", Audience.PARENT)

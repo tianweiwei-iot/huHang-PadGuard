@@ -10,14 +10,15 @@ import com.padguard.core.data.repository.CommandRepository
 import com.padguard.core.data.repository.PolicyRepository
 import com.padguard.core.data.repository.UnlockRequestRepository
 import com.padguard.core.engine.admin.Capability
-import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.core.engine.admin.DeviceAdminBridgePort
 import com.padguard.core.engine.admin.OpResult
 import com.padguard.core.engine.enforcer.AppLimitEnforcer
-import com.padguard.core.engine.guard.GuardMasterSwitch
 import com.padguard.core.engine.enforcer.EyeCareEnforcer
-import com.padguard.core.engine.enforcer.PeripheralEnforcer
-import com.padguard.core.engine.lock.LockController
+import com.padguard.core.engine.enforcer.PeripheralEnforcerPort
+import com.padguard.core.engine.guard.GuardMasterSwitchPort
+import com.padguard.core.engine.lock.LockControllerPort
 import com.padguard.core.engine.lock.LockReason
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -48,15 +49,15 @@ import javax.inject.Singleton
  */
 @Singleton
 class CommandExecutor @Inject constructor(
-    private val admin: DeviceAdminBridge,
-    private val lockController: LockController,
+    private val admin: DeviceAdminBridgePort,
+    private val lockController: LockControllerPort,
     private val policyRepository: PolicyRepository,
     private val unlockRequestRepository: UnlockRequestRepository,
-    private val peripheralEnforcer: PeripheralEnforcer,
+    private val peripheralEnforcer: PeripheralEnforcerPort,
     private val appLimitEnforcer: AppLimitEnforcer,
     private val eyeCareEnforcer: EyeCareEnforcer,
     private val timeProvider: TimeProvider,
-    private val guardMasterSwitch: GuardMasterSwitch,
+    private val guardMasterSwitch: GuardMasterSwitchPort,
     private val commandRepository: CommandRepository
 ) {
 
@@ -105,6 +106,7 @@ class CommandExecutor @Inject constructor(
                 CommandType.REBOOT -> reboot(command, deviceId)
                 CommandType.SHUTDOWN -> shutdown(command, deviceId)
                 CommandType.SHOW_MESSAGE -> showMessage(command, deviceId)
+                CommandType.START_TIMER_CONFIRM -> startTimerConfirm(command, deviceId)
                 CommandType.SCREENSHOT -> screenshot(command, deviceId)
                 CommandType.LOCATE -> locate(command, deviceId)
                 CommandType.PHOTO -> photo(command, deviceId)
@@ -130,6 +132,11 @@ class CommandExecutor @Inject constructor(
                 CommandType.WIPE -> wipe(command, deviceId)
                 CommandType.REVEAL_MANAGEMENT_UI -> revealManagementUi(command, deviceId)
             }
+        } catch (e: CancellationException) {
+            // execute 是 suspend：服务停止 / 账号切换 / 协程超时的取消不能伪装成 EXEC_CRASH。
+            // 若在这里吞掉，写失败回执 + 记账 + 家长端告警全都会因一次正常取消而触发，
+            // 且取消不再向上传播，调用方误以为指令真的执行失败。
+            throw e
         } catch (e: Exception) {
             // 兜底：任何未预期异常都不能让执行链断掉，否则后续指令全部堆积
             Logger.e(TAG, e) { "command ${command.type} crashed" }
@@ -230,7 +237,7 @@ class CommandExecutor @Inject constructor(
         _effects.tryEmit(EngineEffect.DismissLockScreen)
         unlockRequestRepository.approveLatest(pkg)
 
-        val capped = requested.coerceAtMost(LockController.MAX_TEMP_UNLOCK_MINUTES)
+        val capped = requested.coerceAtMost(LockControllerPort.MAX_TEMP_UNLOCK_MINUTES)
         return if (capped != requested) {
             ack(command, deviceId, AckStatus.SUCCESS, "CAPPED", "请求 ${requested}min 超上限，按 ${capped}min 执行")
         } else {
@@ -282,6 +289,27 @@ class CommandExecutor @Inject constructor(
      * 普通消息不带该键，[UnlockRequestRepository.reject] 不会被调用，行为与之前完全一致。
      * reject 失败（如本地已无该记录）静默吞掉 —— 展示消息本身才是这条指令的主目标。
      */
+    /**
+     * 家长端发起「开始计时」（[CommandType.START_TIMER_CONFIRM]）。
+     *
+     * 只负责**弹确认框**：孩子点「开始计时」是后续的独立交互（会话 start 接口 +
+     * 家长端工单状态回传），不在本指令内完成。因此：
+     * - ACK SUCCESS 的语义 = "已送达并弹出确认框"，**不是**"已开始计时"；
+     * - 指令幂等由 msgId 去重（[markExecutedIfFirst]）兜住，服务端 7 天幂等窗口 +
+     *   本地账本不会再重放；同一天家长重复点按钮由服务端工单按 requestId+dayKey 幂等；
+     * - 今日已开始计时（会话 active）时收到本指令：无害，弹出的确认框在孩子确认
+     *   时经 start() 幂等返回当前会话，不刷新额度（服务端 start 幂等：今日已开始一个字不写）。
+     * - requestId 原样带给 app 层：孩子确认时回传，用于把家长端工单置 CONFIRMED。
+     */
+    private fun startTimerConfirm(command: Command, deviceId: String): CommandAck {
+        val requestId = command.payloadString(KEY_REQUEST_ID)
+        if (requestId.isBlank()) {
+            return ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "requestId 为空")
+        }
+        _effects.tryEmit(EngineEffect.ShowStartTimerConfirm(requestId = requestId))
+        return ack(command, deviceId, AckStatus.SUCCESS)
+    }
+
     private suspend fun showMessage(command: Command, deviceId: String): CommandAck {
         val body = command.payloadString(KEY_CONTENT)
         val mediaUrl = command.payloadString(KEY_MEDIA_URL)
@@ -330,7 +358,7 @@ class CommandExecutor @Inject constructor(
         _effects.tryEmit(
             EngineEffect.CaptureScreenshot(
                 msgId = command.msgId,
-                shotId = command.payloadString("shotId").ifBlank { command.msgId }
+                shotId = command.payloadString(KEY_SHOT_ID).ifBlank { command.msgId }
             )
         )
         return ack(command, deviceId, AckStatus.SUCCESS, "ACCEPTED", "截屏任务已受理，结果将随日志单独上报")
@@ -345,14 +373,14 @@ class CommandExecutor @Inject constructor(
         _effects.tryEmit(
             EngineEffect.CapturePhoto(
                 msgId = command.msgId,
-                taskId = command.payloadString("taskId").ifBlank { command.msgId }
+                taskId = command.payloadString(KEY_TASK_ID).ifBlank { command.msgId }
             )
         )
         return ack(command, deviceId, AckStatus.SUCCESS, "ACCEPTED", "拍照任务已受理，结果将随日志单独上报")
     }
 
     private fun audioRecord(command: Command, deviceId: String): CommandAck {
-        val taskId = command.payloadString("taskId").ifBlank { command.msgId }
+        val taskId = command.payloadString(KEY_TASK_ID).ifBlank { command.msgId }
         _effects.tryEmit(EngineEffect.StartAudioRecord(command.msgId, taskId))
         return ack(command, deviceId, AckStatus.SUCCESS, "ACCEPTED", "录音任务已受理，结果将随日志单独上报")
     }
@@ -366,9 +394,9 @@ class CommandExecutor @Inject constructor(
         _effects.tryEmit(
             EngineEffect.StartScreenRecord(
                 msgId = command.msgId,
-                taskId = command.payloadString("taskId").ifBlank { command.msgId },
-                resolution = command.payloadString("resolution", "HD_720P"),
-                withAudio = command.payloadBoolean("withAudio", false)
+                taskId = command.payloadString(KEY_TASK_ID).ifBlank { command.msgId },
+                resolution = command.payloadString(KEY_RESOLUTION, "HD_720P"),
+                withAudio = command.payloadBoolean(KEY_WITH_AUDIO, false)
             )
         )
         return ack(command, deviceId, AckStatus.SUCCESS, "ACCEPTED", "录屏任务已受理，结果将随日志单独上报")
@@ -392,7 +420,7 @@ class CommandExecutor @Inject constructor(
                 msgId = command.msgId,
                 // 画质档位由服务端随指令下发。老服务端不下发该字段时按标准档位推流，
                 // 与"从未开过高清"的表现一致，不会因缺字段而中断看屏。
-                highDefinition = command.payloadBoolean("highDefinition", false)
+                highDefinition = command.payloadBoolean(KEY_HIGH_DEFINITION, false)
             )
         )
         return ack(command, deviceId, AckStatus.SUCCESS)
@@ -462,6 +490,10 @@ class CommandExecutor @Inject constructor(
     private suspend fun resetPolicy(command: Command, deviceId: String): CommandAck {
         policyRepository.reset()
         appLimitEnforcer.resetSampling()
+        // 家长显式重置策略时**连单次会话一起清**（这才是"清零已用额度"的语义）。
+        // 与 onDeviceBoot() 的区别见 AppLimitEnforcer.resetSampling 的注释：
+        // 开机只重置采样基准，不清会话，否则"重启一次拿一份新额度"会变成常态。
+        appLimitEnforcer.resetSession()
         eyeCareEnforcer.reset()
         _effects.tryEmit(EngineEffect.RefreshPolicy(afterReset = true))
         return ack(command, deviceId, AckStatus.SUCCESS)
@@ -502,8 +534,11 @@ class CommandExecutor @Inject constructor(
         if (pkg.isBlank()) {
             return ack(command, deviceId, AckStatus.FAILED, "BAD_PAYLOAD", "packageName 不能为空")
         }
-        // 自我保护：任何情况下都不执行"卸载自己"，否则一条指令即可让设备彻底脱管
-        if (pkg == SELF_GUARD_PLACEHOLDER || pkg.endsWith(".child")) {
+        // 自我保护：任何情况下都不执行"卸载自己"，否则一条指令即可让设备彻底脱管。
+        // 用运行时真实包名精确相等（与 setAppHidden 同口径），禁止写死常量或后缀匹配——
+        // 写死 "com.padguard.child" 在 debug/flavor 变体（如 .debug 后缀）下判不等会漏防，
+        // endsWith(".child") 又会误伤 com.xxx.child 这类无关应用。
+        if (pkg == admin.selfPackageName) {
             return ack(command, deviceId, AckStatus.FAILED, "SELF_PROTECT", "拒绝卸载管控端自身，解绑请走服务端解绑流程")
         }
         _effects.tryEmit(EngineEffect.UninstallApp(pkg, command.msgId))
@@ -724,7 +759,6 @@ class CommandExecutor @Inject constructor(
 
         /** 去重窗口大小：覆盖轮询周期内可能的重复下发即可 */
         private const val RECENT_MSG_ID_LIMIT = 512
-        private const val SELF_GUARD_PLACEHOLDER = "com.padguard.child"
 
         // payload 键名，与接口契约 §4.1 保持一致
         const val KEY_REASON = "reason"
@@ -753,6 +787,16 @@ class CommandExecutor @Inject constructor(
         const val KEY_ACTIVE = "active"
         const val KEY_ITEM = "item"
         const val KEY_CONFIRM = "confirm"
+        /** 截图任务号：服务端落 PENDING 时生成，孩子端必须原样带回，否则上传结果无法与请求关联 */
+        const val KEY_SHOT_ID = "shotId"
+        /** 媒体任务号（拍照/录音/录屏） */
+        const val KEY_TASK_ID = "taskId"
+        /** 录屏分辨率档位 */
+        const val KEY_RESOLUTION = "resolution"
+        /** 录屏是否带系统音频 */
+        const val KEY_WITH_AUDIO = "withAudio"
+        /** 实时看屏画质档位：true=高清（更宽、更高 JPEG 质量），false=标准（省带宽） */
+        const val KEY_HIGH_DEFINITION = "highDefinition"
     }
 }
 
@@ -831,4 +875,12 @@ sealed interface EngineEffect {
      * 点亮图标 + 拉起管理台需要 app 层的 PackageManager 与 Activity 启动能力，engine 只发副作用。
      */
     data object RevealManagementUi : EngineEffect
+
+    /**
+     * 家长端发起「开始计时」（[CommandType.START_TIMER_CONFIRM]）：弹出确认浮层
+     * （"家长已为你开启今日计时"），由 app 层的 [com.padguard.child.usagesession.UsageStartOverlay]
+     * 渲染；孩子点「开始计时」后才真正起表。requestId 在孩子确认时回传，
+     * 用于把家长端的 start-request 工单置 CONFIRMED。
+     */
+    data class ShowStartTimerConfirm(val requestId: String) : EngineEffect
 }

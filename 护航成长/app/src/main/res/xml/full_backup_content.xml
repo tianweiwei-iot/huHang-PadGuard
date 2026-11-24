@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  受管孩子设备的全量备份规则（Android 6.0 ~ 11 的 fullBackupContent，对应 B1 的
+  dataExtractionRules 的 API 26-30 这一段）。
+
+  本应用已在 AndroidManifest 将 android:allowBackup="false"，理论上云备份与设备迁移都已关闭；
+  但 lint 对 minSdk=26 仍要求显式声明 fullBackupContent（dataExtractionRules 仅对 API 31+ 生效），
+  否则会报 DataExtractionRules 告警。这里用空 <full-backup-content> 表示「不备份任何文件」，
+  与 dataExtractionRules 的空 domain 立场一致：会话快照 / 设备令牌 / 策略缓存等管控敏感数据
+  不被 adb backup、云备份或厂商换机助手提取到另一台设备。
+
+  注：allowBackup=false 在 API 26-30 已使 fullBackupContent 实际失效，此文件是显式化 + 消告警的
+  双重保险；与 data_extraction_rules.xml 不可合并（两套 schema 不互通）。
+-->
+<full-backup-content>
+    <!-- 空：不向自动备份贡献任何文件 / 数据库 / SharedPreferences -->
+</full-backup-content>

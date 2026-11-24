@@ -52,9 +52,24 @@
     setTimeout(() => { el.style.opacity = "0"; el.style.transform = "translateX(20px)"; setTimeout(() => el.remove(), 250); }, 3200);
   }
 
+  /**
+   * 会话守卫：登出/401 后仍可能有利到的异步回调（重置密码弹明文、详情抽屉等）继续
+   * 向全局 #modal-root 挂弹层——它在 #app-shell 之外，不在 leaveToLogin 的清空范围内，
+   * 于是含明文密码/家长隐私的弹层会浮在登录屏上，泄露给下一个用这台电脑的人。
+   *
+   * 集中在一处拦截：登录屏可见（=未登录/已登出）时把弹层挂到 detached 节点，
+   * 调用方拿到的 el/close/querySelector 全部照常工作，只是不进文档、用户不可见。
+   * 这样无需逐个改所有 await 后的调用点，且不破坏 confirm() 等依赖返回值的用法。
+   */
+  function overlayRoot() {
+    const login = doc.getElementById("login-screen");
+    const loggedOut = login && !login.classList.contains("hidden");
+    return loggedOut ? doc.createElement("div") : doc.getElementById("modal-root");
+  }
+
   // ---------- Modal ----------
   function modal({ title, body, foot, width }) {
-    const root = doc.getElementById("modal-root");
+    const root = overlayRoot();
     const mask = doc.createElement("div"); mask.className = "modal-mask";
     mask.innerHTML = '<div class="modal" style="' + (width ? "width:" + width + "px" : "") + '"><div class="modal-head"><h3>' + esc(title) + '</h3><button class="modal-close">×</button></div><div class="modal-body">' + body + '</div>' + (foot ? '<div class="modal-foot">' + foot + '</div>' : '') + '</div>';
     root.appendChild(mask);
@@ -66,7 +81,7 @@
 
   // ---------- Drawer ----------
   function drawer({ title, body, width }) {
-    const root = doc.getElementById("modal-root");
+    const root = overlayRoot();
     const mask = doc.createElement("div"); mask.className = "drawer-mask";
     const panel = doc.createElement("div"); panel.className = "drawer";
     if (width) panel.style.width = width + "px";
@@ -92,7 +107,9 @@
       try {
         await (onOk && onOk());
       } catch (e) {
-        toast("err", "操作失败", String((e && e.message) || e));
+        // 与登录页共用中文错误解析，避免 OkHttp/fetch 的英文异常原样上屏。
+        const explain = (typeof PG !== "undefined" && PG.explainError) ? PG.explainError : null;
+        toast("err", "操作失败", explain ? explain(e) : String((e && e.message) || e));
       }
     };
   }

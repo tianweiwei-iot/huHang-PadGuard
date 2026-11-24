@@ -37,8 +37,13 @@ class GuardWatchdogService : JobService() {
             Logger.v(TAG) { "watchdog: guard service alive" }
         } else if (bound) {
             Logger.w(TAG) { "watchdog: guard service NOT running, restarting" }
-            runCatching { GuardService.start(this, GuardService.REASON_WATCHDOG) }
-                .onFailure { Logger.e(TAG, it) { "watchdog restart failed" } }
+            // AB 锁优先：bindService 会创建服务实例（而非"启动服务"），因此不受
+            // Android 12+ 后台启动前台服务限制，也不触发国产 ROM 的"自启"拦截。
+            // 只有绑定请求被系统拒绝时才退回 startForegroundService。
+            if (!GuardLink.wakeGuard(this)) {
+                runCatching { GuardService.start(this, GuardService.REASON_WATCHDOG) }
+                    .onFailure { Logger.e(TAG, it) { "watchdog restart failed" } }
+            }
         } else {
             Logger.v(TAG) { "watchdog: guard not running but device not bound, skip" }
         }
@@ -47,7 +52,7 @@ class GuardWatchdogService : JobService() {
         val daemonAge = GuardHeartbeat.readDaemonAliveAgeMs(this)
         if (bound && (daemonAge == null || daemonAge > GuardHeartbeat.DAEMON_STALE_MS)) {
             Logger.w(TAG) { "watchdog: daemon NOT alive (age=$daemonAge), restarting" }
-            GuardDaemonService.start(this)
+            if (!GuardLink.wakeDaemon(this)) GuardDaemonService.start(this)
         }
         // 顺带排上闹钟兜底通道（与 JobScheduler 并行的第二条系统调度路径，幂等）
         if (bound) GuardAlarmReceiver.schedule(this)

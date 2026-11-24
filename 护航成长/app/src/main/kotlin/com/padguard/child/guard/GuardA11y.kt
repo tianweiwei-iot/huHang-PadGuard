@@ -1,8 +1,11 @@
 package com.padguard.child.guard
 
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.ComponentName
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.SystemClock
+import android.provider.Settings
 import android.view.accessibility.AccessibilityManager
 
 /**
@@ -86,9 +89,31 @@ object GuardA11y {
      *
      * 注意：这只代表**开关状态**，不代表服务在跑。判断"能不能用"请用 [isAlive]。
      *
+     * ## 双口径交叉，消除"明明已开却判定未开"（2026-11 复盘的误报根因）
+     * 旧实现只认 [AccessibilityManager.getEnabledAccessibilityServiceList]，
+     * 而该列表在部分定制 ROM（EMUI / MIUI 等）下会**滞后或被过滤**——
+     * 用户已在系统「无障碍」里打开本服务，列表却还没刷新，于是不少设备稳定地误报"未授权"，
+     * 表现为：主页横幅喊"需要授权"、授权流水线不认为它已办妥、拨完开关不自动跳下一项。
+     *
+     * 修复：以系统落盘的 [Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES] 为**主口径**
+     * （它与系统「无障碍」设置页读取的是同一份数据，开关打开它就必然包含本服务，绝不被 Manager 缓存拖累）；
+     * [AccessibilityManager] 列表降级为**兜底**（仅当读取落盘设置异常时再用），
+     * 二者任一为真即视为已启用。这样一来，只要开关真的打开，就不会再误报未授权。
+     *
      * @return true = 已启用（闸门系统级拦截可用）；false = 未启用或探测失败。
      */
     fun isEnabled(context: Context): Boolean {
+        // ① 主口径：系统持久化设置（最权威，与设置页同源）。
+        val flat = ComponentName(context, OperationGuardAccessibilityService::class.java).flattenToString()
+        val enabledServices = runCatching {
+            Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            )
+        }.getOrNull()
+        if (matchesEnabledSetting(flat, enabledServices)) return true
+
+        // ② 兜底口径：AccessibilityManager 已启用列表（落盘设置读取异常时的退路）。
         val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
             ?: return false
         return runCatching {
@@ -99,6 +124,24 @@ object GuardA11y {
                             ?.endsWith("OperationGuardAccessibilityService") == true
                 }
         }.getOrDefault(false)
+    }
+
+    /**
+     * 判定某组件是否已在 `ENABLED_ACCESSIBILITY_SERVICES` 设置串中启用（纯函数，便于单测）。
+     *
+     * 系统把已启用的无障碍服务以 `:` 分隔的 flatten 组件名拼接存进该设置项，
+     * 例如 `com.padguard.child/com.padguard.child.guard.OperationGuardAccessibilityService`。
+     * 用 [String.equals] 的 `ignoreCase` 是因为个别 ROM 会把包名/类名小写落盘。
+     *
+     * @param flatComponent 本服务的 [ComponentName.flattenToString] 结果
+     * @param enabledServices [Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES] 的原始字符串（可空）
+     */
+    @JvmStatic
+    internal fun matchesEnabledSetting(flatComponent: String, enabledServices: String?): Boolean {
+        if (flatComponent.isBlank()) return false
+        return enabledServices.orEmpty()
+            .split(':')
+            .any { it.equals(flatComponent, ignoreCase = true) }
     }
 
     /**
@@ -156,7 +199,10 @@ object GuardA11y {
             enabled = isEnabled(context),
             link = link,
             lastAliveAt = lastAliveAt(context),
-            now = System.currentTimeMillis(),
+            // 心跳新鲜度是短时窗，必须用单调钟：裸墙钟下回拨系统时间会让
+            // now-lastAliveAt 恒为负，UNKNOWN 分支永远判"活着"，
+            // 无障碍服务实际已死也不再提示补授权，软闸门静默失效。
+            now = SystemClock.elapsedRealtime(),
             graceMs = ALIVE_GRACE_MS
         )
 
@@ -182,12 +228,15 @@ object GuardA11y {
             Link.CONNECTED -> true
             Link.DISCONNECTED -> false
             // 从未有过心跳记录：只能相信开关（可能是首次装机，服务尚未连接）
-            Link.UNKNOWN -> lastAliveAt == 0L || now - lastAliveAt <= graceMs
+            // lastAliveAt > now 说明是旧版本落盘的墙钟值 / 单调钟重启归零 / 读数回拨，
+            // 一律判为心跳过期，绝不能让负差值把"已死"判成"还活着"。
+            Link.UNKNOWN -> lastAliveAt == 0L || (now >= lastAliveAt && now - lastAliveAt <= graceMs)
         }
     }
 
     private fun writeHeartbeat(context: Context, force: Boolean) {
-        val now = System.currentTimeMillis()
+        // 与 isAlive 的 now 同域（单调钟）；写节流 @Volatile 内存态同样只在本进程比较。
+        val now = SystemClock.elapsedRealtime()
         if (!force && now - lastWrittenAt < HEARTBEAT_WRITE_INTERVAL_MS) return
         lastWrittenAt = now
         runCatching {

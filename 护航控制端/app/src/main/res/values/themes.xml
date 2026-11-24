@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- android:windowLightNavigationBar 需要 API 27，放在 values-v27 变体里；
+         放在这里会被 lint（NewApi）判错并中断构建，API 26 设备上该属性本来也会被忽略。 -->
     <style name="Theme.PadGuardParent" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/white</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
     </style>
 </resources>

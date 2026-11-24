@@ -124,6 +124,20 @@ interface RemoteDataSource {
     ): ApiResult<ScreenshotAck>
 
     /**
+     * 截图上传（文件版）：从磁盘流式读取，不整读进内存。
+     *
+     * 供重试队列使用 —— 失败落盘的截图在弱网恢复后由 drain 重传，
+     * 若重读 `readBytes()` 会把整张图再拷一份进堆（B22 上传全程流式的红线）。
+     * 直采路径（字节本来就在内存里）继续走 [uploadScreenshot] 字节版。
+     */
+    suspend fun uploadScreenshot(
+        shotId: String,
+        capturedAt: Long,
+        triggerType: String,
+        file: java.io.File
+    ): ApiResult<ScreenshotAck>
+
+    /**
      * 上报媒体文件（录音/录屏），服务端关联到媒体任务。
      * 用 [java.io.File] 而非 ByteArray：录屏文件动辄几十 MB，
      * 整体读进内存会直接 OOM，走流式 RequestBody 才稳。

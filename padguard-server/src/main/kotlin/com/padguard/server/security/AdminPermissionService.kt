@@ -100,6 +100,20 @@ class AdminPermissionService(
     }
 
     /**
+     * 仅超级管理员可执行的不可逆动作（当前用于家长账号注销）。
+     *
+     * 不能只靠一个 `parents:erase` 权限点：权限矩阵允许运营给自定义角色勾选任意动作，
+     * 而注销会解绑设备、脱敏财务流水、物理删除账号，属于"给错一次就无法挽回"的操作。
+     * 这里硬编码角色，配合 `parents:delete` 的常规闸门形成双闸。
+     */
+    fun requireSuper(adminId: String) {
+        val admin = adminRepository.findById(adminId).orElse(null)
+        if (admin == null || admin.status != "active" || admin.role != "super") {
+            throw BizException(ParentErr.FORBIDDEN, "仅超级管理员可执行该操作", Audience.PARENT)
+        }
+    }
+
+    /**
      * 列出全部角色（内置 + 自定义，含生效权限、成员数与是否已被调整），
      * 供前端 RBAC 矩阵渲染、指派下拉与删除前校验使用。
      *

@@ -59,6 +59,17 @@ interface AuthApi {
     /** 退出登录 */
     @POST("auth/logout")
     suspend fun logout(): Response<ApiResponse<Unit>>
+
+    /**
+     * 修改登录密码（需已登录）。
+     *
+     * 服务端成功后会吊销该账号的全部旧令牌，并返回一对新令牌；
+     * 调用方必须把新令牌落盘，否则本机下一个请求会被判为未授权。
+     */
+    @POST("auth/password")
+    suspend fun changePassword(
+        @Body request: ChangePasswordRequest
+    ): Response<ApiResponse<TokenResponse>>
 }
 
 /**
@@ -106,6 +117,23 @@ interface DeviceApi {
     suspend fun getDeviceDetail(
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<DeviceDto>>
+
+    /**
+     * 拉取设备某一类上报日志（按时间倒序，最多 [limit] 条）。
+     * 用于家长端「通知记录」：type=NOTIFICATION_COLLECTED 时返回孩子端代收的系统通知（包名 + 标题）。
+     */
+    @GET("devices/{deviceId}/logs")
+    suspend fun getDeviceLogs(
+        @Path("deviceId") deviceId: String,
+        @Query("type") type: String,
+        @Query("limit") limit: Int = 200
+    ): Response<ApiResponse<List<DeviceLogDto>>>
+
+    /** 使用授权协议签署凭证（说明书 §5.4）：signed=false 表示未查询到，不等于未同意 */
+    @GET("devices/{deviceId}/agreement")
+    suspend fun getAgreementStatus(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<AgreementStatusDto>>
 
     /**
      * 打开（或复用）一次设备接入，一次拿到会话 ID、6 位接入码与二维码载荷。

@@ -5,12 +5,14 @@ import android.content.Intent
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.os.Bundle
+import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
+import com.padguard.child.notify.NotificationDelivery
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
@@ -147,7 +149,7 @@ class MessageActivity : ComponentActivity() {
         // 否则只要来一个系统弹窗，霸屏就永远数不完（实测踩过）。
         val remainMs = beginSession(sessionKey(), durationSec)
         armClose(remainMs)
-        deadlineMs.longValue = if (remainMs > 0) System.currentTimeMillis() + remainMs else 0L
+        deadlineMs.longValue = if (remainMs > 0) SystemClock.elapsedRealtime() + remainMs else 0L
 
         // 霸屏期间拦截返回键
         blockBackCallback.isEnabled = blocking
@@ -207,7 +209,7 @@ class MessageActivity : ComponentActivity() {
         endSession()
         val remainMs = beginSession(sessionKey(), durationSec)
         armClose(remainMs)
-        deadlineMs.longValue = if (remainMs > 0) System.currentTimeMillis() + remainMs else 0L
+        deadlineMs.longValue = if (remainMs > 0) SystemClock.elapsedRealtime() + remainMs else 0L
         blockBackCallback.isEnabled = blocking
         if (blocking) LockTaskSupport.start(this) else LockTaskSupport.stop(this)
         contentRevision.intValue = contentRevision.intValue + 1
@@ -290,7 +292,7 @@ class MessageActivity : ComponentActivity() {
      */
     fun extendSession(mediaSec: Int) {
         if (mediaSec <= 0) return
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         val currentRemain = if (deadlineAt > now) (deadlineAt - now) else 0L
         val mediaRemain = mediaSec * 1000L
         if (mediaRemain > currentRemain) {
@@ -321,7 +323,7 @@ class MessageActivity : ComponentActivity() {
         /** 返回距截止还剩多少毫秒；durationSec<=0 返回 0（不自动关闭）。 */
         private fun beginSession(key: String, durationSec: Int): Long {
             if (durationSec <= 0) return 0L
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             if (key == sessionKey && deadlineAt > now) return deadlineAt - now
             sessionKey = key
             deadlineAt = now + durationSec * 1000L
@@ -398,6 +400,11 @@ class MessageActivity : ComponentActivity() {
             notifId: Int
         ) {
             val mgr = context.getSystemService(NotificationManager::class.java) ?: return
+            // 通知被关时 notify() 静默丢弃且不抛异常，别把"调用过"当成"孩子看到了"（R34）
+            if (!NotificationDelivery.canDeliver(context, NOTIF_CHANNEL_ID)) {
+                Logger.w(TAG) { "notifications disabled; broadcast notification cannot be delivered" }
+                return
+            }
             ensureChannel(context)
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or
                 (if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M)
@@ -723,14 +730,14 @@ private fun BlockingFooter(durationSec: Int, deadlineMs: Long, modifier: Modifie
     var remain by remember(deadlineMs) {
         mutableIntStateOf(
             if (deadlineMs > 0) {
-                ((deadlineMs - System.currentTimeMillis()) / 1000L).toInt().coerceAtLeast(0)
+                ((deadlineMs - SystemClock.elapsedRealtime()) / 1000L).toInt().coerceAtLeast(0)
             } else durationSec
         )
     }
     LaunchedEffect(deadlineMs) {
         while (true) {
             val left = if (deadlineMs > 0) {
-                ((deadlineMs - System.currentTimeMillis()) / 1000L).toInt().coerceAtLeast(0)
+                ((deadlineMs - SystemClock.elapsedRealtime()) / 1000L).toInt().coerceAtLeast(0)
             } else 0
             remain = left
             if (left <= 0) break

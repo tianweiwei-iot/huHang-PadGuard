@@ -1,6 +1,7 @@
 package com.padguard.child.capture
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
@@ -144,6 +145,10 @@ class PhotoCapture @Inject constructor(
 
     // ==================== Camera2 流程 ====================
 
+    // CAMERA 权限已在 capture() 入口校验（checkSelfPermission != GRANTED 直接返回），
+    // 且 openCamera 全程在 try/catch 内：权限在调用瞬间被撤销时按失败处理，不崩进程。
+    // lint 无法跨函数推断调用点的权限门，这里显式声明。
+    @SuppressLint("MissingPermission")
     private suspend fun openCamera(
         manager: CameraManager,
         cameraId: String,

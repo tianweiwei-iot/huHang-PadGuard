@@ -35,22 +35,20 @@ import com.padguard.core.data.model.policy.ControlMode
 import kotlinx.coroutines.launch
 
 /**
- * 发布包装机第一道门：设备所有者(DO)预置引导（#7 DO 部署闭环·强制首步）。
+ * 硬管控路径的「设备所有者(DO)预置」引导页。
  *
- * ## 为什么是「强制首步」而不是「可选增强」
- * 防卸载 / 静默安装 / 禁止恢复出厂 等核心承诺**全部依赖** DO：
- * 未开 DO 时这些能力在系统层面不可用，"孩子可自卸"即成立。因此发布包把 DO 预置
- * 设为装机第一道门——未成为 DO 前不进入登录 / 授权 / 绑定流程。
+ * ## 只在家长选了硬管控时才出现
+ * 装机首启二选一（[ManagementModeChoiceScreen]）选硬管控后才会挂载本页；
+ * 选软管控的家长直接走三件套授权，不会被 DO 预置拦截。两档并行、互不打扰。
  *
  * ## 为什么 App 不能自己变成 DO
  * Android 不允许已安装应用自行提升为设备所有者，必须由外部预置完成
  * （`dpm set-device-owner` 或设置向导扫码）。本页只负责把合法路径清晰地给到家长，
  * 并支持「重新检测」后立即放行。
  *
- * ## 逃生通道（显式、持久化、标注风险）
- * 仅在家长**明确确认已知风险仍要继续**时才放行（设备所有者能力将不可用），
- * 正常部署（恢复出厂 + 预置）不会走到这里。放行后由 [com.padguard.child.MainActivity]
- * 的验收脚本 / 上线检查表继续兜住。
+ * ## 降级通道
+ * 家长可在本页明确选择「改用软管控」：落 management_mode=SOFT（并置位旧 ack 标记兼容既有流程），
+ * 立即放行；已授予的三件套权限与已下发的策略配置一律保留，日后可切回硬管控。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,7 +60,7 @@ fun DoProvisioningScreen() {
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text(text = "设备所有者预置（必做）") })
+            TopAppBar(title = { Text(text = "设备所有者预置（硬管控）") })
         }
     ) { padding ->
         Surface(
@@ -190,15 +188,15 @@ fun DoProvisioningScreen() {
                     Text(text = "我已执行，重新检测")
                 }
 
-                // 显式逃生通道：仅当家长清楚后果时才放行，且持久化（下次不再强制）。
+                // 降级到软管控：明确切档，不是"带风险继续"；两档配置各自保留，可随时切回。
                 TextButton(
                     onClick = {
-                        scope.launch { vm.ackSkip() }
+                        scope.launch { vm.fallbackToSoft() }
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "我已了解风险，仍要继续（设备所有者能力将不可用）",
+                        text = "改用软管控（放弃设备所有者能力，已开启的管控配置保留）",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }

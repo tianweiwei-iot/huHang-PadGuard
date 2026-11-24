@@ -1,6 +1,7 @@
 package com.padguard.core.data.repository
 
 import com.padguard.core.common.Logger
+import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.db.CommandRecordDao
 import com.padguard.core.data.db.CommandRecordEntity
 import com.padguard.core.data.model.AckStatus
@@ -25,10 +26,19 @@ import javax.inject.Singleton
  * `tryClaim`（写 PENDING）→ 执行 → `recordResult`（写终态）→ 定期 `purgeExpired`。
  * 中间任何一环断开都会让幂等窗口失真：**只认领不写终态**正是本项目曾经的真实缺陷，
  * 表现为"每次重启后整个窗口被清空、旧指令可被重放"。
+ *
+ * ## 时间源纪律（新增缺陷 G）
+ * 本账本**所有**时间戳必须落在 `TimeProvider.now()` 的受信时间轴上，禁止裸墙钟。
+ * `purgeExpired` 曾用 `System.currentTimeMillis() - 7天` 当 `deleteBefore` 阈值：
+ * 孩子把系统时间前拨一年（软管控守不住的已知攻击面），阈值瞬间跳到未来，
+ * 一次清理就删光整张 `command_record`，7 天内执行过的 LOCK/UNLOCK/PAUSE 指令
+ * 全部可被服务端重发或报文重放重新执行 —— 时间护栏把管控时刻钳住了，幂等账本却裸奔。
+ * 现在阈值由受信钟推导，前拨/回拨都不再改变可见范围；脏值则本轮不按年龄删。
  */
 @Singleton
 class CommandRepository @Inject constructor(
-    private val dao: CommandRecordDao
+    private val dao: CommandRecordDao,
+    private val timeProvider: TimeProvider
 ) {
 
     companion object {
@@ -39,6 +49,20 @@ class CommandRepository @Inject constructor(
 
         /** 未认领即到终态时的类型占位。正常路径永远写真实 [CommandType]。 */
         private const val TYPE_UNKNOWN = "UNKNOWN"
+
+        /**
+         * 按年龄清理的阈值；**纯函数**，便于 JVM 单测钉住"墙钟前拨不会清空账本"。
+         *
+         * 返回 null = 本轮不按年龄删（只跑条数窗），用于挡住 0 / 负数 / 溢出等脏值：
+         * 一个负数阈值不会删任何行，但一个因溢出变成极大正数的阈值会删光全表，
+         * 所以宁可跳过一轮也不能拿脏值去 DELETE。
+         */
+        internal fun purgeThreshold(trustedNowMs: Long): Long? {
+            if (trustedNowMs <= 0L) return null
+            val threshold = trustedNowMs - RETENTION_MS
+            if (threshold <= 0L || threshold >= trustedNowMs) return null
+            return threshold
+        }
     }
 
     private val mutex = Mutex()
@@ -61,14 +85,15 @@ class CommandRepository @Inject constructor(
     suspend fun tryClaim(
         msgId: String,
         type: CommandType,
-        receivedAt: Long = System.currentTimeMillis()
+        /** 显式值只应由 `CommandGate` 传入的同一帧 `timeProvider.now()`；留空则内部取受信钟 */
+        receivedAt: Long? = null
     ): Boolean = mutex.withLock {
         if (dao.get(msgId) != null) return false
         dao.upsert(
             CommandRecordEntity(
                 msgId = msgId,
                 type = type.name,
-                receivedAt = receivedAt,
+                receivedAt = receivedAt ?: timeProvider.now(),
                 executedAt = null,
                 status = AckStatus.PENDING.name
             )
@@ -115,10 +140,12 @@ class CommandRepository @Inject constructor(
         msgId: String,
         type: CommandType?,
         status: AckStatus,
-        executedAt: Long = System.currentTimeMillis(),
+        /** 显式值来自 `CommandAck.executedAt`（执行器同样取 `timeProvider.now()`）；留空则内部取受信钟 */
+        executedAt: Long? = null,
         errorMessage: String? = null,
         retryCount: Int = 0
     ) {
+        val at = executedAt ?: timeProvider.now()
         // 与 tryClaim 共用同一把锁：避免"recordResult 读到 null → 补插终态"与
         // 另一通道的 "tryClaim 写入 PENDING" 交错，把已完成的终态覆盖回 PENDING。
         mutex.withLock {
@@ -131,8 +158,8 @@ class CommandRepository @Inject constructor(
                         CommandRecordEntity(
                             msgId = msgId,
                             type = type?.name ?: TYPE_UNKNOWN,
-                            receivedAt = executedAt,
-                            executedAt = executedAt,
+                            receivedAt = at,
+                            executedAt = at,
                             status = status.name,
                             retryCount = retryCount,
                             errorMessage = errorMessage
@@ -141,7 +168,7 @@ class CommandRepository @Inject constructor(
                 } else {
                     dao.upsert(
                         existing.copy(
-                            executedAt = executedAt,
+                            executedAt = at,
                             status = status.name,
                             errorMessage = errorMessage,
                             retryCount = retryCount
@@ -157,9 +184,13 @@ class CommandRepository @Inject constructor(
      *
      * @return 本次删除的总行数，供调用方判断是否需要记日志。
      */
-    suspend fun purgeExpired(): Int {
-        val byAge = runCatching { dao.deleteBefore(System.currentTimeMillis() - RETENTION_MS) }
-            .getOrDefault(0)
+    suspend fun purgeExpired(trustedNowMs: Long = timeProvider.now()): Int {
+        // 阈值只认受信钟（新增缺陷 G）。显式参数供 JVM 单测注入受控时刻，
+        // 生产路径由默认参数走 TimeProvider —— 前拨/回拨墙钟都不会移动这个阈值。
+        val byAge = purgeThreshold(trustedNowMs)
+            ?.let { threshold -> runCatching { dao.deleteBefore(threshold) }.getOrDefault(0) }
+            ?: 0
+        // 条数窗与时间源无关，脏值时仍必须跑，否则重投风暴能把表撑到无限大。
         val byCount = runCatching { dao.deleteBeyondWindow(IDEMPOTENT_WINDOW) }
             .getOrDefault(0)
         return byAge + byCount

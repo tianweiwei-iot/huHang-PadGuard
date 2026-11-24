@@ -1,8 +1,8 @@
 package com.padguard.parent.data.importer
 
-import android.util.Xml
 import com.padguard.parent.domain.model.DeviceImportRow
 import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserFactory
 import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
@@ -33,6 +33,18 @@ class DeviceImportFileParser @Inject constructor() {
         ALIAS("设备别名", "别名", "名称"),
         MODEL("型号", "设备型号"),
         GROUP("分组", "设备分组", "班级")
+    }
+
+    // P-1：导入解析防 OOM 上限（恶意/损坏的 .xlsx 本质是 ZIP，可能含超大条目或海量条目）。
+    // 用 internal var 而非 const：单测可注入小值钉住上限行为（生产语义不变，默认值即发布值）。
+    internal var maxEntryBytes: Long = 32 * 1024 * 1024L   // 单条目上限 32MB
+    internal var maxEntries: Int = 4096                    // 条目数上限
+    internal var maxTotalBytes: Long = 128 * 1024 * 1024L  // 全包解压上限 128MB
+    internal var maxCsvBytes: Long = 32 * 1024 * 1024L     // CSV 全文上限 32MB
+
+    private companion object {
+        /** [readLimited] 的搬运缓冲（64KB，与常见页缓存对齐即可，无性能敏感点） */
+        const val COPY_BUFFER_BYTES = 64 * 1024
     }
 
     fun parse(fileName: String, input: InputStream): Result<List<DeviceImportRow>> {
@@ -123,9 +135,12 @@ class DeviceImportFileParser @Inject constructor() {
         }
     }
 
-    /** BOM 优先；无 BOM 时先严格按 UTF-8 解码，失败则回退 GBK（中文 Excel 导出常见编码） */
+    /**
+     * BOM 优先；无 BOM 时先严格按 UTF-8 解码，失败则回退 GBK（中文 Excel 导出常见编码）。
+     * 全文读取同样走 [readLimited]：CSV 没有 ZIP 外壳，超大文件（GB 级）会直接 OOM。
+     */
     private fun readTextWithCharsetDetection(input: InputStream): String {
-        val bytes = input.readBytes()
+        val bytes = readLimited(input, maxCsvBytes)
         val bomCharset = when {
             bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte() -> Charsets.UTF_8
             bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte() -> Charsets.UTF_16LE
@@ -163,17 +178,49 @@ class DeviceImportFileParser @Inject constructor() {
 
     private fun readZipEntries(input: InputStream): Map<String, ByteArray> {
         val result = mutableMapOf<String, ByteArray>()
+        var totalBytes = 0L
         ZipInputStream(BufferedInputStream(input)).use { zip ->
             var entry = zip.nextEntry
             while (entry != null) {
                 if (!entry.isDirectory) {
-                    result[entry.name] = zip.readBytes()
+                    // P-1：防 OOM —— 按**实际读取的字节数**执行三条上限。
+                    // 历史缺陷：原先用 entry.size 预判，但流式生成的 ZIP（无中央目录，
+                    // local header 的 size 字段为 0）读出来 entry.size == -1，
+                    // 三条上限判断全部形同虚设，恶意构造的压缩包可以无限耗内存。
+                    if (result.size >= maxEntries) {
+                        throw IllegalArgumentException("导入文件损坏或过大，已中止解析")
+                    }
+                    val bytes = readLimited(zip, maxEntryBytes)
+                    totalBytes += bytes.size
+                    if (totalBytes > maxTotalBytes) {
+                        throw IllegalArgumentException("导入文件损坏或过大，已中止解析")
+                    }
+                    result[entry.name] = bytes
                 }
                 zip.closeEntry()
                 entry = zip.nextEntry
             }
         }
         return result
+    }
+
+    /**
+     * 流式读取并按**实际字节数**强制上限，超过即抛 IllegalArgumentException
+     * （调用方均在 runCatching 内，会转成带中文提示的导入失败，不会崩溃）。
+     * 绝不能用 readBytes()：那是无界读取，上限就失去意义。
+     */
+    private fun readLimited(input: InputStream, maxBytes: Long): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(COPY_BUFFER_BYTES)
+        var total = 0L
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > maxBytes) throw IllegalArgumentException("导入文件损坏或过大，已中止解析")
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
     }
 
     /** 解析 sharedStrings.xml：<si> 内所有 <t> 文本拼接为一个共享字符串 */
@@ -252,7 +299,11 @@ class DeviceImportFileParser @Inject constructor() {
     }
 
     private fun newParser(bytes: ByteArray): XmlPullParser {
-        val parser = Xml.newPullParser()
+        // 用 XmlPullParserFactory 而非 android.util.Xml.newPullParser()：
+        // 两者在 Android 上返回同一实现（KXmlParser），但 android.util.Xml 是
+        // android.jar 里的 stub 方法，JVM 单测会抛 "not mocked"，解析器行为
+        // 无法在本地门禁里回归（此前导入解析测试因此一直无法落地）。
+        val parser = XmlPullParserFactory.newInstance().newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
         parser.setInput(java.io.ByteArrayInputStream(bytes), null)
         return parser

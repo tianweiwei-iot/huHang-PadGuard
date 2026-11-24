@@ -104,7 +104,7 @@ REM   留空后服务端下发相对路径 /v1/files/{id}，由孩子端 MediaUr
 REM   家长端 retrofit.baseUrl().resolve() 各自用"自己连的那个服务端"拼 origin，
 REM   服务端换 IP、换部署环境都不会失效。
 REM 确需固定对外地址时用环境变量注入：set PADGUARD_BASE_URL=https://files.example.com
-java -jar "%JAR%" ^
+java -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -jar "%JAR%" ^
     --spring.profiles.active=%PROFILE% ^
     --server.port=%PORT% ^
     --padguard.base-url= ^

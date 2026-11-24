@@ -155,6 +155,7 @@ class EntitlementGateIntegrationTest {
         override fun findByDeviceIdAndPackageName(deviceId: String, packageName: String) = null
         override fun findByDeviceIdAndInstalledTrue(deviceId: String) = emptyList<com.padguard.server.domain.InstalledApp>()
         override fun deleteByDeviceId(deviceId: String): Int = 0
+        override fun findAllIconUrls(): List<String> = emptyList()
     }
 
     private class FakeUrlCategoryRepo : FakeJpaRepository<com.padguard.server.domain.UrlCategory, String>(), UrlCategoryRepository {
@@ -181,6 +182,29 @@ class EntitlementGateIntegrationTest {
             emptyList<com.padguard.server.domain.Command>()
         override fun findExpiredPending(deviceId: String, status: String, now: Long) =
             emptyList<com.padguard.server.domain.Command>()
+        /** F01 CAS 的内存等价实现：只有仍是 PENDING 才改写并返回影响行数 1 */
+        override fun markExpiredIfPending(id: String, pending: String, expired: String): Int {
+            val cmd = table[id] ?: return 0
+            if (cmd.status != pending) return 0
+            cmd.status = expired
+            return 1
+        }
+        override fun applyAckIfOpen(
+            msgId: String, deviceId: String, terminal: Collection<String>, status: String,
+            executedAt: Long?, errorCode: String?, errorMessage: String?
+        ): Int {
+            val cmd = table.values.firstOrNull { it.msgId == msgId && it.deviceId == deviceId } ?: return 0
+            if (cmd.status in terminal) return 0
+            cmd.status = status
+            cmd.executedAt = executedAt
+            cmd.errorCode = errorCode
+            cmd.errorMessage = errorMessage
+            return 1
+        }
+        // W2 补发查询：本组测试不涉及补发，恒返回空/0 即可保持原有断言语义
+        override fun findRedeliverablePending(deviceId: String, status: String, now: Long, maxAttempts: Int, types: Collection<String>, pageable: Pageable) =
+            emptyList<com.padguard.server.domain.Command>()
+        override fun tryRefreshForRedelivery(id: String, status: String, now: Long, newExpiresAt: Long): Int = 0
         override fun deleteByDeviceId(deviceId: String): Int {
             val before = table.size
             table.values.removeIf { it.deviceId == deviceId }
@@ -195,6 +219,13 @@ class EntitlementGateIntegrationTest {
         override fun findFirstByDeviceIdAndShotId(deviceId: String, shotId: String) = null
         override fun deleteByDeviceId(deviceId: String): Int = 0
         override fun findReceivedAtBefore(ts: Long) = emptyList<com.padguard.server.domain.Screenshot>()
+        override fun markExpiredIfPending(deviceId: String, shotId: String, pending: String, expired: String): Int {
+            val row = table.values.firstOrNull {
+                it.deviceId == deviceId && it.shotId == shotId && it.status == pending
+            } ?: return 0
+            row.status = expired
+            return 1
+        }
     }
 
     private class FakeAuditLogRepo : FakeJpaRepository<com.padguard.server.domain.AuditLog, String>(), AuditLogRepository {
@@ -252,8 +283,10 @@ class EntitlementGateIntegrationTest {
         val ownership = DeviceOwnershipGuard(devices)
         val auditService = AuditService(FakeAuditLogRepo(), ownership)
         val mqtt = MqttGateway(null, objectMapper, "test")
-        val sweeper = ExpiredCommandSweeper(commands, FakeScreenshotRepo(), objectMapper)
-        val commandService = CommandService(devices, commands, mqtt, objectMapper, sweeper, auditService, ownership)
+        // W2：补发服务用默认配置 + 假仓储（findRedeliverablePending 恒空），不改变本组用例语义
+        val commandRedelivery = CommandRedeliveryService(commands)
+        val sweeper = ExpiredCommandSweeper(commands, FakeScreenshotRepo(), objectMapper, commandRedelivery)
+        val commandService = CommandService(devices, commands, mqtt, objectMapper, sweeper, auditService, ownership, commandRedelivery)
         // ContentFilterService 是 final 类且与 PolicyExtensionService 构造循环（@Lazy），
         // 测试只关心 buildPolicyPackage 用到的 blockedCategoriesForDevice → 直接 mock
         val contentFilter = Mockito.mock(ContentFilterService::class.java).also {

@@ -90,6 +90,21 @@ class GuardA11yTest {
     }
 
     @Test
+    fun `未知状态下心跳时刻在未来时判死而不是复活`() {
+        // 回拨系统时间 / 旧版墙钟值落到单调域 / 重启后单调归零：
+        // 负差值曾让 UNKNOWN 分支恒为 true，服务已死却不再提示补授权。
+        assertFalse(
+            GuardA11y.decideAlive(
+                enabled = true,
+                link = GuardA11y.Link.UNKNOWN,
+                lastAliveAt = now + 10 * 60 * 1000L,
+                now = now,
+                graceMs = grace
+            )
+        )
+    }
+
+    @Test
     fun `未知状态下心跳过期则判死`() {
         assertFalse(
             GuardA11y.decideAlive(
@@ -100,5 +115,43 @@ class GuardA11yTest {
                 graceMs = grace
             )
         )
+    }
+
+    // ==================== matchesEnabledSetting（双口径主判断的纯函数） ====================
+
+    private val flat = "com.padguard.child/com.padguard.child.guard.OperationGuardAccessibilityService"
+
+    @Test
+    fun `设置串精确包含本服务组件即判定启用`() {
+        assertTrue(GuardA11y.matchesEnabledSetting(flat, flat))
+    }
+
+    @Test
+    fun `设置串含多个服务时仍能命中本服务`() {
+        val others = "com.other.app/com.other.app.SomeService"
+        assertTrue(GuardA11y.matchesEnabledSetting(flat, "$others:$flat"))
+        assertTrue(GuardA11y.matchesEnabledSetting(flat, "$flat:$others"))
+    }
+
+    @Test
+    fun `设置串大小写不一致也能命中（部分 ROM 小写落盘）`() {
+        assertTrue(GuardA11y.matchesEnabledSetting(flat, flat.lowercase()))
+    }
+
+    @Test
+    fun `设置串不含本服务时判定未启用`() {
+        val others = "com.other.app/com.other.app.SomeService"
+        assertFalse(GuardA11y.matchesEnabledSetting(flat, others))
+    }
+
+    @Test
+    fun `设置串为空或 null 时判定未启用`() {
+        assertFalse(GuardA11y.matchesEnabledSetting(flat, ""))
+        assertFalse(GuardA11y.matchesEnabledSetting(flat, null))
+    }
+
+    @Test
+    fun `空白组件名永不命中`() {
+        assertFalse(GuardA11y.matchesEnabledSetting("   ", flat))
     }
 }

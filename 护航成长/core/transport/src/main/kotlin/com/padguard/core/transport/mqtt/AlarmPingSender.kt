@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.PowerManager
+import android.os.SystemClock
 import com.padguard.core.common.Logger
 import org.eclipse.paho.client.mqttv3.IMqttActionListener
 import org.eclipse.paho.client.mqttv3.IMqttToken
@@ -85,14 +86,23 @@ class AlarmPingSender(private val context: Context) : MqttPingSender {
     override fun schedule(delayInMilliseconds: Long) {
         val intent = pendingIntent ?: return
         if (!started) return
-        val triggerAt = System.currentTimeMillis() + delayInMilliseconds
+        // KeepAlive 是"从现在起 delay 之后"的**相对**定时，与墙上日历无关。
+        // 早期用 System.currentTimeMillis() + delay 配 RTC_WAKEUP（裸墙钟）：
+        // 孩子回拨系统时间会把已排的 PINGREQ 推迟几小时，broker 按 KeepAlive
+        // 超时把设备判离线（家长端看到"设备离线"却无任何异常日志）；
+        // 前拨则让 ping 立刻触发、白白打乱心跳节奏。
+        // 改用 elapsedRealtime() + ELAPSED_REALTIME_WAKEUP —— 这也是 Paho 官方
+        // AlarmPingSender 的时钟域，改时间 / NTP 校时都不会挪动触发点。
+        val triggerAt = SystemClock.elapsedRealtime() + delayInMilliseconds
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 // setExactAndAllowWhileIdle 是唯一能在 Doze 下按时触发的接口，
                 // 系统对其有 9 分钟最小间隔限流，因此 KeepAlive 不应低于 60s。
-                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, intent)
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, intent
+                )
             } else {
-                alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAt, intent)
+                alarmManager.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, intent)
             }
         } catch (e: SecurityException) {
             // 兜底：SCHEDULE_EXACT_ALARM 虽随安装授予，但 Android 12+ 用户可在
@@ -102,7 +112,9 @@ class AlarmPingSender(private val context: Context) : MqttPingSender {
             // （那会导致 broker 约 135s 判掉线，表现为每晚息屏即脱管）。
             Logger.w(TAG, e) { "exact alarm unavailable, degrading to inexact alarm" }
             runCatching {
-                alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, intent)
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, intent
+                )
             }.onFailure {
                 Logger.w(TAG, it) { "failed to schedule inexact mqtt ping" }
             }

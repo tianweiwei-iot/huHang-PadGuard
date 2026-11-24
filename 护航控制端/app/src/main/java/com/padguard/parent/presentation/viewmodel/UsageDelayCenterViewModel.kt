@@ -12,6 +12,7 @@ import com.padguard.parent.presentation.util.RefreshGate
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -57,7 +58,17 @@ data class UsageDelayCenterUiState(
     /** 最近一次操作的反馈文案 */
     val actionMessage: String? = null,
     /** 处理中：按钮置灰，避免家长连点导致重复下发指令 */
-    val processing: Boolean = false
+    val processing: Boolean = false,
+    /**
+     * 最近一次拉取失败的原因；null = 最近一次成功。
+     *
+     * 此前设备列表失败是 `?: return@launch`、单台设备工单失败是静默跳过：
+     * 前者让"接口全挂"看起来像"没有申请"，后者让某台孩子的申请整段消失。
+     * 孩子正等着延时，家长却以为他没提 —— 必须留痕。
+     */
+    val error: String? = null,
+    /** 最近一次**完整**拉到延时申请的时刻（墙钟毫秒）；部分失败不更新，避免夸大新鲜度 */
+    val lastSuccessAt: Long? = null
 )
 
 @HiltViewModel
@@ -102,6 +113,14 @@ class UsageDelayCenterViewModel @Inject constructor(
         observePush()
     }
 
+    /** 账号切换时清空 A 的延时工单记录/未读/去重集合，防止残留到 B 的会话（详见 Unlock VM 同名方法）。 */
+    fun resetForSessionChange() {
+        handledInSession.clear()
+        notifiedTicketIds.clear()
+        refreshGate.reset()
+        _uiState.value = UsageDelayCenterUiState()
+    }
+
     private fun startPolling() {
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
@@ -140,11 +159,27 @@ class UsageDelayCenterViewModel @Inject constructor(
         if (!refreshGate.tryEnter()) return
         viewModelScope.launch {
             try {
-                val devices = deviceRepository.getDeviceList().getOrNull() ?: return@launch
+                val devicesResult = deviceRepository.getDeviceList()
+                val devices = devicesResult.getOrNull()
+                if (devices == null) {
+                    // 失败不能静默返回：页面会把"接口挂了"渲染成"暂无申请"，
+                    // 而孩子可能正卡在锁机界面等着这一次延时。
+                    _uiState.value = _uiState.value.copy(
+                        error = devicesResult.exceptionOrNull()?.message ?: "设备列表读取失败"
+                    )
+                    return@launch
+                }
                 val nameById = devices.associate { it.id to it.name }
 
+                // 单台设备工单拉取失败必须记下来：静默跳过会让那台设备的申请整体消失，
+                // 家长看到的是"孩子没提申请"。
+                var anyFetchFailed = false
                 val entries = devices.mapNotNull { device ->
-                    val tickets = policyRepository.getUsageDelayTickets(device.id).getOrNull() ?: return@mapNotNull null
+                    val tickets = policyRepository.getUsageDelayTickets(device.id).getOrNull()
+                    if (tickets == null) {
+                        anyFetchFailed = true
+                        return@mapNotNull null
+                    }
                     tickets.map { UsageDelayTicketEntry(it, nameById[device.id].orEmpty()) }
                 }.flatten().sortedByDescending { it.ticket.createdAt }
 
@@ -166,7 +201,14 @@ class UsageDelayCenterViewModel @Inject constructor(
                 _uiState.value = _uiState.value.copy(
                     records = entries,
                     unreadCount = entries.count { it.ticket.isPending },
-                    popup = next
+                    popup = next,
+                    error = if (anyFetchFailed) "部分设备的延时申请未能读取" else null,
+                    // 部分失败时列表是残缺的，不能刷新"新鲜度"，否则角标会说谎
+                    lastSuccessAt = if (anyFetchFailed) {
+                        _uiState.value.lastSuccessAt
+                    } else {
+                        System.currentTimeMillis()
+                    }
                 )
             } finally {
                 // 期间被拒的刷新（处理工单后的刷新 / 下拉刷新）不能丢，放行一次
@@ -217,6 +259,8 @@ class UsageDelayCenterViewModel @Inject constructor(
         val outcome = try {
             block()
         } catch (t: Throwable) {
+            // 取消不是操作失败：放行后不写错误态、不把工单误记进失败冷却窗。
+            if (t is CancellationException) throw t
             Result.failure(t)
         }
         val message = outcome.fold(

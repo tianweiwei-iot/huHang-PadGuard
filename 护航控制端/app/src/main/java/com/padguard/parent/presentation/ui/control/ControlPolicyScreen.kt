@@ -21,7 +21,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.padguard.parent.domain.model.ControlMode
+import com.padguard.parent.presentation.ui.components.HighRiskAction
+import com.padguard.parent.presentation.ui.components.HighRiskActions
+import com.padguard.parent.presentation.ui.components.HighRiskConfirmDialog
 import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.components.StaleDataHint
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.util.TimeFormat
 import com.padguard.parent.presentation.viewmodel.ControlPolicyUiState
@@ -102,6 +106,8 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
     // 编辑态必须提到 LazyColumn 之外：LazyListScope 里不能直接放可组合项（Dialog），
     // 且条目滚出屏幕被回收时，正在编辑的草稿会一起丢掉。
     var editing by remember { mutableStateOf<TimeRestrictionDraft?>(null) }
+    // 锁屏属高风险即时指令：按钮紧挨「一键解锁」，误触会让孩子的平板当场锁定，先确认再下发
+    var pendingRisk by remember { mutableStateOf<HighRiskAction?>(null) }
     Box(modifier = Modifier.fillMaxSize()) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -125,7 +131,11 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                         ) { Text("一键解锁") }
                         OutlinedButton(
-                            onClick = { viewModel.lockScreen() },
+                            onClick = {
+                                pendingRisk = HighRiskActions.lockScreen(uiState.device?.name) {
+                                    viewModel.lockScreen()
+                                }
+                            },
                             modifier = Modifier.weight(1f)
                         ) { Text("立即锁屏") }
                     }
@@ -208,7 +218,8 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
                 )
             }
-            uiState.timeRestrictionsError != null -> item {
+            // 一条都没读到：整段换成错误 + 重试（此时没有"旧数据"可展示）
+            uiState.timeRestrictionsError != null && uiState.timeRestrictions.isEmpty() -> item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "读取失败：${uiState.timeRestrictionsError}",
@@ -238,25 +249,39 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
                     }
                 }
             }
-            else -> items(uiState.timeRestrictions) { tr ->
-                TimeRestrictionItem(
-                    dayLabel = dayLabel(tr.dayOfWeek),
-                    timeRange = "${TimeFormat.formatClock(tr.startTime)} - ${TimeFormat.formatClock(tr.endTime)}",
-                    maxMinutes = tr.maxMinutes,
-                    enabled = tr.isEnabled,
-                    onToggle = { viewModel.toggleTimeRestriction(tr) },
-                    onEdit = {
-                        editing = TimeRestrictionDraft(
-                            id = tr.id,
-                            dayOfWeek = tr.dayOfWeek,
-                            start = tr.startTime,
-                            end = tr.endTime,
-                            limitEnabled = tr.maxMinutes != null,
-                            limitMinutes = (tr.maxMinutes ?: 60).toString(),
-                            enabled = tr.isEnabled
+            else -> {
+                // 读过、但本次刷新失败：时段列表**照旧展示**（那是家长自己配的、孩子端正在生效的规则），
+                // 只在上方说明"这份列表是哪一刻的、本次没读到最新"。此前错误分支会把整段列表顶掉，
+                // 家长看到空白会误以为时段被删了。
+                if (uiState.timeRestrictionsError != null) {
+                    item {
+                        StaleDataHint(
+                            message = uiState.timeRestrictionsError,
+                            lastSuccessAt = uiState.lastSuccessAt,
+                            onRetry = { viewModel.load() }
                         )
                     }
-                )
+                }
+                items(uiState.timeRestrictions) { tr ->
+                    TimeRestrictionItem(
+                        dayLabel = dayLabel(tr.dayOfWeek),
+                        timeRange = "${TimeFormat.formatClock(tr.startTime)} - ${TimeFormat.formatClock(tr.endTime)}",
+                        maxMinutes = tr.maxMinutes,
+                        enabled = tr.isEnabled,
+                        onToggle = { viewModel.toggleTimeRestriction(tr) },
+                        onEdit = {
+                            editing = TimeRestrictionDraft(
+                                id = tr.id,
+                                dayOfWeek = tr.dayOfWeek,
+                                start = tr.startTime,
+                                end = tr.endTime,
+                                limitEnabled = tr.maxMinutes != null,
+                                limitMinutes = (tr.maxMinutes ?: 60).toString(),
+                                enabled = tr.isEnabled
+                            )
+                        }
+                    )
+                }
             }
         }
     }
@@ -285,6 +310,7 @@ private fun TimePolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolic
             }
         )
     }
+    HighRiskConfirmDialog(action = pendingRisk, onDismiss = { pendingRisk = null })
     }
 }
 
@@ -670,13 +696,17 @@ private fun WebPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolicy
 
 @Composable
 private fun SystemPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPolicyViewModel) {
+    // 系统页的「一键锁屏」是大红按钮，且位于页面最上方，误触概率高于其它入口 → 二次确认
+    var pendingRisk by remember { mutableStateOf<HighRiskAction?>(null) }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
             Button(
-                onClick = { viewModel.lockScreen() },
+                onClick = {
+                    pendingRisk = HighRiskActions.lockScreen(uiState.device?.name) { viewModel.lockScreen() }
+                },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = PadGuardColors.WarningRed)
@@ -733,6 +763,7 @@ private fun SystemPolicyTab(uiState: ControlPolicyUiState, viewModel: ControlPol
             }
         }
     }
+    HighRiskConfirmDialog(action = pendingRisk, onDismiss = { pendingRisk = null })
 }
 
 @Composable

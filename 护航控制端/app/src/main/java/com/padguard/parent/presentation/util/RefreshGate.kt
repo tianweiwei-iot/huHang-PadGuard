@@ -59,4 +59,14 @@ class RefreshGate {
         inFlight.set(false)
         return pending.compareAndSet(true, false)
     }
+
+    /**
+     * 会话切换时复位闸门：旧会话的在途刷新若在上锁期间被账号切换打断，
+     * inFlight/pending 可能残留，导致新会话的首次刷新被误判为"已有在途"而吞掉。
+     * 与 VM 的 resetForSessionChange 配套调用。
+     */
+    fun reset() {
+        pending.set(false)
+        inFlight.set(false)
+    }
 }

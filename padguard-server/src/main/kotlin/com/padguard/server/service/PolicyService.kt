@@ -292,7 +292,10 @@ class PolicyService(
                 "heartbeatIntervalSec" to 30,
                 "logUploadIntervalSec" to 300,
                 // 必须下发：不写这个字段孩子端按 0 处理 = 关闭周期定位上报
-                "locationIntervalSec" to DEFAULT_LOCATION_INTERVAL_SEC
+                "locationIntervalSec" to DEFAULT_LOCATION_INTERVAL_SEC,
+                // 新设备可能已经处于"撤回同意"状态（恢复出厂后重新绑定/后台代建），
+                // 默认包也必须如实带上，否则旧缓存包会把闸门重新打开。
+                "consentRevoked" to (deviceRepository.findById(deviceId).orElse(null)?.consentRevoked ?: false)
             ),
             // 默认包也要带护眼（默认关闭）：孩子端在拿到重建策略前会先收到默认包，
             // 缺字段时按"关闭"处理，行为一致；带上它免去"默认包覆盖后被清掉"的解释成本。

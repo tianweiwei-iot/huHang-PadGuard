@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,6 +32,7 @@ import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.presentation.ui.auth.ServerConfigDialog
 import com.padguard.parent.presentation.ui.theme.ThemeMode
 import com.padguard.parent.presentation.ui.theme.tokensFor
+import com.padguard.parent.presentation.viewmodel.PasswordChangeState
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 
@@ -48,8 +50,18 @@ sealed interface ProfileAction {
     data object EyeCare : ProfileAction
     data object Settings : ProfileAction
     data object About : ProfileAction
+    /** 数据权利与合规：查阅复制/撤回同意/注销/申诉 */
+    data object DataRights : ProfileAction
     /** 服务器地址：在「我的」页即可修改，不必退出登录 */
     data object ServerAddress : ProfileAction
+    /**
+     * 修改登录密码。
+     *
+     * 不放进 ProfileAction 的导航分发，而是像「服务器地址」那样由本页弹窗完成：
+     * 它是就地弹窗、不涉及路由，混进 onAction 会让调用方多一个永远不导航的分支。
+     * 之所以仍然给它一个 Action 常量：列表项（ProfileItem）统一用 Action 标识自己。
+     */
+    data object ChangePassword : ProfileAction
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -68,11 +80,28 @@ fun ProfileScreen(
     /** 深色模式三态（跟随系统/浅色/深色） */
     darkMode: DarkMode = DarkMode.SYSTEM,
     /** 切换深色模式（写入持久化并触发整树重组） */
-    onDarkModeChange: (DarkMode) -> Unit = {}
+    onDarkModeChange: (DarkMode) -> Unit = {},
+    /** 修改登录密码的提交状态（提交中 / 错误 / 已完成） */
+    passwordChangeState: PasswordChangeState = PasswordChangeState(),
+    /** 提交修改密码；三参分别为当前密码、新密码、确认新密码 */
+    onChangePassword: (oldPassword: String, newPassword: String, confirmPassword: String) -> Unit = { _, _, _ -> },
+    /** 关闭弹窗时清理状态（错误 / 完成标记），避免下次打开残留上一次的报错 */
+    onClearPasswordChange: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var showLogoutConfirm by remember { mutableStateOf(false) }
     var showServerConfig by remember { mutableStateOf(false) }
+    var showChangePassword by remember { mutableStateOf(false) }
+
+    // 改密成功：服务端已换新令牌并落盘，本机不需要重新登录。
+    // 这句提示很重要 —— 不说清楚，用户会以为"改完密码之后是不是被踢下线了"。
+    LaunchedEffect(passwordChangeState.done) {
+        if (passwordChangeState.done) {
+            showChangePassword = false
+            Toast.makeText(context, "密码已修改，其他设备需重新登录", Toast.LENGTH_LONG).show()
+            onClearPasswordChange()
+        }
+    }
     Scaffold(
         containerColor = Color.Transparent,
         topBar = { TopAppBar(title = { Text("我的") }) }
@@ -139,16 +168,35 @@ fun ProfileScreen(
                     ProfileAction.About
                 ),
                 ProfileItem(
+                    "数据权利与合规", Icons.Default.PrivacyTip,
+                    "导出数据 / 撤回同意 / 注销 / 申诉",
+                    ProfileAction.DataRights
+                ),
+                ProfileItem(
                     "服务器地址", Icons.Default.Dns,
                     if (serverUrl.isBlank()) "未设置" else serverUrl,
                     ProfileAction.ServerAddress
+                ),
+                // 登录密码：与「服务器地址」同属"账号/连接"，放在一起。
+                // 副标题直说"建议改掉初始密码"—— 因为绝大多数账号此刻用的还是
+                // 客服/运营转告的随机口令，而这个页面是他们唯一能找到的修改入口。
+                ProfileItem(
+                    "登录密码", Icons.Default.Lock,
+                    "建议改掉客服给的初始密码",
+                    ProfileAction.ChangePassword
                 )
             )
             items.forEach { item ->
                 ProfileListItem(item = item, onClick = {
-                    // 服务器地址走本地弹窗（登录后也能改，不依赖 onAction 导航）
-                    if (item.action == ProfileAction.ServerAddress) showServerConfig = true
-                    else onAction(item.action)
+                    when (item.action) {
+                        // 服务器地址与登录密码都走本页弹窗（登录后也能改，不依赖 onAction 导航）
+                        ProfileAction.ServerAddress -> showServerConfig = true
+                        ProfileAction.ChangePassword -> {
+                            onClearPasswordChange()
+                            showChangePassword = true
+                        }
+                        else -> onAction(item.action)
+                    }
                 })
             }
 
@@ -210,6 +258,19 @@ fun ProfileScreen(
                 onSaveServerUrl(url)
                 Toast.makeText(context, "已保存，立即生效", Toast.LENGTH_SHORT).show()
                 showServerConfig = false
+            }
+        )
+    }
+
+    if (showChangePassword) {
+        ChangePasswordDialog(
+            state = passwordChangeState,
+            onSubmit = onChangePassword,
+            // 关闭时清状态：否则下次打开会带着上一次的"原密码不正确"，
+            // 而用户这次还没输入任何东西，看起来像在指责他刚刚填错。
+            onDismiss = {
+                showChangePassword = false
+                onClearPasswordChange()
             }
         )
     }

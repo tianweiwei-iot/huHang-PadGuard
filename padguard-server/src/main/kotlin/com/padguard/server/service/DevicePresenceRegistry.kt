@@ -58,7 +58,12 @@ class DevicePresenceRegistry(
          * 这个间隔不是真实节奏，喂进 EWMA 会把阈值临时撑到十几秒 ——
          * 恰好让"服务端刚重启就掉线"的设备又慢一拍。第一次真实信号只用于校准 LastSeen。
          */
-        @Volatile var skipNextGapSample: Boolean = false
+        @Volatile var skipNextGapSample: Boolean = false,
+        /**
+         * 长轮询挂起截止时刻（绝对毫秒）。挂起期间连接明确活着，不得判离线。
+         * 详见 [hold] —— 这是「一会儿上线一会儿掉线」的根治点。
+         */
+        @Volatile var holdUntilMs: Long = 0L
     )
 
     private val entries = ConcurrentHashMap<String, Entry>()
@@ -103,10 +108,51 @@ class DevicePresenceRegistry(
     }
 
     /**
+     * 登记一次**指令长轮询挂起**：在 [holdMs] 内该设备的 HTTP 连接明确还活着，
+     * 即使这段时间没有任何新请求，也不得判离线。
+     *
+     * ## 为什么必须补这一条（"一会儿上线一会儿掉线"的根因）
+     * 孩子端 `GET /api/v1/device/commands?since=...&waitMs=20000` 会把请求挂起最长 20 秒
+     * 等指令，挂起期间端上**不会再发任何 HTTP 请求**（它在等这一个响应）。
+     * 而本表按「约 5~20 秒无信号」判离线 —— 两条节奏天生打架：
+     * 每一轮长轮询返回前设备必被判一次 OFFLINE 并推 `device.offline`，
+     * 返回后下一个请求到达又立刻 ONLINE 并推 `device.online`，家长端就是反复横跳。
+     * 更糟的是 [takeTimedOut] 会摘除条目，导致刚学到的慢节奏被清零、阈值回到 5.4s，
+     * 下一轮必然重演，EWMA 自适应永远收敛不了。
+     *
+     * 挂起中的 TCP 连接本身就是比心跳更强的存活证据，不该被当成"失联"。
+     *
+     * ## 安全阀
+     * [holdMs] 由调用方按服务端 `CommandService.MAX_WAIT_MS` 裁剪后再传，这里再钳一次
+     * [MAX_HOLD_MS]。宽限是**绝对到期时刻**，不依赖客户端断开回调：
+     * 即使 `DeferredResult` 的完成回调因容器/网络异常没触发，宽限到期后也会自动失效、
+     * 恢复常规超时判定，绝不会把设备永久钉在"在线"。
+     *
+     * @param now 当前时间戳（毫秒），便于测试注入
+     */
+    fun hold(deviceId: String, holdMs: Long, now: Long = System.currentTimeMillis()) {
+        if (holdMs <= 0L) return
+        val until = now + holdMs.coerceAtMost(MAX_HOLD_MS)
+        // 与 touch 同样走 compute，保证与扫描线程的"判定 + 摘除"互斥。
+        entries.compute(deviceId) { _, old ->
+            val e = old ?: Entry(now, true, now, DEFAULT_GAP_MS)
+            // 同一设备可能有多个并发长轮询（推送/兜底两条循环），取最晚的那个截止时刻。
+            e.holdUntilMs = maxOf(e.holdUntilMs, until)
+            e.lastSeenAt = now
+            e.knownOnline = true
+            e
+        }
+    }
+
+    /**
      * 判断并摘除"已超时未上报"的在线设备，返回需要置为离线的设备 ID。
      *
      * 摘除而不是只打标记：离线设备不参与后续扫描，扫描成本 = 在线设备数，
      * 家庭部署几百台设备时每秒一次也只是一次数组遍历，没有任何 SQL。
+     *
+     * 唯一例外是长轮询宽限期内的设备（见 [hold]）：扫描时把 `lastSeenAt` 续到本轮，
+     * 这样宽限结束后不是"立刻超时"，而是从宽限结束时刻重新按正常阈值计时，
+     * 孩子端下一轮长轮询正常续约即可，不会出现"宽限一到就闪一下离线"。
      */
     fun takeTimedOut(now: Long = System.currentTimeMillis()): List<String> {
         if (entries.isEmpty()) return emptyList()
@@ -115,11 +161,18 @@ class DevicePresenceRegistry(
             // computeIfPresent 保证"判定 + 摘除"是原子的：
             // 与并发到达的 touch 不会出现"刚判定超时、信号已进来又被删"的错杀。
             entries.computeIfPresent(id) { key, e ->
-                if (now - e.lastSeenAt > timeoutFor(e)) {
-                    timedOut += key
-                    null
-                } else {
+                if (e.holdUntilMs > now) {
+                    // 连接仍挂起：续约，绝不判离线。
+                    e.lastSeenAt = now
                     e
+                } else {
+                    if (e.holdUntilMs != 0L) e.holdUntilMs = 0L
+                    if (now - e.lastSeenAt > timeoutFor(e)) {
+                        timedOut += key
+                        null
+                    } else {
+                        e
+                    }
                 }
             }
         }
@@ -170,6 +223,13 @@ class DevicePresenceRegistry(
 
         /** 在线态落库的最小间隔。远小于 [DeviceService] 的惰性超时兜底，足够支撑展示与告警 */
         const val DB_REFRESH_MS = 15_000L
+
+        /**
+         * 单次长轮询宽限的上限。服务端 `CommandService.MAX_WAIT_MS` 为 20s，
+         * 这里留 10s 余量给"请求已发出但尚未被容器受理"的窗口；再长就不该由挂起解释了，
+         * 必须交回常规超时判定，否则真断网的设备会被长时间误报在线。
+         */
+        const val MAX_HOLD_MS = 30_000L
     }
 
     init {

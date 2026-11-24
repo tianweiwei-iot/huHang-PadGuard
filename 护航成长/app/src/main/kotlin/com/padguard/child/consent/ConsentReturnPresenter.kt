@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import com.padguard.child.AppForeground
 import com.padguard.child.MainActivity
+import com.padguard.child.hidden.AppHider
 import com.padguard.child.permission.SpecialPermission
 import com.padguard.core.common.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -74,32 +75,141 @@ class ConsentReturnPresenter @Inject constructor(
      * @param label 刚办妥的授权名，用于兜底通知文案（如"设备管理员"）
      */
     fun watch(completion: () -> Boolean, label: String) {
-        startWatching(completion, label)
+        startWatching({ awaitGranted(completion, label) }, label)
     }
 
     /**
      * 兼容旧调用：盯一组系统设置类权限（使用情况 / 悬浮窗 / 无障碍 / 未知来源）。
      * 转译为完成判定后复用同一引擎。
+     *
+     * 用 `all` 而不是 `any`：多项目标里只要有一项先开了就"提前完成"，会把还在办的那一项
+     * 当场跳过。当前调用方都只传单项，但语义必须写对，否则以后扩展必踩坑。
      */
     fun watch(targets: Set<SpecialPermission>) {
         if (targets.isEmpty()) return
-        watch({ targets.any { it.isGranted(context) } }, targets.firstOrNull()?.label ?: "授权")
+        watch({ targets.all { it.isGranted(context) } }, targets.firstOrNull()?.label ?: "授权")
     }
 
-    private fun startWatching(completion: () -> Boolean, label: String) {
+    /**
+     * 盯一类「官方查询 API 与厂商实际入口可能不一致」的设置页（当前只有电池优化）。
+     *
+     * ## 为什么 [watch] 不够
+     * 华为/荣耀的省电白名单（受保护应用 / 电源管理）与系统的
+     * `isIgnoringBatteryOptimizations` 是**两套互不联通的机制**：家长在厂商电池页
+     * 完成加白后，官方查询 API 仍可能恒为 false。继续用 [watch] 只会等满预算后
+     * 静默放弃，家长回来后被卡进「复检 → 跳过」的拉锯——真机表现就是
+     * "电池优化这一项怎么都过不去"。
+     *
+     * ## 完成判定（两条任一命中即算这一趟办完）
+     * 1. 查询 API 变 true（家长走的是官方白名单页，正常快速路径）；
+     * 2. 家长确实离开过前台又回到前台（走的是厂商页，开关状态由家长自己确认，
+     *    授权页 `ON_RESUME` 会把它按「已带往设置」如实收口，绝不谎报已开启）。
+     */
+    fun watchGrantedOrReturn(completion: () -> Boolean, label: String) {
+        startWatching({ awaitGrantedOrReturn(completion, label) }, label)
+    }
+
+    /**
+     * 盯一类**没有公开状态查询接口**的设置页（厂商自启动 / 后台弹出界面等）。
+     *
+     * ## 为什么不能复用 [watch]
+     * [watch] 的完成判定是"轮询某个查询 API 变 true"，而 OEM 私有开关没有查询 API，
+     * `isGranted` 恒 false —— 复用它必然等满 5 分钟后静默放弃，家长拨完开关却卡在设置页。
+     *
+     * ## 完成判定改成什么
+     * "页面确实离开过前台（系统页打开了）→ 之后又回到前台（家长办完返回 / 点了兜底通知）"。
+     * 回到前台时授权页自己的 `ON_RESUME` 会复检并自动拉起下一项，因此这里依旧是
+     * **零多余点击**：家长拨完开关按返回即可，连「继续」都不用点。
+     *
+     * 家长若按 HOME 键不回来，等 [HINT_AFTER_MS] 后发一条可点的兜底通知；点一下同样
+     * 回到授权页并自动接续。这是 Android 不给状态回调时唯一诚实的做法 ——
+     * 不谎报"已开启"，也不假装能替家长判断开关拨没拨。
+     */
+    fun watchReturn(label: String) {
+        startWatching({ awaitReturnToForeground(label) }, label)
+    }
+
+    private fun startWatching(awaitCompletion: suspend () -> Boolean, label: String) {
         stop()
         watchJob = scope.launch {
             // ① 等家长在系统页里把授权办妥（AppOps/无障碍/管理员激活都没有回调，只能轮询复检）
-            if (!awaitGranted(completion, label)) {
-                // 等太久仍未开：不作静默放弃，留一条可点的通知作为入口，同时撤掉后台轮询。
+            if (!awaitCompletion()) {
+                // 等太久仍未办妥：不作静默放弃，留一条可点的通知作为入口，同时撤掉后台轮询。
                 // 界面已经在前台就不发（家长就在本页，再弹通知只会添乱）。
-                Logger.w(TAG) { "consent target not granted in ${TOTAL_WAIT_MS / 1000}s, stop watching ($label)" }
+                Logger.w(TAG) { "consent target not completed in ${TOTAL_WAIT_MS / 1000}s, stop watching ($label)" }
                 if (!AppForeground.isForeground) notifier.postReturnToConsent(label)
                 return@launch
             }
             // ② 已办妥：把授权页接回前台并接续下一项；拉不动就带着通知兜底持续重试
             bringBackConsentScreen(label)
         }
+    }
+
+    /**
+     * 等待「系统设置页打开 → 家长办完回到本 App」。
+     *
+     * 第一阶段必须等**确实离开过前台**：授权页发起跳转时还在前台，若直接盯
+     * `isForeground` 会立刻命中，把家长刚要打开的下一项设置页当场弹掉（历史事故）。
+     * 离开窗口内没离开（系统页被 ROM 拦下、根本没打开）则返回 false，
+     * 把控制权交回 ActivityResult / `onResume`，不做"以为跳过去了"的假推进。
+     */
+    private suspend fun awaitReturnToForeground(label: String): Boolean {
+        var waited = 0L
+        while (coroutineContext.isActive && waited < LEAVE_BUDGET_MS) {
+            if (!AppForeground.isForeground) break
+            delay(LEAVE_POLL_MS)
+            waited += LEAVE_POLL_MS
+        }
+        if (AppForeground.isForeground) {
+            Logger.w(TAG) { "settings page never took foreground ($label), leave control to ActivityResult" }
+            return false
+        }
+        var elapsed = 0L
+        var notified = false
+        while (coroutineContext.isActive && elapsed < TOTAL_WAIT_MS) {
+            if (AppForeground.isForeground) {
+                Logger.i(TAG) { "returned from OEM settings after ${elapsed}ms: $label" }
+                return true
+            }
+            if (!notified && elapsed >= HINT_AFTER_MS) {
+                notified = notifier.postReturnToConsent(label)
+            }
+            delay(SLOW_INTERVAL_MS)
+            elapsed += SLOW_INTERVAL_MS
+        }
+        return false
+    }
+
+    /**
+     * [watchGrantedOrReturn] 的等待实现：查询到已授予，或「离开过前台 → 回到前台」。
+     *
+     * 复检粒度与 [awaitGranted] 相同（先快后慢）；"离开过"必须亲眼见过一次
+     * `isForeground == false` 才认——发起跳转时本页还在前台，直接盯 isForeground
+     * 会立刻误命中，把家长刚要打开的设置页当场弹掉（历史事故）。
+     */
+    private suspend fun awaitGrantedOrReturn(completion: () -> Boolean, label: String): Boolean {
+        var leftForeground = false
+        var elapsed = 0L
+        var notified = false
+        while (coroutineContext.isActive && elapsed < TOTAL_WAIT_MS) {
+            if (runCatching(completion).getOrDefault(false)) {
+                Logger.i(TAG) { "consent target granted after ${elapsed}ms: $label" }
+                return true
+            }
+            if (!AppForeground.isForeground) {
+                leftForeground = true
+            } else if (leftForeground) {
+                Logger.i(TAG) { "returned from settings after ${elapsed}ms (grant not queryable): $label" }
+                return true
+            }
+            if (leftForeground && !notified && elapsed >= HINT_AFTER_MS) {
+                notified = notifier.postReturnToConsent(label)
+            }
+            val interval = if (elapsed < FAST_WINDOW_MS) FAST_INTERVAL_MS else SLOW_INTERVAL_MS
+            delay(interval)
+            elapsed += interval
+        }
+        return false
     }
 
     /** 停止盯守（授权页已回前台 / 流程结束 / 切到非设置步骤时调用）。 */
@@ -151,16 +261,28 @@ class ConsentReturnPresenter @Inject constructor(
             if (AppForeground.isForeground) return // 已在前台，交给它的 onResume 推进
 
             attempt++
-            // 策略一：把自家任务整体提到前台（对后台启动限制免疫，优先尝试）
-            if (moveOwnTaskToFront() && awaitForeground()) {
-                Logger.i(TAG) { "consent screen returned via task-move (#$attempt, $label)" }
-                return
-            }
+            // 设置页落在自家任务栈顶时（ActivityResult 拉起、未加 NEW_TASK 的常态），
+            // moveToFront 只会把设置页再次顶到前台、白等一个检测窗口——这是真机上
+            // "开关拨完了，界面愣了一两秒才回来"的固定来源。此时直接先走直接启动；
+            // 设置页在独立任务栈（个别 ROM 强开新任务）时维持 moveToFront 优先，
+            // 它对后台启动限制免疫。
+            if (settingsOnTopOfOwnTask()) {
+                if (tryDirectStart() && awaitForeground()) {
+                    Logger.i(TAG) { "consent screen returned via direct-first (#$attempt, $label)" }
+                    return
+                }
+            } else {
+                // 策略一：把自家任务整体提到前台（对后台启动限制免疫，优先尝试）
+                if (moveOwnTaskToFront() && awaitForeground()) {
+                    Logger.i(TAG) { "consent screen returned via task-move (#$attempt, $label)" }
+                    return
+                }
 
-            // 策略二：直接启动授权页宿主（设置页落在本任务栈内时成立）
-            if (tryDirectStart() && awaitForeground()) {
-                Logger.i(TAG) { "consent screen returned via activity-start (#$attempt, $label)" }
-                return
+                // 策略二：直接启动授权页宿主（设置页落在本任务栈内时成立）
+                if (tryDirectStart() && awaitForeground()) {
+                    Logger.i(TAG) { "consent screen returned via activity-start (#$attempt, $label)" }
+                    return
+                }
             }
 
             // 策略三：发一条可点的通知兜底。只发一次——同一 ID 反复更新会让通知反复弹出，反而添乱
@@ -175,6 +297,24 @@ class ConsentReturnPresenter @Inject constructor(
                 "notification stays as fallback (foreground=${AppForeground.isForeground})"
         }
     }
+
+    /**
+     * 自家任务栈顶是否压着**别的应用**的页面（通常是授权向导带家长去的系统设置页）。
+     *
+     * 判定依据：`appTasks` 里根 Activity 是授权页宿主的任务，其栈顶 Activity
+     * 不是宿主本身。栈顶是我们自己 → App 理应已在前台（轮询开头就会返回），
+     * 或设置页开在独立任务栈里，两者都该按原顺序先 moveToFront。
+     */
+    @Suppress("DEPRECATION")
+    private fun settingsOnTopOfOwnTask(): Boolean = runCatching {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+            ?: return@runCatching false
+        val task = am.appTasks.orEmpty().firstOrNull {
+            AppHider.isConsoleTaskHost(it.taskInfo.baseActivity?.className)
+        } ?: return@runCatching false
+        task.taskInfo.topActivity?.let { AppHider.isConsoleTaskHost(it.className) } != true
+    }.onFailure { Logger.w(TAG) { "settingsOnTopOfOwnTask failed: ${it.message}" } }
+        .getOrDefault(false)
 
     /**
      * 等待"界面真的出现在前台"。
@@ -208,7 +348,7 @@ class ConsentReturnPresenter @Inject constructor(
         val tasks = am.appTasks.orEmpty()
         // 优先挑"根 Activity 是授权页宿主"的那个任务（孩子桌面等其它任务不参与）
         val target = tasks.firstOrNull {
-            it.taskInfo.baseActivity?.className == MainActivity::class.java.name
+            AppHider.isConsoleTaskHost(it.taskInfo.baseActivity?.className)
         } ?: tasks.firstOrNull()
         if (target == null) {
             Logger.w(TAG) { "no own task found, cannot moveToFront" }
@@ -244,8 +384,11 @@ class ConsentReturnPresenter @Inject constructor(
     private companion object {
         const val TAG = "ConsentReturnPresenter"
 
-        /** 快速轮询间隔：家长此刻就在开关旁边 */
-        const val FAST_INTERVAL_MS = 500L
+        /**
+         * 快速轮询间隔：家长此刻就在开关旁边。拨完开关的感知迟滞由它决定，
+         * 500ms 会被真机用户明确感知为"愣了一下"，250ms 内基本无感。
+         */
+        const val FAST_INTERVAL_MS = 250L
 
         /** 慢速轮询间隔：家长可能还在设置里找入口 */
         const val SLOW_INTERVAL_MS = 1_200L
@@ -262,6 +405,13 @@ class ConsentReturnPresenter @Inject constructor(
 
         /** 接回前台的预算：覆盖"直接启动偶发被丢弃 + 系统把任务切回需要时间" */
         const val RETURN_BUDGET_MS = 60_000L
+
+        /** 等待"系统设置页确实打开"的窗口；超时即认定本次跳转没生效 */
+        const val LEAVE_BUDGET_MS = 8_000L
+        const val LEAVE_POLL_MS = 200L
+
+        /** 不可检测项：离开前台多久后发一条可点的「回来继续」兜底通知 */
+        const val HINT_AFTER_MS = 60_000L
 
         /** 单次尝试后的间隔 */
         const val ATTEMPT_INTERVAL_MS = 600L

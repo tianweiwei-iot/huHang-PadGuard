@@ -38,6 +38,9 @@ class DeviceMgmtService(
 
     private val log = LoggerFactory.getLogger(DeviceMgmtService::class.java)
 
+    /** S-1：Android 包名格式（小写字母/数字/下划线/点，至少两段） */
+    private val PACKAGE_NAME_PATTERN = Regex("^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z0-9_]+)+\$")
+
     // ==================== 应用目录库 ====================
 
     /**
@@ -56,6 +59,16 @@ class DeviceMgmtService(
         requireOwned(userId, deviceId)
         if (file.isEmpty) throw BizException(ParentErr.PARAM_ERROR, "APK 文件为空", Audience.PARENT)
         if (packageName.isBlank()) throw BizException(ParentErr.PARAM_ERROR, "包名不能为空", Audience.PARENT)
+        // S-1：服务端作为目录元数据权威，对家长端上报的包名/版本做格式校验，拒绝明显非法值，
+        // 避免错误归属的物料进入目录库、导致分发/升级判定错乱。
+        // 注：强校验（比对 APK 字节流真实包名/签名）需服务端内嵌 APK 解析器，当前未引入；
+        // 真正"安装什么"的终态校验由被管控端安装前 verifyApk 兜底（见孩子端 AppInstaller）。
+        if (!PACKAGE_NAME_PATTERN.matches(packageName)) {
+            throw BizException(ParentErr.PARAM_ERROR, "包名格式非法: $packageName", Audience.PARENT)
+        }
+        if (versionCode < 0) {
+            throw BizException(ParentErr.PARAM_ERROR, "版本号不能为负", Audience.PARENT)
+        }
         val mime = "application/vnd.android.package-archive"
         // APK 可达 200MB：必须流式，`file.bytes` 会整块进堆（见 FileStorageService.storeStream）
         val stored = fileStorageService.storeStream(
@@ -126,8 +139,10 @@ class DeviceMgmtService(
         requireOwned(userId, deviceId)
         val catalogs = appCatalogRepository.findByUserId(userId)
         val latestByPkg = catalogs.groupBy { it.packageName }.mapValues { (_, list) -> list.maxByOrNull { it.versionCode }!! }
+        // 一次取出该设备全部已装应用再按包名关联，避免逐包查询目录（N+1）。
+        val installedByPkg = installedAppRepository.findByDeviceId(deviceId).associateBy { it.packageName }
         return latestByPkg.map { (pkg, catalog) ->
-            val installed = installedAppRepository.findByDeviceIdAndPackageName(deviceId, pkg)
+            val installed = installedByPkg[pkg]
             val installedVc = installed?.versionCode ?: 0
             UpgradeCheckItem(
                 catalogId = catalog.id,

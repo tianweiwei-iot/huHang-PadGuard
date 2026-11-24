@@ -21,9 +21,10 @@ class GroupService(
         } else {
             groupRepository.findByOwnerUserId(ownerUserId).filter { it.sceneType == sceneType }
         }
+        // 一次取设备按 groupId 归类：原实现在每个分组内重复全量装载设备（G 次全表查询 + N*G 次遍历）。
+        val counts = deviceRepository.findByUserId(ownerUserId).groupingBy { it.groupId }.eachCount()
         return groups.map { g ->
-            val count = deviceRepository.findByUserId(ownerUserId).count { it.groupId == g.id }
-            DeviceGroupDto(g.id, g.name, g.sceneType, count)
+            DeviceGroupDto(g.id, g.name, g.sceneType, counts[g.id] ?: 0)
         }
     }
 

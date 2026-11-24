@@ -4,6 +4,7 @@ import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
 import retrofit2.Response
 import java.io.IOException
+import kotlin.coroutines.cancellation.CancellationException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -66,6 +67,11 @@ class ApiCaller @Inject constructor(
         } catch (e: IOException) {
             Logger.w(tag) { "network failure: ${e.message}" }
             return ApiResult.Failure(ApiCode.LOCAL_NETWORK_ERROR, e.message ?: "network error", e)
+        } catch (e: CancellationException) {
+            // 取消不是故障：作用域被取消（服务停机 / 页面销毁 / 传输降级切换）必须放行，
+            // 否则每个进行中的请求都变成一条假 LOCAL_PARSE_ERROR，调用方还会在已取消的
+            // 协程里继续处理"失败"分支（R37）。
+            throw e
         } catch (e: Exception) {
             // 包含 SerializationException：服务端字段变更时不能让终端崩
             Logger.e(tag, e) { "unexpected failure" }

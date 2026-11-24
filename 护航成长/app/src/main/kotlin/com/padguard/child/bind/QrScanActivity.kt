@@ -11,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -214,6 +215,10 @@ private fun CameraPermissionPlaceholder(
     }
 }
 
+// `image.image`（ImageProxy.getImage）标的是 **androidx 的 Java 版实验注解**
+// （androidx.annotation.experimental.RequiresOptIn），Kotlin 的 kotlin.OptIn 管不到它，
+// 必须用 androidx.annotation.OptIn 才能让 lint 放行 —— 这点踩了两次，别再换成 kotlin.OptIn。
+@androidx.annotation.OptIn(ExperimentalGetImage::class)
 @Composable
 private fun CameraPreview(onCodeScanned: (String) -> Unit) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -222,6 +227,8 @@ private fun CameraPreview(onCodeScanned: (String) -> Unit) {
 
     val analyzer = remember {
         object : ImageAnalysis.Analyzer {
+            // 匿名对象的成员是独立声明作用域，外部函数的 opt-in 不会传递进来，必须就地标注。
+            @androidx.annotation.OptIn(ExperimentalGetImage::class)
             override fun analyze(image: ImageProxy) {
                 val mediaImage = image.image
                 if (mediaImage != null) {

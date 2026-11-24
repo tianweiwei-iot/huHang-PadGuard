@@ -121,6 +121,10 @@ class AccessibilityScreenshot @Inject constructor(
      */
     suspend fun captureAndUpload(shotId: String): Boolean {
         if (shotId.isBlank()) return false
+        // 显式版本门：grabJpeg() 标了 @RequiresApi(R)，无障碍取帧在 API 30 以下不存在。
+        // isAvailable() 内部已判过，但把判断放在**调用点**才能被 lint 与后续维护者同时看见，
+        // 也避免有人误删 isAvailable 里的版本判断后直接踩到 NoSuchMethodError。
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
         if (!isAvailable()) return false
         val jpeg = grabJpeg()
         if (jpeg == null) {

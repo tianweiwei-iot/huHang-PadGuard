@@ -4,11 +4,13 @@ import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
 import com.padguard.server.domain.UnlockTicket
+import com.padguard.server.domain.UsageSession
 import com.padguard.server.dto.UnlockApproveRequest
 import com.padguard.server.dto.UnlockRejectRequest
 import com.padguard.server.dto.UnlockTicketDto
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UnlockTicketRepository
+import com.padguard.server.repository.UsageSessionRepository
 import com.padguard.server.service.AuditAction
 import com.padguard.server.service.AuditService
 import com.padguard.server.ws.WebSocketPushService
@@ -18,13 +20,19 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
 
+/** 分钟 → 毫秒，与 UsageSessionService.toDto 的额度换算同口径 */
+private const val MINUTE_MS = 60_000L
+
 @Service
 class UnlockService(
     private val deviceRepository: DeviceRepository,
     private val unlockTicketRepository: UnlockTicketRepository,
+    private val usageSessionRepository: UsageSessionRepository,
+    private val usageSessionService: UsageSessionService,
     private val commandService: CommandService,
     private val webSocketPush: WebSocketPushService,
-    private val auditService: AuditService
+    private val auditService: AuditService,
+    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard
 ) {
     private val log = LoggerFactory.getLogger(UnlockService::class.java)
 
@@ -93,6 +101,11 @@ class UnlockService(
      * 想再放行只能等孩子重新提交一次 —— 而孩子往往不会重提。
      */
     fun listTickets(userId: String, deviceId: String): List<UnlockTicketDto> {
+        // 设备归属校验（与其他 {deviceId} 接口同口径）：跨用户访问他人设备应 403，
+        // 而不是靠下方 userId filter 兜底返回 200 空列表 —— 后者虽不泄漏数据，
+        // 但让"任意登录家长可探测 deviceId 是否存在"成立，且与全系统行为不一致。
+        // 第 4 轮边界测试实测：修复前跨用户访问返回 200 + 空列表。
+        ownershipGuard.requireOwned(userId, deviceId)
         val today = dayKey(System.currentTimeMillis())
         return listOf("PENDING", "APPROVED", "REJECTED", "IGNORED")
             .flatMap { unlockTicketRepository.findByDeviceIdAndStatus(deviceId, it) }
@@ -124,24 +137,98 @@ class UnlockService(
     @Transactional
     fun approve(userId: String, deviceId: String, ticketId: String, req: UnlockApproveRequest) {
         val t = ownedOpen(userId, deviceId, ticketId)
-        val duration = req.durationMinutes ?: t.durationMinutes
+        val requestedDuration = req.durationMinutes ?: t.durationMinutes ?: 30
+        // P1（2026-11-18）：整机申请此前下发**未钳制**的原始时长（家长可填 480），
+        // 而额度记账在 grantWholeDeviceMinutes 里钳制到日上限 120 —— 设备放行 8 小时、账面只加 2 小时，
+        // 等于突破"单日累计延时 120 分钟"这条硬防线。下发值必须与记账上限同源。
+        // 带包名的应用级解锁不改每日额度，保留原时长（仅夹非正下界）。
+        // 下界必须夹到 >= 1：孩子端 CommandExecutor 对 durationMinutes<=0 直接 ACK BAD_PAYLOAD
+        // 拒绝整条 TEMP_UNLOCK；若放行 -5，会出现「账面已加时、设备却拒绝解锁→家长点同意孩子端毫无反应」，
+        // 正是本方法注释承诺要避免的事故。记账侧 grantWholeDeviceMinutes 已 coerceIn(1,max)，
+        // 下发值必须与之一致，三端口径才统一。
+        val effectiveDuration = if (t.packageName.isNullOrBlank()) {
+            requestedDuration.coerceIn(1, UsageSession.MAX_DAILY_EXTEND_MINUTES)
+        } else {
+            requestedDuration.coerceAtLeast(1)
+        }
         // 原子抢占，避免"双击同意 / 超时重试"下发两条 TEMP_UNLOCK。
         // 两条 HIGH 优先级指令孩子端都会执行，若两次时长不同还会互相覆盖
         // （家长批 30 分钟，设备被放开 60 分钟）。
-        val claimed = unlockTicketRepository.claimApprove(ticketId, duration, System.currentTimeMillis())
+        val claimed = unlockTicketRepository.claimApprove(ticketId, effectiveDuration, System.currentTimeMillis())
         if (claimed == 0) {
             throw BizException(ParentErr.PARAM_ERROR, "该申请已被处理，请刷新后查看", Audience.PARENT)
         }
         auditService.record(userId, deviceId, AuditAction.UNLOCK_APPROVE, targetType = "ticket", targetId = ticketId,
-            detail = "package=${req.packageName ?: t.packageName ?: ""} duration=${duration}")
+            detail = "package=${req.packageName ?: t.packageName ?: ""} duration=${effectiveDuration}")
+        // 整机使用时间申请（packageName 为空）：同意即把申请时长累加到当日总时长（extendedMinutes）。
+        // 否则设备虽被 TEMP_UNLOCK 放开，但三端（孩子端倒计时 / 家长端看板 / 服务端锁机判定）
+        // 的"总时长"不变 —— 表现为"解锁了却没加时间"，与用户预期"总时长增加"不符。
+        // 仅整机申请做此累加：带包名的应用级解锁只放开那一个应用，不应改动每日总额度。
+        if (t.packageName.isNullOrBlank()) {
+            grantWholeDeviceMinutes(deviceId, ticketId, effectiveDuration)
+        }
         commandService.issueCommand(
             deviceId, CommandType.TEMP_UNLOCK,
             mapOf(
                 CommandKey.PACKAGE_NAME to (req.packageName ?: t.packageName ?: ""),
-                CommandKey.DURATION_MINUTES to (duration ?: 30)
+                CommandKey.DURATION_MINUTES to effectiveDuration
             ),
             priority = "HIGH"
         )
+    }
+
+    /**
+     * 整机使用时间申请批准后的额度落地。
+     *
+     * 本场景（用户原话「当天时间已达上限，申请解锁时增加的时长」）有两处坑，缺一都会
+     * 表现为"家长同意了、设备也解锁了，可时长没加上去"：
+     *
+     * 1. **额度耗尽后的历史超支**：服务端剩余按 `(quota + extended) - (now - startEpoch)` 派生，
+     *    额度用完后孩子等审批的那段锁屏时间仍在流逝，会把新增时长整笔吃掉。故在累加后调用
+     *    [UsageSessionRepository.rebaseExpiredSession] 把这段不可用时间从计时里剔除，
+     *    使批准的 N 分钟真实变成孩子端 N 分钟倒计时（三端同源，仍由服务端 DTO 派生）。
+     * 2. **单日 120 分钟上限的"全有或全无"**：[addExtendedMinutes] 的写条件是
+     *    `extended + minutes <= max`，只剩 10 分钟额度时家长批 30 分钟会**整笔返回 0**。
+     *    这里钳制到剩余额度再试一次，能加多少加多少；确实到顶才只解锁、不加额度并记日志，
+     *    不再静默失败。与 [UsageDelayService.approve] 共用同一上限，两条通道不会叠加突破。
+     *
+     * 命中上限 / 无会话时**不抛异常**：TEMP_UNLOCK 已给到申请时长，不能因为额度记账失败
+     * 把整个审批事务回滚掉，否则家长点同意后孩子端毫无反应。
+     */
+    private fun grantWholeDeviceMinutes(deviceId: String, ticketId: String, requestedDuration: Int) {
+        val now = System.currentTimeMillis()
+        val max = UsageSession.MAX_DAILY_EXTEND_MINUTES
+        // 异常 payload 兜底：负数 / 0 会把 extended_minutes 写坏，超上限也不该直接顶穿防线。
+        val requested = requestedDuration.coerceIn(1, max)
+        // 会话快照取服务端的实时解析额度（家长当天改过额度时实体列里的旧值不可用）。
+        val before = usageSessionService.get(deviceId)
+
+        var granted = requested
+        var added = usageSessionRepository.addExtendedMinutes(deviceId, granted, now, max)
+        if (added == 0 && before.extendedMinutes < max) {
+            granted = minOf(requested, max - before.extendedMinutes)
+            if (granted > 0) {
+                added = usageSessionRepository.addExtendedMinutes(deviceId, granted, now, max)
+            }
+        }
+        if (added == 0) {
+            log.warn(
+                "whole-device unlock approve: extendedMinutes not added (cap reached or no session): " +
+                    "device={} ticket={} duration={} extended={}", deviceId, ticketId, requested, before.extendedMinutes
+            )
+            return
+        }
+        // 额度已耗尽才补偿：未耗尽时基础剩余会自然增加 granted 分钟，动起点反而会多送时长。
+        if (before.active && before.remainingMs <= 0L) {
+            val rebased = usageSessionRepository.rebaseExpiredSession(
+                deviceId, before.dayKey, now, before.quotaMinutes, granted, MINUTE_MS
+            )
+            log.info(
+                "whole-device unlock approve: rebase expired session device={} ticket={} rows={}",
+                deviceId, ticketId, rebased
+            )
+        }
+        log.info("whole-device unlock approve: +{}min device={} ticket={}", granted, deviceId, ticketId)
     }
 
     /** 家长拒绝 -> 下发 SHOW_MESSAGE（带 requestId + 拒因 body） */

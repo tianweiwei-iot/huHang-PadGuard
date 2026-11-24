@@ -135,10 +135,15 @@ fun computeSignatureChecksum(context: Context): String = runCatching {
     }
     // 必须先取到局部 val：signingInfo 是 Java 的可变属性(var)，
     // 直接用 `info.signingInfo != null` 无法智能转换为非空类型。
-    @Suppress("DEPRECATION")
-    val signing = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.signingInfo else null
-    @Suppress("DEPRECATION")
-    val certs = if (signing != null) signing.apkContentsSigners else info.signatures
+    // 版本判断必须**内联**在取值处：写成「先 if 判 P 取 signingInfo，再判 signing != null」
+    // 时 lint 无法把非空推断回 SDK 版本，会报 NewApi（并由 CI 当错误处理）。
+    // `signingInfo?.apkContentsSigners` 只在 SDK>=P 分支求值，API 28 以下不会解析该类。
+    val certs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        info.signingInfo?.apkContentsSigners
+    } else {
+        @Suppress("DEPRECATION")
+        info.signatures
+    }
     val cert = certs?.firstOrNull() ?: return ""
     val digest = MessageDigest.getInstance("SHA-256").digest(cert.toByteArray())
     Base64.encodeToString(digest, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)

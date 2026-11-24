@@ -103,6 +103,31 @@ object TimeFormat {
     fun formatDateTimeFromMillis(millis: Long): String =
         sdf("MM月dd日 ").format(Date(millis)) + formatClockFromMillis(millis)
 
+    /**
+     * 「数据是哪一刻的」：毫秒时间戳 -> 按新旧程度分档的**绝对**时刻。
+     *
+     * 用途：刷新失败时告诉家长"屏幕上这份数据是什么时候的"。
+     *
+     * 为什么不用"3 分钟前"这类相对时间：Compose 只在状态变化时重组，
+     * 页面挂着一小时不动，相对文案会永远停在"刚刚"，反而给出**虚假的新鲜感**。
+     * 绝对时刻不会自己过期，配合"今天 / 月日 / 年月日"三档，
+     * 既能在当天场景保持简短，也能在离线多日后一眼看出过期程度。
+     *
+     * 必须与 [formatHourMinute] 一样固定北京时区（见 [sdf]），否则设备时区被改后
+     * 家长看到的"上次更新"会与服务端时间线错位。
+     */
+    fun describeStamp(millis: Long, now: Long = System.currentTimeMillis()): String {
+        val stamp = Date(millis)
+        val nowDate = Date(now)
+        return when {
+            sdf("yyyy-MM-dd").format(stamp) == sdf("yyyy-MM-dd").format(nowDate) ->
+                "今天 ${sdf("HH:mm").format(stamp)}"
+            sdf("yyyy").format(stamp) == sdf("yyyy").format(nowDate) ->
+                sdf("MM月dd日 HH:mm").format(stamp)
+            else -> sdf("yyyy年MM月dd日 HH:mm").format(stamp)
+        }
+    }
+
     // ===================== 日期（保持原有行为） =====================
 
     fun formatFullDate(date: String): String {

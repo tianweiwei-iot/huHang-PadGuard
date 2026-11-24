@@ -3,7 +3,8 @@ package com.padguard.server.controller
 import com.padguard.server.common.DeviceApiResponse
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
-import com.padguard.server.common.ParentErr
+import com.padguard.server.common.ChildErr
+import com.padguard.server.config.TraceIds
 import com.padguard.server.dto.*
 import com.padguard.server.service.*
 import com.padguard.server.mqtt.ChildUplinkHandler
@@ -122,6 +123,21 @@ class ChildReportController(
     private val childUplinkHandler: ChildUplinkHandler,
     private val alertService: AlertService
 ) {
+    /**
+     * 三条孩子端上传入口共用的类型闸门。
+     *
+     * 之前这里直接信任客户端声明的 contentType：设备令牌持有者上传 `image/svg+xml`，
+     * 下载侧按 image 通配类型会 inline 渲染，与 /admin 同源执行脚本。
+     * 规则与家长入口共用 [FileStorageService] 的单一来源，避免只堵一边。
+     */
+    private fun safeUploadMime(file: MultipartFile, fallbackMime: String): String {
+        val mime = FileStorageService.resolveMime(file.originalFilename, file.contentType ?: fallbackMime)
+        FileStorageService.unsafeUploadReason(file.originalFilename, mime)?.let { reason ->
+            throw BizException(ChildErr.PARAM_ERROR, reason, Audience.CHILD)
+        }
+        return mime
+    }
+
 
     /**
      * 孩子端自愈成功后关闭对应类别的 ACTIVE 告警（恢复即关闭闭环）。
@@ -133,17 +149,22 @@ class ChildReportController(
      *
      * ## 安全约束
      * - deviceId 一律取鉴权注入值，禁止报文伪造（防越权关闭他人告警）；
-     * - category 限定白名单 [RESOLVABLE_ALERT_CATEGORIES]，孩子端只能关闭"权限自愈"相关类别，
-     *   无法借此关闭越界 / 卸载 / root 等其它告警。
+     * - category 限定白名单 [RESOLVABLE_ALERT_CATEGORIES]，孩子端只能关闭「确会自行恢复的状态型告警」，
+     *   无法借此关闭越界 / 卸载 / root 等事件型或需人工介入的其它告警。
      */
     @PostMapping("/alerts/resolve")
     fun resolveAlerts(
         @RequestAttribute("deviceId") deviceId: String,
         @RequestBody req: AlertResolveRequest
     ): DeviceApiResponse<*> {
+        // 空列表是"无意义成功"：不触发任何校验/写入却返回 200 resolved=0，
+        // 端上可能误判为"已处理"。显式拒绝，让调用方拿到明确失败而非静默空操作。
+        if (req.categories.isEmpty()) {
+            throw BizException(ChildErr.PARAM_ERROR, "告警类别列表不能为空", Audience.CHILD)
+        }
         for (category in req.categories) {
             if (category !in RESOLVABLE_ALERT_CATEGORIES) {
-                throw BizException(ParentErr.PARAM_ERROR, "不被允许的告警类别: $category", Audience.CHILD)
+                throw BizException(ChildErr.PARAM_ERROR, "不被允许的告警类别: $category", Audience.CHILD)
             }
             alertService.resolveActiveByCategory(deviceId, category, req.reason ?: "已自动恢复")
         }
@@ -151,11 +172,35 @@ class ChildReportController(
     }
 
     private companion object {
-        /** 孩子端仅可关闭"权限自愈"相关类别，禁止关闭越界 / 卸载 / root 等其它告警 */
+        /**
+         * 孩子端可自行关闭的**状态型**告警类别（自愈成功后回落）。
+         *
+         * ## 必须与孩子端 resolve 产出侧全量对齐
+         * 两端口径分处两个独立 Gradle 工程，编译器无法互相约束。历史事故：
+         * 孩子端 `PermissionHealthChecker.clearLockScreenUnprotected()` 早就传了
+         * `LOCK_SCREEN_UNPROTECTED`，本白名单却漏了它 → 服务端 400，而端上把
+         * `ApiResult.BizError` 当成功（400 不抛异常、`runCatching` 静默）→
+         * 「锁屏已恢复，家长端『锁屏未能生效』告警却永久挂着」。
+         *
+         * 新增/修改本集合必须同步 `AlertResolveContractCoverageTest`：它会扫描孩子端
+         * `PermissionHealthChecker` 实际产出的类别并做双向比对，单边改动会直接红。
+         *
+         * 刻意**不含**事件型（UNINSTALL_ATTEMPT / BLACKLIST_APP_LAUNCH / CLOCK_TAMPERING …）
+         * 与需人工介入型（ROOT_DETECTED）：这些不该被设备端批量关掉。
+         */
         val RESOLVABLE_ALERT_CATEGORIES = setOf(
             "ACCESSIBILITY_DISABLED",
             "GUARD_PERMISSION_DROPPED",
-            "PERMISSION_REVOKED"
+            "PERMISSION_REVOKED",
+            // 锁屏自愈闭环：孩子端 clearLockScreenUnprotected 的产出（曾被 400 静默拒绝）
+            "LOCK_SCREEN_UNPROTECTED",
+            // 使用情况访问恢复：TamperDetector 上报 USAGE_ACCESS_LOST，
+            // 由 computeResolveCategories 在 usageStats 从掉失到恢复时产出
+            "USAGE_ACCESS_LOST",
+            // 网页防护隧道重建成功：孩子端 GuardService.watchdogWebGuard 在隧道恢复时产出
+            "WEB_GUARD_DOWN",
+            // 操作密码经策略设置：孩子端 GuardService.applyGuardPassword 在设密成功时产出
+            "GUARD_PASSWORD_NOT_SET"
         )
     }
 
@@ -252,17 +297,33 @@ class ChildReportController(
             return DeviceApiResponse.ok(wrap(commandService.pendingForPolling(deviceId, since)))
         }
         val capped = waitMs.coerceIn(1L, CommandService.MAX_WAIT_MS)
+        // 挂起期间孩子端在等这一个响应、不会再发任何 HTTP 请求，而在线态按「秒级无信号」
+        // 判离线。不登记宽限的话，每轮 20s 长轮询必被判一次 OFFLINE，返回后又立刻 ONLINE，
+        // 家长端就是「一会儿上线一会儿掉线」。挂起中的连接本身就是最强存活证据。
+        // 宽限是绝对到期时刻，即便本次回调没触发也会自动失效，不会把设备永久钉在在线。
+        deviceService.holdPresence(deviceId, capped)
+        // 完成回调由「唤醒者线程」触发：MQTT 下行、家长下发请求或超时定时器，都不是本次
+        // HTTP 请求的容器线程，MDC 天然为空（或带着唤醒链路自己的 mqtt- ID）。在请求线程
+        // 捕获 ID 再显式传进去，才能把「家长点锁屏 → 这次长轮询把指令带回平板」串成一条链路。
+        // withTrace 会恢复旧值，不会抹掉唤醒者原有的 traceId。
+        val requestTrace = TraceIds.current() ?: TraceIds.newId("poll")
         val deferred = DeferredResult<Any>(capped)
         val onReady: (List<CommandPacket>) -> Unit = { list ->
-            runCatching { deferred.setResult(DeviceApiResponse.ok(wrap(list))) }
+            TraceIds.withTrace(requestTrace) {
+                runCatching { deferred.setResult(DeviceApiResponse.ok(wrap(list))) }
+            }
         }
         // 超时回空列表而不是报错：对终端而言与「这一轮没有指令」等价，不会触发错误退避
         deferred.onTimeout {
-            commandService.removeWaiter(deviceId, onReady)
-            runCatching { deferred.setResult(DeviceApiResponse.ok(wrap(emptyList()))) }
+            TraceIds.withTrace(requestTrace) {
+                commandService.removeWaiter(deviceId, onReady)
+                runCatching { deferred.setResult(DeviceApiResponse.ok(wrap(emptyList()))) }
+            }
         }
         // 正常完成 / 超时 / 客户端断开都必须摘除回调，否则队列随断连无限增长
-        deferred.onCompletion { commandService.removeWaiter(deviceId, onReady) }
+        deferred.onCompletion {
+            TraceIds.withTrace(requestTrace) { commandService.removeWaiter(deviceId, onReady) }
+        }
         // 返回 false 表示此刻已有待办指令、onReady 已同步 setResult；
         // 结果会暂存在 DeferredResult 里，Spring 拿到它后立刻完成响应。
         commandService.registerWaiter(deviceId, since, onReady)
@@ -289,7 +350,7 @@ class ChildReportController(
         @RequestParam("file") file: org.springframework.web.multipart.MultipartFile
     ): DeviceApiResponse<*> {
         val url = fileStorageService.storeStream(
-            file.contentType ?: "image/jpeg",
+            safeUploadMime(file, "image/jpeg"),
             file.inputStream,
             file.originalFilename ?: "avatar.jpg",
             deviceId = deviceId
@@ -318,7 +379,7 @@ class ChildReportController(
         @RequestParam("file") file: MultipartFile
     ): DeviceApiResponse<*> {
         val url = fileStorageService.storeStream(
-            file.contentType ?: "image/jpeg", file.inputStream, file.originalFilename ?: "shot.jpg",
+            safeUploadMime(file, "image/jpeg"), file.inputStream, file.originalFilename ?: "shot.jpg",
             deviceId = deviceId
         ).url
         monitorService.storeScreenshot(shotId, deviceId, url, null, null, capturedAt)
@@ -333,7 +394,7 @@ class ChildReportController(
         @RequestParam(required = false) durationSeconds: Int?,
         @RequestParam("file") file: MultipartFile
     ): DeviceApiResponse<*> {
-        val mime = file.contentType ?: "application/octet-stream"
+        val mime = safeUploadMime(file, "application/octet-stream")
         // 录屏文件不比 APK 小，统一走流式落盘，避免"孩子端传一段课堂录像就把服务端打挂"
         val url = fileStorageService.storeStream(
             mime, file.inputStream, file.originalFilename ?: "media.bin", deviceId = deviceId

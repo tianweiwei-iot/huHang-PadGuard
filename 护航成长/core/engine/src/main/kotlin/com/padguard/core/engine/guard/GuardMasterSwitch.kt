@@ -1,5 +1,6 @@
 package com.padguard.core.engine.guard
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
 import com.padguard.core.common.Logger
@@ -32,7 +33,7 @@ import javax.inject.Singleton
 @Singleton
 class GuardMasterSwitch @Inject constructor(
     @ApplicationContext private val context: Context
-) {
+) : GuardMasterSwitchPort {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -40,9 +41,13 @@ class GuardMasterSwitch @Inject constructor(
     private val _active = MutableStateFlow(prefs.getBoolean(KEY_ACTIVE, DEFAULT_ACTIVE))
     val active: StateFlow<Boolean> = _active.asStateFlow()
 
-    /** 设定总开关。持久化 + 广播给所有订阅者（无障碍服务、锁屏呈现、DO 执行器）。 */
-    fun setActive(value: Boolean) {
-        prefs.edit().putBoolean(KEY_ACTIVE, value).apply()
+    /**
+     * 设定总开关。持久化（commit 同步落盘，确保家长"暂停/恢复管控"意图在进程被杀重启后仍保留，
+     * 不丢家长意图）+ 广播给所有订阅者（无障碍服务、锁屏呈现、DO 执行器）。
+     */
+    @SuppressLint("ApplySharedPref") // 故意 commit：家长"暂停/恢复管控"意图须在进程被杀重启后仍保留，不丢家长意图
+    override fun setActive(value: Boolean) {
+        prefs.edit().putBoolean(KEY_ACTIVE, value).commit()
         if (_active.value != value) {
             _active.value = value
         }

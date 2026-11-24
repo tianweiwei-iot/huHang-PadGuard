@@ -29,17 +29,18 @@ class AdminAuthInterceptor(
         if (handler !is HandlerMethod) return true
         val auth = request.getHeader("Authorization")
         if (auth.isNullOrBlank() || !auth.startsWith("Bearer ")) {
-            throw BizException(ParentErr.UNAUTHORIZED, "missing or invalid Authorization", Audience.PARENT)
+            // 后台登录态失效的提示会直接弹给管理员，不能是英文（见 GlobalExceptionHandler）。
+            throw BizException(ParentErr.UNAUTHORIZED, "登录状态已失效，请重新登录（缺少有效的登录令牌）", Audience.PARENT)
         }
         val token = auth.substring(7)
         // 先校验 scope，避免把家长令牌当管理员令牌放行
         if (!jwt.isAdminToken(token)) {
-            throw BizException(ParentErr.UNAUTHORIZED, "invalid admin token", Audience.PARENT)
+            throw BizException(ParentErr.UNAUTHORIZED, "登录状态已失效，请重新登录（不是有效的管理员令牌）", Audience.PARENT)
         }
         val payload = try {
             jwt.parseAdminToken(token)
         } catch (e: Exception) {
-            throw BizException(ParentErr.UNAUTHORIZED, "invalid token", Audience.PARENT)
+            throw BizException(ParentErr.UNAUTHORIZED, "登录状态已失效，请重新登录（令牌无效或已过期）", Audience.PARENT)
         }
         val adminId = payload.adminId
         val admin = adminRepository.findById(adminId).orElse(null)
@@ -48,9 +49,11 @@ class AdminAuthInterceptor(
             throw BizException(ParentErr.UNAUTHORIZED, "管理员账号已停用", Audience.PARENT)
         }
         // 令牌版本号闸门：登出 / 改密码 / 停用账号都会把库内值 +1，
-        // 令牌里的 ver 一旦落后即判定为已吊销。JWT 本身无法主动作废，这是唯一的吊销途径。
-        // 历史令牌无 ver 声明时解析为 0，与新列的默认值一致，不会误杀存量会话。
-        if (payload.version < admin.tokenVersion) {
+        // 令牌里的 ver 与库内不一致即判定为已吊销（非仅"落后"，超前同样拒绝：
+        // 库被回滚/手工降版后，超前版本令牌不应复活）。JWT 本身无法主动作废，
+        // 这是唯一的吊销途径。历史令牌无 ver 声明时解析为 0，与新列的默认值一致，
+        // 不会误杀存量会话。
+        if (payload.version != admin.tokenVersion) {
             throw BizException(ParentErr.UNAUTHORIZED, "登录已失效，请重新登录", Audience.PARENT)
         }
         request.setAttribute("adminId", adminId)

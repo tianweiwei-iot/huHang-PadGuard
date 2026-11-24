@@ -44,7 +44,8 @@ import javax.inject.Inject
  * 点按悬浮卡 → 本透明 Activity → 输对家长操作密码后才能：
  *   - **进入管理控制台**：[AppHider.revealManagementUi] 重新点亮图标并打开 [MainActivity]（带 EXTRA_REVEAL，
  *     使 MainActivity 在销毁时自动重新隐藏，避免图标长期暴露给孩子）；
- *   - **退出并卸载**：[ExitController] 先撤销设备管理员再拉起系统卸载页。
+ *   - **退出并卸载**：先开设备操作解锁窗，再由 [ExitController] 完整释放管控（含 DO）
+ *     并拉起系统卸载页。少了解锁窗，卸载确认页会被无障碍闸门顶回。
  *
  * ## 没有密码怎么办
  * 若家长端尚未下发操作密码（[GuardPasswordManager.isEnabledNow] == false），两类敏感操作都无法验证，
@@ -71,11 +72,11 @@ class FloatingActionActivity : ComponentActivity() {
                         startActivity(
                             Intent(this, MainActivity::class.java)
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                                .putExtra(MainActivity.EXTRA_REVEAL, true)
+                                .putExtra(MainActivity.EXTRA_REVEAL, MainActivity.newRevealToken())
                         )
                         finish()
                     },
-                    onExit = { exitController.requestUninstall(this) },
+                    onExit = { exitController.requestUninstall(this@FloatingActionActivity) },
                     onCancel = { finish() }
                 )
             }
@@ -87,7 +88,7 @@ class FloatingActionActivity : ComponentActivity() {
 private fun ParentGateScreen(
     guard: GuardPasswordManager,
     onEnterManagement: () -> Unit,
-    onExit: () -> Unit,
+    onExit: suspend () -> Unit,
     onCancel: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -163,7 +164,15 @@ private fun ParentGateScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("进入管理控制台") }
                     Button(
-                        onClick = onExit,
+                        onClick = {
+                            scope.launch {
+                                // 家长已在本机验身：开 10 分钟设备操作窗口。
+                                // 否则系统卸载确认页会被 OperationGuardAccessibilityService
+                                // 判为 REASON_INSTALLER 直接 HOME 顶回，表现为"密码对了却卸不掉"。
+                                guard.unlock()
+                                onExit()
+                            }
+                        },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("退出并卸载") }
                     TextButton(

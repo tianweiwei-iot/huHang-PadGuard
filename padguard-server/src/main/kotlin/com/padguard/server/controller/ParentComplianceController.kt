@@ -2,6 +2,7 @@ package com.padguard.server.controller
 
 import com.padguard.server.common.ApiResponse
 import com.padguard.server.dto.*
+import com.padguard.server.service.AgreementService
 import com.padguard.server.service.AuditService
 import com.padguard.server.service.ContentFilterService
 import org.springframework.web.bind.annotation.*
@@ -14,8 +15,24 @@ import org.springframework.web.bind.annotation.*
 @RequestMapping("/v1")
 class ParentComplianceController(
     private val auditService: AuditService,
-    private val contentFilterService: ContentFilterService
+    private val contentFilterService: ContentFilterService,
+    private val agreementService: AgreementService
 ) {
+
+    // ==================== 使用授权协议（说明书 §5.4） ====================
+
+    /**
+     * 查询某设备的「已阅已同意」凭证。
+     *
+     * 凭证来自孩子端随批量日志上行的 `LogType.AGREEMENT`，由
+     * [AgreementService] 从 behavior log 还原（含归属校验）。
+     * 返回 `signed=false` 表示**未查到**，不是「孩子拒绝签署」——调用方措辞必须区分。
+     */
+    @GetMapping("/devices/{deviceId}/agreement")
+    fun agreementStatus(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String
+    ) = ApiResponse.ok(agreementService.status(userId, deviceId))
 
     // ==================== 审计日志 ====================
 

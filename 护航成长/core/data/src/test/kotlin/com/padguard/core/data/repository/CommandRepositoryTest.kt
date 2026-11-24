@@ -1,6 +1,7 @@
 package com.padguard.core.data.repository
 
 import com.padguard.core.common.Logger
+import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.db.CommandRecordDao
 import com.padguard.core.data.db.CommandRecordEntity
 import com.padguard.core.data.model.AckStatus
@@ -34,6 +35,8 @@ class CommandRepositoryTest {
     /** 内存版 CommandRecordDao：主键 msgId，语义与 `command_record` 表一致 */
     private class FakeCommandRecordDao : CommandRecordDao {
         val rows = LinkedHashMap<String, CommandRecordEntity>()
+        /** 记录按年龄清理实际使用的阈值，用于断言它来自受信钟而非裸墙钟 */
+        var lastDeleteBefore: Long? = null
 
         override suspend fun get(msgId: String): CommandRecordEntity? = rows[msgId]
 
@@ -45,6 +48,7 @@ class CommandRepositoryTest {
             rows.values.sortedByDescending { it.receivedAt }.take(500).map { it.msgId }
 
         override suspend fun deleteBefore(before: Long): Int {
+            lastDeleteBefore = before
             val victims = rows.values.filter { it.receivedAt < before }.map { it.msgId }
             victims.forEach { rows.remove(it) }
             return victims.size
@@ -76,7 +80,7 @@ class CommandRepositoryTest {
         loggerEnabled = Logger.enabled
         Logger.enabled = false
         dao = FakeCommandRecordDao()
-        repo = CommandRepository(dao)
+        repo = CommandRepository(dao, TimeProvider())
     }
 
     @org.junit.After
@@ -168,5 +172,78 @@ class CommandRepositoryTest {
         assertTrue(repo.tryClaim("dup", CommandType.LOCK_SCREEN, receivedAt = 1L))
         assertFalse(repo.tryClaim("dup", CommandType.LOCK_SCREEN, receivedAt = 2L))
         assertEquals(1, dao.rows.size)
+    }
+
+    // ==================== 新增缺陷 G：幂等账本的时钟域 ====================
+
+    /**
+     * 核心回归：按年龄清理的阈值必须来自**受信钟**，不能来自裸墙钟。
+     *
+     * 这里故意让受信时刻落在 2026-01-01，而 JVM 墙钟是"现在"（晚得多），
+     * 等价于设备把系统时间前拨了几个月。旧实现 `deleteBefore(墙钟 - 7天)` 的
+     * 阈值会远大于账本里所有 receivedAt，**一次清空整张幂等表** ——
+     * 7 天内执行过的 UNLOCK / PAUSE 指令随即全部可被重放。
+     */
+    @Test
+    fun `purge age threshold comes from trusted clock not wall clock`() = runBlocking {
+        val retention = 7L * 24 * 60 * 60 * 1000
+        val trustedNow = 1_767_225_600_000L // 2026-01-01，显著早于 JVM 当前墙钟
+        repo.tryClaim("executed", CommandType.UNLOCK, receivedAt = trustedNow - 1_000L)
+        repo.recordResult("executed", CommandType.UNLOCK, AckStatus.SUCCESS, executedAt = trustedNow)
+
+        val deleted = repo.purgeExpired(trustedNowMs = trustedNow)
+
+        assertEquals(trustedNow - retention, dao.lastDeleteBefore!!)
+        assertEquals(0, deleted)
+        assertNotNull("墙钟前拨不得清空幂等账本", dao.rows["executed"])
+    }
+
+    /** 脏受信时刻：宁可跳过一轮按年龄删，也不能拿溢出/负值去 DELETE */
+    @Test
+    fun `purgeThreshold rejects dirty trusted time`() {
+        val retention = 7L * 24 * 60 * 60 * 1000
+        assertEquals(1_000L, CommandRepository.purgeThreshold(retention + 1_000L))
+        assertNull(CommandRepository.purgeThreshold(0L))
+        assertNull(CommandRepository.purgeThreshold(-1L))
+        assertNull(CommandRepository.purgeThreshold(Long.MIN_VALUE))
+        assertNull("阈值为 0 时也不删", CommandRepository.purgeThreshold(retention))
+    }
+
+    /** 脏值只能跳过「按年龄」这一步，条数窗必须照跑，否则指令重投风暴能撑爆表 */
+    @Test
+    fun `dirty trusted time skips age trim but still runs count window`() = runBlocking {
+        repeat(CommandRepository.IDEMPOTENT_WINDOW + 3) { i ->
+            repo.tryClaim("fresh-$i", CommandType.REFRESH_POLICY, receivedAt = 1_000L + i)
+        }
+
+        val deleted = repo.purgeExpired(trustedNowMs = 0L)
+
+        assertNull("脏值不应发起按年龄 DELETE", dao.lastDeleteBefore)
+        assertTrue("条数窗仍须生效", deleted >= 3)
+        assertEquals(CommandRepository.IDEMPOTENT_WINDOW, dao.rows.size)
+    }
+
+    /**
+     * 不显式传时间戳时，仓库必须写受信钟而不是 `System.currentTimeMillis()`。
+     * 用一次 1 小时的对时样本人为拉开两个时钟域，断言账本落在受信那一侧。
+     */
+    @Test
+    fun `default timestamps come from trusted clock`() = runBlocking {
+        val skew = 60L * 60 * 1000
+        val tp = TimeProvider()
+        tp.syncServerTime(System.currentTimeMillis() + skew)
+        val skewedRepo = CommandRepository(dao, tp)
+
+        skewedRepo.tryClaim("signed", CommandType.LOCK_SCREEN)
+        val claimedAt = dao.rows.getValue("signed").receivedAt
+        assertTrue(
+            "认领时间必须走受信钟（约 +1h）",
+            claimedAt > System.currentTimeMillis() + skew - 10_000L
+        )
+
+        skewedRepo.recordResult("rejected", null, AckStatus.REJECTED)
+        val terminal = dao.rows.getValue("rejected")
+        assertTrue("拒绝补插同样走受信钟", terminal.receivedAt > System.currentTimeMillis() + skew - 10_000L)
+        assertEquals(terminal.receivedAt, terminal.executedAt)
     }
 }

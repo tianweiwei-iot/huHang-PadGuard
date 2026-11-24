@@ -57,6 +57,9 @@ class EyeCareEnforcer @Inject constructor(
 
     private var lastSampleElapsed: Long = -1L
 
+    /** 与 [lastSampleElapsed] 配对的"设备醒着"基准（`uptimeMillis`，不含深睡） */
+    private var lastSampleUptime: Long = -1L
+
     /**
      * 采样一次并给出护眼判定。由前台服务与 [AppLimitEnforcer.track] 同频调用。
      */
@@ -75,8 +78,10 @@ class EyeCareEnforcer @Inject constructor(
         }
 
         val nowElapsed = timeProvider.elapsedRealtime()
-        val delta = computeDelta(nowElapsed)
+        val nowUptime = timeProvider.uptimeMillis()
+        val (realElapsedMs, awakeMs) = computeDeltas(nowElapsed, nowUptime)
         lastSampleElapsed = nowElapsed
+        lastSampleUptime = nowUptime
 
         // 正在强制休息中
         if (restUntilElapsed > 0) {
@@ -95,7 +100,10 @@ class EyeCareEnforcer @Inject constructor(
         }
 
         if (!screenOn) {
-            screenOffAccumulatedMs += delta
+            // 息屏累计用**真实流逝**（含深睡）：睡一夜当然算"眼睛休息过"。
+            // 这里若跟着 [awakeMs] 走，深睡期间 uptime 不动 → 一夜只累计 0，
+            // 第二天孩子一解锁就撞上"连续用眼已满 40 分钟"的强制休息锁屏（真实踩过的坑）。
+            screenOffAccumulatedMs += realElapsedMs
             // 息屏时间足够长 → 认定为有效休息，连续时长清零
             if (screenOffAccumulatedMs >= policy.restMinutes * 60_000L) {
                 if (continuousUsedMs > 0) {
@@ -107,9 +115,11 @@ class EyeCareEnforcer @Inject constructor(
             return EyeCareVerdict.Idle
         }
 
-        // 亮屏：息屏累计作废（短暂息屏不算休息），继续累加连续使用
+        // 亮屏：息屏累计作废（短暂息屏不算休息），继续累加连续使用。
+        // 连续用眼只算"设备真的醒着"的时长（[awakeMs]）：主循环被弱网拖慢时不漏记，
+        // 深睡（屏幕按理熄灭，但采样可能跨过一段挂起）也不被误记成用眼。
         screenOffAccumulatedMs = 0L
-        continuousUsedMs += delta
+        continuousUsedMs += awakeMs
 
         val thresholdMs = policy.continuousMinutes * 60_000L
         if (continuousUsedMs >= thresholdMs) {
@@ -156,6 +166,7 @@ class EyeCareEnforcer @Inject constructor(
         restCapMs = 0L
         pendingRestReport = null
         lastSampleElapsed = -1L
+        lastSampleUptime = -1L
     }
 
     /**
@@ -189,18 +200,41 @@ class EyeCareEnforcer @Inject constructor(
         return r
     }
 
-    /** 与 [AppLimitEnforcer.computeDelta] 同规则：首采样、重启、超长间隔都要挡住 */
-    private fun computeDelta(nowElapsed: Long): Long {
-        val last = lastSampleElapsed
-        if (last < 0) return 0L
-        val delta = nowElapsed - last
-        if (delta < 0) return 0L
-        return delta.coerceAtMost(AppLimitEnforcer.MAX_DELTA_MS)
+    /**
+     * 一次采样算两个增量：`(真实流逝, 设备醒着)`。
+     *
+     * 两者语义不同，用途也不同，不能合并：
+     * - **真实流逝**（`elapsedRealtime` 差值，含深睡）→ 判断"息屏是否构成有效休息"。
+     *   深睡期间 `uptimeMillis` 不走，若用它算休息，睡一夜也累计不到 1 分钟。
+     * - **设备醒着**（`min(含深睡, 不含深睡)`）→ 累计"连续用眼"。深睡不该算用眼，
+     *   而主循环被一次弱网长轮询拖慢 3 分钟时两个钟同步前进，能完整计入。
+     *
+     * 首采样 / 重启（任一差值 < 0）一律返回 (0, 0)，避免把关机时长算成使用。
+     */
+    private fun computeDeltas(nowElapsed: Long, nowUptime: Long): Pair<Long, Long> {
+        val lastMonotonic = lastSampleElapsed
+        val lastAwake = lastSampleUptime
+        if (lastMonotonic < 0 || lastAwake < 0) return 0L to 0L
+        val deltaMonotonic = nowElapsed - lastMonotonic
+        val deltaAwake = nowUptime - lastAwake
+        if (deltaMonotonic < 0 || deltaAwake < 0) return 0L to 0L
+        val realElapsed = deltaMonotonic.coerceAtMost(MAX_REST_EVIDENCE_MS)
+        val awake = minOf(deltaMonotonic, deltaAwake).coerceAtMost(AppLimitEnforcer.MAX_DELTA_MS)
+        return realElapsed to awake
     }
 
     companion object {
         private const val TAG = "EyeCareEnforcer"
         private const val PRE_NOTICE_MINUTES = 5
+
+        /**
+         * 单次"[息屏构成有效休息]"证据的上限：24 小时。
+         *
+         * 息屏累计只用于跟 `restMinutes`（通常 20 分钟）比较，本身越大越好；
+         * 这里只是个防溢出的封顶，防止脏盘值 / 时钟异常把累加撑爆成负数后
+         * 反过来让"睡了一夜"被判成"没休息过"。
+         */
+        private const val MAX_REST_EVIDENCE_MS = 24 * 60 * 60 * 1000L
     }
 }
 

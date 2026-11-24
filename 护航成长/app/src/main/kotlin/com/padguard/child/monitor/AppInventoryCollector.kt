@@ -55,6 +55,17 @@ import javax.inject.Singleton
  * 授权状态属于**家长意图**，设备是执行者不是裁判：这里只如实回显
  * 本机已生效的意图，供服务端做一致性诊断，不参与授权判定。
  *
+ * ## 采集不完整时宁可整轮作废（R27）
+ * [queryIntentActivities] 在 PMS 忙碌 / ROM 限制时可能抛异常，个别包的
+ * `getPackageInfo` 也可能批量失败；此前这两类失败都被逐项吞掉，返回一份**残缺但非空**的台账。
+ * 服务端按「本次没出现 = 已卸载」处理，差分器又会拿它推进基线，
+ * 于是系统一次抖动就炸出一批假的卸载告警、家长端应用列表凭空少一半，
+ * 下个周期恢复时再炸一批假的新装告警。
+ *
+ * 因此本轮只要判定为不完整，就直接返回空列表：[com.padguard.child.service.GuardService]
+ * 的 `syncAppInventory()` 本就有「空台账 → 跳过整轮并快速重试」的兜底，
+ * 既不差分、不推进基线，也不上传残缺清单；30 秒后重采即可自愈，不会污染任何持久状态。
+ *
  * ## 性能
  * 意图解析与图标编码都是跨进程 + 解码操作，上百个包时是百毫秒级，
  * 绝不能在主线程做（否则界面掉帧）。
@@ -69,11 +80,14 @@ class AppInventoryCollector @Inject constructor(
     /** 采集全量台账。@return 已过滤后的应用列表（无启动入口的系统组件已被剔除） */
     suspend fun collect(): List<AppInventoryItem> = withContext(Dispatchers.IO) {
         val pm = context.packageManager
+        // 任一启动器意图解析失败，就说明这份清单不能代表「全量」，见类注释。
+        var queryFailed = false
         // pkg -> 是否有启动入口（false 表示是被我们隐藏、只在记账里的包）
         val candidates = LinkedHashMap<String, Boolean>(128)
         for (category in LAUNCHER_CATEGORIES) {
             val intent = Intent(Intent.ACTION_MAIN).addCategory(category)
             val resolved = runCatching { pm.queryIntentActivities(intent, 0) }.getOrElse {
+                queryFailed = true
                 Logger.w(TAG) { "query launcher activities failed: ${it.message}" }
                 emptyList()
             }
@@ -90,10 +104,17 @@ class AppInventoryCollector @Inject constructor(
         }
 
         val items = ArrayList<AppInventoryItem>(candidates.size)
+        var launcherCandidates = 0
+        var infoFailures = 0
         for ((pkg, hasLauncher) in candidates) {
-            // 单个包取信息失败（已被卸载 / ROM 限制）不该让整份台账报废
+            // 单个包取信息失败（刚被卸载 / ROM 限制）本不该让整份台账报废，
+            // 但**大面积**失败意味着 PMS 查询异常，必须整轮作废（见 inventoryIsIncomplete）。
+            if (hasLauncher) launcherCandidates++
             val info = runCatching { packageInfo(pm, pkg) }.getOrNull()
-            if (info == null && hasLauncher) continue
+            if (info == null && hasLauncher) {
+                infoFailures++
+                continue
+            }
             val app = info?.applicationInfo
             val isSystem = app != null && (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0
             items.add(
@@ -110,6 +131,13 @@ class AppInventoryCollector @Inject constructor(
                     hidden = admin.isHidden(pkg)
                 )
             )
+        }
+        if (inventoryIsIncomplete(queryFailed, launcherCandidates, infoFailures)) {
+            Logger.w(TAG) {
+                "app inventory incomplete (queryFailed=$queryFailed, launcher=$launcherCandidates, " +
+                    "infoFailures=$infoFailures); discard this cycle and retry soon"
+            }
+            return@withContext emptyList()
         }
         Logger.d(TAG) { "app inventory collected: ${items.size}" }
         items
@@ -172,3 +200,30 @@ class AppInventoryCollector @Inject constructor(
         )
     }
 }
+
+/**
+ * 本轮台账是否**不可信**（纯函数，供 JVM 单测钉死判定口径）。
+ *
+ * 判据刻意只用「采集过程失败」，不用「比上次基线少了几个应用」：
+ * 后者会把孩子真的一次卸载 20 个应用误判成采集失败；更糟的是基线不推进，
+ * 同样的收缩每轮都会被判失败 → 装卸事件永久漏报（死锁）。
+ *
+ * @param queryFailed 任一启动器意图解析抛异常（已确知清单不全）
+ * @param launcherCandidates 有启动入口的候选包数
+ * @param infoFailures 其中取不到 PackageInfo 而被跳过的数量
+ */
+internal fun inventoryIsIncomplete(
+    queryFailed: Boolean,
+    launcherCandidates: Int,
+    infoFailures: Int
+): Boolean {
+    if (queryFailed) return true
+    // 小样本不按比例判：装机初期 / 包可见性受限时本来就可能只有 1~3 个候选，
+    // 一个包取不到详情就作废整轮，会让首次台账迟迟建不起来。
+    if (launcherCandidates < MIN_CANDIDATES_FOR_RATIO) return false
+    // 启动器里明明解析到了却取不到详情，说明 PMS 查询整体异常。
+    // 真正被卸载的应用根本不会出现在 queryIntentActivities 结果里，正常卸载不触发此项。
+    return infoFailures * 2 > launcherCandidates
+}
+
+private const val MIN_CANDIDATES_FOR_RATIO = 4

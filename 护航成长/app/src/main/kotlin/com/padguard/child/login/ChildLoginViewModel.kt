@@ -41,27 +41,54 @@ class ChildLoginViewModel @Inject constructor(
     private val _password = MutableStateFlow("")
     val password: StateFlow<String> = _password
 
-    /** 是否勾选「记住账号密码」；勾选后凭据落地，下次进入自动填充。 */
+    /** 是否勾选「记住账号」；勾选后仅账号落地，下次进入自动填充账号（密码从不持久化，符合安全设计）。 */
     private val _remember = MutableStateFlow(false)
     val remember: StateFlow<Boolean> = _remember
 
+    /**
+     * 用户本轮是否已手动编辑过账号 / 勾选（R29）。
+     *
+     * `rememberedCredentials.first()` 冷启动读盘有几十~几百毫秒延迟，旧实现首帧无条件回填，
+     * 会把家长刚敲进去的手机号清空、把刚勾的「记住账号」弹回未勾选。
+     */
+    @Volatile
+    private var userEdited = false
+
     init {
-        // 已记录过凭据：回填账号密码并默认勾上，省去每次重输
+        // 已记录过账号：回填账号并默认勾选「记住账号」，省去每次重输。
+        // 密码按设计从不持久化（见 AuthRepository.saveChildCredentials），故只回填账号；
+        // 旧逻辑要求 savedPwd 非空才回填，导致「记住账号」功能彻底失效（密码永远为空串），
+        // 改为仅判断账号非空即可回填并默认勾选（决策抽成 rememberInitial 便于单测，见 companion）。
         viewModelScope.launch {
-            val (savedPhone, savedPwd) = authRepository.rememberedCredentials.first()
-            if (savedPhone.isNotBlank() && savedPwd.isNotBlank()) {
-                _phone.value = savedPhone
-                _password.value = savedPwd
-                _remember.value = true
-            }
+            val remembered = authRepository.rememberedCredentials.first()
+            // 持久化回填只能发生在用户动手之前，绝不覆盖已输入内容。
+            if (userEdited) return@launch
+            val (phone, checked) = rememberInitial(remembered)
+            _phone.value = phone
+            _remember.value = checked
         }
     }
 
     fun onRememberChanged(value: Boolean) {
+        userEdited = true
         _remember.value = value
-        // 取消勾选立即清除已记录的密码，避免"关了开关但密码还在库里"
+        // 取消勾选立即清除已记录的账号，避免"关了开关但账号还在库里"
         if (!value) {
             viewModelScope.launch { authRepository.clearRememberedCredentials() }
+        }
+    }
+
+    companion object {
+        /**
+         * 「记住账号」初始回填决策（R15·L1 抽离，便于单测，无协程依赖）。
+         *
+         * 密码按安全设计从不持久化（见 AuthRepository.saveChildCredentials），
+         * rememberedCredentials 第二元素恒为空串。旧逻辑要求密码非空才回填，
+         * 导致功能彻底失效；正确口径：只看账号是否非空 —— 非空则回填账号并默认勾选。
+         */
+        internal fun rememberInitial(saved: Pair<String, String>): Pair<String, Boolean> {
+            val (phone, _) = saved
+            return if (phone.isNotBlank()) phone to true else "" to false
         }
     }
 
@@ -69,6 +96,7 @@ class ChildLoginViewModel @Inject constructor(
     val state: StateFlow<LoginUiState> = _state
 
     fun onPhoneChanged(value: String) {
+        userEdited = true
         _phone.value = value
         if (_state.value is LoginUiState.Error) _state.value = LoginUiState.Idle
     }

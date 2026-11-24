@@ -206,7 +206,12 @@ fun TabletUsageSettingsScreen(
                 }
                 item { RestSection(settings = uiState.settings, viewModel = viewModel, enabled = enabled) }
                 item {
-                    UsageSessionCard(session = uiState.usageSession, error = uiState.sessionError)
+                    UsageSessionCard(
+                        session = uiState.usageSession,
+                        error = uiState.sessionError,
+                        startProcessing = uiState.startRequestProcessing,
+                        onRequestStart = { viewModel.requestStart(deviceId) }
+                    )
                 }
                 item {
                     DelayApprovalCard(
@@ -786,7 +791,12 @@ private fun RestSection(
  * 卡片内部每秒本地插值刷新倒计时，服务端拉取由页面每 15 秒轮询一次。
  */
 @Composable
-private fun UsageSessionCard(session: UsageSession?, error: String?) {
+private fun UsageSessionCard(
+    session: UsageSession?,
+    error: String?,
+    startProcessing: Boolean = false,
+    onRequestStart: () -> Unit = {}
+) {
     GlassCard {
         GlassSectionHeader(icon = Icons.Default.Schedule, title = "今日剩余时长")
         Spacer(modifier = Modifier.height(6.dp))
@@ -803,10 +813,33 @@ private fun UsageSessionCard(session: UsageSession?, error: String?) {
             return@GlassCard
         }
         if (!session.active) {
+            // 新的一天：计时须孩子确认后才开始（未确认不计时、不消耗额度）。
+            // 家长点「开始计时」= 发起/催办（孩子端弹确认框），不是强制开始。
+            val pendingStart = session.startRequest?.pending == true
             Text(
-                "孩子端尚未确认开始计时，今日额度 ${session.quotaMinutes} 分钟（尚未开始计时）",
+                text = if (pendingStart) {
+                    "已发送「开始计时」，等待孩子在平板上确认（今日额度 ${session.quotaMinutes} 分钟）"
+                } else {
+                    "今日尚未开始计时，可在孩子平板确认或点下方按钮发起（今日额度 ${session.quotaMinutes} 分钟）"
+                },
                 style = TextStyle(color = GlassTextDim, fontSize = 12.sp)
             )
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = onRequestStart,
+                enabled = !startProcessing,
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = AccentCyan)
+            ) {
+                Text(
+                    text = when {
+                        startProcessing -> "正在发送…"
+                        pendingStart -> "再次提醒孩子确认"
+                        else -> "开始计时"
+                    },
+                    fontSize = 13.sp
+                )
+            }
             return@GlassCard
         }
         // 每秒按**单调时钟**插值刷新，与服务端/孩子端同源派生。

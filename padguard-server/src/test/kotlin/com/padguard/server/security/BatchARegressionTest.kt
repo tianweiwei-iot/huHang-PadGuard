@@ -13,7 +13,9 @@ import com.padguard.server.repository.DeviceEventRepository
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.GeofenceZoneRepository
 import com.padguard.server.repository.LocationTrackRepository
+import com.padguard.server.repository.AppDistributionRepository
 import com.padguard.server.service.AlertService
+import com.padguard.server.service.AppDistributionConverger
 import com.padguard.server.service.DeviceService
 import com.padguard.server.service.FakeJpaRepository
 import com.padguard.server.service.GeofenceService
@@ -111,6 +113,28 @@ class BatchARegressionTest {
         override fun findPendingForPolling(deviceId: String, status: String, now: Long, cursor: Long, pageable: Pageable) =
             emptyList<Command>()
         override fun findExpiredPending(deviceId: String, status: String, now: Long) = emptyList<Command>()
+        /** F01 CAS 的内存等价实现：只有仍是 PENDING 才改写并返回影响行数 1 */
+        override fun markExpiredIfPending(id: String, pending: String, expired: String): Int {
+            val cmd = table[id] ?: return 0
+            if (cmd.status != pending) return 0
+            cmd.status = expired
+            return 1
+        }
+        override fun applyAckIfOpen(
+            msgId: String, deviceId: String, terminal: Collection<String>, status: String,
+            executedAt: Long?, errorCode: String?, errorMessage: String?
+        ): Int {
+            val cmd = table.values.firstOrNull { it.msgId == msgId && it.deviceId == deviceId } ?: return 0
+            if (cmd.status in terminal) return 0
+            cmd.status = status
+            cmd.executedAt = executedAt
+            cmd.errorCode = errorCode
+            cmd.errorMessage = errorMessage
+            return 1
+        }
+        // W2 补发查询：本组测试不涉及补发，恒返回空/0 即可保持原有断言语义
+        override fun findRedeliverablePending(deviceId: String, status: String, now: Long, maxAttempts: Int, types: Collection<String>, pageable: Pageable) = emptyList<Command>()
+        override fun tryRefreshForRedelivery(id: String, status: String, now: Long, newExpiresAt: Long): Int = 0
         override fun deleteByDeviceId(deviceId: String): Int {
             val before = table.size
             table.values.removeIf { it.deviceId == deviceId }
@@ -133,10 +157,10 @@ class BatchARegressionTest {
             table.values.removeIf { it.deviceId == deviceId }
             return before - table.size
         }
-        // E11：保留期清理（与 JPQL coalesce(t.ts, t.receivedAt) 同口径）
+        // E11：保留期清理（R41 起与 JPQL `t.receivedAt < :ts` 同口径，不认客户端 ts）
         override fun deleteByTsBefore(ts: Long): Int {
             val before = table.size
-            table.values.removeIf { (it.ts ?: it.receivedAt) < ts }
+            table.values.removeIf { it.receivedAt < ts }
             return before - table.size
         }
     }
@@ -186,7 +210,7 @@ class BatchARegressionTest {
     @Test
     fun `refresh token cannot be used as access token (s5)`() {
         val p = jwt()
-        val refresh = p.createRefreshToken("u1")
+        val refresh = p.createRefreshToken("u1", 0L)
         val ex = assertThrows(JwtException::class.java) { p.parseAccessToken(refresh) }
         assertTrue(ex.message!!.contains("typ mismatch"), "必须以 typ 不符为由拒绝，而不是其他解析错误")
     }
@@ -194,7 +218,7 @@ class BatchARegressionTest {
     @Test
     fun `access token cannot refresh or act as admin (s5)`() {
         val p = jwt()
-        val access = p.createAccessToken("u1")
+        val access = p.createAccessToken("u1", 0L)
         assertThrows(JwtException::class.java) { p.parseRefreshToken(access) }
         assertThrows(JwtException::class.java) { p.parseAdminToken(access) }
     }
@@ -202,8 +226,8 @@ class BatchARegressionTest {
     @Test
     fun `matching typ parses the subject (s5)`() {
         val p = jwt()
-        assertEquals("u1", p.parseAccessToken(p.createAccessToken("u1")))
-        assertEquals("u1", p.parseRefreshToken(p.createRefreshToken("u1")))
+        assertEquals("u1", p.parseAccessToken(p.createAccessToken("u1", 0L)))
+        assertEquals("u1", p.parseRefreshToken(p.createRefreshToken("u1", 0L)))
         assertEquals("A1", p.parseAdminToken(p.createAdminToken("A1", 0)).adminId)
     }
 
@@ -215,10 +239,15 @@ class BatchARegressionTest {
         // 本组用例设备统一为 dev-A；用具体值 stub —— Mockito inline 对 Kotlin 非空参数
         // 的 matcher 匹配会在入口 null 检查处先失败，因此全程不用参数 matcher。
         Mockito.`when`(deviceService.getUserId("dev-A")).thenReturn("parent-1")
+        // R-P0-3：设备已下发 hmacSecret，用于上行验签回归。
+        Mockito.`when`(deviceService.getHmacSecret("dev-A")).thenReturn("hs_test-secret")
         val ws = Mockito.mock(WebSocketPushService::class.java)
         val alerts = Mockito.mock(AlertService::class.java)
+        // R-P2-12：回执会顺带收敛分发台账。本组用例的指令类型是 LOCK，不会触达；
+        // 仓库 mock 默认返回空列表，等价于"该 msgId 没有分发记录"。
+        val converger = AppDistributionConverger(Mockito.mock(AppDistributionRepository::class.java))
         val handler = ChildUplinkHandler(
-            null, ObjectMapper(), commands, FakeDeviceEventRepo(), deviceService, ws, alerts
+            null, ObjectMapper(), commands, FakeDeviceEventRepo(), deviceService, ws, alerts, converger
         )
         return Triple(handler, commands, ws)
     }
@@ -236,6 +265,65 @@ class BatchARegressionTest {
 
     private fun ackJson(msgId: String, status: String) =
         """{"msgId":"$msgId","status":"$status","executedAt":123}"""
+
+    // ----------------------------- R-P0-3：上行验签 -----------------------------
+
+    private fun signedAckEnvelope(msgId: String, status: String, secret: String): String {
+        val ack = ackJson(msgId, status)
+        val sig = UplinkSigning.hmac(secret, ack)
+        // p 必须是 JSON 字符串值（与终端 UplinkSigner 信封一致）
+        return ObjectMapper().writeValueAsString(LinkedHashMap<String, Any>().apply {
+            put("s", sig); put("p", ack)
+        })
+    }
+
+    private fun rawAckEnvelope(msgId: String, status: String): String =
+        ackJson(msgId, status)
+
+    @Test
+    fun `R-P0-3 signed ack is accepted and applied (s6 with signature)`() {
+        val (handler, commands, ws) = ackFixture()
+        seedCommand(commands, "m1", deviceId = "dev-A", status = "PENDING")
+        val env = signedAckEnvelope("m1", "SUCCESS", "hs_test-secret")
+        handler.messageArrived(
+            "pg/v1/default/up/dev-A/ack",
+            org.eclipse.paho.mqttv5.common.MqttMessage(env.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+        )
+        assertEquals("SUCCESS", commands.table["m1"]!!.status, "合法签名的上行回执应被正常处理")
+        verify(ws).pushToUser("parent-1", expectedPush("dev-A", "m1", "SUCCESS"))
+    }
+
+    @Test
+    fun `R-P0-3 forged ack (wrong signature) is rejected and alerted`() {
+        val (handler, commands, ws) = ackFixture()
+        seedCommand(commands, "m2", deviceId = "dev-A", status = "PENDING")
+        // 报文与合法回执完全一致，但签名错误（攻击者伪造）
+        val ack = ackJson("m2", "SUCCESS")
+        val env = ObjectMapper().writeValueAsString(LinkedHashMap<String, Any>().apply {
+            put("s", "deadbeef-invalid-sig"); put("p", ack)
+        })
+        handler.messageArrived(
+            "pg/v1/default/up/dev-A/ack",
+            org.eclipse.paho.mqttv5.common.MqttMessage(env.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+        )
+        assertEquals("PENDING", commands.table["m2"]!!.status, "伪造签名的上行回执必须被丢弃，状态不得改变")
+        verify(ws, never()).pushToUser("parent-1", expectedPush("dev-A", "m2", "SUCCESS"))
+    }
+
+    @Test
+    fun `R-P0-3 unsigned ack from signed device is rejected when strict (default)`() {
+        val (handler, commands, ws) = ackFixture()
+        seedCommand(commands, "m3", deviceId = "dev-A", status = "PENDING")
+        // 设备有密钥却发裸报文（未签名）
+        handler.messageArrived(
+            "pg/v1/default/up/dev-A/ack",
+            org.eclipse.paho.mqttv5.common.MqttMessage(
+                rawAckEnvelope("m3", "SUCCESS").toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+            )
+        )
+        assertEquals("PENDING", commands.table["m3"]!!.status, "默认严格模式下裸上行必须被拒收")
+        verify(ws, never()).pushToUser("parent-1", expectedPush("dev-A", "m3", "SUCCESS"))
+    }
 
     @Test
     fun `ack from another device is dropped (s6 cross-device forgery)`() {

@@ -53,6 +53,7 @@ import java.util.concurrent.atomic.AtomicInteger
 @AutoConfigureMockMvc
 @ActiveProfiles("local")
 @TestPropertySource(properties = [
+    "padguard.storage.dir=build/test-uploads",
     "spring.datasource.url=jdbc:h2:mem:adminagg;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE",
     "spring.jpa.hibernate.ddl-auto=create-drop",
     "padguard.jwt.secret=admin-agg-test-secret-key-32-bytes-min",
@@ -61,7 +62,10 @@ import java.util.concurrent.atomic.AtomicInteger
     "padguard.parent-initial-password-file=target/adminagg-parent-pwd.txt",
     "padguard.base-url=http://localhost:8080",
     // 仪表盘缓存禁用：用例会改数据后再断言 KPI 变化，缓存会让第二次读到旧值
-    "padguard.admin.dashboard-cache-ttl-ms=0"
+    "padguard.admin.dashboard-cache-ttl-ms=0",
+    // 本类靠 register 造数据（每个用例一次），而 MockMvc 全部请求共用同一个对端 IP：
+    // 注册限流默认 3 次/窗口，第 4 个用例就会 429。这里只验聚合查询，不验频控。
+    "padguard.ratelimit.register=1000"
 ])
 class AdminAggregateIntegrationTest {
 

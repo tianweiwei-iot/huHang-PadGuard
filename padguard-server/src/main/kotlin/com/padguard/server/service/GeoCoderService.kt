@@ -63,7 +63,9 @@ class GeoCoderService {
         val address = try {
             queryAmap(lat, lng)
         } catch (e: Exception) {
-            log.warn("逆地理编码失败 lat={}, lng={}: {}", lat, lng, e.message)
+            // 儿童精确坐标（WGS-84 十进制度≈米级）属敏感个人信息，禁止写入日志；
+            // 异常 message 也可能带原始请求 URL（含高德 Key 与坐标），一并省略，只记异常类型。
+            log.warn("逆地理编码失败（坐标与异常详情已省略，避免儿童精确位置入日志）: {}", e.javaClass.simpleName)
             null
         }
         synchronized(cacheLock) { cache[cacheKey] = address }

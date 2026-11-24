@@ -172,7 +172,7 @@ class AdminBillingService(
      */
     fun refund(adminId: String, orderNo: String): Map<String, Any> {
         adminPerm.require(adminId, "billing", "refund")
-        // 退款口径：订单标记 REFUNDED；订阅权益不自动回收（显性设计约定，见下）。
+        // 退款口径：订单标记 REFUNDED，并随即回收会员权益（「退款即回收」策略，见 revokeRightsOnRefund）。
         // 营收统计基于订单 PAID 状态，退款后自动自洽（PAID 单数减少）。
         val order = paymentOrderRepository.findByOrderNo(orderNo)
             ?: throw BizException(ParentErr.ORDER_NOT_FOUND, "订单不存在", Audience.PARENT)
@@ -221,6 +221,8 @@ class AdminBillingService(
                 refundId?.let { append(" (微信退款单 ").append(it).append(")") }
             }
         )
+        // 「退款即回收」：手动退款受理后，立即回收该家长的会员权益（钱退即停服）。
+        billingService.revokeRightsOnRefund(order.userId)
         return mapOf("ok" to true, "refundId" to (refundId ?: ""))
     }
 

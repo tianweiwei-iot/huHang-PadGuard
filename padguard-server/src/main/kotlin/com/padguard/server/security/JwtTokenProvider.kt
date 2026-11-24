@@ -46,32 +46,55 @@ class JwtTokenProvider(
 
     private fun loadOrCreateSecret(): String {
         val file = File(SECRET_FILE)
-        val existing = runCatching { file.readText(Charsets.UTF_8).trim() }.getOrNull()
-        if (!existing.isNullOrBlank() && existing.length >= 32) return existing
+        // 多副本竞态（R-P2-16）：未显式配置 secret 时，多个实例可能同时读到空文件、
+        // 各自生成不同密钥，导致用户在一个副本登录后被另一个副本随机登出。
+        // 用独立 `.lock` 文件的阻塞锁把"读-生成-落盘"串行化：先拿到锁的实例生成并落盘，
+        // 后到的实例读到同一份文件内容，密钥保持一致。
+        // 注：POSIX 建议锁只在同内核有效；跨主机 NFS 场景仍依赖部署方显式注入
+        // `padguard.jwt.secret`（k8s secret / 环境变量）以彻底闭环，本处兜底同主机并发。
+        val lockFile = File(file.parentFile ?: File("."), "${file.name}.lock")
+        val lockChannel = runCatching {
+            java.nio.channels.FileChannel.open(
+                lockFile.toPath(),
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.READ,
+                java.nio.file.StandardOpenOption.WRITE
+            )
+        }.getOrNull()
+        val lock = lockChannel?.let { runCatching { it.lock() }.getOrNull() }
+        try {
+            val existing = runCatching { file.readText(Charsets.UTF_8).trim() }.getOrNull()
+            if (!existing.isNullOrBlank() && existing.length >= 32) return existing
 
-        val generated = ByteArray(32).let { bytes ->
-            SecureRandom().nextBytes(bytes)
-            Base64.getEncoder().encodeToString(bytes)
+            val generated = ByteArray(32).let { bytes ->
+                SecureRandom().nextBytes(bytes)
+                Base64.getEncoder().encodeToString(bytes)
+            }
+            runCatching {
+                file.parentFile?.mkdirs()
+                file.writeText(generated, Charsets.UTF_8)
+            }.onFailure { log.error("写入 JWT 密钥文件失败: {}", it.message) }
+            log.warn(
+                "padguard.jwt.secret 未配置，已生成随机密钥并写入 {}；" +
+                    "该文件丢失会导致已登录用户需要重新登录，请勿删除。" +
+                    "多副本部署请显式注入 padguard.jwt.secret 以彻底避免跨实例密钥漂移。",
+                file.absolutePath
+            )
+            return generated
+        } finally {
+            runCatching { lock?.release() }
+            runCatching { lockChannel?.close() }
         }
-        runCatching {
-            file.parentFile?.mkdirs()
-            file.writeText(generated, Charsets.UTF_8)
-        }.onFailure { log.error("写入 JWT 密钥文件失败: {}", it.message) }
-        log.warn(
-            "padguard.jwt.secret 未配置，已生成随机密钥并写入 {}；" +
-                "该文件丢失会导致已登录用户需要重新登录，请勿删除。",
-            file.absolutePath
-        )
-        return generated
     }
 
     /**
      * 签发家长 access token。
      *
-     * [tokenVersion] 取自 `users.token_version`，写入 `ver` 声明。默认 0 是为了让
-     * 未关心吊销的调用点（如测试、内部工具）保持可编译，正式签发点必须传真实版本号。
+     * [tokenVersion] 取自 `users.token_version`，写入 `ver` 声明。**必传**：
+     * 默认值 0 会让未来漏传版本号的调用点静默签出 `ver=0` 令牌（版本闸门对它形同虚设），
+     * 改为无默认值后漏传直接编译失败。内部工具/测试需签发时显式传 0 表达意图。
      */
-    fun createAccessToken(userId: String, tokenVersion: Long = 0L): String = Jwts.builder()
+    fun createAccessToken(userId: String, tokenVersion: Long): String = Jwts.builder()
         .subject(userId)
         .claim("typ", "access")
         .claim("ver", tokenVersion)
@@ -80,10 +103,11 @@ class JwtTokenProvider(
         .signWith(key)
         .compact()
 
-    fun createRefreshToken(userId: String, tokenVersion: Long = 0L): String = Jwts.builder()
+    fun createRefreshToken(userId: String, tokenVersion: Long, jti: String = java.util.UUID.randomUUID().toString()): String = Jwts.builder()
         .subject(userId)
         .claim("typ", "refresh")
         .claim("ver", tokenVersion)
+        .claim("jti", jti)
         .issuedAt(java.util.Date())
         .expiration(java.util.Date(System.currentTimeMillis() + refreshTtlDays * 86_400_000))
         .signWith(key)
@@ -109,11 +133,12 @@ class JwtTokenProvider(
     fun parseUserToken(token: String, expectedTyp: String): UserTokenPayload {
         val claims = parseClaimsWithTyp(token, expectedTyp)
         val version = (claims["ver"] as? Number)?.toLong() ?: 0L
-        return UserTokenPayload(userId = claims.subject, version = version)
+        val jti = claims["jti"] as? String
+        return UserTokenPayload(userId = claims.subject, version = version, jti = jti)
     }
 
-    /** 家长令牌解析结果：[version] 与库内 `users.token_version` 比对以判定是否已吊销 */
-    data class UserTokenPayload(val userId: String, val version: Long)
+    /** 家长令牌解析结果：[version] 与库内 `users.token_version` 比对以判定是否已吊销；[jti] 用于单会话吊销/轮换 */
+    data class UserTokenPayload(val userId: String, val version: Long, val jti: String? = null)
 
     /**
      * 解析管理员令牌，返回身份与令牌版本号。

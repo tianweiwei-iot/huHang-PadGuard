@@ -76,15 +76,27 @@ class ConfigurablePaymentVerifier(
      * 后果：运营在后台把 `mockPay` 打开后，[com.padguard.server.service.BillingService] 在支付校验处直接跳过验签，
      * 等于在生产开了一条免验证白嫖通道，而启动断言只查配置项被完全绕过。
      *
-     * 现收敛为与 [com.padguard.server.service.BillingService] 同一读取口径：DB（admin.settings.mockPay）优先、
-     * 配置兜底、解析失败安全回退。配合 [com.padguard.server.service.AdminService.saveSettings] 对非 dev 环境
-     * 拒绝 `mockPay=true` 落库，生产环境示例支付恒为 false。
+     * 现收敛为与 [com.padguard.server.service.BillingService] 同一读取口径：
+     * **部署配置为总闸，后台 DB 只能关、不能开**（`config && dbValue`）。
+     *
+     * 为什么不能再让 DB 优先：配置只由 [com.padguard.server.config.ProdConfigAssertion]
+     * 在启动期检查一次，而 DB 值可在运行中由任意持有 `settings:write` 的管理员会话改写
+     * （甚至直接写库）。"DB 优先"意味着一次后台勾选就能在生产关掉全部支付验签，
+     * 启动断言完全绕不过——这是资金红线。现在生产档位的配置恒为 false，
+     * DB 无论写什么都无法打开示例支付；示例支付只允许在 local/dev 档位由配置显式开启。
      */
-    private fun effectiveMockPay(): Boolean =
+    private fun mockPayFlagFromDb(): Boolean? =
         runCatching {
             systemSettingRepository.findById("admin.settings").orElse(null)?.valueJson
                 ?.let { objectMapper.readTree(it).get("mockPay")?.asBoolean() }
-        }.getOrNull() ?: configMockPayEnabled
+        }.getOrNull()
+
+    private fun effectiveMockPay(): Boolean {
+        if (!configMockPayEnabled) return false
+        // 配置为 true 时，DB 仍可显式关闭（例如联调环境临时切回真实验签）；
+        // DB 未保存该字段则沿用配置值，保持既有联调行为不变。
+        return mockPayFlagFromDb() ?: true
+    }
 
     override fun verify(channel: String, rawBody: String, headers: Map<String, String>): Boolean {
         // 1) 示例支付（开发）模式：跳过验签，便于端到端验证"下单→支付→开通"链路。

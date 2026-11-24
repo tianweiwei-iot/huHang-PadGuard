@@ -92,7 +92,15 @@ class WeChatPayVerifier(
             log.warn("微信验签通过但缺少 out_trade_no")
             return null
         }
-        return WeChatNotifyResult(outTradeNo, tx["transaction_id"]?.asText())
+        // 订单总金额（amount.total，单位分）：微信 V3 支付通知的必填字段。
+        // 这里把它带回给调用方与本地订单比对（官方接入规范第 4 步：
+        // 「校验订单金额是否与商户侧一致」）。缺失说明报文不符合官方协议形态，
+        // 验签通过也不入账 —— 宁可人工介入处理回调失败，不可错账开通。
+        val totalFen = tx["amount"]?.get("total")?.asLong()
+            ?: return null.also {
+                log.warn("微信验签通过但缺少 amount.total，拒绝入账：out_trade_no={}", outTradeNo)
+            }
+        return WeChatNotifyResult(outTradeNo, tx["transaction_id"]?.asText(), totalFen)
     }
 
     /**
@@ -209,8 +217,12 @@ class WeChatPayVerifier(
     private data class Authed(val payload: JsonNode)
 }
 
-/** 微信回调解析结果：商户订单号 + 微信支付订单号 */
-data class WeChatNotifyResult(val outTradeNo: String, val transactionId: String?)
+/** 微信回调解析结果：商户订单号 + 微信支付订单号 + 回调金额（amount.total，分） */
+data class WeChatNotifyResult(
+    val outTradeNo: String,
+    val transactionId: String?,
+    val totalFen: Long
+)
 
 /** 微信退款回调解析结果：商户订单号 + 商户退款单号 + 微信退款单号 */
 data class WeChatRefundNotifyResult(

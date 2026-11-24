@@ -9,6 +9,7 @@ import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.ws.WebSocketPushService
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -16,12 +17,14 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.ArgumentMatchers
+import org.mockito.ArgumentMatchers.argThat
 import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.verify
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Pageable
 import java.util.LinkedHashMap
+import java.util.Optional
 import org.springframework.data.domain.Page
 
 /**
@@ -138,6 +141,67 @@ class AlertServiceTest {
             table.values.removeIf { it.deviceId == deviceId }
             return before - table.size
         }
+
+        // ---- 状态机条件 UPDATE（与生产 JPQL 语义一致：前驱态不符即 0 行幂等）----
+
+        override fun acknowledgeIfActive(id: String, userId: String, at: Long): Int {
+            val a = table[id] ?: return 0
+            if (a.userId != userId || a.status != "ACTIVE") return 0
+            a.status = "ACKNOWLEDGED"
+            a.acknowledgedAt = at
+            return 1
+        }
+
+        override fun closeIfOpen(id: String, userId: String, at: Long): Int {
+            val a = table[id] ?: return 0
+            if (a.userId != userId || (a.status != "ACTIVE" && a.status != "ACKNOWLEDGED")) return 0
+            a.status = "CLOSED"
+            a.resolvedAt = at
+            return 1
+        }
+
+        override fun appendCloseNoteIfStillClosed(id: String, suffix: String): Int {
+            val a = table[id] ?: return 0
+            if (a.status != "CLOSED") return 0
+            a.message = (a.message ?: "") + suffix
+            return 1
+        }
+
+        override fun closeActiveByCategory(deviceId: String, category: String, at: Long): Int {
+            val targets = table.values.filter { it.deviceId == deviceId && it.category == category && it.status == "ACTIVE" }
+            targets.forEach {
+                it.status = "CLOSED"
+                it.resolvedAt = at
+            }
+            return targets.size
+        }
+
+        override fun resolveIfNotResolved(id: String, at: Long): Int {
+            val a = table[id] ?: return 0
+            if (a.status == "RESOLVED") return 0
+            a.status = "RESOLVED"
+            a.resolvedAt = at
+            return 1
+        }
+    }
+
+    /**
+     * 计数型假仓储：记录 `findById` / `findAllById` 的调用次数与参数，
+     * 用于把"告警列表批量预取设备名（消灭 N+1）"钉死成回归测试。
+     */
+    private class CountingDeviceRepo : FakeDeviceRepo() {
+        var findByIdCalls = 0
+        var findAllByIdCalls = 0
+        var lastFindAllByIdIds: List<String> = emptyList()
+        override fun findById(id: String): Optional<Device> {
+            findByIdCalls++
+            return super.findById(id)
+        }
+        override fun findAllById(ids: MutableIterable<String>): MutableList<Device> {
+            findAllByIdCalls++
+            lastFindAllByIdIds = ids.toList()
+            return super.findAllById(ids)
+        }
     }
 
     // ----------------------------- 夹具 -----------------------------
@@ -196,6 +260,20 @@ class AlertServiceTest {
         assertEquals("打开黑名单应用", info.title)
     }
 
+    /**
+     * 未知风险类型必须落到可读中文兜底，不能把英文枚举名原样当标题。
+     * 这是"孩子端新增 RiskType 但服务端漏登记"事故的真实行为防线：
+     * 直接跑 [AlertService.createFromEvent] 并断言落库结果，而非断言测试内局部常量。
+     */
+    @Test
+    fun `unmapped risk type falls back to readable Chinese title and message`() {
+        val alert = event("dev1", "SOME_FUTURE_TYPE", "NORMAL")
+        assertEquals("设备事件", alert.title, "未知类型的标题必须是中文兜底，不能是英文枚举名")
+        assertTrue(alert.message!!.contains("SOME_FUTURE_TYPE"), "正文要保留原始类型名供排查")
+        assertNotEquals("SOME_FUTURE_TYPE", alert.title, "原始枚举名绝不能当标题")
+        assertEquals("SOME_FUTURE_TYPE", alert.category, "category 仍存原始枚举名，供后台筛选")
+    }
+
     @Test
     fun `createFromEvent for unknown device is a no-op`() {
         assertNull(svc.createFromEvent("ghost", "ROOT_DETECTED", "HIGH", null))
@@ -233,6 +311,39 @@ class AlertServiceTest {
         assertTrue(byStatus.isEmpty())
         svc.acknowledge("u1", a1.id)
         assertEquals(1, svc.list("u1", null, "ACKNOWLEDGED", 0, 20).size)
+    }
+
+    /**
+     * 告警列表 N+1 回归锁：家长端每 15~30s 拉一次告警，一页若分散在多台设备，
+     * 旧实现会逐条 `toDto` → 每条一次 `deviceRepository.findById`，一页 20 条即 20 次查询。
+     * 修复后改为一次 `findAllById` 批量预取设备名。本测试确保该优化不被回退。
+     */
+    @Test
+    fun `list batches device-name lookup into one findAllById, no N+1`() {
+        val devRepo = CountingDeviceRepo()
+        devRepo.save(Device(id = "devA", userId = "u1", name = "平板A"))
+        devRepo.save(Device(id = "devB", userId = "u1", name = "平板B"))
+        devRepo.save(Device(id = "devC", userId = "u1", name = "平板C"))
+        val aRepo = FakeAlertRepo()
+        // 9 条告警分散在 3 台设备（每台 3 条），归属同一家长 u1
+        var seq = 0L
+        for (dev in listOf("devA", "devB", "devC")) {
+            for (i in 1..3) {
+                seq++
+                aRepo.save(Alert("al$seq", dev, "u1", "WARNING", "t", "m", "X", "ACTIVE", null, seq))
+            }
+        }
+        val service = AlertService(aRepo, devRepo, mock(WebSocketPushService::class.java), ObjectMapper())
+
+        val result = service.list("u1", null, null, 0, 100)
+
+        assertEquals(9, result.size, "应返回全部 9 条告警")
+        // 设备名只批量预取一次（findAllById），绝不逐条 findById 造成 N+1
+        assertEquals(1, devRepo.findAllByIdCalls, "设备名应一次性批量预取，只调一次 findAllById")
+        assertEquals(0, devRepo.findByIdCalls, "list 路径不应再逐条 findById")
+        assertEquals(setOf("devA", "devB", "devC"), devRepo.lastFindAllByIdIds.toSet())
+        // 设备名正确回填（非回退成 deviceId）
+        assertTrue(result.all { it.deviceName != it.deviceId && it.deviceName.isNotBlank() })
     }
 
     // ----------------------------- 状态机 -----------------------------
@@ -327,6 +438,19 @@ class AlertServiceTest {
     // ----------------------------- 分页 -----------------------------
 
     @Test
+    fun `create suppresses duplicate category within cooldown window`() {
+        val a1 = svc.create("dev1", "WARNING", "t", "m", "DUP_CAT")
+        assertNotNull(a1, "首次建警应成功")
+        // 同一设备+类别在冷却窗口内：应被抑制，避免告警风暴（R-P2-14）
+        val a2 = svc.create("dev1", "WARNING", "t", "m", "DUP_CAT")
+        assertNull(a2, "同设备同类别在冷却窗口内应被抑制")
+        // 同设备不同类别：允许
+        assertNotNull(svc.create("dev1", "WARNING", "t", "m", "OTHER_CAT"))
+        // 不同设备同类别：允许
+        assertNotNull(svc.create("dev2", "WARNING", "t", "m", "DUP_CAT"))
+    }
+
+    @Test
     fun `list paginates by triggeredAt desc`() {
         repeat(5) { i ->
             val a = svc.createFromEvent("dev1", "ROOT_DETECTED", "HIGH", null)!!
@@ -338,5 +462,71 @@ class AlertServiceTest {
         assertEquals(1003L, page0[1].triggeredAt)
         val page1 = svc.list("u1", null, null, 1, 2)
         assertEquals(1002L, page1[0].triggeredAt)
+    }
+
+    // ----------------------------- 终态不可回退（R45） -----------------------------
+
+    /**
+     * 状态迁移必须带前驱条件（项目红线：终态不可回退靠 DB WHERE）。
+     * 旧实现"读实体→改字段→整行 save"允许 UI 残留入口重放把 CLOSED 拉回 ACKNOWLEDGED，
+     * 家长端红点死而复生；本组用例锁死条件 UPDATE 的前驱语义。
+     */
+    @Test
+    fun `acknowledge cannot resurrect a CLOSED alert`() {
+        val alert = event("dev1", "CLOCK_TAMPERING", "HIGH")
+        svc.close("u1", alert.id, null)
+
+        // UI 残留入口 / 双击重放：不抛错（幂等），但绝不能把 CLOSED 拉回 ACKNOWLEDGED
+        svc.acknowledge("u1", alert.id)
+
+        val reloaded = alertRepo.findById(alert.id).get()
+        assertEquals("CLOSED", reloaded.status, "CLOSED 是终态，重放 acknowledge 不得复活红点")
+        assertNull(reloaded.acknowledgedAt, "终态复活的同时不得伪造确认时间戳")
+    }
+
+    @Test
+    fun `close cannot overwrite a RESOLVED alert`() {
+        val alert = event("dev1", "ROOT_DETECTED", "HIGH")
+        val resolvedAt = 1234567890123L
+        alertRepo.acknowledgeIfActive(alert.id, "u1", System.currentTimeMillis())
+        alertRepo.resolveIfNotResolved(alert.id, resolvedAt) // 模拟后台已处置
+
+        svc.close("u1", alert.id, "重复处理")
+
+        val reloaded = alertRepo.findById(alert.id).get()
+        assertEquals("RESOLVED", reloaded.status, "后台已 RESOLVED 的告警是终态，家长 close 不得覆盖")
+        assertEquals(resolvedAt, reloaded.resolvedAt, "终态时间戳不得被改写")
+        assertFalse(reloaded.message.orEmpty().contains("[处理:"), "处理说明不得追加到已 RESOLVED 的告警")
+    }
+
+    @Test
+    fun `resolveActiveByCategory skips ACKNOWLEDGED alerts and pushes closed count`() {
+        val active = event("dev1", "ACCESSIBILITY_DISABLED", "HIGH")
+        val acknowledged = event("dev1", "ACCESSIBILITY_DISABLED", "HIGH")
+        alertRepo.acknowledgeIfActive(acknowledged.id, "u1", System.currentTimeMillis())
+
+        svc.resolveActiveByCategory("dev1", "ACCESSIBILITY_DISABLED")
+
+        assertEquals("CLOSED", alertRepo.findById(active.id).get().status)
+        assertEquals(
+            "ACKNOWLEDGED", alertRepo.findById(acknowledged.id).get().status,
+            "家长已确认的告警保留 ACKNOWLEDGED，自愈批量关闭只动 ACTIVE"
+        )
+        // 推送的 count 必须是真实关闭数（1），不能把跳过的 ACKNOWLEDGED 也算进去。
+        // argThat 对 Kotlin 非空参数返回 null，需 ?: 打断空值链（同上 HIGH event 用例的注释）。
+        verify(ws).pushToUser(eq("u1"), argThat<Map<String, Any?>> { it["count"] == 1 } ?: emptyMap())
+    }
+
+    @Test
+    fun `double acknowledge is idempotent and keeps first timestamp`() {
+        val alert = event("dev1", "PERMISSION_REVOKED", "HIGH")
+        svc.acknowledge("u1", alert.id)
+        val first = alertRepo.findById(alert.id).get().acknowledgedAt
+
+        Thread.sleep(2) // 保证时间戳可区分
+        svc.acknowledge("u1", alert.id)
+
+        assertEquals("ACKNOWLEDGED", alertRepo.findById(alert.id).get().status)
+        assertEquals(first, alertRepo.findById(alert.id).get().acknowledgedAt, "重复确认不得改写首次确认时间")
     }
 }

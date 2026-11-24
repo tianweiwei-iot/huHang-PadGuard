@@ -169,8 +169,16 @@ class Device(
      * 闸门在**孩子端必经路径**（心跳 / 拉策略）上对比此列与实时权益：
      * 翻转沿触发一次"放开/恢复"策略重建（版本号前进，孩子端自动拉取）。
      * 写入走条件 UPDATE（updateEntitlementState），绝不整行 merge 覆盖并发绑定。
+     *
+     * 列定义里**刻意不写 `default 'ACTIVE'`**：写了会让 Hibernate 在 H2 上每次启动都发
+     * `alter table ... alter column ... set data type varchar(20) default 'ACTIVE'`，
+     * 而 H2 2.x 不支持"改类型 + 带默认值"的组合语法，直接报 42000 语法错误 ——
+     * 结果是每启动一次就往 data/padguard.trace.db 里堆一段堆栈，真故障反而被淹没。
+     * 默认值改由两处保证：Flyway 迁移 V2026110703 的 DDL DEFAULT，以及下面的 Kotlin 初值。
+     * `length = 20` 必须保留：否则 Hibernate 会认为库里是 varchar(20)、实体是 varchar(255)
+     * 而反复尝试加宽列。
      */
-    @Column(name = "entitlement_state", columnDefinition = "varchar(20) default 'ACTIVE'")
+    @Column(name = "entitlement_state", length = 20)
     var entitlementState: String = "ACTIVE",
     /**
      * 未成年人模式分龄档位：UNDER_3 / BAND_3_8 / BAND_8_12 / BAND_12_16 / BAND_16_18。
@@ -189,6 +197,38 @@ class Device(
      * - 非空：已启用，哈希随策略包下发给客户端，明文永不出服务端。
      */
     @Column(name = "guard_password_hash") var guardPasswordHash: String? = null,
+    /**
+     * 家长/监护人「撤回授权」标记（PIPL 撤回同意）。
+     *
+     * 一旦为 true：① 服务端 [IngestService] 停止落库该设备的个人数据（用量/位置/截图等）；
+     * ② 作为孩子端本地停采的信号源（设备下次拉策略/心跳即读到，离线也能在本地生效）。
+     * 可空：老库加列时已有行为 NULL，非空 Boolean 会在读取时抛异常；DTO 出口兜底成 false。
+     */
+    @Column(name = "consent_revoked", columnDefinition = "boolean default false")
+    var consentRevoked: Boolean? = false,
+    @Column(name = "created_at") var createdAt: Long = 0
+)
+
+/**
+ * 不满十四周岁监护人单独同意凭证（PIPL 第 29/31 条）。
+ *
+ * 只记录「家长申报出生日期 + 勾选单独同意 + 同意文案版本」的留痕，
+ * **不是实名年龄核验结果**。设备/账号归属由 [GuardianConsentRepository] 查询时按 user_id 收口。
+ */
+@Entity
+@Table(
+    name = "guardian_consents",
+    indexes = [Index(name = "idx_guardian_consents_user_device", columnList = "user_id, device_id")]
+)
+class GuardianConsent(
+    @Id var id: String = "",
+    @Column(name = "user_id") var userId: String = "",
+    @Column(name = "device_id") var deviceId: String = "",
+    /** ISO 日期 yyyy-MM-dd；只做 <14 判定与留痕，不做实名核验。 */
+    @Column(name = "child_birth_date") var childBirthDate: String = "",
+    var consent: Boolean = false,
+    /** 家长勾选的隐私政策/单独同意文案版本，便于事后还原"当时同意了什么"。 */
+    @Column(name = "consent_text_version") var consentTextVersion: String = "",
     @Column(name = "created_at") var createdAt: Long = 0
 )
 
@@ -252,7 +292,12 @@ class EnrollmentSession(
 )
 
 @Entity
-@Table(name = "policies")
+// 与 V2026110701 的 Flyway 索引同名同列：local/home profile 关掉 Flyway、
+// 用 ddl-auto=update 建表，索引只写在迁移脚本里在这些环境等于没有。
+@Table(
+    name = "policies",
+    indexes = [Index(name = "idx_policies_device_version", columnList = "device_id, version DESC")]
+)
 class Policy(
     @Id var id: String = "",
     @Column(name = "device_id") var deviceId: String = "",
@@ -261,6 +306,15 @@ class Policy(
     var scene: String? = null,
     @Column(name = "effective_from") var effectiveFrom: Long? = null,
     @Column(name = "effective_to") var effectiveTo: Long? = null,
+    /**
+     * 策略行来源：NORMAL（子表重建的常规策略）/ ROLLBACK（版本回滚产物）。
+     * ROLLBACK 行会被 `PolicyExtensionService.ensureRebuilt` 跳过，否则历史快照
+     * 会在设备下一次拉策略时被「子表 → 策略包」自愈覆盖，回滚变成假成功。
+     * 默认值保持 NORMAL，存量行由 Flyway 的 DEFAULT 填充，无需回填。
+     */
+    @Column(name = "source") var source: String = "NORMAL",
+    /** 该行是回滚产物时，记录被回滚到的历史版本号 */
+    @Column(name = "rollback_of") var rollbackOf: Int? = null,
     @Column(name = "updated_at") var updatedAt: Long = 0
 )
 
@@ -274,7 +328,10 @@ class Policy(
     name = "commands",
     indexes = [
         Index(name = "idx_commands_device_id", columnList = "device_id"),
-        Index(name = "idx_commands_poll", columnList = "device_id, status, expires_at, created_at")
+        Index(name = "idx_commands_poll", columnList = "device_id, status, expires_at, created_at"),
+        // W2 补发查询：device_id + status + 仍在保留期内，按 created_at 做 FIFO。
+        // 生产走 Flyway V2026110601，本地 create-drop 走这里，两处都声明才不会漏索引。
+        Index(name = "idx_commands_redelivery", columnList = "device_id, status, redelivery_deadline_at, created_at")
     ]
 )
 class Command(
@@ -295,7 +352,24 @@ class Command(
      * 服务端落库后家长端轮询 [getCommand] 即可看到"指令为什么没生效"。
      */
     @Column(name = "error_code") var errorCode: String? = null,
-    @Column(name = "error_message", columnDefinition = "text") var errorMessage: String? = null
+    @Column(name = "error_message", columnDefinition = "text") var errorMessage: String? = null,
+
+    // ---------- W2：离线指令补发 ----------
+    /**
+     * 已补发次数。原子条件 UPDATE 递增，达到配置上限后不再补发，
+     * 由 ExpiredCommandSweeper 收敛为 EXPIRED，避免一条永远送不达的指令无限重放。
+     */
+    @Column(name = "delivery_count") var deliveryCount: Int = 0,
+    /**
+     * 补发保留期截止时刻 = createdAt + retention。
+     *
+     * **NULL 表示不参与补发**（存量数据、以及不在可补发白名单内的指令类型）。
+     * 刻意用 NULL 而不是回填一个统一时间：上线瞬间把历史积压的旧解锁/采集指令
+     * 全量重放是合规与业务双重事故，fail-closed 比"尽量送达"更重要。
+     */
+    @Column(name = "redelivery_deadline_at") var redeliveryDeadlineAt: Long? = null,
+    /** 最近一次补发刷新时刻，供运维排查「这条指令被重放过几次/何时」 */
+    @Column(name = "last_delivery_at") var lastDeliveryAt: Long? = null
 )
 
 @Entity

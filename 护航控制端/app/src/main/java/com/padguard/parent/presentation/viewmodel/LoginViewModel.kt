@@ -2,6 +2,7 @@ package com.padguard.parent.presentation.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.padguard.parent.data.remote.readableUserFacingError
 import com.padguard.parent.domain.repository.AuthRepository
 import com.padguard.parent.di.AccountPrefs
 import com.padguard.parent.di.ServerPrefs
@@ -113,13 +114,12 @@ class LoginViewModel @Inject constructor(
     /** 当前生效的服务器地址（登录页「高级设置」可修改，改完立即生效） */
     val serverUrl: StateFlow<String> = serverPrefs.baseUrl
 
-    /** 保存服务器地址。返回 false 表示格式不合法（必须以 http:// 或 https:// 开头）。 */
-    fun saveServerUrl(url: String): Boolean {
-        val u = url.trim()
-        if (!u.startsWith("http://") && !u.startsWith("https://")) return false
-        serverPrefs.setBaseUrl(u)
-        return true
-    }
+    /**
+     * 保存服务器地址。返回 false 表示被 [com.padguard.parent.data.remote.EndpointSafety] 拒绝
+     * （格式不合法，或公网地址用了明文 HTTP）。具体原因由表单里的校验文案展示，
+     * 这里只做最后一道拦截，避免未来新增的写入点绕过安全准入。
+     */
+    fun saveServerUrl(url: String): Boolean = serverPrefs.setBaseUrl(url)
 
     /** 恢复出厂默认服务器地址：用户填错导致彻底连不上时的兜底回退。 */
     fun resetServerUrl() {
@@ -214,13 +214,23 @@ class LoginViewModel @Inject constructor(
             result.onSuccess {
                 // 注册时不静默记住密码（无勾选语义）；记住密码仅限登录页用户主动勾选。
                 accountPrefs.save(phone)
+                // R-P3-5：成功后立刻把明文密码从内存状态里抹掉 ——
+                // 登录页只是被导航走，ViewModel 仍留在返回栈里，密码会一直挂在
+                // UiState 上（进程被 dump / 内存快照 / 崩溃上报都可能带出去）。
                 _uiState.value = _uiState.value.copy(
                     isLoading = true,
                     isLoggedIn = true,
+                    password = "",
+                    confirmPassword = "",
                     history = accountPrefs.history()
                 )
             }.onFailure { e ->
-                _uiState.value = _uiState.value.copy(isLoading = false, error = e.message ?: "注册失败")
+                // 统一中文错误出口：服务端的具体原因（用户不存在/密码错误/冻结/锁定）原样显示，
+                // OkHttp 的英文网络异常翻译成「连不上服务器/连接超时」，不再直接上屏 e.message。
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    error = readableUserFacingError(e, "注册失败，请稍后重试")
+                )
             }
         }
     }
@@ -242,7 +252,7 @@ class LoginViewModel @Inject constructor(
             }.onFailure { e ->
                 _uiState.value = _uiState.value.copy(
                     isSendingCode = false,
-                    error = e.message ?: "发送失败"
+                    error = readableUserFacingError(e, "验证码发送失败，请稍后重试")
                 )
             }
         }
@@ -256,13 +266,18 @@ class LoginViewModel @Inject constructor(
             val result = authRepository.loginWithPassword(state.phone, state.password)
             result.onSuccess {
                 accountPrefs.save(state.phone)
+                // R-P3-5：登录成功后立即清空明文密码（理由见 register()）
                 _uiState.value = _uiState.value.copy(
                     isLoading = true,
                     isLoggedIn = true,
+                    password = "",
                     history = accountPrefs.history()
                 )
             }.onFailure { e ->
-                _uiState.value = _uiState.value.copy(isLoading = false, error = e.message ?: "登录失败")
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    error = readableUserFacingError(e, "登录失败，请稍后重试")
+                )
             }
         }
     }
@@ -276,13 +291,18 @@ class LoginViewModel @Inject constructor(
             result.onSuccess {
                 // 短信登录没有密码可存，只记账号，方便下次直接选中
                 accountPrefs.save(state.phone)
+                // R-P3-5：验证码同样属于短时凭据，成功后立即从内存状态清掉
                 _uiState.value = _uiState.value.copy(
                     isLoading = true,
                     isLoggedIn = true,
+                    smsCode = "",
                     history = accountPrefs.history()
                 )
             }.onFailure { e ->
-                _uiState.value = _uiState.value.copy(isLoading = false, error = e.message ?: "登录失败")
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    error = readableUserFacingError(e, "登录失败，请稍后重试")
+                )
             }
         }
     }

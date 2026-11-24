@@ -30,6 +30,9 @@ class EyeCareEnforcerTest {
     private lateinit var timeProvider: TimeProvider
     private var elapsed = 0L          // 受控单调时钟（含休眠）
     private var wall = 0L             // 受控墙钟（服务端校准）
+
+    /** `uptimeMillis` 偏移：默认 0（两个钟同步）；模拟深睡时调负，uptime 便不再前进 */
+    private var awakeDrift = 0L
     private var originalLoggerEnabled = true
 
     @Before
@@ -39,6 +42,7 @@ class EyeCareEnforcerTest {
         timeProvider = mock(TimeProvider::class.java)
         // 测试间手动改写 elapsed / wall 即可驱动状态机；闭包读取当前值
         `when`(timeProvider.elapsedRealtime()).thenAnswer { elapsed }
+        `when`(timeProvider.uptimeMillis()).thenAnswer { elapsed + awakeDrift }
         `when`(timeProvider.now()).thenAnswer { wall }
     }
 
@@ -143,5 +147,41 @@ class EyeCareEnforcerTest {
         // 关闭护眼（该状态下本就无每日总时长管控，静默清零即可，不上报）
         enforcer.track(EyeCarePolicy(enabled = false), screenOn = true)
         assertNull("策略关闭后不应残留上报事件", enforcer.consumePendingRestReport())
+    }
+
+    /**
+     * 睡一夜之后不能一解锁就撞上强制休息。
+     *
+     * 这是"息屏累计用哪个钟"决定的：深睡期间 `uptimeMillis` 不走，
+     * 若拿它算休息，一夜只累计到 0 分 → 连续用眼量（35 分钟）原样保留，
+     * 第二天早上用不了几分钟就被锁屏。必须用含深睡的真实流逝判断"是否休息过"。
+     */
+    @Test
+    fun `a whole night of screen-off counts as a real rest despite frozen uptime`() {
+        val enforcer = EyeCareEnforcer(timeProvider)
+        elapsed = 0L; wall = 1_000_000L
+        enforcer.track(policy(continuousMinutes = 40), screenOn = true)   // 采样基线
+
+        // 白天连续用 35 分钟（距 40 分钟阈值只差 5 分钟）
+        var t = 0L
+        repeat(35) {
+            t += 60_000L; elapsed = t; wall += 60_000L
+            enforcer.track(policy(continuousMinutes = 40), screenOn = true)
+        }
+
+        // 睡一夜：elapsedRealtime 照走 8 小时，uptimeMillis 停住
+        val sleepMs = 8 * 60 * 60_000L
+        awakeDrift -= sleepMs
+        t += sleepMs; elapsed = t; wall += sleepMs
+        val nightSample = enforcer.track(policy(continuousMinutes = 40), screenOn = false)
+        assertTrue("夜里不该弹休息", nightSample !is EyeCareVerdict.Resting)
+
+        // 早上再用 9 分钟：连续用眼应从 0 重新累计，不该被昨夜那 35 分钟顶爆
+        var morning: EyeCareVerdict = EyeCareVerdict.Idle
+        repeat(9) {
+            t += 60_000L; elapsed = t; wall += 60_000L
+            morning = enforcer.track(policy(continuousMinutes = 40), screenOn = true)
+        }
+        assertTrue("睡一夜应视为有效休息，早上不该立刻锁屏，实际 $morning", morning !is EyeCareVerdict.Resting)
     }
 }

@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.os.Build
 import com.padguard.child.di.ApplicationScope
 import com.padguard.core.common.Logger
+import com.padguard.core.data.model.policy.ManagementMode
+import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.admin.OpResult
 import com.padguard.core.engine.guard.GuardMasterSwitch
@@ -17,6 +19,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -25,9 +29,11 @@ import javax.inject.Singleton
  *
  * ## 设计边界（必须独立、不得影响 P0/P1）
  * - 本类是 P2 的唯一载体：所有 DO 专属的"硬"管控都在这里，P0/P1（无障碍三件套）代码**零改动**。
- * - 闸门单一：[DeviceAdminBridge.isDeviceOwner] 为 false（绝大多数存量 C 端平板）时，本类**整体 no-op**，
- *   既不回收权限、也不进 Kiosk —— 行为与未引入 P2 完全一致。
- * - 因此"有条件的平板（能成为 DO 的）走 P2，其余走三件套"天然成立：同一份代码，按设备能力分流。
+ * - 闸门两道且都为真才生效：家长选择了硬管控（ManagementMode.HARD），且
+ *   [DeviceAdminBridge.isDeviceOwner] 为 true。任一不满足，本类**整体 no-op** 并精确归还
+ *   此前回收的权限——这就是"硬 / 软两档并行、互不影响"的落点：设备哪怕是 DO，
+ *   家长选软管控时也绝不做系统级权限回收与 Kiosk 真锁死。
+ * - 家长在「我的」页切换模式会实时触发重新评估，无需重启 App。
  *
  * ## 它补上三件套做不到的"真"两件事（计划 §7）
  * 1. **真回收应用权限**：进入受控态 → 对受控/被取消授权的应用强制
@@ -52,6 +58,7 @@ class DeviceOwnerEnforcer @Inject constructor(
     private val lockController: LockController,
     private val appGuardStore: AppGuardPolicyStore,
     private val guardMasterSwitch: GuardMasterSwitch,
+    private val authRepository: AuthRepository,
     @ApplicationScope private val scope: CoroutineScope
 ) {
 
@@ -62,7 +69,41 @@ class DeviceOwnerEnforcer @Inject constructor(
     /** 本轮受控态已强制拒绝的 (包名, 权限) 对，解锁时据此精确归还，避免误伤未回收的应用。 */
     private val revokedPairs = mutableSetOf<Pair<String, String>>()
 
+    /**
+     * 状态变更串行锁。
+     *
+     * `lockController.state` 与 `guardMasterSwitch.active` 两条 Flow 都在 `@ApplicationScope`
+     * （`CoroutineScope(SupervisorJob() + Dispatchers.Default)`，多线程）上并发触发，
+     * 都汇入 [onLockStateChanged]，而该方法会读写共享可变状态 [revokedPairs]
+     * （recover 时 add、release 时 toSet+clear+遍历 restore）。
+     * 两路协程若在不同线程同时进入，会出现：
+     *   - `ConcurrentModificationException`（被协程吞掉，导致本次回收/归还被截断）；
+     *   - 更隐蔽的：线程 A 释放了一半权限、线程 B 已 clear 并 restore 了那一半，
+     *     A 随后 add 的权限不再被追踪 → 解锁后相机/定位/麦克风等**永久残留 DENIED**。
+     * 用 Mutex 把整段决策 + 回收/归还收口到同一临界区，彻底消除竞态，串行重评估也保证最终一致。
+     */
+    private val transitionMutex = Mutex()
+
+    /**
+     * 家长是否选择了硬管控。未读到 / 未选择 / 软管控一律按 false 处理：
+     * 宁可少做系统级强管控，也绝不在家长没选硬管控时越权回收权限。
+     * 多协程并发读写（模式切换与锁定态两条流），故用 @Volatile 保证可见性。
+     */
+    @Volatile
+    private var hardControlEnabled: Boolean = false
+
     init {
+        // 家长切档时立即重新评估：切到软管控要归还已回收权限并撤掉 Kiosk。
+        authRepository.managementMode
+            .onEach { mode ->
+                val enabled = mode == ManagementMode.HARD
+                if (enabled != hardControlEnabled) {
+                    hardControlEnabled = enabled
+                    onLockStateChanged(lockController.state.value.locked)
+                }
+            }
+            .launchIn(scope)
+
         // 独立订阅锁定态：进入锁定（时间到/远程/宵禁…）即回收权限 + 置 Kiosk 标志；解除即归还。
         // 与 P0/P1 的 LockScreenPresenter 同订阅 lockController.state，但各管各的、互不耦合。
         // StateFlow 对新订阅者回放当前值 —— 即使本类晚于锁定被实例化，也能自愈到正确状态。
@@ -86,30 +127,38 @@ class DeviceOwnerEnforcer @Inject constructor(
      * - active=true：按当前锁定态重新进入/退出受控态。
      * StateFlow 回放首值会触发一次对账，可自愈"权限残留但开关已暂停"的异常态。
      */
-    private fun onManagementActiveChanged(active: Boolean) {
+    private suspend fun onManagementActiveChanged(active: Boolean) {
         if (active) {
             Logger.i(TAG) { "management re-activated, re-evaluating DO controlled-state" }
         } else {
             Logger.i(TAG) { "management paused, releasing DO controlled-state (permissions + Kiosk)" }
         }
+        // 复用同一决策入口；锁在 onLockStateChanged 内部获取，这里不二次加锁（Mutex 不可重入）。
         onLockStateChanged(lockController.state.value.locked)
     }
 
-    private fun onLockStateChanged(locked: Boolean) {
-        // 整机管控暂停：无论锁定态如何，DO 都不回收权限、不进 Kiosk，设备完全可用。
-        if (!guardMasterSwitch.active.value) {
-            if (revokedPairs.isNotEmpty()) releasePermissions()
-            _kioskActive.value = false
-            return
+    private suspend fun onLockStateChanged(locked: Boolean) {
+        // 串行化：两路 Flow 在多线程 @ApplicationScope 上并发触发，共享可变状态 revokedPairs
+        // 若无保护会出现并发修改（解锁后权限残留 DENIED）。整段收口到同一临界区。
+        transitionMutex.withLock {
+            // 整机管控暂停：无论锁定态如何，DO 都不回收权限、不进 Kiosk，设备完全可用。
+            if (!guardMasterSwitch.active.value) {
+                if (revokedPairs.isNotEmpty()) releasePermissions()
+                _kioskActive.value = false
+                return@withLock
+            }
+            // 两道闸门：家长选了硬管控 + 设备确实是 DO，才启用系统级增强。
+            // 家长选软管控时即便设备是 DO 也整体 no-op，并归还此前回收的权限。
+            val isDo = hardControlEnabled && admin.isDeviceOwner()
+            _kioskActive.value = isDo && locked
+            if (!isDo) {
+                // 未启用硬管控 / 非 DO 设备：P2 完全不参与，但需确保已无残留
+                // （曾切到软管控，或 DO 被摘除）。
+                if (revokedPairs.isNotEmpty()) releasePermissions()
+                return@withLock
+            }
+            if (locked) revokeControlledPermissions() else releasePermissions()
         }
-        val isDo = admin.isDeviceOwner()
-        _kioskActive.value = isDo && locked
-        if (!isDo) {
-            // 非 DO 设备：P2 完全不参与，但需确保已无残留（例如曾 DO 后被摘除）。
-            if (revokedPairs.isNotEmpty()) releasePermissions()
-            return
-        }
-        if (locked) revokeControlledPermissions() else releasePermissions()
     }
 
     /**

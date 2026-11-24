@@ -18,6 +18,7 @@ import androidx.navigation.NavHostController
 import com.padguard.parent.domain.model.AppUsage
 import com.padguard.parent.presentation.ui.components.AppIcon
 import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.components.StaleDataHint
 import com.padguard.parent.domain.model.DailyUsage
 import com.padguard.parent.presentation.util.TimeFormat
 import com.padguard.parent.presentation.viewmodel.StatisticsViewModel
@@ -85,6 +86,17 @@ fun StatisticsScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                // 有数据但本次刷新失败：保留可视数据，同时把"这份数字是哪一刻的"钉在首屏。
+                // 只在有旧数据时出现（hasData）；整页失败走上面的错误页，不谎称"以下是旧数据"。
+                if (uiState.error != null && uiState.hasData) {
+                    item {
+                        StaleDataHint(
+                            message = uiState.error,
+                            lastSuccessAt = uiState.lastSuccessAt,
+                            onRetry = { viewModel.load(deviceId) }
+                        )
+                    }
+                }
                 item {
                     StatCardBig(
                         title = "今日使用时长",

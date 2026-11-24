@@ -264,12 +264,14 @@ class WebEnforcer @Inject constructor(
         safeSearch = policy.safeSearch
     )
 
-    /** 去掉协议、路径与前导 `*.`，统一成可比较的域名后缀 */
+    /** 去掉协议、路径与前导 `*.` / `.` / `www.`，统一成可比较的域名后缀 */
     private fun normalizePattern(raw: String): String = raw.trim().lowercase()
         .removePrefix("http://")
         .removePrefix("https://")
         .substringBefore('/')
         .removePrefix("*.")
+        .removePrefix(".")
+        .removePrefix("www.")
 
     private fun extractHost(url: String): String? {
         val trimmed = url.trim()

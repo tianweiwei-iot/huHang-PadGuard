@@ -1,5 +1,6 @@
 package com.padguard.core.engine.lock
 
+import android.annotation.SuppressLint
 import android.content.Context
 import com.padguard.core.common.Logger
 import com.padguard.core.common.TimeProvider
@@ -60,7 +61,7 @@ import javax.inject.Singleton
 class LockController @Inject constructor(
     private val timeProvider: TimeProvider,
     @ApplicationContext context: Context
-) {
+) : LockControllerPort {
 
     private val remoteLockPrefs =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -96,16 +97,35 @@ class LockController @Inject constructor(
         Logger.i(TAG) { "remote lock restored after process restart (detail='$detail')" }
     }
 
+    /**
+     * 持久化 REMOTE 远端锁。
+     *
+     * 必须用 [SharedPreferences.Editor.commit] 而不是 [apply]：REMOTE 是一次性指令
+     * （服务端回执后即收敛为终态、不再补发），落盘失败等于"锁凭空消失"。
+     * [apply] 是异步写盘，若 [requestLock] 之后进程在后台写线程 flush 前被系统强杀/崩溃，
+     * 重启后 [restoreRemoteLockLocked] 读不到 → REMOTE 丢失 → 孩子重启即绕过远端锁（fail-open 窄窗口）。
+     * [commit] 同步落盘、保证返回前已写入；REMOTE 锁是低频一次性操作，同步写开销可忽略，
+     * 且调用方（[CommandExecutor] 远程指令通道）本就不在主线程，不会造成 UI 卡顿。
+     */
+    @SuppressLint("ApplySharedPref") // 故意 commit：REMOTE 锁是低频一次性操作，须保证返回前已落盘，防重启绕过
     private fun persistRemoteLock(detail: String) {
         remoteLockPrefs.edit()
             .putBoolean(KEY_REMOTE_LOCKED, true)
             .putString(KEY_REMOTE_DETAIL, detail)
-            .apply()
+            .commit()
     }
 
+    /**
+     * 清除持久化的 REMOTE 远端锁。
+     *
+     * 同样用 [commit] 而非 [apply]：保证"家长已解锁"在进程死亡重启后仍被尊重，
+     * 否则可能残留 REMOTE 导致"家长已解锁、孩子端仍锁"的误锁（虽 fail-closed，但解锁指令可重发，
+     * 这里同步落盘让解锁结果确定可见）。
+     */
+    @SuppressLint("ApplySharedPref") // 故意 commit：保证"家长已解锁"在进程死亡重启后仍被尊重，不残留误锁
     private fun clearPersistedRemoteLock() {
         if (!remoteLockPrefs.getBoolean(KEY_REMOTE_LOCKED, false)) return
-        remoteLockPrefs.edit().remove(KEY_REMOTE_LOCKED).remove(KEY_REMOTE_DETAIL).apply()
+        remoteLockPrefs.edit().remove(KEY_REMOTE_LOCKED).remove(KEY_REMOTE_DETAIL).commit()
         Logger.i(TAG) { "persisted remote lock cleared" }
     }
 
@@ -151,13 +171,17 @@ class LockController @Inject constructor(
      * @param untilMillis 预计解锁的墙钟时间戳，用于 UI 倒计时；0 表示无明确期限
      * @param detail 展示给孩子的补充说明（如"今日剩余时长已用完"）
      */
-    fun requestLock(reason: LockReason, untilMillis: Long = 0L, detail: String = "") {
+    override fun requestLock(reason: LockReason, untilMillis: Long, detail: String) {
         var applied = false
         synchronized(stateLock) {
             expireTempUnlockIfNeededLocked()
-            // 临时解锁期内屏蔽除远程强制锁屏外的所有自动锁定，
+            // 临时解锁期内屏蔽除"远程强制锁屏"和"暂停计时"之外的所有自动锁定，
             // 否则家长刚放行 30 分钟就被时段规则立刻锁回去，等于放行无效。
-            if (reason != LockReason.REMOTE && isTempUnlockActiveLocked()) {
+            // TIMER_PAUSED 是本次功能的硬承诺：暂停期间必须不可操作，家长误批一次
+            // 解锁申请不能让孩子在停止计时的状态下继续玩（与 REMOTE 同级豁免）。
+            if (reason != LockReason.REMOTE && reason != LockReason.TIMER_PAUSED &&
+                isTempUnlockActiveLocked()
+            ) {
                 Logger.d(TAG) { "lock($reason) suppressed by temp unlock" }
             } else {
                 val current = _state.value
@@ -219,7 +243,7 @@ class LockController @Inject constructor(
     }
 
     /** 远程解锁：清空所有锁定原因。自动原因若仍成立，下一轮自检会重新锁上。 */
-    fun releaseAll() {
+    override fun releaseAll() {
         val had = synchronized(stateLock) {
             val current = _state.value
             if (current.reasons.isEmpty()) {
@@ -250,7 +274,7 @@ class LockController @Inject constructor(
      * 家长明明点了同意、孩子那边纹丝不动，正是"同意放行后毫无反应"的直接成因。
      * 因此放行范围必须跟着包名走，由 [isTempUnlockActive] 同时供限额判定与挂起恢复使用。
      */
-    fun tempUnlock(durationMinutes: Int, packageName: String = "") {
+    override fun tempUnlock(durationMinutes: Int, packageName: String) {
         val minutes = durationMinutes.coerceIn(1, MAX_TEMP_UNLOCK_MINUTES)
         val durationMs = minutes * 60_000L
         synchronized(stateLock) {
@@ -267,7 +291,7 @@ class LockController @Inject constructor(
     /** 临时解锁到期墙钟点（供日志/展示读取，需在锁内取以免读到撕裂值） */
     private fun tempUnlockUntilWall(): Long = synchronized(stateLock) { tempUnlockUntilWall }
 
-    fun cancelTempUnlock() {
+    override fun cancelTempUnlock() {
         val cancelled = synchronized(stateLock) {
             if (tempUnlockUntilElapsed == 0L) {
                 false
@@ -344,7 +368,7 @@ data class LockState(
 ) {
     val locked: Boolean get() = reasons.isNotEmpty()
 
-    /** 优先级：远程 > 时段 > 宵禁 > 每日总时长 > 单应用限额 > 护眼 */
+    /** 优先级：远程 > 时段 > 宵禁 > 定时锁机 > 暂停计时 > 每日总时长 > 等待开始 > 单应用限额 > 护眼 */
     val primaryReason: LockReason?
         get() = LockReason.entries.firstOrNull { it in reasons }
 
@@ -382,8 +406,35 @@ enum class LockReason {
      */
     SMART_SHUTDOWN,
 
+    /**
+     * 暂停计时（熄屏自动暂停 / 孩子长按悬浮球确认暂停）。
+     *
+     * 与 [AWAITING_START] 同型：未恢复计时前设备不可操作，恢复后由
+     * [com.padguard.core.engine.PolicyEngine.tick] 每轮差集自动释放。
+     *
+     * 与 [AWAITING_START] 的不同点：**临时解锁不能压过它**。
+     * 暂停期间"平板不可操作"是本次功能的硬承诺；家长误批一次解锁申请
+     * 或远程下发 UNLOCK，都不能把暂停态变成可用态（否则孩子只需申请一次解锁
+     * 即可在停止计时的状态下继续玩）。恢复的唯一出口是会话 `resume()`。
+     */
+    TIMER_PAUSED,
+
     /** 每日总时长耗尽 */
     DAILY_LIMIT,
+
+    /**
+     * 新的一天尚未确认「开始计时」。
+     *
+     * 与 [DAILY_LIMIT] 的区别：这不是"用完了"，而是"还没开始"。日切后本地重置会话，
+     * 在孩子点「开始计时」确认（或离线本地起表）之前，设备保持等待页 ——
+     * 未确认期间不计时、不消耗额度，但也不能自由使用（否则"一直不确认"就是绕过）。
+     *
+     * 解除条件只有一个：会话转 active（确认成功）。因此它由
+     * [com.padguard.core.engine.PolicyEngine.tick] 按会话状态每轮重派生，
+     * 家长 UNLOCK / TEMP_UNLOCK 暂时压过后，到期/下一轮会重新挂上 ——
+     * 这是刻意行为：等待开始不是故障态，不能被"解锁指令"永久消掉。
+     */
+    AWAITING_START,
 
     /** 单应用限额耗尽 */
     APP_LIMIT,

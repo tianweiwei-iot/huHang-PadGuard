@@ -1,9 +1,11 @@
 package com.padguard.server.controller
 
 import com.padguard.server.common.ApiResponse
+import com.padguard.server.common.Audience
+import com.padguard.server.common.BizException
+import com.padguard.server.common.ParentErr
 import com.padguard.server.domain.Device
 import com.padguard.server.dto.*
-import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.service.AuthService
 import com.padguard.server.service.CommandKey
 import com.padguard.server.service.CommandService
@@ -11,6 +13,7 @@ import com.padguard.server.service.CommandType
 import com.padguard.server.service.DeviceService
 import com.padguard.server.service.EnrollmentService
 import com.padguard.server.service.GroupService
+import com.padguard.server.service.IngestService
 import com.padguard.server.service.PolicyExtensionService
 import com.padguard.server.service.PolicyService
 import com.padguard.server.security.GuardPasswords
@@ -32,13 +35,42 @@ class AuthController(private val authService: AuthService, private val rateLimit
         )
 
     @PostMapping("/register")
-    fun register(@RequestBody req: RegisterRequest) = ApiResponse.ok(authService.register(req))
+    fun register(@RequestBody req: RegisterRequest, httpRequest: jakarta.servlet.http.HttpServletRequest) =
+        ApiResponse.ok(
+            run {
+                // 频控必须在建号之前：注册会写 users 表并顺带建一份试用订阅台账，
+                // 是唯一"匿名即可写库"的入口。放在业务前，被限流时库里不会留下半成品账号。
+                // 只按 IP 计数（注册的手机号每次都是新的，按账号计数没有意义）。
+                rateLimit.require("register", httpRequest)
+                authService.register(req)
+            }
+        )
 
     @PostMapping("/login/sms")
-    fun loginSms(@RequestBody req: LoginSmsRequest) = ApiResponse.ok(authService.loginWithSms(req))
+    fun loginSms(
+        @RequestBody req: LoginSmsRequest,
+        httpRequest: jakarta.servlet.http.HttpServletRequest
+    ) = ApiResponse.ok(
+        run {
+            // F-02：匿名可达端点必须与其他爆破面一样先过频控再进业务。
+            // 短信登录当前在非开发 profile 被硬拒，但业务闸门在频控之后，
+            // 不能因此让它成为零成本探测 / 轰炸入口。
+            rateLimit.require("login_sms", httpRequest, req.phone)
+            authService.loginWithSms(req)
+        }
+    )
 
     @PostMapping("/sms/send")
-    fun sendSms(@RequestBody req: SendSmsRequest) = ApiResponse.ok<Any?>(null)
+    fun sendSms(
+        @RequestBody req: SendSmsRequest,
+        httpRequest: jakarta.servlet.http.HttpServletRequest
+    ) = ApiResponse.ok<Any?>(
+        run {
+            // 空实现阶段也要限流：接入服务商后这里是唯一「匿名即可触发外部计费调用」的入口。
+            rateLimit.require("sms_send", httpRequest, req.phone)
+            null
+        }
+    )
 
     @PostMapping("/refresh")
     fun refresh(@RequestHeader("Refresh-Token") refreshToken: String) =
@@ -54,6 +86,57 @@ class AuthController(private val authService: AuthService, private val rateLimit
      */
     @PostMapping("/logout")
     fun logout(@RequestAttribute("userId") userId: String) = ApiResponse.ok(authService.logout(userId))
+
+    /**
+     * 修改登录密码（需已登录；未列入拦截器放行清单，失败即 401）。
+     *
+     * 返回一对**新令牌**而不是空回执：改密码会让本账号全部旧令牌失效（含当前这台），
+     * 客户端必须立刻用新令牌替换本地存的那对，否则下一个请求就被登出。
+     *
+     * 限流用独立场景名：与 "login" 分桶，避免家长在登录页试错把改密码的额度吃掉
+     * （两者是不同动作，共用一个桶会让"刚被锁过的人改不了密码"）。
+     */
+    @PostMapping("/password")
+    fun changePassword(
+        @RequestAttribute("userId") userId: String,
+        @RequestBody req: ChangePasswordRequest,
+        httpRequest: jakarta.servlet.http.HttpServletRequest
+    ) = ApiResponse.ok(
+        run {
+            rateLimit.require("password_change", httpRequest, userId)
+            authService.changePassword(userId, req)
+        }
+    )
+
+    /**
+     * 查询当前账号的活跃登录会话（「登录设备」管理页）。
+     *
+     * 只列未吊销会话，且不外泄 refresh_jti / userId / revoked 等敏感字段
+     * （[AuthService.listSessions] 已映射到脱敏 DTO [UserSessionView]）。
+     * 已登录态只读操作，无需额外频控。
+     */
+    @GetMapping("/sessions")
+    fun listSessions(@RequestAttribute("userId") userId: String) =
+        ApiResponse.ok(authService.listSessions(userId))
+
+    /**
+     * 单设备退出登录：只吊销指定会话的 refresh token，不影响其他设备。
+     *
+     * 与 [logout] 的「整账号踢下线」不同，这里只置位那一台的 revoked，
+     * 其 access token 仍有效至 ≤120 分钟自然过期（标准单设备退出语义）。
+     * 已登录态写操作，套用轻量频控防止误刷 / 滥用。
+     */
+    @DeleteMapping("/sessions/{sessionId}")
+    fun revokeSession(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable sessionId: String,
+        httpRequest: jakarta.servlet.http.HttpServletRequest
+    ) = ApiResponse.ok(
+        run {
+            rateLimit.require("revoke_session", httpRequest, userId)
+            authService.revokeSession(userId, sessionId)
+        }
+    )
 }
 
 @RestController
@@ -61,7 +144,8 @@ class AuthController(private val authService: AuthService, private val rateLimit
 class ParentDeviceController(
     private val deviceService: DeviceService,
     private val groupService: GroupService,
-    private val enrollmentService: EnrollmentService
+    private val enrollmentService: EnrollmentService,
+    private val ingestService: IngestService
 ) {
 
     /**
@@ -140,6 +224,26 @@ class ParentDeviceController(
     fun detail(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
         ApiResponse.ok(deviceService.getDevice(userId, deviceId))
 
+    /**
+     * 拉取指定设备的某一类上报日志（按时间倒序，最多 [limit] 条）。
+     *
+     * 用途：家长端「通知记录」展示孩子端代收的系统通知（type=NOTIFICATION_COLLECTED）。
+     * 租户隔离由 [DeviceService.getDevice] 兜底（非本人设备直接抛 DEVICE_NOT_OWNED）。
+     * 仅返回元数据（id/type/timestamp/payloadJson），payloadJson 是孩子端已最小化的「包名 + 标题」，
+     * 绝不返回通知正文，符合隐私最小化原则。
+     */
+    @GetMapping("/{deviceId}/logs")
+    fun listDeviceLogs(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String,
+        @RequestParam type: String,
+        @RequestParam(defaultValue = "200") limit: Int
+    ): ApiResponse<List<DeviceLogView>> {
+        deviceService.getDevice(userId, deviceId)
+        val logs = ingestService.listDeviceLogs(deviceId, type, limit)
+        return ApiResponse.ok(logs.map { DeviceLogView(it.logId, it.type, it.timestamp, it.payloadJson) })
+    }
+
     @PostMapping("/{deviceId}/unbind")
     fun unbind(@RequestAttribute("userId") userId: String, @PathVariable deviceId: String) =
         run { deviceService.unbind(userId, deviceId); ApiResponse.ok<Any?>(null) }
@@ -177,7 +281,6 @@ class PolicyController(
     private val commandService: CommandService,
     private val policyService: PolicyService,
     private val deviceService: DeviceService,
-    private val deviceRepository: DeviceRepository,
     private val policyExtensionService: PolicyExtensionService
 ) {
     @PostMapping("/policies/{deviceId}/lock")
@@ -283,18 +386,22 @@ class PolicyController(
         @RequestBody req: GuardPasswordRequest
     ): ApiResponse<*> {
         deviceService.getDevice(userId, deviceId) // 校验设备归属
-        val dev = deviceRepository.findById(deviceId).orElse(null)
-            ?: return ApiResponse.fail<Any?>(400, "设备不存在")
-        when {
-            req.clear -> dev.guardPasswordHash = "" // 显式清除：空串(非 null) 语义
+        // 计算目标哈希：clear→空串(非 null) 语义；password→SHA-256 哈希；两者皆空→null 表示无操作。
+        // 落库改字段收口到 DeviceService.setGuardPasswordHash（事务内托管实体，避免脱管实体整行 merge 覆盖安全列）。
+        val hash = when {
+            req.clear -> ""
             !req.password.isNullOrBlank() -> {
                 if (req.password.length < GuardPasswords.MIN_LENGTH)
-                    return ApiResponse.fail<Any?>(400, "密码长度至少 ${GuardPasswords.MIN_LENGTH} 位")
-                dev.guardPasswordHash = GuardPasswords.hash(req.password)
+                    throw BizException(
+                        ParentErr.PARAM_ERROR,
+                        "密码长度至少 ${GuardPasswords.MIN_LENGTH} 位",
+                        Audience.PARENT
+                    )
+                GuardPasswords.hash(req.password)
             }
-            else -> { /* 既不清也不设：保持原值，无操作 */ }
+            else -> null
         }
-        deviceRepository.save(dev)
+        if (hash != null) deviceService.setGuardPasswordHash(deviceId, hash)
         // 重建策略包并推送：设备下次拉取（或 MQTT 通知后立即拉取）即生效。
         runCatching { policyExtensionService.rebuildPolicy(deviceId) }
             .onFailure { log.warn("rebuild policy after guard-password failed: ${it.message}") }
@@ -344,9 +451,9 @@ class PolicyController(
      * 指令已经下发、孩子端确实会锁上，因状态落库失败而报错只会误导家长以为没生效。
      */
     private fun setRemoteLocked(deviceId: String, locked: Boolean) {
-        val dev = deviceRepository.findById(deviceId).orElse(null) ?: return
-        dev.remoteLocked = locked
-        runCatching { deviceRepository.save(dev) }
+        // 落库收口到 DeviceService.setRemoteLocked（事务内托管实体，避免脱管实体整行 merge
+        // 覆盖并发写入的其它列）。写失败仍不阻断主流程：指令已下发、孩子端会锁上。
+        runCatching { deviceService.setRemoteLocked(deviceId, locked) }
             .onFailure { log.warn("persist remoteLocked=$locked failed: ${it.message}") }
     }
 
@@ -426,3 +533,11 @@ class PolicyController(
     fun command(@RequestAttribute("userId") userId: String, @PathVariable msgId: String) =
         ApiResponse.ok(commandService.getCommand(userId, msgId))
 }
+
+/** 设备上报日志的精简视图：仅暴露元数据，payloadJson 是已最小化的「包名 + 标题」，不含通知正文 */
+data class DeviceLogView(
+    val id: String?,
+    val type: String?,
+    val timestamp: Long?,
+    val payloadJson: String?
+)

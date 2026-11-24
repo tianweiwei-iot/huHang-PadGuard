@@ -41,6 +41,7 @@ import java.util.concurrent.atomic.AtomicInteger
 @AutoConfigureMockMvc
 @ActiveProfiles("local")
 @TestPropertySource(properties = [
+    "padguard.storage.dir=build/test-uploads",
     "spring.datasource.url=jdbc:h2:mem:loginlock;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE",
     "spring.jpa.hibernate.ddl-auto=create-drop",
     "padguard.jwt.secret=login-lock-test-secret-key-32-bytes-min-ok",
@@ -50,6 +51,10 @@ import java.util.concurrent.atomic.AtomicInteger
     "padguard.base-url=http://localhost:8080",
     // 把限流抬到不可能触发的水平，避免"被限流"冒充"被锁定"
     "padguard.ratelimit.login=1000",
+    // 本类每个用例都要先注册家长账号，而 MockMvc 全部请求共用同一个对端 IP，
+    // 注册限流（默认 3 次/窗口）会在第 4 个用例起直接 429 —— 那是限流的正常行为，
+    // 不是本类要验的东西。注册限流本身由 RateLimit 的单测覆盖。
+    "padguard.ratelimit.register=1000",
     "padguard.auth.max-fail-attempts=5",
     "padguard.auth.lock-minutes=15"
 ])

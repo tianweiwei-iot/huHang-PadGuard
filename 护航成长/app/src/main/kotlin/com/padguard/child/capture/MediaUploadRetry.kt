@@ -2,6 +2,7 @@ package com.padguard.child.capture
 
 import android.content.Context
 import com.padguard.core.common.Logger
+import com.padguard.core.transport.JsonLinesFile
 import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.http.ApiResult
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -24,6 +25,15 @@ import javax.inject.Singleton
  * 之后在采集服务启动 / 每次录制收尾 / 拍照完成时尝试重传（[drain]），成功才删。
  * 与指令回执重发（RealRemoteDataSource.ackRetryQueue）同一思路：
  * **失败要留下可恢复的痕迹，而不是假装没发生过**。
+ *
+ * ## 落盘底座（新增缺陷 L-02）
+ * 这是全工程第四处离线队列，此前却自己写了一套「readLines + writeText/appendText」：
+ * - 读异常被 `.getOrElse { emptyList() }` 折叠成"队列已空"，[drain] 结尾的重读会据此
+ *   `writeIndex(emptyList())` → 删掉索引文件，**整队未上传的采集媒体从此永不补传**；
+ * - `writeText` 非原子整文件覆写，中途被系统回收会留下半行脏数据；
+ * - 队首坏行会让 `mapNotNull` 后的列表缺项但不被剔除，重写时仍能卡住队列。
+ * 现统一走 [JsonLinesFile]：读失败返回 null（≠ 空队列）、tmp 写完整后直接 rename 覆盖、
+ * 失败保留 tmp 供下次 read 恢复；坏行在解码阶段剔除，下次写盘即自愈。
  *
  * ## 边界
  * - 队列有上限（[MAX_FILES] 条）与存活期（[MAX_AGE_MS]），超限丢最旧 ——
@@ -60,26 +70,26 @@ class MediaUploadRetry @Inject constructor(
     )
 
     private val dir: File get() = File(context.cacheDir, DIR_NAME)
-    private val indexFile: File get() = File(dir, INDEX_NAME)
+
+    /** 与 AckOutbox / EyeCareRestOutbox / LocationOutbox 共用的原子落盘底座。 */
+    private val index = JsonLinesFile(File(context.cacheDir, "$DIR_NAME/$INDEX_NAME"))
 
     /**
      * 索引文件的读写互斥锁。
      *
      * ## 为什么必须有（历史缺陷）
-     * 索引是一个纯文本文件，读写方式都是"整文件重写"（[writeIndex]）或"追加一行"（[enqueue]）。
-     * 同一时刻可能有三条采集链路在动它：截屏服务在 [enqueue]、录音收尾在 [enqueue]、
-     * [drain] 正在重传。没有锁时有两类真实丢件：
-     * 1. **[drain] 抹掉新条目**：drain 开头读出快照，结束时用 `快照 - 成功项` 整文件写回；
-     *    drain 期间新入队的条目不在快照里，于是被这次写回直接抹掉。文件还躺在 cacheDir 里，
-     *    索引里已经没有它 —— 永远不会重传，也永远不会被 24h 清理，纯磁盘泄漏加数据丢失。
-     * 2. **[trim] 与 [enqueue] 交错**：trim 先读后写，中间夹进一条 enqueue 的追加，
-     *    写回时按旧快照覆盖，新追加那行消失。
-     * 两条都以"静默丢件"告终，正是这个类本来要解决的问题。
+     * 索引是纯文本文件，读写都是"整份快照重写"。同一时刻可能有三条采集链路在动它：
+     * 截屏服务在 [enqueue]、录音收尾在 [enqueue]、[drain] 正在重传。
+     * 没有锁时 [drain] 开头的快照会被结尾的写回抹掉 drain 期间新入队的条目；
+     * [trim] 与 [enqueue] 交错也会丢新行。两条都以"静默丢件"告终。
      */
     private val indexLock = Any()
 
     /**
      * 上传失败时调用：把已采集好的文件移交重试队列（源文件被移动，不复制留存两份）。
+     *
+     * 索引读不出来时**跳过本次写盘并保留源文件**：绝不能把读失败当成空队列后写一份
+     * 只含新条目的文件，那样盘上原有的整队数据会一次清空。
      *
      * @param source    已采集的媒体文件
      * @param kind      上传类型（截图 / 媒体任务）
@@ -92,11 +102,32 @@ class MediaUploadRetry @Inject constructor(
             }
             dir.mkdirs()
             val dest = File(dir, "${System.currentTimeMillis()}_${kind.id}${extOf(source.name)}")
-            source.copyTo(dest, overwrite = true)
-            source.delete()
+            var committed = false
             synchronized(indexLock) {
-                indexFile.appendText(encode(Entry(kind, dest.name, System.currentTimeMillis())) + "\n")
-                trim()
+                val current = readIndex()
+                if (current != null) {
+                    // copyTo 中途失败（磁盘满最易触发，录屏文件数十 MB）：半截 dest **不在索引**，
+                    // drain/trim/MAX_AGE 都只处理索引内文件 → 永久泄漏。必须当场删除再抛，
+                    // 让外层 runCatching 记日志且源文件保持原样（重试语义不破坏）。
+                    try {
+                        source.copyTo(dest, overwrite = true)
+                    } catch (e: Exception) {
+                        runCatching { dest.delete() }
+                        throw e
+                    }
+                    val entry = Entry(kind, dest.name, System.currentTimeMillis())
+                    committed = writeIndex(current + entry)
+                    if (committed) {
+                        source.delete()
+                        trim()
+                    } else {
+                        runCatching { dest.delete() }
+                    }
+                }
+            }
+            if (!committed) {
+                Logger.w(TAG) { "retry enqueue kept source untouched: index unreadable or write rejected" }
+                return
             }
             Logger.w(TAG) { "media upload failed, queued for retry: ${dest.name} (queue=${count()})" }
         }.onFailure { Logger.w(TAG) { "retry enqueue failed: ${it.message}" } }
@@ -108,9 +139,10 @@ class MediaUploadRetry @Inject constructor(
      *
      * 写回索引前会**重新读一次**并剔除本次已处理项，而不是直接用开头那个快照 ——
      * 否则 drain 期间新入队的条目会被这次写回抹掉（见 [indexLock] 的说明）。
+     * 重读失败时**整段跳过写回**，宁可下轮重复上传，也不能清空盘上队列。
      */
     suspend fun drain() {
-        val entries = readIndex()
+        val entries = readIndex() ?: return
         if (entries.isEmpty()) return
         val now = System.currentTimeMillis()
         // 本次"可以从索引里移除"的文件名：上传成功、已过期、或文件已被系统清理
@@ -129,7 +161,8 @@ class MediaUploadRetry @Inject constructor(
             }
             val ok = runCatching {
                 when (val k = e.kind) {
-                    is Kind.Screenshot -> remote.uploadScreenshot(k.id, k.capturedAt, k.triggerType, f.readBytes())
+                    // File 版重载：流式读盘上传，不把整张图 readBytes() 进堆（B22 上传全程流式）。
+                    is Kind.Screenshot -> remote.uploadScreenshot(k.id, k.capturedAt, k.triggerType, f)
                     is Kind.Media -> remote.uploadMedia(k.id, k.durationSec, k.mime, f)
                 }
             }.let { outcome ->
@@ -145,9 +178,17 @@ class MediaUploadRetry @Inject constructor(
         }
         val remainingCount = synchronized(indexLock) {
             val latest = readIndex()
-            val kept = latest.filterNot { it.fileName in settled }
-            writeIndex(kept)
-            kept.size
+            if (latest == null) {
+                null
+            } else {
+                val kept = latest.filterNot { it.fileName in settled }
+                writeIndex(kept)
+                kept.size
+            }
+        }
+        if (remainingCount == null) {
+            Logger.w(TAG) { "retry drain: index unreadable, skipped rewrite to keep queued files" }
+            return
         }
         if (sent > 0 || remainingCount != entries.size) {
             Logger.i(TAG) { "retry drain done: sent=$sent remaining=$remainingCount" }
@@ -171,8 +212,8 @@ class MediaUploadRetry @Inject constructor(
         }.onFailure { Logger.w(TAG) { "retry queue clear failed: ${it.message}" } }
     }
 
-    /** 当前队列长度（供日志/调试）。 */
-    fun count(): Int = readIndex().size
+    /** 当前队列长度（供日志/调试）；读不出来返回 0，绝不因此触发任何写盘。 */
+    fun count(): Int = readIndex()?.size ?: 0
 
     // ==================== 索引序列化（管道分隔，免引入序列化插件） ====================
 
@@ -195,29 +236,23 @@ class MediaUploadRetry @Inject constructor(
         return Entry(kind, p[p.size - 2], p[p.size - 1].toLongOrNull() ?: 0L)
     }
 
-    private fun readIndex(): List<Entry> = synchronized(indexLock) {
-        runCatching {
-            if (!indexFile.exists()) emptyList()
-            else indexFile.readLines().mapNotNull { line -> line.takeIf { it.isNotBlank() }?.let(::decode) }
-        }.getOrElse { emptyList() }
+    /**
+     * 读失败返回 `null`（**不是空列表**），坏行在解码阶段剔除。
+     * 调用方凡是要写盘的路径都必须先判 null，否则一次磁盘抖动就能清空整队。
+     */
+    private fun readIndex(): List<Entry>? = synchronized(indexLock) {
+        index.readOrNull()?.mapNotNull { line -> decode(line) }
     }
 
-    private fun writeIndex(entries: List<Entry>) {
-        synchronized(indexLock) {
-            runCatching {
-                if (entries.isEmpty()) {
-                    indexFile.delete()
-                } else {
-                    indexFile.writeText(entries.joinToString("\n") { encode(it) } + "\n")
-                }
-            }.onFailure { Logger.w(TAG) { "retry index write failed: ${it.message}" } }
-        }
+    /** 整份快照原子提交，返回是否成功；调用方须持有 [indexLock]（此处可重入）。 */
+    private fun writeIndex(entries: List<Entry>): Boolean = synchronized(indexLock) {
+        index.write(entries.map(::encode))
     }
 
-    /** 超限时丢最旧（索引按入队时间追加，队首即最旧）。调用方须持有 [indexLock]，此处可重入。 */
+    /** 超限时丢最旧（索引按入队时间追加，队首即最旧）。读不出来时不动盘。 */
     private fun trim() {
         synchronized(indexLock) {
-            val entries = readIndex()
+            val entries = readIndex() ?: return
             if (entries.size <= MAX_FILES) return
             val drop = entries.take(entries.size - MAX_FILES)
             drop.forEach { e -> runCatching { File(dir, e.fileName).delete() } }

@@ -2,6 +2,7 @@ package com.padguard.server.service
 
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
+import com.padguard.server.common.ChildErr
 import com.padguard.server.common.ParentErr
 import com.padguard.server.domain.AppPolicy
 import com.padguard.server.domain.InstalledApp
@@ -47,7 +48,9 @@ class AppManageService(
     private val installedAppRepository: InstalledAppRepository,
     private val appPolicyRepository: AppPolicyRepository,
     private val commandService: CommandService,
-    private val policyExtensionService: PolicyExtensionService
+    private val policyExtensionService: PolicyExtensionService,
+    /** R-P2-12：台账上报是"安装真正完成"的权威证据，用它收敛分发状态 */
+    private val appDistributionConverger: AppDistributionConverger
 ) {
 
     private val log = LoggerFactory.getLogger(AppManageService::class.java)
@@ -61,7 +64,9 @@ class AppManageService(
      */
     fun syncInventory(deviceId: String, req: AppInventoryRequest): Map<String, Int> {
         if (!deviceRepository.existsById(deviceId)) {
-            throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.CHILD)
+            // 孩子端码表是 40xxx，抛 ParentErr(2001) 会被异常处理器落到 else -> HTTP 200，
+            // 端上按"成功"处理；这里改用孩子端参数错误码并落 400，明确失败但不触发清凭据终态。
+            throw BizException(ChildErr.PARAM_ERROR, "设备不存在", Audience.CHILD)
         }
         val now = System.currentTimeMillis()
         val existing = installedAppRepository.findByDeviceId(deviceId)
@@ -72,6 +77,8 @@ class AppManageService(
         val toUpdate = mutableListOf<InstalledApp>()
         val toRemove = mutableListOf<InstalledApp>()
         val newHiddenPackages = mutableListOf<String>()
+        /** 本轮被新图标取代、待删除的旧图标文件 id（落库成功后才真删，见下方） */
+        val staleIconIds = mutableListOf<String>()
         var inserted = 0
         var updated = 0
         var removed = 0
@@ -96,7 +103,7 @@ class AppManageService(
                         updateTime = item.updateTime,
                         firstSeenAt = now,
                         lastSeenAt = now,
-                        iconUrl = storeIcon(pkg, item.iconBase64),
+                        iconUrl = storeIcon(pkg, item.iconBase64, deviceId),
                         iconHash = iconHash(item.iconBase64),
                         // 开启管控后新上报的应用默认处于「未授权 / 隐藏」状态：
                         // 孩子端只有被管控端显式授权的应用才可见可用，其余一律隐藏。
@@ -108,7 +115,7 @@ class AppManageService(
                 inserted++
             } else {
                 // 图标只在内容真的变了时才重新落盘（见 [storeIcon] 说明）
-                val (hash, url) = iconUpdate(pkg, item.iconBase64, current.iconHash)
+                val (hash, url) = iconUpdate(pkg, item.iconBase64, current.iconHash, deviceId)
                 // 只在字段真的变了时才写库：孩子端上报频率不低，
                 // 无条件 save 会让每次上报都产生 N 条 UPDATE，白白拖慢数据库。
                 val iconChanged = url != null && hash != current.iconHash
@@ -157,6 +164,9 @@ class AppManageService(
                     current.updateTime = item.updateTime
                     current.lastSeenAt = now
                     if (iconChanged) {
+                        // 旧文件只登记、不在这里删：此刻 toUpdate 还没落库，删早了会留下
+                        // "库里指向已删除文件"的窗口（详见下方删除段落的说明）。
+                        fileStorageService.idFromUrl(current.iconUrl)?.let { staleIconIds.add(it) }
                         current.iconUrl = url
                         current.iconHash = hash
                     }
@@ -171,6 +181,21 @@ class AppManageService(
         // 配合 hibernate.jdbc.batch_size 进一步把 INSERT/UPDATE 攒批下发，显著降低 DB 往返。
         if (toInsert.isNotEmpty()) installedAppRepository.saveAll(toInsert)
         if (toUpdate.isNotEmpty()) installedAppRepository.saveAll(toUpdate)
+
+        // ==================== 图标换新后删掉被取代的旧文件 ====================
+        // 顺序必须是「先落库、后删文件」：反过来的话，一旦 saveAll 抛异常（约束冲突、连接骤断），
+        // 库里仍然指向旧图标而文件已经没了 —— 两端会显示一片空白图标，而且**永久不会自愈**：
+        // 下次上报图标内容没变（hash 相同），iconUpdate 直接返回 null，不会重新落盘。
+        // 按现在的顺序，最坏结果只是留下一个没人引用的孤儿文件，由磁盘孤儿清扫兜底。
+        //
+        // 不删会怎样：孩子端每 30 分钟全量上报，家长改一次主题、应用升级、ROM 换图标都会让
+        // hash 变化 → 每次都新增一条 uploaded_files 记录与一个 PNG，一台设备上百个应用长期累积。
+        // 这些文件**有** device_id 归属，命中不到"无记录即孤儿"的清扫，只能等 90 天媒体保留期
+        // 连记录一起清 —— 而那条清理会**把正在使用的图标也删掉**（见报告 P1 条目）。
+        staleIconIds.forEach { id ->
+            runCatching { fileStorageService.deleteById(id) }
+                .onFailure { log.warn("旧图标删除失败（已忽略，孤儿文件由清扫兜底）id={} err={}", id, it.message) }
+        }
 
         // 新应用默认隐藏：各下发一条 SET_APP_HIDDEN 指令（语义必要，无法合并）。
         newHiddenPackages.forEach { pkg ->
@@ -193,6 +218,11 @@ class AppManageService(
         }
         if (toRemove.isNotEmpty()) installedAppRepository.saveAll(toRemove)
 
+        // R-P2-12：本次上报里确实存在的包，就是"安装真的完成了"的权威证据 ——
+        // 收敛该设备未闭环的分发记录（覆盖"回执 SUCCESS 但安装失败"与"回执丢失"两种情况）。
+        runCatching { appDistributionConverger.onInventoryInstalled(deviceId, seen) }
+            .onFailure { log.warn("distribution converge on inventory failed: device={} err={}", deviceId, it.message) }
+
         return mapOf("inserted" to inserted, "updated" to updated, "removed" to removed)
     }
 
@@ -206,10 +236,10 @@ class AppManageService(
      * 无条件落盘意味着每天产生上百 × 48 次文件写入，磁盘很快堆满历史图标，
      * 而这些文件里绝大多数是同一张图的重复副本。
      */
-    private fun iconUpdate(pkg: String, base64: String?, currentHash: String?): Pair<String?, String?> {
+    private fun iconUpdate(pkg: String, base64: String?, currentHash: String?, deviceId: String): Pair<String?, String?> {
         val hash = iconHash(base64) ?: return null to null
         if (hash == currentHash) return hash to null
-        return hash to storeIcon(pkg, base64)
+        return hash to storeIcon(pkg, base64, deviceId)
     }
 
     private fun iconHash(base64: String?): String? {
@@ -219,10 +249,17 @@ class AppManageService(
             .joinToString("") { "%02x".format(it) }
     }
 
-    /** 落盘图标并返回可访问地址；解码失败返回 null（个别 ROM 的图标无法解码，不能因此让整条台账失败） */
-    private fun storeIcon(pkg: String, base64: String?): String? {
+    /**
+     * 落盘图标并返回可访问地址；解码失败返回 null（个别 ROM 的图标无法解码，不能因此让整条台账失败）。
+     *
+     * 必须带 deviceId 归属：RetentionCleanup / DeviceDataPurgeService 只清理
+     * `uploaded_files.device_id` 非空的文件。此前只传 3 个参数（deviceId 默认 null），
+     * 图标既不随保留期过期、也不随设备解绑清除，而孩子端每 30 分钟全量上报、应用换图标
+     * 又会生成新文件，uploads 会一路涨到写满后全站拒写。
+     */
+    private fun storeIcon(pkg: String, base64: String?, deviceId: String): String? {
         val bytes = decodeIcon(base64) ?: return null
-        return runCatching { fileStorageService.store("image/png", bytes, "$pkg.png") }
+        return runCatching { fileStorageService.store("image/png", bytes, "$pkg.png", deviceId = deviceId) }
             .onFailure { log.warn("store icon failed for {}: {}", pkg, it.message) }
             .getOrNull()
     }
@@ -349,13 +386,15 @@ class AppManageService(
             req.packages
         }.filter { it.isNotBlank() && it != SELF_PACKAGE }
 
+        // 一次性预取该设备的台账：批量关闭/放开全部应用时 targets 可达数十~上百，
+        // 循环内按包名逐条查台账会产生 N 次往返（N+1）。
+        val known = installedAppRepository.findByDeviceId(deviceId).associateBy { it.packageName }.toMutableMap()
         var sent = 0
         for (pkg in targets.distinct()) {
-            val entity = installedAppRepository.findByDeviceIdAndPackageName(deviceId, pkg)
-                ?: InstalledApp(
-                    id = UUID.randomUUID().toString(), deviceId = deviceId,
-                    packageName = pkg, firstSeenAt = System.currentTimeMillis()
-                )
+            val entity = known[pkg] ?: InstalledApp(
+                id = UUID.randomUUID().toString(), deviceId = deviceId,
+                packageName = pkg, firstSeenAt = System.currentTimeMillis()
+            ).also { known[pkg] = it }
             entity.hidden = req.hidden
             entity.lastSeenAt = System.currentTimeMillis()
             installedAppRepository.save(entity)
@@ -436,13 +475,15 @@ class AppManageService(
     /** 批量挂起/恢复：管控端常见的"一键禁用所有游戏"场景，逐条发指令体验太差 */
     fun setSuspendedBatch(userId: String, deviceId: String, packages: List<String>, suspended: Boolean): Int {
         requireOwned(userId, deviceId)
+        // 同上：一次预取台账，避免循环内逐条查询（批量禁用游戏可达数十个包）。
+        val known = installedAppRepository.findByDeviceId(deviceId).associateBy { it.packageName }
         var sent = 0
         for (pkg in packages.distinct().filter { it.isNotBlank() && it != SELF_PACKAGE }) {
             commandService.issueCommand(
                 deviceId, CommandType.SET_APP_SUSPENDED,
                 mapOf(CommandKey.PACKAGE_NAME to pkg, CommandKey.SUSPENDED to suspended)
             )
-            installedAppRepository.findByDeviceIdAndPackageName(deviceId, pkg)?.let {
+            known[pkg]?.let {
                 it.suspended = suspended
                 installedAppRepository.save(it)
             }

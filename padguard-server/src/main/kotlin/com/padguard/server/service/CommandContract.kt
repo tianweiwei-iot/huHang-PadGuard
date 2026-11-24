@@ -22,6 +22,14 @@ object CommandType {
     const val UNLOCK = "UNLOCK"
     const val TEMP_UNLOCK = "TEMP_UNLOCK"
     const val SHOW_MESSAGE = "SHOW_MESSAGE"
+    /**
+     * 家长端发起「开始计时」：孩子端弹出确认框（"家长已为你开启今日计时"），
+     * 孩子点「开始计时」后才真正起表（usage session start 接口）；未确认不开始计时。
+     * payload { requestId }（字段名必须与孩子端 CommandExecutor.KEY_REQUEST_ID 一致）。
+     * ACK 语义：SUCCESS = 已送达并弹出确认框，**不是**"已开始计时"
+     * （是否开始由会话 active 状态与 usage_start_requests 工单回传）。
+     */
+    const val START_TIMER_CONFIRM = "START_TIMER_CONFIRM"
     const val SCREENSHOT = "SCREENSHOT"
     const val LOCATE = "LOCATE"
     const val PHOTO = "PHOTO"

@@ -278,7 +278,11 @@ data class MinorModePolicy(
         val start = ScheduleRule.toMinutes(effectiveCurfewStart())
         val end = ScheduleRule.toMinutes(effectiveCurfewEnd())
         return when {
-            start == end -> true // 起止相同视为全天宵禁（异常配置，按最严格处理）
+            // 与 ScheduleRule/SmartShutdownEnforcer 统一：起止相同视为**无效配置、不锁**。
+            // 旧实现把它当"全天宵禁"，家长在未成年人模式里误填 22:00–22:00 会把设备整天锁死，
+            // 而同样数值配在时段锁/定时锁机却完全不锁 —— 同一份配置三种语义，PRD M07 已点名。
+            // "整天不让用"应通过每日额度=0 或显式 00:00–23:59 表达，不能靠退化区间隐式表达。
+            start == end -> false
             end <= start -> minutesOfDay >= start || minutesOfDay < end // 跨零点
             else -> minutesOfDay >= start && minutesOfDay < end
         }

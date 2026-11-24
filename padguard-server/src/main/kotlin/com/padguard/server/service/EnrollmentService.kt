@@ -126,15 +126,23 @@ class EnrollmentService(
         session.deviceId = deviceId
         session.boundAt = now
         repository.save(session)
-        // 主动推送：家长端不必轮询，WS 断开时它会退化到查询 [current]
-        webSocketPush.pushToUser(
-            session.userId,
-            mapOf(
-                "type" to EVENT_DEVICE_ENROLLED,
-                "sessionId" to sessionId,
-                "deviceId" to deviceId
+        // 主动推送：家长端不必轮询，WS 断开时它会退化到查询 [current]。
+        //
+        // 但本方法是在调用方 `DeviceService.bindChild` 的事务内执行的，save 之后还有
+        // 建设备台账、下发初始指令等步骤。若在事务体内就推，任一步失败导致整笔回滚时，
+        // 家长端已经收到「绑定成功」并跳到设备页，刷新后设备却不存在 —— 一条无法解释的假成功。
+        // 与策略下发的 MQTT 通知同口径，挂到提交之后；无事务（单测直调）时 afterCommit 立即执行。
+        val ownerId = session.userId
+        afterCommit {
+            webSocketPush.pushToUser(
+                ownerId,
+                mapOf(
+                    "type" to EVENT_DEVICE_ENROLLED,
+                    "sessionId" to sessionId,
+                    "deviceId" to deviceId
+                )
             )
-        )
+        }
     }
 
     private fun create(userId: String, now: Long): EnrollmentSession {

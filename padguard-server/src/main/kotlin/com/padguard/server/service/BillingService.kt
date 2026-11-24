@@ -271,18 +271,25 @@ class BillingService(
      * 后台设置将来增删字段不会导致这里解析失败（解析失败也只会安全回退到配置值）。
      */
     /**
-     * 示例支付开关：后台系统设置（DB）优先，未保存则回退部署配置。
+     * 示例支付开关：**部署配置为总闸，后台 DB 只能关不能开**（`config && dbValue`）。
      *
-     * 为什么改：早期后台「系统设置 → 示例支付」只是把一个布尔值存进库里，
-     * 计费侧读的却是启动时的 `padguard.billing.mock-pay-enabled` 配置项，
-     * 两者完全断开 —— 运营在后台打开开关没有任何效果，必须改配置重启，属于"设了没用"。
-     * 现在与 [effectiveTrialDays] 同一口径：DB 优先、配置兜底、解析失败安全回退。
+     * 早期是"DB 优先、配置兜底"，看起来 convenient，实际是资金红线：
+     * [com.padguard.server.config.ProdConfigAssertion] 只在启动期检查配置，
+     * 运行中任何持有 `settings:write` 的会话（或直接写库）都能把 DB 里的 `mockPay`
+     * 置 true，从而在生产跳过验签、白嫖订阅。现在与 [ConfigurablePaymentVerifier]
+     * 统一为同一口径：生产配置恒 false，DB 无法反向打开；联调档位配置 true 时
+     * DB 仍可显式关闭，未保存字段时沿用配置值。
      */
-    private fun mockPayEnabled(): Boolean =
+    private fun mockPayFlagFromDb(): Boolean? =
         runCatching {
             systemSettingRepository.findById(SETTINGS_KEY).orElse(null)?.valueJson
                 ?.let { objectMapper.readTree(it).get("mockPay")?.asBoolean() }
-        }.getOrNull() ?: configMockPayEnabled
+        }.getOrNull()
+
+    private fun mockPayEnabled(): Boolean {
+        if (!configMockPayEnabled) return false
+        return mockPayFlagFromDb() ?: true
+    }
 
     private fun effectiveTrialDays(): Long =
         runCatching {
@@ -397,10 +404,26 @@ class BillingService(
      *
      * 顺序很重要 —— 先判订阅再判设备数，否则未付费用户会收到"设备数超限"，
      * 那是完全错误的引导（他会去买更多额度，而不是去付费）。
+     *
+     * ## 设备数上限的原子性（R-P2-11，TOCTOU 修复）
+     * `count → save` 原来是两步 check-then-act：同一家长多台设备并发绑定时
+     * （[com.padguard.server.service.DeviceBindLocks] 按**设备指纹**加锁，
+     * 锁得住"同一台平板重复建台账"，锁不住"不同设备绑同一家长"），
+     * 两个事务都 count 到 limit-1 → 都通过 → 各 save 一台，越上限一台（资损面）。
+     * 现在对 subscription 行加悲观锁（SELECT ... FOR UPDATE，与续费 extend 的
+     * [SubscriptionRepository.findByUserIdForUpdate] 同口径）：同一家长的并发绑定
+     * 在此串行化，后到的事务等前一个提交后重数，超限即拒。
+     * `@Transactional`（REQUIRED）确保锁所在事务与调用方的绑定事务**是同一个**，
+     * 锁活到绑定 save + 提交；全部调用路径（bindChild / bindChildByAccount /
+     * bindLanDevice / importDevices 的 txTemplate 行事务）均在事务内调用本方法。
      */
+    @Transactional
     fun ensureCanBind(userId: String) {
         ensureActive(userId)
-        val sub = subscriptionRepository.findByUserId(userId)!!
+        // ensureActive 已确保订阅存在（缺失会 createTrial），这里的行锁查询理论不会为空；
+        // 但仍用显式业务异常兜底，避免并发下订阅被删时裸 NPE 冒泡成 500。
+        val sub = subscriptionRepository.findByUserIdForUpdate(userId)
+            ?: throw BizException(ParentErr.SUBSCRIPTION_REQUIRED, "订阅记录不可用，请重新登录后重试", Audience.PARENT)
         val used = deviceRepository.countByUserId(userId).toInt()
         if (used >= sub.deviceLimit) {
             throw BizException(
@@ -411,9 +434,12 @@ class BillingService(
         }
     }
 
+    @Transactional
     fun ensureCanBindForChild(userId: String) {
         ensureActiveForChild(userId)
-        val sub = subscriptionRepository.findByUserId(userId)!!
+        // 同 ensureCanBind：显式业务异常兜底，杜绝裸 NPE→500。
+        val sub = subscriptionRepository.findByUserIdForUpdate(userId)
+            ?: throw BizException(ChildErr.SUBSCRIPTION_REQUIRED, "订阅记录不可用，请让家长重新登录后重试", Audience.CHILD)
         val used = deviceRepository.countByUserId(userId).toInt()
         if (used >= sub.deviceLimit) {
             throw BizException(
@@ -614,6 +640,18 @@ class BillingService(
             log.warn("微信回调单号 {} 对应订单渠道非 WECHAT：{}", result.outTradeNo, order.channel)
             throw BizException(ParentErr.FORBIDDEN, "订单渠道不匹配", Audience.PARENT)
         }
+        // 金额比对（微信官方接入规范第 4 步：回调金额必须与商户侧订单一致才可入账）。
+        // 验签已保证报文来自微信，这里防的是错账类运营事故：
+        // 商户号被多套系统共用 / 测试与生产混用商户号时，另一套系统的回调单号
+        // 碰巧命中本系统订单 —— 验签照样通过（同一张平台证书），但金额对不上，
+        // 之前会照单全收地开通订阅。金额不符必须拒绝并留痕，订单保持 PENDING 等人工对账。
+        if (result.totalFen != order.amountFen.toLong()) {
+            log.error(
+                "微信回调金额与订单不符，拒绝入账: no={}, callback={}fen, order={}fen",
+                result.outTradeNo, result.totalFen, order.amountFen
+            )
+            throw BizException(ParentErr.ORDER_STATE_INVALID, "支付金额校验未通过", Audience.PARENT)
+        }
         return markPaid(result.outTradeNo, result.transactionId)
     }
 
@@ -722,7 +760,8 @@ class BillingService(
      *
      * 责任边界：管理员在后台发起退款申请时订单已标记 REFUNDED（申请受理即入账口径），
      * 回调在这里做**二次确认**：
-     * - 订单已是 REFUNDED → 幂等成功（最常见路径）；
+     * - 订单已是 REFUNDED → 幂等成功（最常见路径），**不再回收权益**（回收已在首次退款时完成；
+     *   重投回调若再次回收，会误伤家长此后新购恢复的订阅）；
      * - 订单仍是 PAID（回调先于管理端事务提交等竞态）→ 原子条件 UPDATE 补标 REFUNDED；
      * - 退款结果非 SUCCESS → 由 [WeChatPayVerifier.verifyRefundAndParse] 拒绝并留痕，不推进状态。
      */
@@ -747,13 +786,38 @@ class BillingService(
                 "refund notify confirmed (already settled): orderNo={}, refundId={}, status={}",
                 order.orderNo, result.refundId, order.status
             )
-        } else {
-            log.info(
-                "refund notify settled: orderNo={}, refundId={} (PAID -> REFUNDED)",
-                order.orderNo, result.refundId
-            )
+            // R42：已经 REFUNDED 的重复/延迟回调只做幂等确认，**绝不能再次回收权益**。
+            // 管理员发起退款时已在 AdminBillingService.refund 里回收过一次；若此后家长
+            // 新购订单恢复 ACTIVE，微信重投的旧回调会在这里把新订阅重新打回 REVOKED，
+            // 造成「付了新单却停服」。回调先到（PAID -> REFUNDED）的那一次才需要回收。
+            return mapOf("ok" to true)
         }
+        log.info(
+            "refund notify settled: orderNo={}, refundId={} (PAID -> REFUNDED)",
+            order.orderNo, result.refundId
+        )
+        // 「退款即回收」：仅本次真正完成 PAID -> REFUNDED 时才回收该家长的会员权益。
+        revokeRightsOnRefund(order.userId)
         return mapOf("ok" to true)
+    }
+
+    /**
+     * 退款后回收会员权益（「退款即回收」策略）。
+     *
+     * 把该家长的订阅置为 [SubStatus.REVOKED] 并清掉到期时间，使其立即丧失会员权益
+     * （[SubStatus.REVOKED] 在 `ensureActive` / `statusOf` 中按「无权益」处理，与 EXPIRED 同效）。
+     * 仅对当前仍有效（ACTIVE / TRIAL）的订阅生效；已过期 / 已回收的不动，保证幂等。
+     * 退款确认（微信回调二次确认 或 后台手动退款受理）后调用，钱退即停服，避免「既退钱又白用」。
+     */
+    @Transactional
+    fun revokeRightsOnRefund(userId: String) {
+        val sub = subscriptionRepository.findByUserId(userId) ?: return
+        if (sub.status != SubStatus.ACTIVE.name && sub.status != SubStatus.TRIAL.name) return
+        sub.status = SubStatus.REVOKED.name
+        sub.expiredAt = System.currentTimeMillis()
+        sub.updatedAt = System.currentTimeMillis()
+        subscriptionRepository.save(sub)
+        log.info("subscription rights revoked on refund: userId={}", userId)
     }
 
     // ------------------------------------------------------------------ 工具
@@ -782,10 +846,20 @@ class BillingService(
     /**
      * 按**自然月**顺延，而不是按 30 天乘。
      * 30×12=360 天会让年卡每年少 5 天，续费几年后家长会发现"明明买的年卡怎么提前到期"。
+     *
+     * 月末锚定：LocalDate.plusMonths 会把 1/31 夹到 2/28；若下次续费再以 2/28 为基准，
+     * 就得到 3/28 —— 每次续费都少几天，月底到期的月卡/年卡用户几年后会发现到期日
+     * 从 31 号悄悄漂到 28 号。因此基准日若是所在月最后一天，目标日也取目标月最后一天，
+     * 使 1/31→2/28→3/31 稳定停在月末。普通日期（如 15 号）不受影响。
      */
     private fun plusMonths(ts: Long, months: Int): Long {
         val zone = SERVER_ZONE_ID
-        val date: LocalDate = Instant.ofEpochMilli(ts).atZone(zone).toLocalDate().plusMonths(months.toLong())
+        val base: LocalDate = Instant.ofEpochMilli(ts).atZone(zone).toLocalDate()
+        var date: LocalDate = base.plusMonths(months.toLong())
+        if (base.dayOfMonth == base.lengthOfMonth()) {
+            // 基准是月末 → 目标也锚到月末，避免 clamp 后逐月收缩
+            date = date.withDayOfMonth(date.lengthOfMonth())
+        }
         // 到期时刻取顺延当日 23:59:59.999，家长体感是"当天还能用"
         return date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1
     }

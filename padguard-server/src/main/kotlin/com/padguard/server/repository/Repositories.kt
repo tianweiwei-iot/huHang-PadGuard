@@ -163,7 +163,7 @@ interface DeviceRepository : JpaRepository<Device, String> {
     fun countByUserId(userId: String): Long
 
     /** 权益闸门状态翻转（ACTIVE/SUSPENDED）：只碰一列，绝不整行 merge 覆盖并发绑定写回的 user_id/token */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Transactional
     @Query("update Device d set d.entitlementState = :state where d.id = :deviceId")
     fun updateEntitlementState(@Param("deviceId") deviceId: String, @Param("state") state: String): Int
@@ -172,10 +172,18 @@ interface DeviceRepository : JpaRepository<Device, String> {
      * 条件清除远程锁屏标记：只在当前确为锁定时命中，防止并发窗口内家长刚好手动解锁后
      * 被权益闸门"代理解锁"再发一条多余指令的竞态（条件 UPDATE 天然幂等）。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Transactional
     @Query("update Device d set d.remoteLocked = false where d.id = :deviceId and d.remoteLocked = true")
     fun clearRemoteLockedIfSet(@Param("deviceId") deviceId: String): Int
+
+    /**
+     * 撤回授权置位走 ComplianceService 内「load 实体 → 改 consentRevoked → save」语义，
+     * 复用 FakeJpaRepository 既有 save；不在此声明 @Modifying 抽象方法，
+     * 以免扩散到十余个测试桩（W2 已标记的 fake-implements-whole-repository 技术债）。
+     * 该标志为低频用户动作（撤回/恢复授权），整行 save 的并发覆盖风险可接受，
+     * 与 confirmAccountDeletion 对已注销账号的匿名化写法保持一致。
+     */
     /** 在线设备数（看板指标）；注意在线态由 DeviceService 惰性超时兜底，此处为近似计数 */
     fun countByOnlineStatus(onlineStatus: String): Long
 
@@ -311,7 +319,7 @@ interface EnrollmentSessionRepository : JpaRepository<EnrollmentSession, String>
      */
     // flushAutomatically：删除前先把上下文中未落库的会话变更写下去，
     // 否则"刚被标记为终态、尚未 flush"的会话会躲过这次清理条件。
-    @Modifying(flushAutomatically = true)
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from EnrollmentSession s where s.state <> 'PENDING' and s.createdAt < :before")
     fun purgeTerminalBefore(@Param("before") before: Long): Int
 }
@@ -335,7 +343,7 @@ interface PolicyRepository : JpaRepository<Policy, String> {
      * 被 findFirstByDeviceIdOrderByVersionDesc 命中，把上任家庭的管控配置
      * （minorMode、curfew 等）短暂下发给新孩子。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from Policy p where p.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
@@ -355,7 +363,7 @@ interface CommandRepository : JpaRepository<Command, String> {
      * 指令里带着截图、锁屏、应用安装等下发内容与回执，跨账号复用时不清除等于把上任家长
      * 管控过这台平板的完整证据链交给下一任；同时也是本项目行数增长最快的表之一。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from Command c where c.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
@@ -412,6 +420,154 @@ interface CommandRepository : JpaRepository<Command, String> {
         @Param("status") status: String,
         @Param("now") now: Long
     ): List<Command>
+
+    /**
+     * 过期收敛专用 CAS（阶段 1 体检 F01）：只把**此刻仍是 PENDING** 的指令改成终态。
+     *
+     * [ExpiredCommandSweeper] 原先查出一快照后改内存实体再 `saveAll`：
+     * 两次查询之间若回执（MQTT / HTTP 双通道）已把指令置为 SUCCESS，
+     * 旧快照会把它覆盖回 EXPIRED，家长端看到「执行成功又变过期」。
+     * 条件 UPDATE 把「读」与「写」合成一条原子语句，返回影响行数让调用方判断
+     * 是否真的由自己完成了收敛（只有成功的那条才允许连带收敛截图记录）。
+     *
+     * 与下方补发刷新同一套写法：显式 `@Transactional`（Spring Data 不会自动为
+     * `@Modifying` 开启写事务）+ `flushAutomatically/clearAutomatically`，
+     * 避免持久化上下文里的旧实体在后续查询中被读回。
+     */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        """
+        update Command c
+           set c.status = :expired
+         where c.id = :id
+           and c.status = :pending
+        """
+    )
+    fun markExpiredIfPending(
+        @Param("id") id: String,
+        @Param("pending") pending: String,
+        @Param("expired") expired: String
+    ): Int
+
+    /**
+     * 原子落地一条设备回执：仅当指令**仍处于非终态**时才写入，返回影响行数。
+     *
+     * 与 [markExpiredIfPending] 是对称的两侧：sweeper 用 `status = PENDING` 抢占过期结论，
+     * 回执用 `status not in 终态` 抢占执行结论，两边都靠数据库行锁裁决，
+     * 谁先提交谁赢，输家影响 0 行。改造前 `applyAck` 走「读实体 → 改字段 → save(整行)」，
+     * 有两个真实后果：
+     * 1. 双通道（MQTT + HTTP 长轮询）并发回执时，后提交的旧快照把先提交的 SUCCESS 覆盖回 FAILED；
+     * 2. 更严重的是能把 sweeper 刚写入的 **EXPIRED 复活成 SUCCESS** —— 两个线程都读到 PENDING，
+     *    sweeper 先置 EXPIRED，回执随后 merge 整行，家长端看到「已过期又执行成功」。
+     *
+     * 错误码 / 描述的合并由调用方按旧规则算好再传入（回执不带错误时沿用读到的旧值），
+     * 保证单线程语义与改造前逐字一致；并发下由本条件更新决定唯一赢家。
+     *
+     * 条件刻意与调用方的读取键**同组**：`msgId + deviceId`（`msg_id` 带 unique 约束）。
+     * 只按 msgId 会让别的设备伪造回执，按内部主键 `id` 则多一次「读出来的 id 是否可靠」
+     * 的假设；双键与 `findByMsgIdAndDeviceId` 完全对齐，`deviceId` 由鉴权注入不可伪造。
+     *
+     * `clearAutomatically` 必须有：批量 UPDATE 绕过一级缓存，调用方在更新后只读
+     * `cmd.type` 等已加载字段，不清会在同一事务内读回旧 status。
+     */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        """
+        update Command c
+           set c.status = :status,
+               c.executedAt = :executedAt,
+               c.errorCode = :errorCode,
+               c.errorMessage = :errorMessage
+         where c.msgId = :msgId
+           and c.deviceId = :deviceId
+           and c.status not in :terminal
+        """
+    )
+    fun applyAckIfOpen(
+        @Param("msgId") msgId: String,
+        @Param("deviceId") deviceId: String,
+        @Param("terminal") terminal: Collection<String>,
+        @Param("status") status: String,
+        @Param("executedAt") executedAt: Long?,
+        @Param("errorCode") errorCode: String?,
+        @Param("errorMessage") errorMessage: String?
+    ): Int
+
+    // ==================== W2：离线指令补发 ====================
+
+    /**
+     * 待补发指令：已过 5 分钟有效期、但仍在补发保留期内、次数未达上限、且在可补发白名单内。
+     *
+     * **不能用 [findPendingForPolling] 的游标**：这些指令的 createdAt 可能远早于终端
+     * 「上次拉取」游标，带 `createdAt >= cursor` 会把离线期间的全部指令再次过滤掉，
+     * 补发就成了空转。因此这里按 device + status + deadline 独立查询，按 createdAt 升序
+     * 保证先下发的先补发（FIFO），并由 Pageable 在 SQL 层限流。
+     *
+     * 白名单由调用方传入（配置化），空集合时调用方必须直接跳过——JPQL `in ()` 在
+     * 部分数据库上会生成非法 SQL。
+     */
+    @Query(
+        """
+        select c from Command c
+        where c.deviceId = :deviceId
+          and c.status = :status
+          and c.expiresAt <= :now
+          and c.redeliveryDeadlineAt > :now
+          and c.deliveryCount < :maxAttempts
+          and c.type in :types
+        order by c.createdAt asc
+        """
+    )
+    fun findRedeliverablePending(
+        @Param("deviceId") deviceId: String,
+        @Param("status") status: String,
+        @Param("now") now: Long,
+        @Param("maxAttempts") maxAttempts: Int,
+        @Param("types") types: Collection<String>,
+        pageable: Pageable
+    ): List<Command>
+
+    /**
+     * 原子抢占一次补发权：只有**当前仍过期**的那一个请求能把 expires_at 推进到新窗口。
+     *
+     * 为什么不用「查出来改字段再 save」：孩子端 MQTT 与 HTTP 长轮询是双通道，
+     * 设备重连瞬间常有多个轮询并发。两个线程各自 save 会互相覆盖 deliveryCount
+     * （lost update），补发次数上限形同虚设，同一条指令也会被重复塞进多个响应。
+     * 条件 UPDATE 把「判过期 + 推进窗口 + 计数」收进一条语句，由数据库行锁保证
+     * 只有一个线程拿到 1；这是跨实例也成立的做法，不需要再引入一把进程内锁。
+     *
+     * `clearAutomatically` 必须有：批量 UPDATE 绕过一级缓存，不清的话同一事务内
+     * 随后的查询会读回旧 expiresAt，把刚刷新过的指令再当过期指令处理一次。
+     */
+    /**
+     * 必须显式 `@Transactional`：Spring Data **不会**自动为 `@Modifying` 查询开启写事务
+     * （本项目 ExtraRepositories 已踩过同坑）。缺了它，`flushAutomatically = true`
+     * 会在无事务线程上抛 `No EntityManager with actual transaction available`，
+     * 且并发调用路径必现，表现为「补发功能整体不可用」。
+     * 调用方已有事务时按 REQUIRED 加入，语义一致。
+     */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        """
+        update Command c
+           set c.expiresAt = :newExpiresAt,
+               c.deliveryCount = c.deliveryCount + 1,
+               c.lastDeliveryAt = :now
+         where c.id = :id
+           and c.status = :status
+           and c.expiresAt <= :now
+           and c.redeliveryDeadlineAt > :now
+        """
+    )
+    fun tryRefreshForRedelivery(
+        @Param("id") id: String,
+        @Param("status") status: String,
+        @Param("now") now: Long,
+        @Param("newExpiresAt") newExpiresAt: Long
+    ): Int
 }
 
 @Repository
@@ -419,6 +575,34 @@ interface UsageLogRepository : JpaRepository<UsageLog, String> {
     fun existsByLogId(logId: String): Boolean
     fun findByDeviceId(deviceId: String): List<UsageLog>
     fun findByDeviceIdAndTimestampBetween(deviceId: String, start: Long, end: Long): List<UsageLog>
+    /** 数据导出：按服务端落库时刻倒序取最近 N 条，避免导出接口把百万行一次拉爆。 */
+    fun findByDeviceIdOrderByReceivedAtDesc(deviceId: String, pageable: Pageable): List<UsageLog>
+
+    /**
+     * 按设备 + 类型拉取上报日志，按时间倒序，配合 [Pageable] 取最近 N 条。
+     *
+     * 用途：家长端「通知记录」展示孩子端代收的系统通知（type=NOTIFICATION_COLLECTED）。
+     * 走 `idx_usage_logs_device_type` 索引下推过滤，避免把全量 payload 读进内存。
+     */
+    fun findByDeviceIdAndTypeOrderByTimestampDesc(deviceId: String, type: String, pageable: Pageable): List<UsageLog>
+
+    /**
+     * 分页读取指定设备、指定时间范围内的**用量类**日志（统计聚合专用）。
+     *
+     * 存在的唯一理由：`usage_logs` 单设备一个月约 26 万行，一次性 `findBy...Between` 会把
+     * 全部 payload 文本读进内存，月视图一开就可能 OOM。这里把「类型过滤」下推到 SQL
+     * （走 `idx_usage_logs_device_type`），并允许调用方按页推进、折叠完即丢弃。
+     *
+     * 必须带 `Pageable` 的显式排序（见 `UsageLogPager.SORT`），否则 OFFSET 分页在无确定顺序时
+     * 会重复/漏读行，聚合结果会静默偏差。
+     */
+    fun findByDeviceIdAndTypeInAndTimestampBetween(
+        deviceId: String,
+        types: Collection<String>,
+        start: Long,
+        end: Long,
+        pageable: Pageable
+    ): List<UsageLog>
 
     /**
      * 批量幂等查重：一次查询取回本批日志中已存在的 logId。
@@ -435,15 +619,22 @@ interface UsageLogRepository : JpaRepository<UsageLog, String> {
      *
      * 常规路径是「一次查重 + 一次批量 saveAll」；但查重与写入之间存在竞态窗口：
      * 同一 logId 的两次并发上报可能都通过查重，后提交者撞 unique 约束导致**整批**失败。
-     * 命中约束时降级为本方法逐行 `ON CONFLICT DO NOTHING`（H2 2.2.x 与 PG16 均支持），
-     * 只跳过真正已存在的行。仅竞态时触发，不影响常规批量性能。
+     * 命中约束时降级为本方法逐行 `ON CONFLICT DO NOTHING`，只跳过真正已存在的行。
+     * 仅竞态时触发，不影响常规批量性能。
+     *
+     * **实测修正（第 4 批）**：原写法 `on conflict (log_id) do nothing` 在真实
+     * H2 2.2.224（MODE=PostgreSQL）上抛 JdbcSQLSyntaxErrorException —— H2 不支持带列的
+     * 冲突目标，只有 PG 支持。这条降级路径平常不触发，所以本地联调一直没暴露；一旦
+     * 真撞上批写竞态，本该救场的语句反而是第二次报错。改成无目标的
+     * `on conflict do nothing`，H2 与 PG16 都合法，且本表唯一约束只有主键 + log_id，
+     * 冲突处理语义不变。
      */
     @Modifying
     @Transactional
     @Query(
         value = "insert into usage_logs (id, device_id, log_id, type, \"timestamp\", payload_json, received_at) " +
                 "values (:id, :deviceId, :logId, :type, :timestamp, :payloadJson, :receivedAt) " +
-                "on conflict (log_id) do nothing",
+                "on conflict do nothing",
         nativeQuery = true
     )
     fun insertIgnoreConflict(
@@ -463,22 +654,85 @@ interface UsageLogRepository : JpaRepository<UsageLog, String> {
      * 走 JPQL 批量 delete：派生删除会先把该设备全部日志 SELECT 进内存再逐条 DELETE，
      * 用量日志是本库行数最多的表，逐条删会让"绑定"这一步卡成一次超长事务。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from UsageLog l where l.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
     /**
-     * 保留期清理：删除早于 [threshold]（事件时间戳，epoch 毫秒）的用量日志。
-     * 用量日志只增不删、体积最大，不清理会无限膨胀，也违背"不该长期保存历史"的诉求。
-     * 配合 [com.padguard.server.config.SchemaIndexInitializer] 上的 `idx_usage_logs_ts` 索引，
-     * 该 DELETE 走时间戳范围扫描，不会全表扫。
+     * 保留期清理：删除**落库时刻**早于 [threshold] 的行为日志，**但排除
+     * [protectedTypes] 里的合规凭证类**（如 AGREEMENT 使用授权协议签署记录）。
      *
-     * 必须显式 @Transactional：派生 delete 方法不会自动获得事务，调用方
-     * UsageLogCleanup 也没有事务边界，否则运行期 TransactionRequiredException
-     * 被吞成 warn，用量日志永远不会被清理。
+     * ## 为什么必须排除
+     * `usage_logs` 不是纯用量表，孩子端的 `LogType.AGREEMENT`（说明书 §5.4 合规留存）
+     * 也走这条上行通道落在这里。合规凭证的价值恰在"事后可追溯"——若跟用量日志一起
+     * 按 30 天 TTL 删掉，设备用满一个月后，"孩子是否签署过授权"就再也查不到，
+     * 而家长端仍可能展示「已阅已同意」。清理不该把审计证据清掉。
+     *
+     * `l.type is null` 必须显式放行：SQL 的 `NOT IN` 对 NULL 结果为 UNKNOWN，
+     * 若不加这一支，历史脏数据（type 为空）会永远删不掉，表重新无限膨胀。
+     *
+     * ## 判据必须是 `received_at` 而不是客户端上报的 `timestamp`（历史缺陷）
+     * `timestamp` 来自上报体（`LogItem.timestamp`），是**孩子端可写的设备本地钟**，
+     * 服务端从不钳制。用它当清理判据两个方向都会踩：
+     * - 设备把时间调到未来（NTP 未同步 / 孩子主动改）→ 这期间所有日志 `timestamp > threshold`，
+     *   **每天清理都跳过**，只增不删；`usage_logs` 是全库增长最快的表，写满磁盘会连带全站写入失败，
+     *   同时儿童数据超保留期仍在库，合规面更糟；
+     * - 设备把时间调到过去 → 上报当天就被当成 30 天前历史删掉，家长端『应用使用记录』凭空缺段；
+     * - `timestamp` 为 NULL 时 `NULL < :threshold` 恒为 UNKNOWN，这些行**永远删不掉**。
+     *
+     * `received_at` 是服务端落库时刻（[com.padguard.server.service.IngestService] 两条写入路径
+     * 都显式赋值），设备改不了，且与 [com.padguard.server.service.RetentionCleanup] 的
+     * 媒体清理判据同一口径。存量行若 `received_at` 仍为默认 0（该列上线前的历史数据），
+     * `0 < threshold` 成立 → 一并清掉，正是期望的"过期即删"。
+     *
+     * 配合 `idx_usage_logs_received_at` 索引，该 DELETE 走范围扫描，不会全表扫。
+     *
+     * 必须显式 @Transactional + @Modifying：批量 delete 无事务会抛
+     * TransactionRequiredException，且被用法包裹在 runCatching 里只会落成一条 warn，
+     * 表现为"清理天天跑、表却一天比一天大"。
      */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Transactional
-    fun deleteByTimestampBefore(threshold: Long): Int
+    @Query(
+        "delete from UsageLog l where l.receivedAt < :threshold " +
+                "and (l.type is null or l.type not in :protectedTypes)"
+    )
+    fun deleteExpiredExcept(
+        @Param("threshold") threshold: Long,
+        @Param("protectedTypes") protectedTypes: Collection<String>
+    ): Int
+
+    /**
+     * 夜清分页第一步：只取主键，按服务端落库时间与受保护类型过滤。
+     * 与 [deleteExpiredExcept] 同一 WHERE 口径，但用 Pageable 把单次事务影响行数钉死，
+     * 避免百万行一次 DELETE 拖出长事务 / WAL 暴涨。
+     */
+    @Query(
+        "select l.id from UsageLog l where l.receivedAt < :threshold " +
+                "and (l.type is null or l.type not in :protectedTypes)"
+    )
+    fun findExpiredIds(
+        @Param("threshold") threshold: Long,
+        @Param("protectedTypes") protectedTypes: Collection<String>,
+        pageable: Pageable
+    ): List<String>
+
+    /** 夜清分页第二步：按主键批量删除。Spring Data 每次调用各自一个小事务。 */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Transactional
+    @Query("delete from UsageLog l where l.id in :ids")
+    fun deleteByIds(@Param("ids") ids: Collection<String>): Int
+
+    /** 查询某设备最近一条指定类型的行为日志（用于合规凭证「已阅已同意」回显）。 */
+    fun findFirstByDeviceIdAndTypeOrderByTimestampDesc(
+        deviceId: String, type: String
+    ): UsageLog?
+}
+
+@Repository
+interface GuardianConsentRepository : JpaRepository<GuardianConsent, String> {
+    fun findByUserIdAndDeviceIdOrderByCreatedAtDesc(userId: String, deviceId: String): List<GuardianConsent>
+    fun findByUserIdOrderByCreatedAtDesc(userId: String): List<GuardianConsent>
 }
 
 @Repository
@@ -532,6 +786,62 @@ interface AuditLogRepository : JpaRepository<AuditLog, String> {
 }
 
 @Repository
+interface AppealRepository : JpaRepository<Appeal, String> {
+    fun findByUserIdOrderByCreatedAtDesc(userId: String, pageable: Pageable): List<Appeal>
+    fun findByUserIdAndId(userId: String, id: String): Appeal?
+}
+
+@Repository
+interface AccountDeletionRepository : JpaRepository<AccountDeletionRequest, String> {
+    fun findByUserIdAndTicket(userId: String, ticket: String): AccountDeletionRequest?
+    fun findByUserId(userId: String): List<AccountDeletionRequest>
+}
+
+/**
+ * 家长登录会话（第三步安全：refresh token 轮换 + 单设备吊销）。
+ * jti 唯一索引保证同一 refresh token 只对应一条有效会话；revoked 标记实现单设备踢下线。
+ */
+@Repository
+interface UserSessionRepository : JpaRepository<UserSession, String> {
+    fun findByUserIdAndRevokedFalse(userId: String): List<UserSession>
+    fun findByRefreshJtiAndRevokedFalse(jti: String): UserSession?
+    fun findByUserIdAndIdAndRevokedFalse(userId: String, id: String): UserSession?
+    fun countByUserIdAndRevokedFalse(userId: String): Long
+
+    /**
+     * 整账号吊销全部会话（登出/改密/后台动作）。条件 UPDATE 只碰 revoked 标记，
+     * 不覆盖并发写入的其他列；`flushAutomatically/clearAutomatically` 保证持久化上下文同步。
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update UserSession s set s.revoked = true, s.revokedAt = :at where s.userId = :userId and s.revoked = false")
+    fun revokeAllForUser(@Param("userId") userId: String, @Param("at") at: Long): Int
+
+    /**
+     * refresh token 原子轮换（防并发重放）。
+     *
+     * 条件 UPDATE 一次完成「认领旧 jti → 换成新 jti」：WHERE 同时钉住 `refreshJti=旧`、
+     * `userId`（顺带做归属校验）与 `revoked=false`。DB 层保证同一枚旧 jti 只能被
+     * 成功 UPDATE 一次（第二次影响行数为 0），杜绝"读 jti→校验→改字段→save"的
+     * 读改写竞态——后者允许两请求都在 jti 被改前通过校验、各自签出一对新令牌，
+     * 令 refresh token 的"单次使用"与单设备踢下线语义失效。
+     *
+     * 只改 jti/lastRefreshedAt 两列，不碰其它字段（并发登出可能正改 revoked）；
+     * `flushAutomatically/clearAutomatically` 让持久化上下文与库同步，避免脏检查写回。
+     * 返回值：1=轮换成功可签新令牌；0=旧 jti 已被并发轮换/吊销/归属不符，按失效拒绝。
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Transactional
+    @Query("update UserSession s set s.refreshJti = :newJti, s.lastRefreshedAt = :at " +
+        "where s.refreshJti = :oldJti and s.userId = :userId and s.revoked = false")
+    fun rotateRefreshJti(
+        @Param("oldJti") oldJti: String,
+        @Param("newJti") newJti: String,
+        @Param("userId") userId: String,
+        @Param("at") at: Long
+    ): Int
+}
+
+@Repository
 interface UrlCategoryRepository : JpaRepository<UrlCategory, String>
 
 @Repository
@@ -544,7 +854,7 @@ interface DeviceEventRepository : JpaRepository<DeviceEvent, String> {
     fun existsByEventId(eventId: String): Boolean
     fun findByDeviceIdAndTimestampBetween(deviceId: String, start: Long, end: Long): List<DeviceEvent>
 
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from DeviceEvent e where e.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
@@ -558,13 +868,18 @@ interface DeviceEventRepository : JpaRepository<DeviceEvent, String> {
     /**
      * 逐行幂等 upsert（S8，与 [UsageLogRepository.insertIgnoreConflict] 同款）：
      * event_id 竞态并发上报时整批撞 unique 约束，降级为逐行 ON CONFLICT DO NOTHING。
+     *
+     * **冲突目标必须省略**（第 5 批补齐）：第 4 批修 usage_logs / usage_sessions 两处时
+     * 漏了这里，H2 2.2.224(MODE=PostgreSQL) 不支持 `on conflict (col)`，导致本该救场的
+     * 降级语句自己再抛一次 `JdbcSQLSyntaxErrorException`。PG16 两种写法都支持，
+     * 统一用无目标形式；`ScheduledTraceContractTest` 扫描全 repository 防止再漏。
      */
     @Modifying
     @Transactional
     @Query(
         value = "insert into device_events (id, device_id, event_id, type, \"level\", detail_json, \"timestamp\") " +
                 "values (:id, :deviceId, :eventId, :type, :level, :detailJson, :timestamp) " +
-                "on conflict (event_id) do nothing",
+                "on conflict do nothing",
         nativeQuery = true
     )
     fun insertIgnoreConflict(

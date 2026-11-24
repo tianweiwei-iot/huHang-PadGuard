@@ -2,6 +2,7 @@ package com.padguard.child.guard
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -101,5 +102,55 @@ class UninstallShieldTest {
         val strengths = UninstallShield.values().map { it.strength }
         assertEquals(strengths.sorted(), strengths)
         assertEquals(UninstallShield.values().size, strengths.toSet().size)
+    }
+
+    // ===== 常驻通知文案：授权办妥后不得再误报（2026-11-09「授权了还提示未开启」） =====
+
+    @Test
+    fun `无障碍已开但没设操作密码时提示必须指向家长端密码`() {
+        // 旧文案一律"去激活设备管理员或开启无障碍"，家长照做一百遍也修不好：
+        // 真实缺口是家长端的操作密码，且孩子端授权页根本没有设密码这一步。
+        val text = ShieldNotice.text(
+            shield = UninstallShield.SOFT_GATE_WITHOUT_PASSWORD,
+            unguardedText = "请激活设备管理员或开启无障碍",
+            missingPasswordText = "请在家长端设置操作密码"
+        )
+        assertEquals("请在家长端设置操作密码", text)
+        assertFalse(text!!.contains("激活设备管理员或开启无障碍"))
+    }
+
+    @Test
+    fun `三层通道全空时才提示激活设备管理员或开启无障碍`() {
+        assertEquals(
+            "请激活设备管理员或开启无障碍",
+            ShieldNotice.text(
+                UninstallShield.NONE,
+                "请激活设备管理员或开启无障碍",
+                "请在家长端设置操作密码"
+            )
+        )
+    }
+
+    @Test
+    fun `授权补齐后通知恢复守护中_三类就绪状态都不再提示`() {
+        listOf(
+            UninstallShield.SOFT_GATE,
+            UninstallShield.ADMIN_SHIELD,
+            UninstallShield.DO_BLOCKED
+        ).forEach { shield ->
+            assertNull(
+                "$shield 已能拦住随手卸载，不该再喊未开启",
+                ShieldNotice.text(shield, "未开启", "缺密码")
+            )
+        }
+        assertTrue("已就绪状态与 needsParentAttention 口径必须一致",
+            UninstallShield.values().filter { !it.needsParentAttention }.all {
+                ShieldNotice.text(it, "未开启", "缺密码") == null
+            })
+    }
+
+    @Test
+    fun `尚未算出状态时保持正常文案_不把未知说成故障`() {
+        assertNull(ShieldNotice.text(null, "未开启", "缺密码"))
     }
 }

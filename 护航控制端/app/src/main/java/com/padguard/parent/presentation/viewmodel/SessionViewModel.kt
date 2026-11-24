@@ -29,7 +29,7 @@ import javax.inject.Inject
  */
 @HiltViewModel
 class SessionViewModel @Inject constructor(
-    tokenManager: TokenManager
+    private val tokenManager: TokenManager
 ) : ViewModel() {
 
     /** 持久化会话对应的用户；null 表示无登录态（含会话被清空的瞬间） */
@@ -39,6 +39,21 @@ class SessionViewModel @Inject constructor(
             started = SharingStarted.Eagerly,
             initialValue = null
         )
+
+    /**
+     * 会话被**非主动**清空的原因（令牌过期 / 别处改密 / 账号被停用）。
+     *
+     * 导航层在退回登录页时把它交给登录页展示成一条提示；展示完立刻消费掉，
+     * 否则家长下次主动退出登录时还会看到上次那条"登录状态已过期"。
+     */
+    val sessionNotice: StateFlow<String?> = tokenManager.sessionNotice
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = null
+        )
+
+    fun consumeSessionNotice() = tokenManager.consumeSessionNotice()
 
     /**
      * 启动起点路由；null 表示会话读取尚未完成（首帧显示启动占位，避免闪登录页）。

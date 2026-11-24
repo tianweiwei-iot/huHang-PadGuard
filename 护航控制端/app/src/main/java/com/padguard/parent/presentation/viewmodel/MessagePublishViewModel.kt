@@ -3,6 +3,7 @@ package com.padguard.parent.presentation.viewmodel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.padguard.parent.domain.model.MediaSource
 import com.padguard.parent.domain.model.MessageContentType
 import com.padguard.parent.domain.model.MessagePublishRequest
 import com.padguard.parent.domain.model.PublishedMessage
@@ -86,25 +87,35 @@ class MessagePublishViewModel @Inject constructor(
      * 界面看起来"选好了素材"，孩子端拿到的却是一个根本不存在的域名，
      * 表现就是"家长发布成功、孩子端一片空白"，且没有任何报错可查。
      * 现在改为先上传再回填真实地址，发布链路才真正闭环。
+     *
+     * 素材以[流式来源][MediaSource]传入而不是 `ByteArray`：视频动辄几百 MB，
+     * 整份读进堆会让家长端在上传刚开始时被系统 OOM 杀掉。上传结束（无论成败、
+     * 包括页面被销毁导致协程取消）都会 `close()` 释放来源持有的临时文件。
      */
-    fun attachMedia(bytes: ByteArray, fileName: String, contentType: String) {
+    fun attachMedia(source: MediaSource) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isUploading = true, toast = null)
-            messageRepository.uploadMedia(fileName = fileName, contentType = contentType, bytes = bytes)
-                .onSuccess { media ->
-                    _uiState.value = _uiState.value.copy(
-                        isUploading = false,
-                        mediaName = media.fileName,
-                        mediaUrl = media.url,
-                        toast = "素材已就绪：${media.fileName}"
-                    )
-                }
-                .onFailure { e ->
-                    _uiState.value = _uiState.value.copy(
-                        isUploading = false,
-                        toast = "素材上传失败：${e.message}"
-                    )
-                }
+            try {
+                messageRepository.uploadMedia(source)
+                    .onSuccess { media ->
+                        _uiState.value = _uiState.value.copy(
+                            isUploading = false,
+                            mediaName = media.fileName,
+                            mediaUrl = media.url,
+                            toast = "素材已就绪：${media.fileName}"
+                        )
+                    }
+                    .onFailure { e ->
+                        _uiState.value = _uiState.value.copy(
+                            isUploading = false,
+                            toast = "素材上传失败：${e.message}"
+                        )
+                    }
+            } finally {
+                // 视频来源本身不持有临时文件（直接读 ContentResolver），这里主要给
+                // 未来的落盘型来源兜底；close 幂等，重复调用安全。
+                runCatching { source.close() }
+            }
         }
     }
 

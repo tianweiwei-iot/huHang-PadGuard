@@ -324,6 +324,16 @@ interface PolicyApi {
         @Path("deviceId") deviceId: String
     ): Response<ApiResponse<UsageSessionDto>>
 
+    /**
+     * 家长发起「开始计时」：落/复用当日 PENDING 工单并下发确认指令，
+     * 孩子端弹出确认框；孩子点「开始计时」后工单转 CONFIRMED（经 usage-session 轮询同步）。
+     * 重复点击 = 催办（重发指令）；今日已 CONFIRMED 则幂等返回。
+     */
+    @POST("policies/{deviceId}/usage-session/start-request")
+    suspend fun requestUsageStart(
+        @Path("deviceId") deviceId: String
+    ): Response<ApiResponse<UsageStartRequestDto>>
+
     // === 延时审批工单（孩子申请延长使用时长，须经家长审批） ===
     @GET("devices/{deviceId}/usage-delay/tickets")
     suspend fun getUsageDelayTickets(

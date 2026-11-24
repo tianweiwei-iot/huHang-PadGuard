@@ -1,8 +1,5 @@
 package com.padguard.server.service
 
-import com.padguard.server.common.Audience
-import com.padguard.server.common.BizException
-import com.padguard.server.common.ParentErr
 import com.padguard.server.common.SERVER_ZONE_ID
 import com.padguard.server.domain.UsageLog
 import com.padguard.server.dto.*
@@ -12,14 +9,12 @@ import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.InstalledAppRepository
 import com.padguard.server.repository.UsageLogRepository
 import com.fasterxml.jackson.databind.ObjectMapper
-import org.springframework.data.domain.Pageable
 import org.springframework.stereotype.Service
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
 @Service
@@ -38,7 +33,7 @@ class StatisticsService(
 
     /**
      * 今日用量缓存：孩子端每 10 秒上行一次，家长端既有 10 秒轮询兜底、又新增 WS 实时推送，
-     * 二者都会频繁调用 [today]。每次都重扫全天的 usage_logs + 反序列化 payload 并不便宜，
+     * 二者都会频繁调用 [today]。每次都重扫全天日志并反序列化 payload 并不便宜，
      * 故在此做一层短 TTL 缓存（[TODAY_CACHE_TTL_MS]）：
      * - 新日志入库时由 [invalidateToday] 失效，保证推送/轮询拿到的是最新值；
      * - 两次入库之间的轮询直接命中缓存，省去重扫与反序列化。
@@ -48,6 +43,19 @@ class StatisticsService(
     private data class CachedToday(val dto: UsageStatsDto, val ts: Long)
     private companion object {
         const val TODAY_CACHE_TTL_MS = 15_000L
+
+        /** 网址统计只需要这两类日志，把过滤下推到 SQL，避免把全量日志捞回来 */
+        val WEB_TYPES = listOf("URL_VISIT", "URL_BLOCKED")
+
+        /** 单应用历史的来源类型 */
+        val APP_ONLY = listOf(UsageAggregator.TYPE_APP)
+
+        /**
+         * 单应用历史的返回上限。重度使用的应用，月视图按"一次打开"粒度可达数千条，
+         * 一次性全量返回会撑大 HTTP 响应、拖慢家长端渲染；服务端截断到最近的 N 条
+         * （已按时间倒序）既够家长回溯，也避免无界增长。N 取 500 是"一个月每天约 16 次"的余量。
+         */
+        const val APP_USAGE_HISTORY_MAX = 500
     }
 
     /** 新 usage 日志入库后调用，使该设备接下来的 today() 重算而非命中旧缓存 */
@@ -61,40 +69,47 @@ class StatisticsService(
         if (cached != null && System.currentTimeMillis() - cached.ts < TODAY_CACHE_TTL_MS) {
             return cached.dto
         }
+        // 过期条目顺手摘除：设备一旦停止上报，其 todayCache 条目在进程生命周期内永不失效会无限堆积
+        // （invalidateToday 只在收到新日志时触发），形成缓慢内存泄漏。访问到过期项即移除，
+        // 让缓存随"曾见过的设备数"自然回落，而非无界增长。
+        if (cached != null) {
+            todayCache.remove(deviceId, cached)
+        }
         val (start, end) = dayRange(0)
-        val logs = usageLogRepository.findByDeviceIdAndTimestampBetween(deviceId, start, end)
-        val idx = PayloadIndex(logs, ::parsePayload)
+        val agg = aggregate(deviceId, start, end)
         // 头条「今日已用」唯一权威口径：
         // 设备当日存在进行中的使用会话时，必须取 UsageSession 服务端派生的已用时长
         // （= 墙钟流逝、封顶到额度），与孩子端首页、锁机判定三端同源；
         // 否则（未开始计时 / 离线）才回退到上报累计用量的当天 MAX，避免两端数字定义不一致
         // 而长期对不上（详见 [com.padguard.server.service.UsageSessionService.usedMinutesIfActive]）。
-        val totalMin = usageSessionService.usedMinutesIfActive(deviceId) ?: sumMinutes(logs, idx)
-        val appUsages = topApps(logs, idx, 50)
-        val dto = UsageStatsDto(deviceId, todayStr(), totalMin, appUsages)
+        val totalMin = usageSessionService.usedMinutesIfActive(deviceId) ?: agg.totalMinutes()
+        val appUsages = agg.topApps(50) { pkg -> null }
+        val dto = UsageStatsDto(deviceId, todayStr(), totalMin, resolveIcons(deviceId, appUsages))
         todayCache[deviceId] = CachedToday(dto, System.currentTimeMillis())
         return dto
     }
 
     fun usage(userId: String, deviceId: String, period: String): StatisticsReportDto {
         requireOwned(userId, deviceId)
-        val days = when (period) { "weekly" -> 7; "monthly" -> 30; else -> 1 }
+        val days = daysOf(period)
         val (start, end) = range(days)
-        val logs = usageLogRepository.findByDeviceIdAndTimestampBetween(deviceId, start, end)
-        val events = deviceEventRepository.findByDeviceIdAndTimestampBetween(deviceId, start, end)
-        val idx = PayloadIndex(logs, ::parsePayload)
+
+        // 一次分页折叠拿到「总量 + 逐日 + 按应用」三份结果：
+        // 旧实现是先全量捞日志，再按天 filter 一遍（30 天 = 30 趟全扫），再来一次按应用 groupBy。
+        val agg = aggregate(deviceId, start, end)
         val daily = (0 until days).map { d ->
-            val (ds, de) = dayRange(d)
-            val dayLogs = logs.filter { (it.timestamp ?: 0) in ds..de }
-            DailyUsageDto(dayStr(d), sumMinutes(dayLogs, idx), dayLogs.count { it.type == "APP_USAGE" })
+            val date = LocalDate.now(zone).minusDays(d.toLong())
+            DailyUsageDto(dayStr(d), agg.minutesOn(date), agg.appLogCountOn(date))
         }
+        val events = deviceEventRepository.findByDeviceIdAndTimestampBetween(deviceId, start, end)
         // 计数下沉到 SQL：原先是捞回该用户全部 ACTIVE 告警再在内存里 count 出属于本设备的，
         // 告警累积后这里会拉回大量用不到的行。
         val alertCount = alertRepository.countByUserIdAndStatusAndDeviceId(userId, "ACTIVE", deviceId).toInt()
         return StatisticsReportDto(
             deviceId = deviceId, period = period, startDate = dayStr(days - 1), endDate = todayStr(),
-            totalUsageMinutes = sumMinutes(logs, idx), dailyUsages = daily,
-            topApps = topApps(logs, idx, 10), violationCount = events.size, alertCount = alertCount
+            totalUsageMinutes = agg.totalMinutes(), dailyUsages = daily,
+            topApps = resolveIcons(deviceId, agg.topApps(10) { pkg -> null }),
+            violationCount = events.size, alertCount = alertCount
         )
     }
 
@@ -107,6 +122,9 @@ class StatisticsService(
      * 之所以早期的 "应用使用历史" 页只能报错：该出口从未实现，而家长端的入口已经通到二级页，
      * 点进去必然落到错误态。这里补上，同时保持与 [topApps] 一致的时区口径（服务端统一时区）。
      *
+     * 读取走分页流式（[UsageLogPager]）：月视图下 APP_USAGE 也可达数万行，
+     * 全量捞回再 filter 包名同样会吃内存。
+     *
      * @param packageName 目标应用包名
      * @param period      daily / weekly / monthly
      */
@@ -118,56 +136,63 @@ class StatisticsService(
     ): List<AppUsageHistoryEntryDto> {
         requireOwned(userId, deviceId)
         if (packageName.isBlank()) return emptyList()
-        val days = when (period) { "weekly" -> 7; "monthly" -> 30; else -> 1 }
+        val days = daysOf(period)
         val (start, end) = range(days)
-        val logs = usageLogRepository.findByDeviceIdAndTimestampBetween(deviceId, start, end)
-        val idx = PayloadIndex(logs, ::parsePayload)
 
         val dateFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd")
         val timeFmt = DateTimeFormatter.ofPattern("HH:mm:ss")
+        val result = ArrayList<AppUsageHistoryEntryDto>()
 
-        return logs.asSequence()
-            .filter { it.type == "APP_USAGE" }
-            .map { idx.of(it) }
-            .filter { it["packageName"] as? String == packageName }
-            .mapNotNull { p ->
-                // 缺 startAt/endAt 的旧日志无法还原"一次打开到关闭"的区间，直接跳过而不是塞 0——
-                // 占位数据会让家长误以为孩子"在某个时间打开了但没关"，比不显示更糟。
-                val s = asLong(p["startAt"]) ?: return@mapNotNull null
-                val e = asLong(p["endAt"]) ?: return@mapNotNull null
-                if (e < s) return@mapNotNull null
-                val startDt = LocalDateTime.ofInstant(Instant.ofEpochMilli(s), zone)
-                val endDt = LocalDateTime.ofInstant(Instant.ofEpochMilli(e), zone)
-                AppUsageHistoryEntryDto(
-                    date = startDt.format(dateFmt),
-                    startTime = startDt.format(timeFmt),
-                    endTime = endDt.format(timeFmt),
-                    usageSeconds = durationSecFrom(p).takeIf { it > 0 } ?: ((e - s) / 1000).toInt()
-                )
-            }
-            .sortedByDescending { "${it.date} ${it.startTime}" }
-            .toList()
+        readLogs(deviceId, start, end, APP_ONLY) { log ->
+            val p = parsePayload(log)
+            if (p["packageName"] as? String != packageName) return@readLogs
+            // 缺 startAt/endAt 的旧日志无法还原"一次打开到关闭"的区间，直接跳过而不是塞 0——
+            // 占位数据会让家长误以为孩子"在某个时间打开了但没关"，比不显示更糟。
+            val s = UsageAggregator.asLong(p["startAt"]) ?: return@readLogs
+            val e = UsageAggregator.asLong(p["endAt"]) ?: return@readLogs
+            if (e < s) return@readLogs
+            val startDt = LocalDateTime.ofInstant(Instant.ofEpochMilli(s), zone)
+            val endDt = LocalDateTime.ofInstant(Instant.ofEpochMilli(e), zone)
+            val sec = durationSecOf(p).takeIf { it > 0 } ?: ((e - s) / 1000).toInt()
+            result += AppUsageHistoryEntryDto(
+                date = startDt.format(dateFmt),
+                startTime = startDt.format(timeFmt),
+                endTime = endDt.format(timeFmt),
+                usageSeconds = sec
+            )
+        }
+        return result.sortedByDescending { "${it.date} ${it.startTime}" }.take(APP_USAGE_HISTORY_MAX)
     }
 
     fun web(userId: String, deviceId: String, period: String): WebActivityStatsDto {
         requireOwned(userId, deviceId)
-        val days = when (period) { "weekly" -> 7; "monthly" -> 30; else -> 1 }
+        val days = daysOf(period)
         val (start, end) = range(days)
-        val logs = usageLogRepository.findByDeviceIdAndTimestampBetween(deviceId, start, end)
-        val idx = PayloadIndex(logs, ::parsePayload)
-        val visits = logs.filter { it.type == "URL_VISIT" }
-        val blocked = logs.filter { it.type == "URL_BLOCKED" }
-        val domains = visits.mapNotNull { domainOf(it, idx) }
-            .groupingBy { it }.eachCount()
-            .toList().sortedByDescending { it.second }.take(10)
+
+        var visits = 0
+        var blocked = 0
+        val domainCounts = HashMap<String, Int>()
+        readLogs(deviceId, start, end, WEB_TYPES) { log ->
+            when (log.type) {
+                "URL_VISIT" -> {
+                    visits++
+                    domainOf(parsePayload(log))?.let { domainCounts.merge(it, 1, Int::plus) }
+                }
+                "URL_BLOCKED" -> blocked++
+                else -> Unit
+            }
+        }
+        val domains = domainCounts.toList().sortedByDescending { it.second }.take(10)
             .map { DomainVisitDto(it.first, it.second, System.currentTimeMillis()) }
-        return WebActivityStatsDto(visits.size, domains, blocked.size)
+        return WebActivityStatsDto(visits, domains, blocked)
     }
 
     fun violations(userId: String, deviceId: String, period: String): ViolationStatsDto {
         requireOwned(userId, deviceId)
-        val days = when (period) { "weekly" -> 7; "monthly" -> 30; else -> 1 }
+        val days = daysOf(period)
         val (start, end) = range(days)
+        // 违规事件量级远小于用量日志（一次违规一条），保持一次性读取；
+        // 若后续事件也开始按秒上报，同样应改为 [UsageLogPager] 式分页。
         val events = deviceEventRepository.findByDeviceIdAndTimestampBetween(deviceId, start, end)
         val byCategory = events.groupingBy { it.type ?: "OTHER" }.eachCount()
         val trend = (0 until days).map { d ->
@@ -194,120 +219,46 @@ class StatisticsService(
         return ExportResultDto(url, "report_${deviceId}_$period.csv", bytes.size.toLong())
     }
 
-    // ---------- 工具 ----------
-
-    /** 从**已解析**的 payload 取时长，避免对同一份 JSON 重复反序列化 */
-    private fun durationSecFrom(payload: Map<String, Any?>): Int {
-        val raw = payload["durationSec"] ?: return 0
-        return when (raw) {
-            is Number -> raw.toInt()
-            is String -> raw.toIntOrNull() ?: 0
-            else -> 0
-        }
-    }
+    // ---------- 聚合与读取 ----------
 
     /**
-     * 汇总一批日志的使用时长（分钟）。
+     * 分页折叠出该设备在 [start, end] 内的用量聚合结果。
      *
-     * ## 上报语义：累计值 + 当天取最大值
-     * 新版孩子端上报的是「当天累计值」（durationSec = 截至当前的当天累计秒），并带 `cumulative=true` 标记。
-     * 同一天会收到多条（每 10s 一条），必须按「天」取最大值才能还原当天真实累计——
-     * 直接求和会把同一条累计值累加 N 次，导致家长端"今日已用"被高估数倍
-     * （2026-10-03 现场：孩子端 3 分钟，家长端 1 小时 40 分）。
-     *
-     * ## 兼容旧版增量日志
-     * 升级前孩子端报的是「增量」且不含 `cumulative` 标记：对这类日志必须求和
-     * （MAX 只会取到单段增量，严重低估）。判别规则：某一天内只要有一条带 `cumulative=true`，
-     * 当天就按 MAX 聚合；否则（全是旧增量）按 SUM 聚合。过渡当天若新旧混合，
-     * 新日志的累计值恒 ≥ 旧增量，MAX 自然取到真实累计，两种写法都能正确还原。
-     *
-     * ## 周期总时长
-     * 跨天调用时（周/月视图）先按天取 MAX 再跨天求和，即得到周期总时长；
-     * 单天调用（今日）则退化为"当天 MAX"，三种调用场景统一正确。
+     * **这是本类唯一读取用量日志的入口**：所有"总时长 / 逐日 / 按应用"都从这一趟折叠里出，
+     * 避免同一批日志为不同指标被反复扫描与反序列化（旧实现月视图要读 30+ 趟）。
      */
-    private fun sumMinutes(logs: List<UsageLog>, idx: PayloadIndex): Int {
-        val typed = logs.filter { it.type == "USAGE_TOTAL" || it.type == "APP_USAGE" }
-        if (typed.isEmpty()) return 0
-        // 优先用 USAGE_TOTAL；若整批没有（旧版孩子端只报 APP_USAGE）才回退 APP_USAGE。
-        // 有 USAGE_TOTAL 时直接忽略 APP_USAGE，避免同一段时长被算两遍。
-        val source = if (typed.any { it.type == "USAGE_TOTAL" }) {
-            typed.filter { it.type == "USAGE_TOTAL" }
-        } else {
-            typed
-        }
-        val totalSec = source
-            .groupBy { LocalDate.ofInstant(Instant.ofEpochMilli(it.timestamp ?: 0), zone) }
-            .values
-            .sumOf { dayLogs ->
-                val cumulative = dayLogs.any { idx.of(it)["cumulative"]?.toString() == "true" }
-                if (cumulative) {
-                    dayLogs.maxOfOrNull { durationSecFrom(idx.of(it)).toLong() } ?: 0L
-                } else {
-                    dayLogs.sumOf { durationSecFrom(idx.of(it)).toLong() }
-                }
-            }
-        return (totalSec / 60).toInt()
+    private fun aggregate(deviceId: String, start: Long, end: Long): UsageAggregator {
+        val aggregator = UsageAggregator(zone, ::parsePayload)
+        readLogs(deviceId, start, end, UsageAggregator.USAGE_TYPES) { aggregator.accept(it) }
+        return aggregator
     }
 
-    /**
-     * 按应用聚合使用明细（时长 + 起止时间 + 图标 + 启动次数）。
-     *
-     * 时长聚合与 [sumMinutes] 同理：上报的是「当天累计值」，需按 (应用, 天) 取 MAX 还原每天真实用量，
-     * 再跨天求和得到周期总用量；旧版增量日志（无 `cumulative` 标记）则按段求和。
-     * 起止时间取全部段 min/max 即还原出当天使用区间；图标按包名回查 installed_apps 补上。
-     */
-    private fun topApps(logs: List<UsageLog>, idx: PayloadIndex, limit: Int): List<AppUsageDto> {
-        val appLogs = logs.filter { it.type == "APP_USAGE" }
-        if (appLogs.isEmpty()) return emptyList()
-
-        val iconOf = installedAppRepository.findByDeviceId(deviceIdOf(appLogs))
-            .associate { it.packageName to it.iconUrl }
-
-        val index = idx
-        return appLogs
-            .groupBy { index.of(it)["packageName"] as? String ?: "unknown" }
-            .map { (pkg, ls) ->
-                val payloads = ls.map { index.of(it) }
-                // 按 (应用, 天) 取 MAX（累计）/ 求和（旧增量），再跨天求和 = 周期总用量
-                val totalSec = ls
-                    .groupBy { LocalDate.ofInstant(Instant.ofEpochMilli(it.timestamp ?: 0), zone) }
-                    .values
-                    .sumOf { dayLogs ->
-                        val cumulative = dayLogs.any { index.of(it)["cumulative"]?.toString() == "true" }
-                        if (cumulative) {
-                            dayLogs.maxOfOrNull { durationSecFrom(index.of(it)).toLong() } ?: 0L
-                        } else {
-                            dayLogs.sumOf { durationSecFrom(index.of(it)).toLong() }
-                        }
-                    }
-                val starts = payloads.mapNotNull { asLong(it["startAt"]) }
-                val ends = payloads.mapNotNull { asLong(it["endAt"]) }
-                AppUsageDto(
-                    packageName = pkg,
-                    appName = payloads.firstNotNullOfOrNull { it["appName"] as? String } ?: pkg,
-                    usageMinutes = (totalSec / 60).toInt(),
-                    iconUrl = iconOf[pkg],
-                    startAt = starts.minOrNull(),
-                    endAt = ends.maxOrNull(),
-                    launchCount = ls.size
-                )
-            }
-            .sortedByDescending { it.usageMinutes }
-            .take(limit)
+    /** 分页读取指定类型的日志并逐条消费（类型过滤在 SQL 侧完成） */
+    private fun readLogs(deviceId: String, start: Long, end: Long, types: List<String>, consume: (UsageLog) -> Unit) {
+        UsageLogPager.read(
+            fetch = { pageable ->
+                usageLogRepository.findByDeviceIdAndTypeInAndTimestampBetween(deviceId, types, start, end, pageable)
+            },
+            consume = consume
+        )
     }
 
-    /** 从这批日志反推设备 ID（聚合图标时需要按设备查台账） */
-    private fun deviceIdOf(logs: List<UsageLog>): String = logs.first().deviceId
-
-    /** 起止时间在 JSON 里可能是数字也可能是字符串，两种都要认 */
-    private fun asLong(raw: Any?): Long? = when (raw) {
-        is Number -> raw.toLong().takeIf { it > 0 }
-        is String -> raw.toLongOrNull()?.takeIf { it > 0 }
-        else -> null
+    /** 按包名回查图标：聚合阶段不碰 DB，避免每折叠一条日志就打一次库 */
+    private fun resolveIcons(deviceId: String, apps: List<AppUsageDto>): List<AppUsageDto> {
+        if (apps.isEmpty()) return apps
+        val iconOf = installedAppRepository.findByDeviceId(deviceId).associate { it.packageName to it.iconUrl }
+        if (iconOf.isEmpty()) return apps
+        return apps.map { if (it.iconUrl == null) it.copy(iconUrl = iconOf[it.packageName]) else it }
     }
 
-    private fun domainOf(log: UsageLog, idx: PayloadIndex): String? {
-        val url = idx.of(log)["url"] as? String ?: return null
+    private fun durationSecOf(payload: Map<String, Any?>): Int = when (val raw = payload["durationSec"]) {
+        is Number -> raw.toInt()
+        is String -> raw.toIntOrNull() ?: 0
+        else -> 0
+    }
+
+    private fun domainOf(payload: Map<String, Any?>): String? {
+        val url = payload["url"] as? String ?: return null
         return runCatching { java.net.URI(url).host }.getOrNull() ?: url.split("/").getOrNull(0)
     }
 
@@ -321,8 +272,15 @@ class StatisticsService(
     private fun requireOwned(userId: String, deviceId: String) =
         ownershipGuard.requireOwned(userId, deviceId)
 
+    private fun daysOf(period: String): Int = when (period) { "weekly" -> 7; "monthly" -> 30; else -> 1 }
+
+    /**
+     * 统计区间统一取半开 `[start, end)`：Spring Data 的 `Between` 与 Kotlin `in ds..de`
+     * 都是**闭区间**，end 若取次日零点整毫秒，恰好落在该时刻的一条日志/事件会
+     * 同时计入相邻两天，trend 求和大于总数。减 1ms 即等价半开，且不漏当天最后 1ms。
+     */
     private fun range(days: Int): Pair<Long, Long> {
-        val end = LocalDate.now(zone).plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+        val end = LocalDate.now(zone).plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1
         val start = LocalDate.now(zone).minusDays((days - 1).toLong()).atStartOfDay(zone).toInstant().toEpochMilli()
         return start to end
     }
@@ -330,7 +288,7 @@ class StatisticsService(
     private fun dayRange(offsetDays: Int): Pair<Long, Long> {
         val day = LocalDate.now(zone).minusDays(offsetDays.toLong())
         val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
-        val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+        val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli() - 1
         return start to end
     }
 
@@ -338,23 +296,4 @@ class StatisticsService(
         LocalDate.now(zone).minusDays(offsetDays.toLong()).format(DateTimeFormatter.ISO_LOCAL_DATE)
 
     private fun todayStr(): String = LocalDate.now(zone).format(DateTimeFormatter.ISO_LOCAL_DATE)
-}
-
-/**
- * 一批日志的 payload 解析索引：保证同一条日志的 JSON 在一次统计请求里只反序列化一次。
- *
- * 统计接口会对同一批日志做多轮遍历（总时长、按应用聚合、按天分桶、域名统计……），
- * 若每轮都重新解析 payload，就是数倍的反序列化开销——而这是纯浪费，
- * 同一条日志的 payload 文本在各轮里完全一致。
- *
- * JPA 实体未重写 equals/hashCode，因此以实例身份作为 HashMap 键是安全的。
- * 未预热的日志回退为现解析，保证调用方漏传时语义依然正确（不会静默返回空 map）。
- */
-private class PayloadIndex(
-    logs: List<UsageLog>,
-    private val parse: (UsageLog) -> Map<String, Any?>
-) {
-    private val cache: Map<UsageLog, Map<String, Any?>> = logs.associateWith(parse)
-
-    fun of(log: UsageLog): Map<String, Any?> = cache[log] ?: parse(log)
 }

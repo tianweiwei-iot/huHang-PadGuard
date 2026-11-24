@@ -1,13 +1,20 @@
 package com.padguard.core.data.repository
 
 import com.padguard.core.common.Logger
+import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.db.BehaviorLogDao
 import com.padguard.core.data.db.BehaviorLogEntity
 import com.padguard.core.data.db.RiskEventDao
 import com.padguard.core.data.db.RiskEventEntity
 import com.padguard.core.data.model.LogType
+import com.padguard.core.data.model.RiskEvent
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
@@ -88,7 +95,16 @@ class LogRepositoryTest {
         private var nextId = 1L
 
         override suspend fun pending(limit: Int): List<RiskEventEntity> =
-            rows.filter { !it.uploaded }.sortedBy { it.timestamp }.take(limit)
+            rows.filter { !it.uploaded }
+                .sortedWith(compareBy({ alertPriority(it.level) }, { it.timestamp }))
+                .take(limit)
+
+        private fun alertPriority(level: String): Int = when (level) {
+            "HIGH" -> 0
+            "NORMAL" -> 1
+            "INFO" -> 2
+            else -> 3
+        }
 
         override suspend fun pendingCount(): Int = rows.count { !it.uploaded }
 
@@ -122,7 +138,7 @@ class LogRepositoryTest {
         Logger.enabled = false
         logDao = FakeLogDao()
         riskDao = FakeRiskDao()
-        repo = LogRepository(logDao, riskDao)
+        repo = LogRepository(logDao, riskDao, TimeProvider())
     }
 
     @After
@@ -175,6 +191,36 @@ class LogRepositoryTest {
     }
 
     @Test
+    fun `HIGH alert jumps ahead of older benign events (priority out-queue)`() = runBlocking {
+        // 先塞一批较早的良性（NORMAL）告警，再raise一条较晚的 HIGH 告警。
+        // 纯 FIFO（按时间升序）会把 HIGH 压在队尾；按 RiskLevel 优先出队后，
+        // HIGH 必须在任意批次都排在最前，不被良性噪声淹没。
+        riskDao.insert(alertEntity("N1", 1_000L).copy(level = RiskLevel.NORMAL.name))
+        riskDao.insert(alertEntity("N2", 2_000L).copy(level = RiskLevel.NORMAL.name))
+        riskDao.insert(alertEntity("N3", 3_000L).copy(level = RiskLevel.INFO.name))
+        riskDao.insert(alertEntity("H1", 9_000L).copy(level = RiskLevel.HIGH.name))
+
+        val batch = repo.takePendingAlerts(limit = 50)
+        assertEquals(4, batch.size)
+        // HIGH 必须排第一，其余保持各自时间序
+        assertEquals("H1", batch.items.first().eventId)
+        assertEquals(listOf("H1", "N1", "N2", "N3"), batch.items.map { it.eventId })
+    }
+
+    @Test
+    fun `only HIGH events taken when benign backlog exceeds batch size`() = runBlocking {
+        // 100 条较早的良性 + 1 条较晚的 HIGH；批次只取 50 条时，优先把 HIGH 拉进批次首部。
+        repeat(100) { i -> riskDao.insert(alertEntity("N$i", i.toLong()).copy(level = RiskLevel.NORMAL.name)) }
+        riskDao.insert(alertEntity("H1", 10_000L).copy(level = RiskLevel.HIGH.name))
+
+        val batch = repo.takePendingAlerts(limit = 50)
+        assertEquals(50, batch.size)
+        assertEquals("H1", batch.items.first().eventId)
+        // 其余 49 条是时间戳最旧的良性事件（同级 FIFO），HIGH 只此一条
+        assertEquals(1, batch.items.count { it.level == RiskLevel.HIGH })
+    }
+
+    @Test
     fun `empty batch mark is a no-op`() = runBlocking {
         val empty = repo.takePendingLogs()
         assertTrue(empty.isEmpty)
@@ -193,5 +239,32 @@ class LogRepositoryTest {
         assertEquals("超限后应回落到软上限 50_000", 50_000L, logDao.pendingCount().toLong())
         val remaining = logDao.pending(3).map { it.logId }
         assertEquals("被丢弃的应是最旧的 B0/B1", listOf("B2", "B3", "B4"), remaining)
+    }
+
+    /**
+     * B：HIGH 级告警在 raise 时触发即时单发，NORMAL/INFO 不触发（避免 MQTT 通道被良性噪声淹没）。
+     * 捕获器用 CompletableDeferred 等实时发送真正完成，断言只发了 HIGH 那一条。
+     */
+    private class CapturingRealtimePublisher : RealtimeAlertPublisher {
+        val events = mutableListOf<RiskEvent>()
+        val done = CompletableDeferred<Unit>()
+        override suspend fun sendNow(event: RiskEvent) {
+            events.add(event)
+            if (!done.isCompleted) done.complete(Unit)
+        }
+    }
+
+    @Test
+    fun `HIGH raise triggers realtime single-shot, NORMAL does not`() = runBlocking {
+        val capturing = CapturingRealtimePublisher()
+        val scopedRepo = LogRepository(logDao, riskDao, TimeProvider(), realtime = capturing)
+        // NORMAL 不应触发实时通道
+        scopedRepo.raise(RiskType.APP_INSTALLED, RiskLevel.NORMAL, emptyMap(), "dev")
+        // HIGH 应触发
+        val high = scopedRepo.raise(RiskType.CONTROL_LOST, RiskLevel.HIGH, emptyMap(), "dev")
+        capturing.done.await() // 等待 HIGH 的实时发送真正完成
+        assertEquals("只有 HIGH 应通过实时通道单发", 1, capturing.events.size)
+        assertEquals(high.eventId, capturing.events.first().eventId)
+        assertEquals(RiskLevel.HIGH, capturing.events.first().level)
     }
 }

@@ -111,9 +111,12 @@ class ScheduleEvaluator @Inject constructor(
     }
 
     fun dayTypeOf(date: LocalDate): DayType = when {
-        holidayProvider.isHoliday(date) -> DayType.HOLIDAY
-        // 调休上班日：虽然是周六，但按工作日规则管控
+        // R-P2-4：调休上班日优先级高于节假日。
+        // 两者同时标记同一天属数据不一致（服务端/内置表冲突），fail-closed 向"工作日"倾斜——
+        // 补班日本应按工作日锁（更严格），节假日则退化按周末放行（更宽松），
+        // 优先 workday 更符合离线管控红线（宁可多锁、不可漏锁）。
         holidayProvider.isWorkdayOverride(date) -> DayType.WEEKDAY
+        holidayProvider.isHoliday(date) -> DayType.HOLIDAY
         date.dayOfWeek == DayOfWeek.SATURDAY || date.dayOfWeek == DayOfWeek.SUNDAY -> DayType.WEEKEND
         else -> DayType.WEEKDAY
     }
@@ -136,8 +139,62 @@ class ScheduleEvaluator @Inject constructor(
         return boundary.toInstant().toEpochMilli()
     }
 
+    /**
+     * 下一次"时段状态可能翻转"的绝对时间戳（R-P2-6）。
+     *
+     * 用于 app 层设置一次精确闹钟：到点唤醒进程立刻复查一次，而不是指望
+     * 15s 轮询恰好落在那个时刻。**这不是可选优化** —— 息屏进入 Doze 后
+     * 协程 `delay()` 不会唤醒 CPU，锁机开始/结束都可能被拖到下一次系统唤醒，
+     * 表现为"说好 21:00 锁，21:20 才锁上"。
+     *
+     * 返回的是"可能"翻转：把 LOCK 与 UNLOCK 规则的起止点都算进去，
+     * 宁可多醒一次（复查后什么都不用做），也不能漏掉真正的翻转时刻。
+     * 无规则 / 未启用时返回 null（调用方应取消已排的闹钟）。
+     *
+     * 只扫描 [LOOKAHEAD_DAYS] 天：覆盖"只在周末生效"这类周规律规则。
+     */
+    fun nextTransitionAt(policy: SchedulePolicy, atMillis: Long = timeProvider.now()): Long? {
+        if (!policy.enabled) return null
+        val rules = policy.rules.filter { it.isWellFormed() }
+        if (rules.isEmpty()) return null
+        val zone = runCatching { ZoneId.of(policy.timezone) }.getOrElse { ZoneId.systemDefault() }
+
+        // 已锁定：解锁时刻本身就是一个必然翻转点，先纳入候选
+        var best: Long? = when (val current = evaluate(policy, atMillis)) {
+            is ScheduleVerdict.Locked -> current.untilMillis.takeIf { it > atMillis }
+            ScheduleVerdict.Unlocked -> null
+        }
+
+        val today = LocalDateTime.ofInstant(Instant.ofEpochMilli(atMillis), zone).toLocalDate()
+        for (offset in 0..LOOKAHEAD_DAYS) {
+            val date = today.plusDays(offset.toLong())
+            var foundInThisDay = false
+            for (rule in rules) {
+                // 只看"这一天真的会生效"的规则：周规律规则不该在工作日制造无谓唤醒
+                if (!dayTypeMatches(rule, date)) continue
+                val startAt = date.atStartOfDay(zone)
+                    .plusMinutes(rule.startMinutes().toLong()).toInstant().toEpochMilli()
+                // 跨零点规则的结束点落在次日
+                val endDate = if (rule.crossesMidnight()) date.plusDays(1) else date
+                val endAt = endDate.atStartOfDay(zone)
+                    .plusMinutes(rule.endMinutes().toLong()).toInstant().toEpochMilli()
+                for (candidate in longArrayOf(startAt, endAt)) {
+                    if (candidate <= atMillis) continue
+                    foundInThisDay = true
+                    if (best == null || candidate < best!!) best = candidate
+                }
+            }
+            // 日期递增：一旦某天出现候选，后面的日子不可能更近
+            if (foundInThisDay) break
+        }
+        return best
+    }
+
     companion object {
         private const val TAG = "ScheduleEvaluator"
+
+        /** 向前看的天数：覆盖"只在周末/节假日生效"的周规律规则 */
+        private const val LOOKAHEAD_DAYS = 8
     }
 }
 

@@ -23,7 +23,7 @@ interface UploadedFileRepository : JpaRepository<UploadedFile, String> {
     /** 易主 / 解绑清理：先取记录拿 storedPath 删磁盘文件，再删记录（否则留下永远扫不到的孤儿文件）。 */
     fun findByDeviceId(deviceId: String): List<UploadedFile>
 
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from UploadedFile f where f.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
@@ -34,6 +34,19 @@ interface UploadedFileRepository : JpaRepository<UploadedFile, String> {
      */
     @Query("select f from UploadedFile f where f.deviceId is not null and f.createdAt < :ts")
     fun findDeviceFilesCreatedBefore(@Param("ts") ts: Long): List<UploadedFile>
+
+    /**
+     * 全量已登记的文件路径（只取 `stored_path` 一列）。
+     *
+     * 磁盘孤儿清扫要反查"盘上有、库里没有"的文件。逐个文件 `existsBy...` 会退化成 N 次
+     * 往返，而一次顺序取单列在几千~几万行规模下只是几十 KB 内存，明显更划算。
+     * 真到百万行级再谈分页/增量扫描（那时磁盘文件数同量级，扫目录本身也要换策略）。
+     *
+     * 返回**字符串列表**而不是 Set：`stored_path` 里既有纯文件名（新数据）也有绝对路径
+     * （早期版本），归一化（取 `File(...).name`）必须交给调用方，否则会把历史文件误判成孤儿。
+     */
+    @Query("select f.storedPath from UploadedFile f")
+    fun findAllStoredPaths(): List<String>
 }
 
 @Repository
@@ -47,7 +60,7 @@ interface ScreenshotRepository : JpaRepository<Screenshot, String> {
      * 走 JPQL 批量 delete（而非 Spring Data 派生删除）：后者要先 SELECT 出全部实体再逐条 DELETE，
      * 截图是本项目体积最大的私有数据，逐条删会在易主瞬间拖出一次长事务。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from Screenshot s where s.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
@@ -58,6 +71,28 @@ interface ScreenshotRepository : JpaRepository<Screenshot, String> {
      */
     @Query("select s from Screenshot s where s.receivedAt < :ts")
     fun findReceivedAtBefore(@Param("ts") ts: Long): List<Screenshot>
+
+    /**
+     * 条件收敛（第 7 批）：仅当截图**仍是 PENDING** 才置 EXPIRED。
+     *
+     * `ExpiredCommandSweeper` 早先用「findFirst → 判 PENDING → 改内存快照 → `save` 整行」，
+     * 与同文件主指令已修掉的 F01 是同一个坑：两次查询之间孩子端上传成功把记录推到
+     * READY 并填好 `fileUrl`，清扫器拿旧快照整行 merge 会把状态打回 EXPIRED、
+     * 把 `fileUrl` 抹成 null —— 图片文件还在磁盘，记录却永远指不到了。
+     * 用 `deviceId + shotId` 双键，避免跨设备误伤；影响 0 行即说明已被别人收敛，直接放弃。
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Transactional
+    @Query(
+        "update Screenshot s set s.status = :expired " +
+            "where s.deviceId = :deviceId and s.shotId = :shotId and s.status = :pending"
+    )
+    fun markExpiredIfPending(
+        @Param("deviceId") deviceId: String,
+        @Param("shotId") shotId: String,
+        @Param("pending") pending: String,
+        @Param("expired") expired: String
+    ): Int
 }
 
 @Repository
@@ -70,12 +105,12 @@ interface LocationTrackRepository : JpaRepository<LocationTrack, String> {
     ): List<LocationTrack>
 
     /** 移动轨迹属儿童行踪隐私，设备易主 / 解绑时必须随设备一起清除。 */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from LocationTrack t where t.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
     /** 仅更新单条轨迹的文字地址，供 [com.padguard.server.service.LocationAddressBackfill] 异步回填，不触动经纬度/时间。 */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("update LocationTrack t set t.address = :address where t.id = :id")
     fun updateAddressById(@Param("id") id: String, @Param("address") address: String)
 
@@ -83,19 +118,20 @@ interface LocationTrackRepository : JpaRepository<LocationTrack, String> {
      * 定位轨迹保留期清理。
      * 轨迹 288 行/天/设备只增不删（~2.1GB/年/设备），是库里第二大增长源；
      * 且属儿童行踪隐私，保留 90 天足够家长回看，超期应当清除。
-     * ts 可空（历史行可能缺定位时间戳），用 coalesce 回落 receivedAt。
-     */
-    /**
-     * 保留期清理。
+     *
+     * R41：判据必须是服务端落库时刻 `receivedAt`，**不能用客户端上报的 `ts`**。
+     * `ts` 来自设备定位/系统时间：调到未来 → 轨迹永远不满足过期条件、表持续膨胀写满磁盘；
+     * 调到过去 → 今天的真实行踪被当成 90 天前数据删掉，家长回看出现空洞。
+     * 与 `UsageLogCleanup` / 截图清理统一口径：清理只看服务端赋值的时间列。
      *
      * 必须显式 @Transactional：`@Modifying` 查询方法不会由 Spring Data 自动开启事务，
      * 调用方（RetentionCleanup）也没有事务边界，否则运行期抛 TransactionRequiredException
      * 被 runCatching 吞成一条 warn —— 表现为"清理任务每天都跑，但表永远不减少"，
      * 最终写满磁盘导致 PG 拒写、全站瘫痪。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Transactional
-    @Query("delete from LocationTrack t where coalesce(t.ts, t.receivedAt) < :ts")
+    @Query("delete from LocationTrack t where t.receivedAt < :ts")
     fun deleteByTsBefore(@Param("ts") ts: Long): Int
 }
 
@@ -133,16 +169,83 @@ interface AlertRepository : JpaRepository<Alert, String> {
     fun countByUserIdAndStatusAndDeviceId(userId: String, status: String, deviceId: String): Long
 
     /** 设备易主 / 解绑时清除该设备的告警，避免下一任家长看到上一任的告警历史。 */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from Alert a where a.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+
+    /**
+     * 家长确认告警：仅 ACTIVE → ACKNOWLEDGED。
+     *
+     * 状态迁移必须带前驱条件（项目红线：终态不可回退靠 DB WHERE，不能"读实体+if+save"）：
+     * 旧实现整行 save 可把已被孩子端自愈关掉的 CLOSED / 后台已处置的 RESOLVED 改回
+     * ACKNOWLEDGED，家长端红点"死而复生"。0 行 = 已被处置，幂等无操作。
+     * WHERE 带上 userId 双保险（调用方 requireOwned 已校验，这里防的是读后并发）。
+     */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        "update Alert a set a.status = 'ACKNOWLEDGED', a.acknowledgedAt = :at " +
+            "where a.id = :id and a.userId = :userId and a.status = 'ACTIVE'"
+    )
+    fun acknowledgeIfActive(
+        @Param("id") id: String, @Param("userId") userId: String, @Param("at") at: Long
+    ): Int
+
+    /**
+     * 家长关闭告警：ACTIVE/ACKNOWLEDGED → CLOSED（含可选处理说明追加）。
+     * RESOLVED（后台已处置）与 CLOSED 不可回退；0 行 = 已在终态，幂等无操作。
+     */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        "update Alert a set a.status = 'CLOSED', a.resolvedAt = :at " +
+            "where a.id = :id and a.userId = :userId and a.status in ('ACTIVE', 'ACKNOWLEDGED')"
+    )
+    fun closeIfOpen(
+        @Param("id") id: String, @Param("userId") userId: String, @Param("at") at: Long
+    ): Int
+
+    /** 关闭成功后追加处理说明（仅仍在 CLOSED 态时生效，纯展示字段，并发被后台改走则放弃追加）。 */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("update Alert a set a.message = concat(coalesce(a.message, ''), :suffix) where a.id = :id and a.status = 'CLOSED'")
+    fun appendCloseNoteIfStillClosed(@Param("id") id: String, @Param("suffix") suffix: String): Int
+
+    /**
+     * 孩子端自愈关闭某 (deviceId, category) 下全部 ACTIVE 告警。
+     *
+     * 旧实现"查出 ACTIVE 快照→内存置 CLOSED→saveAll"与家长 acknowledge / 后台 closeAlert
+     * 并发时互相整行覆盖（后提交者赢）。改为单条带状态条件的批量 UPDATE，原子且只动 ACTIVE。
+     */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        "update Alert a set a.status = 'CLOSED', a.resolvedAt = :at " +
+            "where a.deviceId = :deviceId and a.category = :category and a.status = 'ACTIVE'"
+    )
+    fun closeActiveByCategory(
+        @Param("deviceId") deviceId: String, @Param("category") category: String, @Param("at") at: Long
+    ): Int
+
+    /**
+     * 后台处置告警：任意非 RESOLVED 态 → RESOLVED。
+     * 已 RESOLVED 幂等（0 行），不可把终态改回其它状态；家长已 CLOSED 的允许升级为 RESOLVED
+     * （后台处置语义上"更进一步"，且告警表只增不改历史状态字段以外信息）。
+     */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        "update Alert a set a.status = 'RESOLVED', a.resolvedAt = :at " +
+            "where a.id = :id and a.status <> 'RESOLVED'"
+    )
+    fun resolveIfNotResolved(@Param("id") id: String, @Param("at") at: Long): Int
 }
 
 @Repository
 interface PublishedMessageRepository : JpaRepository<PublishedMessage, String> {
     fun findByDeviceIdOrderByPublishedAtDesc(deviceId: String, pageable: Pageable): List<PublishedMessage>
 
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from PublishedMessage m where m.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
@@ -156,7 +259,7 @@ interface GeofenceZoneRepository : JpaRepository<GeofenceZone, String> {
      * 围栏按 deviceId 归属。易主时必须删除：把"上一个孩子的学校"留成新孩子的围栏，
      * 会让新家长收到完全错误的越界告警。重绑后由家长重新配置。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from GeofenceZone g where g.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
@@ -167,7 +270,7 @@ interface UnlockTicketRepository : JpaRepository<UnlockTicket, String> {
     fun findByDeviceIdAndStatus(deviceId: String, status: String): List<UnlockTicket>
 
     /** 未结工单会一直占着家长端"待审批"列表，易主 / 解绑时连同设备一起作废。 */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from UnlockTicket t where t.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
@@ -277,7 +380,7 @@ interface UsageDelayRepository : JpaRepository<UsageDelayTicket, String> {
     fun claimDismiss(@Param("id") id: String, @Param("now") now: Long): Int
 
     /** 易主 / 解绑时连同设备一起作废未结工单。 */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from UsageDelayTicket t where t.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
@@ -287,7 +390,7 @@ interface AppPolicyRepository : JpaRepository<AppPolicy, String> {
     fun findByDeviceId(deviceId: String): List<AppPolicy>
     fun findByDeviceIdAndPackageName(deviceId: String, packageName: String): AppPolicy?
 
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from AppPolicy p where p.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
@@ -304,7 +407,7 @@ interface TimeRestrictionRepository : JpaRepository<TimeRestriction, String> {
 
     fun deleteByDeviceIdAndId(deviceId: String, id: String)
 
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from TimeRestriction r where r.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
@@ -313,7 +416,28 @@ interface TimeRestrictionRepository : JpaRepository<TimeRestriction, String> {
 interface UsageSessionRepository : JpaRepository<UsageSession, String> {
     fun findByDeviceId(deviceId: String): UsageSession?
 
-    @Modifying
+    /**
+     * 延时申请的**并发闸门**：对当日计时行加 `PESSIMISTIC_WRITE` 行锁后再查待审工单。
+     *
+     * [com.padguard.server.service.UsageDelayService.request] 的「查 PENDING → 判空 →
+     * 插工单」是 check-then-act。两个事务（孩子端网络重试 / 双通道上报）在 READ_COMMITTED
+     * 下都读不到对方尚未提交的 PENDING 行，于是各插一张；家长连点同意就变成两笔可批准时长。
+     * 根治一般靠 `(device_id, status)` 的部分唯一索引，但那需要改表结构（本轮未授权）。
+     *
+     * 这里改用**已有的、且 request 本来就会读的** `usage_sessions` 行做串行域：
+     * `SELECT ... FOR UPDATE` 把同一设备的申请排成一列，锁随事务提交释放 —— 锁边界与
+     * 事务边界天然一致，不会出现「JVM 锁在方法内、事务在锁外提交」那种看似加了锁、
+     * 后到者仍读到旧快照的假修复。因为锁在数据库里，**多副本同样有效**，不依赖单副本假设。
+     * 会话行不存在时两个事务都只会抛「今日计时尚未开始」，不会落工单，无需额外保护。
+     *
+     * 只在这一个入口使用：其它读路径（`start` / `reportRest` / `approve`）保持无锁读，
+     * 避免把行锁扩散到心跳与额度累加的高频路径上。
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select u from UsageSession u where u.deviceId = :deviceId")
+    fun findByDeviceIdForUpdate(@Param("deviceId") deviceId: String): UsageSession?
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from UsageSession u where u.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
@@ -338,6 +462,160 @@ interface UsageSessionRepository : JpaRepository<UsageSession, String> {
         @Param("now") now: Long,
         @Param("maxExtendedMinutes") maxExtendedMinutes: Int
     ): Int
+
+    /**
+     * 额度**已耗尽**后家长追加时长时，把耗尽期间的墙钟流逝从计时里剔除（重设计时起点）。
+     *
+     * ## 为什么需要它（"当天时间已达上限，申请解锁加时"场景）
+     * [UsageSessionService.toDto] 用 `remaining = (quota + extended) * 60000 - (now - startEpoch) - rest`
+     * 派生剩余，其中"已用"是**纯墙钟流逝**。额度用完后设备被锁，孩子在锁屏页等家长审批的这段时间
+     * 仍在流逝：若 30 分钟后家长才批准 +30 分钟，`now - startEpoch` 比总额度多出 30 分钟，
+     * 新增的 30 分钟会被这段历史超支**整笔吃掉**，`remainingMs` 仍是 0 ——
+     * 表现为"总时长数字加了，孩子端剩余没变、临时解锁到期立刻又被锁回去"。
+     *
+     * 本方法在 [addExtendedMinutes] 之后调用，把 `startEpoch` 后移到
+     * `now + rest - (quota + 加时前 extended) * minuteMs`，使新剩余精确等于本次追加的分钟数：
+     * 锁屏等待（设备不可用）不属于"使用"，把它从计时里剔除与 [restAccumulatedMs] 的设计一致；
+     * `usedMinutesIfActive` 也随之回到"加时前已用满的额度"，不会倒退到 0、不会凭空多送时长。
+     *
+     * ## 原子性 / 幂等
+     * WHERE 里的"确实已耗尽"是**数据库侧判定**（不是读出来再 if），两个并发批准只会有一个影响 1 行：
+     * 先赢者重设起点后，`now - startEpoch - rest` 变小，后到者的 WHERE 不再成立，天然幂等。
+     * `dayKey` 一并入条件防止跨日会话被误写；`startEpoch is not null` 排除今日未起表。
+     *
+     * @param quotaMinutes 权威当日额度（调用方传实时解析值，不用实体里 start 时锁定的旧值，
+     *                     否则家长当天改过额度会把起点推多/推少，等于白送或白扣时长）
+     * @param minutes 本次**实际**追加的分钟数（命中上限被钳制后可能小于申请值）
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UsageSession u set
+            u.startEpoch = :now + coalesce(u.restAccumulatedMs, 0)
+                - (:quotaMinutes + coalesce(u.extendedMinutes, 0) - :minutes) * :minuteMs,
+            u.updatedAt = :now
+        where u.deviceId = :deviceId
+          and u.dayKey = :dayKey
+          and u.startEpoch is not null
+          and (:now - u.startEpoch - coalesce(u.restAccumulatedMs, 0))
+                > (:quotaMinutes + coalesce(u.extendedMinutes, 0) - :minutes) * :minuteMs
+        """
+    )
+    fun rebaseExpiredSession(
+        @Param("deviceId") deviceId: String,
+        @Param("dayKey") dayKey: String,
+        @Param("now") now: Long,
+        @Param("quotaMinutes") quotaMinutes: Int,
+        @Param("minutes") minutes: Int,
+        @Param("minuteMs") minuteMs: Long
+    ): Int
+
+    /**
+     * 护眼休息上报的**条件累加**（CAS），与 [addExtendedMinutes] 同一范式。
+     *
+     * `reportRest` 原本是「读实体 → 累加 restAccumulatedMs / 追加 restIds → save(整行)」。
+     * 孩子端一次护眼休息结束就上报一次，网络重试、多段休息连续结束、家长端同时刷新
+     * 都可能让两个请求读到同一份旧快照：后提交的整行把前一次累加与去重 id 一起覆盖掉，
+     * 表现为「休息了却仍被计入额度」以及「同一个 restId 被重复扣减」。
+     *
+     * 把累加交给数据库，并把**读到的旧值同时作为写条件**：并发者的影响行数为 0，
+     * 调用方重读重试即可，不会出现静默丢更新。`dayKey` 一并列进条件，防止跨日会话被误写。
+     *
+     * `coalesce` 是给历史行兜底：这两个列是后续迁移加上的，老行可能为 NULL。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UsageSession u set
+            u.restAccumulatedMs = coalesce(u.restAccumulatedMs, 0) + :delta,
+            u.restIds = :newRestIds,
+            u.updatedAt = :now
+        where u.deviceId = :deviceId
+          and u.dayKey = :dayKey
+          and coalesce(u.restAccumulatedMs, 0) = :oldAccum
+          and coalesce(u.restIds, '') = :oldRestIds
+        """
+    )
+    fun appendRestIfUnchanged(
+        @Param("deviceId") deviceId: String,
+        @Param("dayKey") dayKey: String,
+        @Param("delta") delta: Long,
+        @Param("newRestIds") newRestIds: String,
+        @Param("now") now: Long,
+        @Param("oldAccum") oldAccum: Long,
+        @Param("oldRestIds") oldRestIds: String
+    ): Int
+
+    /**
+     * 首次开始计时的**幂等插入**。
+     *
+     * [UsageSessionService.start] 的旧实现用 `save(新实体)` 建行：`save` 对手动主键走
+     * merge（先查再插），两个并发请求都查到「无行」时后提交者撞主键约束，整次请求 500。
+     * 更糟的是它与下面的跨日重置共用「读-改-写」，会把别的请求刚写入的额度整行覆盖。
+     *
+     * `on conflict do nothing` 让「谁先插谁赢」，输家影响 0 行后重读即可，
+     * 不需要吞异常（事务里吞约束异常会让 Hibernate Session 处于不确定状态，随后回滚）。
+     *
+     * **冲突目标必须省略**：本批在真实 H2 2.2.224 上实测 `on conflict (device_id) do nothing`
+     * 直接抛 JdbcSQLSyntaxErrorException（H2 不支持带列的冲突目标，PG 支持）。无目标的
+     * `on conflict do nothing` 在 H2（MODE=PostgreSQL）与 PG16 上都合法，且本表只有主键
+     * 一个唯一约束，语义完全一致。`Repositories.insertIgnoreConflict` 的同型写法已一并修正。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Transactional
+    @Query(
+        value = "insert into usage_sessions " +
+                "(device_id, day_key, start_epoch, quota_minutes, extended_minutes, last_delay_epoch, " +
+                " rest_accumulated_ms, rest_ids, created_at, updated_at) " +
+                "values (:deviceId, :dayKey, :startEpoch, :quotaMinutes, 0, null, 0, '', :now, :now) " +
+                "on conflict do nothing",
+        nativeQuery = true
+    )
+    fun insertIfAbsent(
+        @Param("deviceId") deviceId: String,
+        @Param("dayKey") dayKey: String,
+        @Param("startEpoch") startEpoch: Long,
+        @Param("quotaMinutes") quotaMinutes: Int,
+        @Param("now") now: Long
+    ): Int
+
+    /**
+     * 跨日重置的**条件更新**，与 [addExtendedMinutes] / [appendRestIfUnchanged] 同一范式。
+     *
+     * 旧实现「读出行 → 判 dayKey → 改 7 个字段 → save(整行)」在日切瞬间有两个致命窗口：
+     * 1. 双通道/网络重试让两个请求都读到昨天的快照，各自 `System.currentTimeMillis()`
+     *    写回，后写者把计时起点往后推（重试一次白赚一段可用时长）；
+     * 2. 家长刚批准的 `extendedMinutes`、孩子刚用 CAS 累加的 `restAccumulatedMs/restIds`
+     *    被整行覆盖清零 —— 前面两批做的条件更新全部白做。
+     *
+     * WHERE 把「确实是旧会话」写成数据库侧的判定条件，行锁保证只有一个赢家；
+     * 输家影响 0 行，调用方重读权威行即可，不需要重试（这不是丢更新，是正常的抢占结果）。
+     * `dayKey is null` 是给加列前的历史行兜底，`startEpoch is null` 对应「今日已建行但没确认起点」。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(
+        """
+        update UsageSession u set
+            u.dayKey = :dayKey,
+            u.startEpoch = :startEpoch,
+            u.quotaMinutes = :quotaMinutes,
+            u.extendedMinutes = 0,
+            u.lastDelayEpoch = null,
+            u.restAccumulatedMs = 0,
+            u.restIds = '',
+            u.updatedAt = :now,
+            u.createdAt = case when u.createdAt is null or u.createdAt = 0 then :now else u.createdAt end
+        where u.deviceId = :deviceId
+          and (u.dayKey is null or u.dayKey <> :dayKey or u.startEpoch is null)
+        """
+    )
+    fun startFreshIfStale(
+        @Param("deviceId") deviceId: String,
+        @Param("dayKey") dayKey: String,
+        @Param("startEpoch") startEpoch: Long,
+        @Param("quotaMinutes") quotaMinutes: Int,
+        @Param("now") now: Long
+    ): Int
 }
 
 @Repository
@@ -346,7 +624,7 @@ interface DeviceSettingRepository : JpaRepository<DeviceSetting, String> {
      * 设备设置以 deviceId 为主键（含密码哈希、护眼/应用管控开关等）。
      * 易主时必须删除，重绑后由默认策略重建 —— 留下上任的"设备操作密码"等于给新家长一把解不开的锁。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from DeviceSetting s where s.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 }
@@ -360,7 +638,7 @@ interface PolicyTemplateRepository : JpaRepository<PolicyTemplate, String> {
 interface MediaTaskRepository : JpaRepository<MediaTask, String> {
     fun findByDeviceIdAndKindOrderByStartedAtDesc(deviceId: String, kind: String, pageable: Pageable): List<MediaTask>
 
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from MediaTask t where t.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
 
@@ -380,9 +658,22 @@ interface InstalledAppRepository : JpaRepository<InstalledApp, String> {
     fun findByDeviceIdAndInstalledTrue(deviceId: String): List<InstalledApp>
 
     /** 已装应用清单反映上任孩子的使用习惯，属隐私；易主时清除，重绑后由孩子端重新上报。 */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("delete from InstalledApp a where a.deviceId = :deviceId")
     fun deleteByDeviceId(@Param("deviceId") deviceId: String): Int
+
+    /**
+     * 仍被应用台账引用的图标地址（保留期清理的"不可删清单"）。
+     *
+     * 图标文件也是 `uploaded_files` 里 `device_id` 非空的一行（L-19 修归属时改的），
+     * 于是它天然落进了"设备上传文件超期即删"的范围。但图标与截图/录屏不同：
+     * **它没有生命周期终点** —— 应用一直装着，图标就一直要在。
+     * 一旦被按 90 天清掉，`installed_apps.icon_url` 就指向一个 404，
+     * 而且**永远不会自愈**：下次上报图标内容没变（hash 相同），
+     * `iconUpdate` 直接返回 null，不会重新落盘，家长端从此一片空白图标。
+     */
+    @Query("select a.iconUrl from InstalledApp a where a.iconUrl is not null")
+    fun findAllIconUrls(): List<String>
 }
 
 @Repository
@@ -508,7 +799,7 @@ interface PaymentOrderRepository : JpaRepository<PaymentOrder, String> {
      * 改为条件 UPDATE 后，行锁保证同一订单只有一个事务能抢占成功——
      * 后到的事务在第一个事务提交前阻塞，提交后其 UPDATE 命中 0 行，走幂等返回。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(
         "update PaymentOrder o set o.status = :paidStatus, o.paidAt = :paidAt, o.transactionId = :txId " +
             "where o.orderNo = :orderNo and o.status = :pendingStatus"
@@ -571,7 +862,7 @@ interface PaymentOrderRepository : JpaRepository<PaymentOrder, String> {
      * "事务外调微信 → 事务内原子标记"两段，标记这半段的事务由本注解自己开。
      * 外层若已有事务（如退款回调），REQUIRED 语义下会正常加入，行为不变。
      */
-    @Modifying
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @org.springframework.transaction.annotation.Transactional
     @Query(
         "update PaymentOrder o set o.status = :refundedStatus where o.orderNo = :orderNo and o.status = :paidStatus"
@@ -580,5 +871,42 @@ interface PaymentOrderRepository : JpaRepository<PaymentOrder, String> {
         @Param("orderNo") orderNo: String,
         @Param("refundedStatus") refundedStatus: String,
         @Param("paidStatus") paidStatus: String
+    ): Int
+}
+
+@Repository
+interface UsageStartRequestRepository : JpaRepository<UsageStartRequest, String> {
+    fun findByDeviceIdAndDayKey(deviceId: String, dayKey: String): List<UsageStartRequest>
+
+    /**
+     * 孩子确认「开始计时」：当日全部 PENDING 工单置 CONFIRMED（条件 UPDATE，终态不可回退）。
+     *
+     * 按设备+日期收敛而不是按 requestId：孩子可能从等待页按钮、日切浮层等多个入口确认，
+     * 任何一条回传链路缺失都不该让工单悬空；同设备同日只允许一张有效工单（request 幂等保证），
+     * 所以"全量置 CONFIRMED"与"按 requestId 置"在正常流下等价。
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        "update UsageStartRequest r set r.status = 'CONFIRMED', r.confirmedAt = :now " +
+            "where r.deviceId = :deviceId and r.dayKey = :dayKey and r.status = 'PENDING'"
+    )
+    fun confirmPendingToday(
+        @Param("deviceId") deviceId: String,
+        @Param("dayKey") dayKey: String,
+        @Param("now") now: Long
+    ): Int
+
+    /**
+     * 跨日作废：非今日的 PENDING 工单一律 EXPIRED（与延时工单同型——
+     * 昨天发起没确认的，今天不能凭旧工单"续命"）。
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(
+        "update UsageStartRequest r set r.status = 'EXPIRED' " +
+            "where r.deviceId = :deviceId and r.status = 'PENDING' and r.dayKey <> :today"
+    )
+    fun expireStale(
+        @Param("deviceId") deviceId: String,
+        @Param("today") today: String
     ): Int
 }

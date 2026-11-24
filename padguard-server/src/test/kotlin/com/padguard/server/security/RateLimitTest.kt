@@ -88,6 +88,53 @@ class RateLimitTest {
         repeat(RateLimitCompanion.defaultLimit()) { assertDoesNotThrow { rateLimit.require("no_such_scene", req) } }
         assertThrows(BizException::class.java) { rateLimit.require("no_such_scene", req) }
     }
+
+    /**
+     * 注册是唯一"匿名 + 写库"的入口（还会顺带建试用订阅台账），必须有自己的桶。
+     *
+     * 两个断言缺一不可：
+     * 1. 注册确实按 [RateLimitProperties.register] 计数（而不是落到 10 次的兜底默认值）；
+     * 2. 注册打满**不影响登录** —— 否则攻击者只要把注册桶刷满，就能让同一 NAT 下的
+     *    正常家长全部登录失败（把防护变成打击面）。
+     */
+    @Test
+    fun `register has its own strict bucket and does not block login`() {
+        val req = request("10.0.6.1")
+        repeat(props.register) { assertDoesNotThrow { rateLimit.require("register", req) } }
+        assertThrows(BizException::class.java) { rateLimit.require("register", req) }
+        // 同 IP 的登录是独立桶：注册被限流不应把家长挡在登录门外
+        assertDoesNotThrow { rateLimit.require("login", req, "13800000002") }
+    }
+
+    @Test
+    fun `register threshold is stricter than login`() {
+        assertTrue(
+            props.register < props.login,
+            "注册阈值(${props.register})必须比登录(${props.login})更紧：登录是高频正常行为，注册不是"
+        )
+    }
+
+    /** F-02：两个匿名短信端点必须有自己的计数桶，且不能挤占密码登录的额度。 */
+    @Test
+    fun `sms endpoints have their own buckets and do not block password login`() {
+        val req = request("10.0.7.1")
+        repeat(props.loginSms) { assertDoesNotThrow { rateLimit.require("login_sms", req, "13800000003") } }
+        assertThrows(BizException::class.java) { rateLimit.require("login_sms", req, "13800000003") }
+        // login_sms 打满后，sms_send 与密码登录仍必须是全新计数
+        assertDoesNotThrow { rateLimit.require("sms_send", req, "13800000003") }
+        assertDoesNotThrow { rateLimit.require("login", req, "13800000003") }
+    }
+
+    @Test
+    fun `sms_send has the strictest threshold`() {
+        val req = request("10.0.8.1")
+        repeat(props.smsSend) { assertDoesNotThrow { rateLimit.require("sms_send", req, "13800000004") } }
+        assertThrows(BizException::class.java) { rateLimit.require("sms_send", req, "13800000004") }
+        assertTrue(
+            props.smsSend <= props.loginSms,
+            "发短信阈值(${props.smsSend})不应宽于短信登录(${props.loginSms})：它才是触发外部计费的一侧"
+        )
+    }
 }
 
 /** 访问 RateLimit 的 DEFAULT_LIMIT 私有常量（避免测试里硬编码数字漂移） */

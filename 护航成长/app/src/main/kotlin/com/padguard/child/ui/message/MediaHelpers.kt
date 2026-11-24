@@ -244,12 +244,17 @@ internal fun RemoteImage(url: String, modifier: Modifier = Modifier, downloader:
     DisposableEffect(url) {
         val job = CoroutineScope(Dispatchers.IO).launch {
             val file = runCatching { downloader.download(context, url) }.getOrNull()
-            val bmp = file?.let { runCatching { android.graphics.BitmapFactory.decodeFile(it.absolutePath) }.getOrNull() }
+            val bmp = file?.let { runCatching { decodeSampledBitmap(it.absolutePath) }.getOrNull() }
             withContext(Dispatchers.Main) {
                 if (bmp != null) bitmap = bmp else failed = true
             }
         }
-        onDispose { job.cancel() }
+        onDispose {
+            job.cancel()
+            // 离开组合 / 切换 url 时回收上一帧 Bitmap，避免低端平板 native 内存积压（MED-3）
+            bitmap?.recycle()
+            bitmap = null
+        }
     }
 
     // 局部快照替代 !!：bitmap 是可变状态，先捕获到局部 val 再判空使用（第八轮 P2-6）。
@@ -266,6 +271,22 @@ internal fun RemoteImage(url: String, modifier: Modifier = Modifier, downloader:
             androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(32.dp))
         }
     }
+}
+
+/**
+ * 解码远端图片时按目标边长下采样，避免 [android.graphics.BitmapFactory.decodeFile] 以原始分辨率
+ * 解成 ARGB_8888 在大屏/高清图上直接 OOM（MED-3）。家长端下发的图片尺寸不可控，低端平板尤甚。
+ */
+private fun decodeSampledBitmap(path: String, maxEdge: Int = 1280): android.graphics.Bitmap? {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeFile(path, bounds)
+    val (w, h) = bounds.outWidth to bounds.outHeight
+    if (w <= 0 || h <= 0) return android.graphics.BitmapFactory.decodeFile(path)
+    var sample = 1
+    val longer = maxOf(w, h)
+    while (longer / (sample + 1) > maxEdge) sample += 1
+    val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+    return android.graphics.BitmapFactory.decodeFile(path, opts)
 }
 
 /**
@@ -287,19 +308,27 @@ internal fun RemoteAudio(
         val player = MediaPlayer()
         val job = CoroutineScope(Dispatchers.IO).launch {
             val file = runCatching { downloader.download(context, url) }.getOrNull()
+            // prepare() 是阻塞 IO（解析容器头/建解码器），大素材可达数百毫秒。
+            // 早期实现在 Dispatchers.Main 里 prepare —— 主线程卡顿甚至 ANR。
+            // MediaPlayer 本身无线程亲和性，解析与 start 放 IO 线程；
+            // 只有 Compose 状态（state）与 onDuration 回调切回主线程。
+            if (file == null) {
+                withContext(Dispatchers.Main) { state = "音频加载失败" }
+                return@launch
+            }
+            val durationSec = runCatching {
+                player.setDataSource(file.absolutePath)
+                player.prepare()
+                if (autoPlay) player.start()
+                runCatching { player.duration / 1000 }.getOrDefault(0)
+            }.getOrElse {
+                withContext(Dispatchers.Main) { state = "音频播放失败" }
+                return@launch
+            }
             withContext(Dispatchers.Main) {
-                if (file == null) {
-                    state = "音频加载失败"
-                } else {
-                    runCatching {
-                        player.setDataSource(file.absolutePath)
-                        player.prepare()
-                        if (autoPlay) player.start()
-                        else state = "音频素材：${name.ifBlank { "未命名" }}"
-                        val dur = runCatching { player.duration / 1000 }.getOrDefault(0)
-                        if (dur > 0) onDuration(dur)
-                    }.onFailure { state = "音频播放失败" }
-                }
+                // onDuration 的线程语义保持不变（调用方 extendSession 原本就在主线程被调）
+                if (durationSec > 0) onDuration(durationSec)
+                if (!autoPlay) state = "音频素材：${name.ifBlank { "未命名" }}"
             }
         }
         onDispose {

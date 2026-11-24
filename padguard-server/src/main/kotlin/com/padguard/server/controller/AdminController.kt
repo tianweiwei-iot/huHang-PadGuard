@@ -5,6 +5,7 @@ import com.padguard.server.dto.*
 import com.padguard.server.security.RateLimit
 import com.padguard.server.service.AdminAuthService
 import com.padguard.server.service.AdminService
+import com.padguard.server.service.StorageMaintenanceService
 import org.springframework.web.bind.annotation.*
 
 /**
@@ -26,7 +27,9 @@ import org.springframework.web.bind.annotation.*
 class AdminController(
     private val adminService: AdminService,
     private val adminAuthService: AdminAuthService,
-    private val rateLimit: RateLimit
+    private val rateLimit: RateLimit,
+    /** 存储维护（危险运维动作，独立于只读的监控视图，权限/审计在服务内）。 */
+    private val storageMaintenance: StorageMaintenanceService
 ) {
 
     // ---------- 登录（免鉴权） ----------
@@ -118,6 +121,17 @@ class AdminController(
         @RequestAttribute("adminId") adminId: String,
         @PathVariable id: String
     ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.deleteParent(adminId, id))
+
+    /**
+     * 注销家长账号（不可逆）。用 POST 而非 DELETE：需要提交完整手机号作二次确认，
+     * 语义上是"带载荷的处置动作"，也避免与上面的普通删除在网关/审计上混淆。
+     */
+    @PostMapping("/parents/{id}/erase")
+    fun eraseParent(
+        @RequestAttribute("adminId") adminId: String,
+        @PathVariable id: String,
+        @RequestBody req: AdminEraseParentRequest
+    ): ApiResponse<Map<String, Any>> = ApiResponse.ok(adminService.eraseParent(adminId, id, req.confirmPhone))
 
     // ---------- 设备 ----------
     @GetMapping("/devices")
@@ -276,6 +290,23 @@ class AdminController(
     @GetMapping("/server/logs")
     fun serverLogs(@RequestAttribute("adminId") adminId: String): ApiResponse<List<ServerMetrics.LogLine>> =
         ApiResponse.ok(adminService.serverLogs(adminId))
+
+    /**
+     * 手动清理 `uploads/` 里的磁盘孤儿（盘上有、`uploaded_files` 里没有任何记录的文件）。
+     *
+     * 这类文件保留期清理永远扫不到（那几条都以 DB 记录为起点），而发布脚本会把整个
+     * `uploads/` 复制进安装包 —— 测试样本、历史残留会随包分发。
+     *
+     * `dryRun` **默认 true**：先看数量和样例，确认后再传 `dryRun=false` 真删。
+     * 宽限期服务端夹在 [1,365] 天，不接受 0。
+     */
+    @PostMapping("/server/storage/sweep-orphans")
+    fun sweepOrphanFiles(
+        @RequestAttribute("adminId") adminId: String,
+        @RequestParam(required = false) graceDays: Long?,
+        @RequestParam(required = false, defaultValue = "true") dryRun: Boolean
+    ): ApiResponse<Map<String, Any>> =
+        ApiResponse.ok(storageMaintenance.sweepOrphanFiles(adminId, graceDays, dryRun))
 
     // ---------- 审计 / 告警 ----------
     /**

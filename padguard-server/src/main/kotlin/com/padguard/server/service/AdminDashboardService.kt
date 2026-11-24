@@ -130,7 +130,14 @@ class AdminDashboardService(
             .map { (region, counts) -> NameCount(region, counts.sum()) }
             .sortedByDescending { it.count }
 
-        val alertsOpen = alertRepository.countByStatus("ACTIVE")
+        // 待处理口径 = ACTIVE + ACKNOWLEDGED，与后台铃铛角标（app.js 的
+        // status !== "closed"）和告警列表（AdminAuditService 把 ACKNOWLEDGED 渲染为
+        // "家长已确认"、且仍提供"标记为已处理"按钮）保持一致。
+        // 原来只数 ACTIVE：只要存在任意一条家长已确认未关单的告警，
+        // 首页卡片和铃铛就显示两个不同的数，运营无法信任该 KPI。
+        // CLOSED / RESOLVED 是终态（家长关闭 / 自愈关闭 / 后台关单），不计入。
+        val alertsOpen = alertRepository.countByStatus("ACTIVE") +
+            alertRepository.countByStatus("ACKNOWLEDGED")
 
         val trendSince = trendWindowStart(TREND_DAYS)
         return DashboardCache.Snapshot(

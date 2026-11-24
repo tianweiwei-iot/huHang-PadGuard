@@ -440,6 +440,13 @@ data class UsageSession(
     /** 当前等待家长审批的延时分钟数（>0 表示孩子已提交、家长尚未处理） */
     val pendingDelayMinutes: Int = 0,
     /**
+     * 家长端「开始计时」当日工单（null = 今日家长未发起）。
+     * PENDING = 已发送、等待孩子确认；CONFIRMED = 孩子已确认开始计时。
+     * 家长端计时卡四态：未开始（null 且 !active）/ 已发送等待确认（PENDING）/
+     * 今日已开始（active）/ 今日已用完（active 且剩余 0）。
+     */
+    val startRequest: UsageStartRequest? = null,
+    /**
      * 本端**收到**该快照那一刻的单调时钟读数（SystemClock.elapsedRealtime，毫秒）。
      * 0 表示未记录，此时 [liveRemainingMsAt] 退回墙钟算法。
      */
@@ -471,6 +478,22 @@ data class UsageSession(
         }
         return (remainingMs - advance).coerceAtLeast(0L)
     }
+}
+
+/**
+ * 家长端「开始计时」当日工单状态（[UsageSession.startRequest]）。
+ * 每日计时须孩子确认后才开始：家长发起（PENDING）→ 孩子确认（CONFIRMED）。
+ */
+data class UsageStartRequest(
+    val requestId: String = "",
+    /** PENDING（已发送，等待孩子确认）/ CONFIRMED（孩子已确认开始计时） */
+    val status: String = "PENDING",
+    val createdAt: Long = 0L,
+    /** 孩子确认时刻（服务端墙钟）；未确认为 null */
+    val confirmedAt: Long? = null
+) {
+    val pending: Boolean get() = status == "PENDING"
+    val confirmed: Boolean get() = status == "CONFIRMED"
 }
 
 /**
@@ -782,3 +805,16 @@ data class InstalledApp(
     /** 使用权限是否开启：未取消授权即视为允许使用 */
     val allowed: Boolean get() = !hidden
 }
+
+/**
+ * 设备「使用授权协议」签署状态（说明书 §5.4 合规留存的管控端回显）。
+ *
+ * [signed] 为 false 只表示**未查询到凭证**（旧版本未上报 / 日志尚未上行 / 设备易主清档），
+ * 绝不能渲染成「未同意」——那会把"查不到"伪造成一个关于孩子行为的确定结论。
+ */
+data class AgreementStatus(
+    val signed: Boolean,
+    val version: String? = null,
+    val signedAt: Long? = null,
+    val snMask: String? = null
+)

@@ -2,26 +2,71 @@ package com.padguard.core.data.repository
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import com.padguard.core.data.di.AuthDataStore
 import com.padguard.core.common.Logger
 import com.padguard.core.data.db.PadGuardDatabase
 import com.padguard.core.data.model.BindResult
+import com.padguard.core.data.model.policy.ManagementMode
+import com.padguard.core.data.crypto.CredentialCodec
 import com.padguard.core.data.crypto.KeystoreManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/**
+ * 「需要重新授权」的来源标识（单一事实源，避免各模块手写字符串漂移）。
+ *
+ * 纪律：**谁置位谁复位**。任何自检恢复时只清自己名下那条来源，绝不越权清掉
+ * 别人的引导请求；只有引导流程真正走完（[AuthRepository.clearAllReauthRequired]）才整表收口。
+ */
+object ReauthSource {
+    /** 30 分钟一轮的全量授权自检（DA / 运行时权限 / 特殊权限「曾授予又丢」）。 */
+    const val KEEPER = "keeper"
+
+    /** 卸载防护自检（三层全空，12h 节流的「把家长带回装机引导」）。 */
+    const val UNINSTALL_SHIELD = "uninstallShield"
+
+    /** 家长在授权总览 / 权限引导页主动点「一键补齐」。 */
+    const val MANUAL_REVIEW = "manualReview"
+
+    /** 5 分钟一轮的权限快检命名空间：后接 SpecialPermission.key / notificationListener。 */
+    const val PERM_HEALTH_PREFIX = "permHealth:"
+}
+
+/**
+ * 纯函数：来源集合非空、或旧版遗留 bool 仍为 true，都应进入授权引导。
+ * 抽出来供 JVM 单测锁定「多来源互不踩踏」与「老设备升级兼容」两条语义。
+ */
+fun reauthRequiredOf(sources: Set<String>, legacyFlag: Boolean): Boolean =
+    sources.isNotEmpty() || legacyFlag
+
+/**
+ * 装机首启「管控模式」读取态。
+ *
+ * 不能直接用 `Flow<ManagementMode?>` 驱动入口分流：DataStore 里**键不存在**（家长尚未选）
+ * 与 **Flow 首帧还没读到** 都表现为 null，用 `collectAsState(initial = null)` 无法区分，
+ * 首帧就会误弹选择页（R36 抢跑问题的同型）。把"已读到"显式包进对象：
+ * - Compose 侧 `initial = null` → 尚未读到 → Splash；
+ * - 读到后 [mode] 仍为 null → 家长确实没选过 → 弹二选一页。
+ */
+data class ManagementModeState(val mode: ManagementMode?)
 
 /**
  * 设备绑定凭据仓库。
@@ -90,16 +135,24 @@ class AuthRepository @Inject constructor(
         val DEVICE_ADMIN_PROMPT_ACK = booleanPreferencesKey("device_admin_prompt_ack")
 
         /**
-         * 授权回退自愈标记。
+         * 授权回退自愈标记（**旧版遗留，只读兼容**）。
          *
-         * 一次性授权完成后，若孩子在系统设置里关掉某项关键权限（或国产 ROM 切换权限时
-         * 强制重启 App 把无障碍/录屏授权清空），[com.padguard.child.permission.AuthorizationKeeper]
-         * 会置位本标记，入口分流据此**自动把家长带回一次性授权引导流程重新勾选**，
-         * 实现"授权不会自动丢失"——而不是像以前那样只在后台静默上报告警。
-         * 引导流程走完（[com.padguard.child.consent.OneTimeConsentViewModel.finish] /
-         * [com.padguard.child.consent.OneTimeConsentViewModel.finishAnyway]）即清掉。
+         * 历史上它是一个单一 bool：任何自检发现异常都置 true，而
+         * [com.padguard.child.permission.AuthorizationKeeper] 只要自己那一套权限全齐就无条件写 false。
+         * 结果是「通知代收授权掉失」「卸载防护为 0」「家长点一键补齐」等与 keeper 维度无关的
+         * 引导请求会被 30 分钟一轮的 keeper 静默吞掉（权限页点了没反应 / 掉了却不被拉回）。
+         * 现改为 [REAUTH_SOURCES] 按来源记账；本键仅为老设备升级后不至于丢失既有引导请求而保留，
+         * 新的写入方一律不再写它，[clearAllReauthRequired] 会把它一并复位。
          */
         val REAUTH_REQUIRED = booleanPreferencesKey("reauth_required")
+
+        /**
+         * 需要重新授权的**来源集合**。非空即表示入口分流应把家长带回一次性授权引导。
+         *
+         * 每个自检/入口只增删自己名下那一条来源，彼此不踩踏；引导流程真正走完才由
+         * [clearAllReauthRequired] 权威收口。见 [ReauthSource]。
+         */
+        val REAUTH_SOURCES = stringSetPreferencesKey("reauth_sources")
         /** 家长已在引导页**显式确认已知风险仍要继续**、跳过「设备所有者(DO)」预置的标记（发布包强制首步用）。
          *
          * 见 [com.padguard.child.MainActivity]：发布包把 DO 预置设为装机第一道门，
@@ -108,16 +161,26 @@ class AuthRepository @Inject constructor(
          * 正常部署（恢复出厂 + 扫码 / adb 预置）不会触发它，DO 始终就位。
          */
         val DEVICE_OWNER_PROMPT_ACK = booleanPreferencesKey("device_owner_prompt_ack")
+
+        /**
+         * 家长在装机首启二选一的**管控模式**（硬 / 软），与设备实际权限等级 ControlMode 解耦。
+         *
+         * 键不存在（null）表示尚未选择，入口分流据此先弹选择页；一旦选择即长期保留，
+         * 解绑（[clearDeviceBinding]）不清除——它是设备级选择而非家庭账号数据。
+         * 只有整机清空（[clear]：卸载 / 恢复出厂 / 换家庭）才会重置，下次装机重新征求。
+         * 切换模式只改本键，不动两档各自的授权与策略配置，做到"互不影响"。
+         */
+        val MANAGEMENT_MODE = stringPreferencesKey("management_mode")
     }
 
     /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
-    val deviceId: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+    val deviceId: Flow<String> = preferences()
         .map { it[Keys.DEVICE_ID].orEmpty() }
 
     val isBound: Flow<Boolean> = deviceId.map { it.isNotBlank() }
 
     /** 已同意的协议版本；为空表示尚未同意（受限预览模式）。 */
-    val agreementVersion: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+    val agreementVersion: Flow<String> = preferences()
         .map { it[Keys.AGREEMENT_VERSION].orEmpty() }
 
     /** 是否已同意当前版本协议 —— 入口门禁据此决定是否弹授权弹窗。 */
@@ -125,75 +188,95 @@ class AuthRepository @Inject constructor(
         agreementVersion.map { it == CURRENT_AGREEMENT_VERSION }
 
     /** 被管控端是否已用家庭账号登录（驱动入口分流：未登录→登录页）。 */
-    val isChildLoggedIn: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+    val isChildLoggedIn: Flow<Boolean> = preferences()
         .map { it[Keys.CHILD_LOGGED_IN] == true }
 
     /** 权限引导是否已完成（初次打开一次性授予，后续登录不再重复）。 */
-    val isPermissionsDone: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+    val isPermissionsDone: Flow<Boolean> = preferences()
         .map { it[Keys.PERMISSIONS_DONE] == true }
 
     /** 已登录的家庭账号手机号（仅用于展示）。 */
-    val childPhone: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+    val childPhone: Flow<String> = preferences()
         .map { it[Keys.CHILD_PHONE].orEmpty() }
 
     /** 已登录的家庭账号用户ID。 */
-    val childUserId: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+    val childUserId: Flow<String> = preferences()
         .map { it[Keys.CHILD_USER_ID].orEmpty() }
 
-    val studentName: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+    val studentName: Flow<String> = preferences()
         .map { it[Keys.STUDENT_NAME].orEmpty() }
 
-    val deviceSn: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+    val deviceSn: Flow<String> = preferences()
         .map { it[Keys.DEVICE_SN].orEmpty() }
 
     /** 自定义设备名（家长重命名下发 / 孩子端本地修改都会写入此处，驱动「我的」页展示） */
-    val deviceName: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+    val deviceName: Flow<String> = preferences()
         .map { it[Keys.DEVICE_NAME].orEmpty() }
 
     suspend fun getDeviceId(): String = deviceId.first()
 
     suspend fun getDeviceToken(): String =
-        dec(store.data.catch { emit(emptyPreferences()) }.first()[Keys.DEVICE_TOKEN].orEmpty())
+        dec(preferences().first()[Keys.DEVICE_TOKEN].orEmpty())
 
     suspend fun getMqttUsername(): String =
-        dec(store.data.catch { emit(emptyPreferences()) }.first()[Keys.MQTT_USERNAME].orEmpty())
+        dec(preferences().first()[Keys.MQTT_USERNAME].orEmpty())
 
     suspend fun getMqttPassword(): String =
-        dec(store.data.catch { emit(emptyPreferences()) }.first()[Keys.MQTT_PASSWORD].orEmpty())
+        dec(preferences().first()[Keys.MQTT_PASSWORD].orEmpty())
 
     suspend fun getHmacSecret(): String =
-        dec(store.data.catch { emit(emptyPreferences()) }.first()[Keys.HMAC_SECRET].orEmpty())
+        dec(preferences().first()[Keys.HMAC_SECRET].orEmpty())
 
     /**
      * 敏感凭据落库加密：经 Android Keystore(AES/GCM) 加密为 Base64。
-     * 空串原样返回；加密异常（极老旧设备 Keystore 不可用）降级为明文并告警，
-     * 避免绑定流程因加密失败而中断（安全性降级但不崩）。
+     * 空串原样返回；加密异常（极老旧设备 Keystore 不可用）**绝不降级为明文**——
+     * 明文落盘会把 hmacSecret 等指令签名密钥暴露给 root / 备份提取，构成伪造指令风险。
+     * 改为返回特殊标记，[dec] 据此按"密钥丢失"返回空串，使设备安全回到需重绑状态
+     * （fail-closed，而非默默泄露密钥）。
      */
     private fun enc(plain: String): String {
         if (plain.isEmpty()) return plain
         return runCatching { keystore.encryptToBase64(plain) }
-            .onFailure { Logger.w(TAG) { "encrypt credential failed, plaintext fallback: ${it.message}" } }
-            .getOrElse { plain }
+            .onFailure { Logger.w(TAG) { "encrypt credential failed (Keystore unavailable?); refusing plaintext fallback to avoid leaking secret" } }
+            .getOrElse { ENC_FAILED_MARKER }
     }
 
     /**
-     * 敏感凭据读取解密：先尝试解密；若失败（老版本明文数据 / 密钥变更 / 坏标签）
-     * 回退为原文，保证升级迁移平滑，下次写入即被加密覆盖。
+     * 敏感凭据读取解密。解密失败时**必须区分三种来源**，不能一概回退原文：
+     *
+     * 1. 解密成功 → 当前格式的加密凭据，直接用。
+     * 2. 解密失败 + [CredentialCodec.looksLikeCipherText] 为真 → **Keystore 密钥已销毁**
+     *    （卸载重装后恢复数据 / 换机备份 / 恢复出厂，密钥与安装态绑定）。
+     *    旧实现在这里把 Base64 密文当成 deviceToken 发出去，服务端判 TOKEN_INVALID 打一串
+     *    401；hmacSecret 同时变成密文，指令签名全错。家长端看到的就是「重装后一直连不上」。
+     *    现在返回空串：[CredentialStore][com.padguard.core.transport.http.CredentialStore]
+     *    的 isBound 会如实变 false，不再拿坏令牌空转请求。
+     *    **绝不自动清持久层**——Keystore 在锁屏/系统升级期间可能只是临时不可用，静默清绑定
+     *    会制造另一种「自动退出」；密钥恢复后本方法自然重新可用，确需重绑时由家长走绑定流程覆盖。
+     * 3. 解密失败 + 非密文形态 → 11-01 前的老版本明文，原样返回完成平滑迁移，下次写入即加密。
      */
     private fun dec(cipher: String): String {
-        if (cipher.isEmpty()) return cipher
-        return runCatching { keystore.decryptFromBase64(cipher) }
-            .getOrElse { cipher }
+        // 加密阶段失败的标记：按密钥丢失处理返回空串，触发重绑，绝不泄露/误用。
+        if (cipher == ENC_FAILED_MARKER) return ""
+        return when (val r = CredentialCodec.resolve(cipher) { keystore.decryptFromBase64(it) }) {
+            is CredentialCodec.Resolution.Plain -> r.value
+            CredentialCodec.Resolution.Corrupted -> {
+                Logger.w(TAG) {
+                    "credential decrypt failed (Keystore key lost?); dropping cipher text instead of sending it as a token"
+                }
+                ""
+            }
+        }
     }
 
     suspend fun getTenantId(): String =
-        store.data.catch { emit(emptyPreferences()) }.first()[Keys.TENANT_ID].orEmpty()
+        preferences().first()[Keys.TENANT_ID].orEmpty()
 
     suspend fun getDeviceSn(): String =
-        store.data.catch { emit(emptyPreferences()) }.first()[Keys.DEVICE_SN].orEmpty()
+        preferences().first()[Keys.DEVICE_SN].orEmpty()
 
     suspend fun getStudentName(): String =
-        store.data.catch { emit(emptyPreferences()) }.first()[Keys.STUDENT_NAME].orEmpty()
+        preferences().first()[Keys.STUDENT_NAME].orEmpty()
 
     /** 持久化自定义设备名（家长下发或孩子本地修改共用） */
     suspend fun saveDeviceName(name: String) {
@@ -211,6 +294,10 @@ class AuthRepository @Inject constructor(
             prefs[Keys.TOKEN_EXPIRES_AT] = result.expiresAt
             prefs[Keys.BOUND_AT] = System.currentTimeMillis()
             prefs[Keys.DEVICE_SN] = deviceSn
+            // 服务端绑定响应下发的多租户标识（契约 V1.1）：非空才写，避免用空串覆盖既有值。
+            // baseUrl / mqttBroker 不在此落盘——它们由 TransportSettings 经 EndpointSafety 闸门统一持有与持久化，
+            // 这里写会制造第二份真相源。
+            if (result.tenantId.isNotBlank()) prefs[Keys.TENANT_ID] = result.tenantId
         }
     }
 
@@ -223,7 +310,7 @@ class AuthRepository @Inject constructor(
     }
 
     /** 孩子端自定义昵称（实时同步至服务端 + 家长端）。 */
-    val childNickname: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+    val childNickname: Flow<String> = preferences()
         .map { it[Keys.CHILD_NICKNAME].orEmpty() }
 
     suspend fun saveChildNickname(nickname: String) {
@@ -231,7 +318,7 @@ class AuthRepository @Inject constructor(
     }
 
     /** 孩子端自定义头像 URL（由 /device/avatar 上传后返回，实时同步至服务端 + 家长端）。 */
-    val childAvatar: Flow<String> = store.data.catch { emit(emptyPreferences()) }
+    val childAvatar: Flow<String> = preferences()
         .map { it[Keys.CHILD_AVATAR].orEmpty() }
 
     suspend fun saveChildAvatar(url: String) {
@@ -271,11 +358,11 @@ class AuthRepository @Inject constructor(
 
     /** 已记录的账号 +（空）密码。密码不再持久化，第二个元素恒为空串。 */
     val rememberedCredentials: Flow<Pair<String, String>> =
-        store.data.catch { emit(emptyPreferences()) }
+        preferences()
             .map { it[Keys.CHILD_PHONE].orEmpty() to "" }
 
     /** 是否开启了「记住账号密码」。 */
-    val isRemembered: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+    val isRemembered: Flow<Boolean> = preferences()
         .map { it[Keys.CHILD_REMEMBER] == true }
 
     /** 清除已记录的账号密码（只清记录，不退出登录、不影响已绑定设备）。 */
@@ -295,6 +382,19 @@ class AuthRepository @Inject constructor(
     companion object {
         private const val TAG = "AuthRepository"
 
+        /**
+         * 加密失败标记（非任何合法密文前缀，[dec] 据此与真实密文区分）。
+         * 仅当 Keystore 加密抛异常时由 [enc] 写入，读取时按"密钥丢失"返回空串，
+         * 设备安全回到需重绑状态，绝不把敏感凭据明文落盘。
+         */
+        private const val ENC_FAILED_MARKER = "__PADGUARD_ENC_FAILED__"
+
+        /**
+         * 读侧自愈订阅的重试间隔（见 [preferences]）：太短会在文件持续损坏时高频重读 IO，
+         * 太长则恢复后要多等一会儿才追上最新值；5 秒对状态类数据足够灵敏。
+         */
+        private const val PREFS_READ_RETRY_MS = 5_000L
+
         /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
         const val CURRENT_AGREEMENT_VERSION = "1.0.0"
 
@@ -303,15 +403,20 @@ class AuthRepository @Inject constructor(
          *
          * **每次往「一次性授权」清单里新增用户必须参与的项，都必须 +1**，
          * 否则存量设备不会补齐新增项（缺失表现为静默失效，家长无从察觉）。
+         *
+         * v2（授权专项）：清单新增「电池优化白名单 / 闹钟和提醒（精确闹钟） / 通知 /
+         * 厂商自启动与后台弹出界面」四项。存量设备升级后 `isConsentDone` 变 false，
+         * 入口分流会补跑一次引导；流水线按真实状态跳过已就绪项，只带家长办新增的几项，
+         * 不会把已经开好的开关再拨一遍。
          */
-        const val CONSENT_VERSION_CURRENT = 1
+        const val CONSENT_VERSION_CURRENT = 2
     }
 
     /**
      * 已完成的装机引导版本；0 表示从未走过引导。
      * 入口分流据此决定是否需要展示一次性授权页：低于 [CONSENT_VERSION_CURRENT] 就补一次。
      */
-    val consentVersion: Flow<Int> = store.data.catch { emit(emptyPreferences()) }
+    val consentVersion: Flow<Int> = preferences()
         .map { it[Keys.CONSENT_VERSION] ?: 0 }
 
     /** 一次性授权是否已做到当前版本（幂等判定，直接驱动入口分流）。 */
@@ -329,42 +434,152 @@ class AuthRepository @Inject constructor(
      * 家长是否已明确跳过 DA 引导（见 [Keys.DEVICE_ADMIN_PROMPT_ACK]）。
      * 入口分流据此决定是否仍因「DA 未激活」强制弹回授权页。
      */
-    val isDeviceAdminPromptAck: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+    val isDeviceAdminPromptAck: Flow<Boolean> = preferences()
         .map { it[Keys.DEVICE_ADMIN_PROMPT_ACK] ?: false }
 
     /** 标记家长已明确跳过 DA 引导，停止强制弹回授权流程。 */
     suspend fun setDeviceAdminPromptAck() {
-        runCatching { store.edit { it[Keys.DEVICE_ADMIN_PROMPT_ACK] = true } }
-            .onFailure { Logger.w(TAG) { "set device admin prompt ack failed" } }
+        editSafely("set device admin prompt ack") { it[Keys.DEVICE_ADMIN_PROMPT_ACK] = true }
     }
 
-    /** 授权回退自愈标记：是否有项在装机后被关掉、需家长重新勾选（见 [Keys.REAUTH_REQUIRED]）。 */
-    val reauthRequired: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
-        .map { it[Keys.REAUTH_REQUIRED] == true }
+    /**
+     * 是否需要重新授权：按来源记账（见 [ReauthSource]），并兼容旧版遗留的单一 bool。
+     * 入口分流只读这一个 Flow，改造对 MainActivity 透明。
+     */
+    val reauthRequired: Flow<Boolean> = preferences()
+        .map { reauthRequiredOf(it[Keys.REAUTH_SOURCES].orEmpty(), it[Keys.REAUTH_REQUIRED] == true) }
 
-    /** 置位"需重新授权"标记，触发入口分流把家长带回引导流程。 */
-    suspend fun setReauthRequired() {
-        runCatching { store.edit { it[Keys.REAUTH_REQUIRED] = true } }
-            .onFailure { Logger.w(TAG) { "set reauth required failed" } }
+    /** 置位一个来源（幂等）；[source] 必须是 [ReauthSource] 里的常量或带命名空间前缀的 key。 */
+    suspend fun setReauthRequired(source: String) {
+        require(source.isNotBlank()) { "reauth source must not be blank" }
+        editSafely("set reauth required($source)") { prefs ->
+            val current = prefs[Keys.REAUTH_SOURCES].orEmpty()
+            if (source !in current) prefs[Keys.REAUTH_SOURCES] = current + source
+        }
     }
 
-    /** 清除"需重新授权"标记（引导流程完成或所有项已就绪时调用）。 */
-    suspend fun clearReauthRequired() {
-        runCatching { store.edit { it[Keys.REAUTH_REQUIRED] = false } }
-            .onFailure { Logger.w(TAG) { "clear reauth required failed" } }
+    /**
+     * 只清除指定来源，**其它来源分毫不动**。
+     * 自检发现「自己那一项恢复了」时必须走这里，不能用 [clearAllReauthRequired]。
+     */
+    suspend fun clearReauthRequired(source: String) {
+        editSafely("clear reauth required($source)") { prefs ->
+            val current = prefs[Keys.REAUTH_SOURCES].orEmpty()
+            if (source !in current) return@editSafely
+            val next = current - source
+            if (next.isEmpty()) prefs.remove(Keys.REAUTH_SOURCES)
+            else prefs[Keys.REAUTH_SOURCES] = next
+        }
+    }
+
+    /** 引导流程真正走完：权威收口，清掉全部来源与旧版遗留 bool。 */
+    suspend fun clearAllReauthRequired() {
+        editSafely("clear all reauth required") { prefs ->
+            prefs.remove(Keys.REAUTH_SOURCES)
+            prefs[Keys.REAUTH_REQUIRED] = false
+        }
+    }
+
+    /**
+     * 原子替换某命名空间下的全部来源，供「一轮自检批量对账」：
+     * 本轮仍掉失的项留在集合里，已恢复 / 不再适用的项自动移除；其它命名空间不受影响。
+     * 集合无变化时不写盘，避免 5 分钟一轮的快检产生无意义 IO。
+     */
+    suspend fun replaceReauthSources(prefix: String, activeKeys: Set<String>) {
+        require(prefix.isNotBlank()) { "reauth namespace prefix must not be blank" }
+        editSafely("replace reauth sources($prefix)") { prefs ->
+            val current = prefs[Keys.REAUTH_SOURCES].orEmpty()
+            val next = current.filterNot { it.startsWith(prefix) }.toSet() +
+                activeKeys.map { prefix + it }
+            if (next == current) return@editSafely
+            if (next.isEmpty()) prefs.remove(Keys.REAUTH_SOURCES)
+            else prefs[Keys.REAUTH_SOURCES] = next
+        }
+    }
+
+    /**
+     * 读侧统一收口（R43）：旧写法 `store.data.catch { emit(emptyPreferences()) }` 是**完结式降级**——
+     * DataStore 读失败（文件损坏 / IO 异常）时发完一张空表，Flow 就此完结；长驻收集方
+     * （入口分流、GuardService 等一直 collect 的调用点）从此**永久失聪**，绑定/登录/授权
+     * 状态定格在失败瞬间的空表快照，之后的任何写入都收不到，只有杀进程重启才恢复。
+     *
+     * 现改为**自愈订阅循环**：
+     * - 失败先发一张空表（保留旧语义——一次性读取 [first] 仍能拿到默认值）；
+     * - 延时 [PREFS_READ_RETRY_MS] 后**重新订阅** store.data，IO 恢复即自动追上最新值；
+     * - 持续失败时靠 [distinctUntilChanged] 去重，空表不会反复下发（下游状态不抖动）；
+     * - 取消必须原样上抛（与 [editSafely] 同口径，禁止把结构化并发取消当读失败吞掉）。
+     */
+    private fun preferences(): Flow<Preferences> = flow {
+        while (true) {
+            try {
+                store.data.collect { emit(it) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Logger.w(TAG, e) { "auth prefs read failed; resubscribing in ${PREFS_READ_RETRY_MS}ms" }
+                emit(emptyPreferences())
+                delay(PREFS_READ_RETRY_MS)
+            }
+        }
+    }.distinctUntilChanged()
+
+    /**
+     * DataStore 写入统一收口（R37）：编辑失败按 warn 记录（保留旧 runCatching 语义），
+     * 但**必须放行 [CancellationException]**——runCatching 会把协程取消当普通失败吞掉，
+     * 已取消的协程继续执行后续逻辑（半取消状态下写盘 / 发通知），破坏结构化并发。
+     */
+    private suspend fun editSafely(what: String, block: (MutablePreferences) -> Unit) {
+        try {
+            store.edit(block)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Logger.w(TAG) { "$what failed" }
+        }
     }
 
     /**
      * 家长是否已显式跳过「设备所有者(DO)」预置引导（发布包强制首步）。
      * 入口分流据此决定是否仍因「未成为 DO」强制停在预置引导页。
      */
-    val isDeviceOwnerPromptAck: Flow<Boolean> = store.data.catch { emit(emptyPreferences()) }
+    val isDeviceOwnerPromptAck: Flow<Boolean> = preferences()
         .map { it[Keys.DEVICE_OWNER_PROMPT_ACK] ?: false }
 
     /** 标记家长已显式跳过 DO 预置（已知风险仍要继续），停止强制预置页。 */
     suspend fun setDeviceOwnerPromptAck() {
-        runCatching { store.edit { it[Keys.DEVICE_OWNER_PROMPT_ACK] = true } }
-            .onFailure { Logger.w(TAG) { "set device owner prompt ack failed" } }
+        editSafely("set device owner prompt ack") { it[Keys.DEVICE_OWNER_PROMPT_ACK] = true }
+    }
+
+    /**
+     * 撤销「已知风险跳过 DO 预置」的旧标记。
+     *
+     * 家长从软管控切回硬管控时必须调用：否则旧的 ack 会让入口分流直接跳过 DO 预置页，
+     * 结果是"选了硬管控却什么都没发生"（设备非 DO、硬管控增强又被双闸门拦住）。
+     * ack 表达的是"这次不预置了"，一旦重新选择硬管控，这个决定即作废。
+     */
+    suspend fun clearDeviceOwnerPromptAck() {
+        editSafely("clear device owner prompt ack") { it.remove(Keys.DEVICE_OWNER_PROMPT_ACK) }
+    }
+
+    /**
+     * 家长选择的管控模式；null = 尚未选择（装机首启需先弹二选一页）。
+     *
+     * 与 [isDeviceOwnerPromptAck] 是两件事：前者是"想用哪档"，后者是"旧版强制 DO 首步的风险放行"。
+     * 新流程里选软管控直接落本键，不再复用 ack 标记表达模式选择。
+     */
+    val managementMode: Flow<ManagementMode?> = preferences()
+        .map { ManagementMode.fromStorage(it[Keys.MANAGEMENT_MODE]) }
+
+    /**
+     * 带"已读到"语义的管控模式读取态，专供入口分流使用（见 [ManagementModeState]）。
+     * 其他只关心当前值的订阅方（如硬管控闸门）直接用 [managementMode] 即可。
+     */
+    val managementState: Flow<ManagementModeState> = preferences()
+        .map { ManagementModeState(ManagementMode.fromStorage(it[Keys.MANAGEMENT_MODE])) }
+
+    /** 记录家长选择的管控模式；切换时只改本键，不动另一档的授权与配置。 */
+    suspend fun setManagementMode(mode: ManagementMode) {
+        editSafely("set management mode") { it[Keys.MANAGEMENT_MODE] = mode.storageValue }
     }
 
     /** 标记权限引导已完成，后续登录不再重复申请。 */

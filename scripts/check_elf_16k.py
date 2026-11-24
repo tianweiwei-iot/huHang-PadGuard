@@ -74,7 +74,7 @@ def main():
         key=lambda x: x.filename,
     )
     print("APK 内 native 库数量: %d" % len(sos))
-    print("覆盖 ABI: %s" % sorted({n.split("/")[1] for n in (i.filename for i in sos)}))
+    print("覆盖 ABI: %s" % sorted({n.split("/")[1] for n in (i.filename for i in sos) if n.count("/") >= 1}))
     print()
 
     print("%-44s %-8s %-12s %-8s %-12s %s" % (
@@ -93,7 +93,7 @@ def main():
             doff = local_data_offset(f, info) if stored else None
             zip_ok = (doff % PAGE == 0) if doff is not None else None
 
-            min_align = min(a for _, _, a in segs)
+            min_align = min((a for _, _, a in segs), default=0)
             elf_ok = min_align >= PAGE and all(
                 (v - o) % PAGE == 0 for o, v, _ in segs)
             ok = elf_ok and (zip_ok is not False)

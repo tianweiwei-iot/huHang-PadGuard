@@ -120,7 +120,7 @@ class GlobalExceptionHandlerTest {
         val resp = MockHttpServletResponse()
         val e = IllegalStateException("duplicate key value violates unique constraint \"uk_usage_logs_log_id\"")
 
-        val entity = handler.handleOther(e, resp)!!
+        val entity = handler.handleOther(e, MockHttpServletRequest(), resp)!!
 
         val body = entity.body as ApiResponse<*>
         assertEquals(ParentErr.SERVER_ERROR, body.code)
@@ -135,16 +135,29 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    fun `unhandled exception on child path uses the device envelope and child error code`() {
+        // 孩子端任何未捕获异常都必须拿到 DeviceApiResponse + 40xxx/50xxx 信封：
+        // 旧兜底固定回家长版 ApiResponse(timestamp, 5001)，孩子端按 serverTime 解析会丢内容。
+        val req = MockHttpServletRequest().apply { requestURI = "/api/v1/device/usage/session" }
+        val entity = handler.handleOther(IllegalStateException("column rest_accumulated_ms does not exist"), req, MockHttpServletResponse())!!
+
+        val body = entity.body as DeviceApiResponse<*>
+        assertEquals(ChildErr.SERVER_ERROR, body.code)
+        assertTrue(body.message?.contains("column rest_accumulated_ms") != true, "不得回传 SQL 细节")
+    }
+
+    @Test
     fun `other parent business errors still return 200 with the code in body`() {
-        // 未被显式映射的业务错误（如设备离线）维持既有约定：200 + body code。
-        // 显式映射（401/403/400/429）之外的错误码不应被波及。
+        // 未被显式映射的业务错误维持既有约定：200 + body code。
+        // 注意：DEVICE_OFFLINE 已在 R-P3-8 被显式映射为 409（"设备不在线"给 4xx 而非假成功），
+        // 故此处改用**真正未映射**的 POLICY_CONFLICT(3002) 来验证 else→200 兜底不被显式映射波及。
         val resp = MockHttpServletResponse()
-        val ex = BizException(ParentErr.DEVICE_OFFLINE, "设备离线，暂无法下发", Audience.PARENT)
+        val ex = BizException(ParentErr.POLICY_CONFLICT, "策略冲突", Audience.PARENT)
 
         val entity = handler.handleBiz(ex, resp)!!
 
         assertEquals(HttpStatus.OK.value(), entity.statusCode.value())
-        assertEquals(ParentErr.DEVICE_OFFLINE, (entity.body as ApiResponse<*>).code)
+        assertEquals(ParentErr.POLICY_CONFLICT, (entity.body as ApiResponse<*>).code)
     }
 
     // ------------------------------------------------------------------
@@ -240,5 +253,35 @@ class GlobalExceptionHandlerTest {
         )
 
         assertEquals(null, result, "响应已提交时必须放弃改写，交由容器处理")
+    }
+
+    // ---------------------------------------------------------------- 异步超时
+
+    @Test
+    fun `async timeout after response committed is not treated as an error`() {
+        // 实时看屏流到 spring.mvc.async.request-timeout 就到点，此时帧早已写出、响应已提交。
+        // 旧实现落到 handleOther 的 "response already committed" 分支 → 每条连接一条 ERROR + 整段堆栈，
+        // 把错误率告警打成假阳性。这里钉死：已提交时静默返回 null。
+        val req = MockHttpServletRequest("GET", "/v1/stream/dev-1/live")
+        val committed = MockHttpServletResponse().apply { setCommitted(true) }
+
+        val result = handler.handleAsyncTimeout(
+            org.springframework.web.context.request.async.AsyncRequestTimeoutException(), req, committed
+        )
+
+        assertEquals(null, result, "响应已提交时不得再改写，也不得记 ERROR")
+    }
+
+    @Test
+    fun `async timeout before response committed maps to 503`() {
+        // 未提交时的语义与 Spring 默认一致：503，让客户端按"稍后重试"处理。
+        val req = MockHttpServletRequest("GET", "/api/v1/device/commands")
+        val resp = MockHttpServletResponse()
+
+        val result = handler.handleAsyncTimeout(
+            org.springframework.web.context.request.async.AsyncRequestTimeoutException(), req, resp
+        )
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE.value(), result!!.statusCode.value())
     }
 }

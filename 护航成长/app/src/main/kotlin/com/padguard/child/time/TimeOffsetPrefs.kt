@@ -17,7 +17,9 @@ import com.padguard.core.common.Logger
  *
  * ## 为什么用 SharedPreferences
  * 只有一个 Long，且读写点在守护服务内（可能跨进程调用），
- * DataStore 的 Flow/事务能力用不上，SP 的 `apply()` 异步落盘对这条路径最轻。
+ * DataStore 的 Flow/事务能力用不上。
+ * 这里用同步 `commit()`：只在值确实变化时写一次（见 [saveIfChanged] 的抖动过滤），
+ * 不会像 apply() 那样在进程被杀时丢掉冷启动初值；与 [TrustedTimePrefs] 同口径。
  */
 object TimeOffsetPrefs {
 
@@ -39,13 +41,15 @@ object TimeOffsetPrefs {
      * 磁盘提交，无脑写会让守护服务在平板待机时持续产生不必要的 I/O。
      */
     fun saveIfChanged(context: Context, offsetMs: Long) {
+        // 0 表示「还没有可用的时间样本」（TimeProvider.seedOffset(0) 会直接 return），
+        // 不是「要把偏移清零」：此时必须保留磁盘上已有的初值，不能覆盖成 0。
         if (offsetMs == 0L) return
         runCatching {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val previous = prefs.getLong(KEY_OFFSET, 0L)
             // 1 秒内的小幅抖动不值得写盘
             if (previous != 0L && kotlin.math.abs(previous - offsetMs) < 1_000L) return
-            prefs.edit().putLong(KEY_OFFSET, offsetMs).apply()
+            prefs.edit().putLong(KEY_OFFSET, offsetMs).commit()
         }.onFailure {
             Logger.w("TimeOffsetPrefs") { "save failed: ${it.message}" }
         }

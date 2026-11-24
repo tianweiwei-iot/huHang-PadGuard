@@ -72,15 +72,17 @@ class TokenAuthenticator(
                     // 只有 401/403 才说明 refresh token 确认失效（服务端已拒绝凭据本身）；
                     // 5xx 等是服务端暂时性问题，清登录态会造成"抖动即登出"。
                     if (refreshResp.code() == 401 || refreshResp.code() == 403) {
-                        tokenManager.clear()
+                        clearIfStillCurrent(refreshToken, noticeFor(refreshResp.code()))
                     }
                     return@withLock null
                 }
 
                 val body = refreshResp.body()
                 if (body == null || body.code != 0 || body.data == null) {
-                    // HTTP 层成功但业务层拒绝：refresh token 已被服务端作废，清登录态。
-                    tokenManager.clear()
+                    // 「HTTP 200 但信封异常 / data 为空」**不能**判定凭据失效：服务端真正的鉴权失败
+                    // 一律走 GlobalExceptionHandler 映射成 401/403，不会回 200。此前这里无条件 clear()，
+                    // 一次网关/反序列化抖动就会把用户踢回登录页（"自动退出"）。保留登录态，
+                    // 放弃本次重试即可，下一个请求会再尝试刷新。
                     return@withLock null
                 }
 
@@ -88,6 +90,30 @@ class TokenAuthenticator(
                 requestWithToken(response.request, body.data.token)
             }
         }
+    }
+
+    /**
+     * 只有「我们发出去的那枚 refresh token 仍是当前登录态」时才允许清空本地会话。
+     *
+     * 典型竞态：旧请求的刷新失败回调晚到，期间用户已在别处重新登录 / 另一路刷新已成功，
+     * 此时无条件 clear() 会把**新会话**一起抹掉 —— 表现为刚登上又被踢回登录页。
+     *
+     * [notice] 会随登录态一起带到登录页：不说明原因就跳回登录页，家长只会认为 App 出故障。
+     */
+    private suspend fun clearIfStillCurrent(sentRefreshToken: String, notice: String) {
+        if (tokenManager.getRefreshToken() == sentRefreshToken) {
+            tokenManager.clearWithReason(notice)
+        }
+    }
+
+    /**
+     * 401 / 403 对家长的解释不同，不能合并成一句"请重新登录"：
+     * - 401：令牌过期或被别处的改密/登出吊销（最常见，服务端 `token_version+1`）；
+     * - 403：账号被冻结／停用，此时让家长"重新登录"是无解的，必须给出联系客服的出路。
+     */
+    private fun noticeFor(code: Int): String = when (code) {
+        403 -> "账号状态已变更（可能已被停用），请重新登录；如仍无法登录请联系客服"
+        else -> "登录状态已过期，请重新登录"
     }
 
     private fun requestWithToken(request: Request, token: String): Request =

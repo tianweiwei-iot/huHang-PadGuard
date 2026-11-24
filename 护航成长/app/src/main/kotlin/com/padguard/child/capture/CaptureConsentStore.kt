@@ -39,6 +39,17 @@ class CaptureConsentStore @Inject constructor(
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val consentFile = File(context.filesDir, CONSENT_FILE_NAME)
 
+    /**
+     * 投影凭据是否由**当前进程**这次授权写入。
+     *
+     * `Parcel.marshall()` 明确保留不了 IBinder：进程被杀 / 重启后反序列化出来的 Intent
+     * 里那枚 MediaProjection binder 已经是死引用。旧实现无条件在启动时 restore，
+     * `hasToken()` 因此假阳性 → 静默起采集服务 → `getMediaProjection()` 抛异常 →
+     * 孩子端又被要求点一次授权（2026-11-07「授权反复丢失」的第二个闭环）。
+     * 现在只在同一进程内允许复用；跨进程一律如实返回「没有令牌」，由无障碍主路接管。
+     */
+    @Volatile private var consentFreshInThisProcess = false
+
     /** 标记/确认无障碍截屏能力已授权（系统级持久授权的本地镜像）。 */
     fun markA11yGranted() {
         prefs.edit().putBoolean(KEY_A11Y_GRANTED, true).apply()
@@ -66,12 +77,20 @@ class CaptureConsentStore @Inject constructor(
             val bytes = p.marshall()
             p.recycle()
             consentFile.writeBytes(bytes)
-            Logger.i(TAG) { "projection consent persisted (${bytes.size} bytes)" }
+            consentFreshInThisProcess = true
+            Logger.i(TAG) { "projection consent persisted (${bytes.size} bytes, current process only)" }
         }.onFailure { Logger.e(TAG, it) { "saveProjectionConsent failed" } }
     }
 
-    /** 读取持久化投影凭据；文件不存在或反序列化失败（IBinder 失效等）返回 null。 */
+    /**
+     * 读取持久化投影凭据。仅当凭据是本进程本次授权写入才返回；跨进程/重启后 IBinder
+     * 必然失效，绝不把死引用当成「已授权」，避免静默起服务后再向孩子弹授权框。
+     */
     fun loadProjectionConsent(): Pair<Int, Intent>? = runCatching {
+        if (!consentFreshInThisProcess) {
+            Logger.i(TAG) { "skip stale projection consent (IBinder cannot survive process restart)" }
+            return null
+        }
         if (!consentFile.exists()) return null
         val bytes = consentFile.readBytes()
         if (bytes.isEmpty()) return null
@@ -86,6 +105,7 @@ class CaptureConsentStore @Inject constructor(
 
     /** 清除持久化投影凭据（不触碰运行时 [ScreenCaptureSession]）。 */
     fun clearProjectionConsent() {
+        consentFreshInThisProcess = false
         runCatching { consentFile.delete() }
     }
 

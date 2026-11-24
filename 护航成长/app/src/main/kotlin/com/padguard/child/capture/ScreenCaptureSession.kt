@@ -43,6 +43,17 @@ object ScreenCaptureSession {
 
     @Volatile private var resultCode: Int = Activity.RESULT_CANCELED
 
+    /**
+     * 本次 consent Intent 是否已被 `getMediaProjection()` 消费。
+     *
+     * Android 14+（本工程 targetSdk 35，实测机 TB330FU / Android 14）**一次用户确认
+     * 只能换取一次 MediaProjection**：投影 stop 之后再用同一个 Intent 调用
+     * `getMediaProjection()` 会抛 SecurityException。旧实现 `stop()` 投影却保留 Intent，
+     * 于是 `hasToken()` 假阳性 → 静默起服务 → 开流中途失败 → 再弹授权框。
+     * 现在用这个标志如实表达「凭据已经用过」，让 [hasToken] 不再骗人。
+     */
+    @Volatile private var consentConsumed = false
+
     @Volatile var mediaProjection: MediaProjection? = null
         private set
 
@@ -53,8 +64,15 @@ object ScreenCaptureSession {
         onLost = listener
     }
 
-    /** 是否已持有可用凭据（已授权未取投影 / 投影仍在，都算可用） */
-    fun hasToken(): Boolean = mediaProjection != null || resultIntent != null
+    /**
+     * 是否已持有**还能换取投影**的凭据：活动投影还在，或用户刚给过一次尚未消费的确认。
+     * 已消费的 consent 不能再算「有令牌」（Android 14+ 一次性语义）。
+     */
+    fun hasToken(): Boolean = projectionHasToken(mediaProjection != null, resultIntent != null, consentConsumed)
+
+    /** 是否需要重新向孩子申请一次系统确认（投影已失且 consent 已消费）。 */
+    fun needsFreshConsent(): Boolean =
+        projectionNeedsFreshConsent(mediaProjection != null, resultIntent != null, consentConsumed)
 
     /**
      * 第一步：只保存授权结果，**不**创建投影。
@@ -68,6 +86,8 @@ object ScreenCaptureSession {
         manager = mgr
         resultCode = code
         resultIntent = data
+        // 用户刚在系统弹窗里确认过，这是一枚全新的、尚未消费的 consent
+        consentConsumed = false
     }
 
     /**
@@ -76,6 +96,10 @@ object ScreenCaptureSession {
      */
     fun obtainProjection(): MediaProjection? {
         mediaProjection?.let { return it }
+        // consent 已消费（投影被 stop / 系统回收）时绝不复用：Android 14+ 必然抛
+        // SecurityException。直接返回 null，调用方走「重新申请一次授权」的明确路径，
+        // 而不是「先静默起服务、开流中途才弹框」。
+        if (consentConsumed) return null
         val mgr = manager ?: return null
         val data = resultIntent ?: return null
         return runCatching {
@@ -99,9 +123,15 @@ object ScreenCaptureSession {
             )
             mediaProjection = projection
             projection
+        }.onSuccess {
+            // 仅在真正拿到投影后才把一次性 consent 标记为已消费：否则 getMediaProjection
+            // 因瞬时竞态（如 mediaProjection 类型前台服务的 appop 尚未被系统激活）抛 SecurityException 时，
+            // 会白白烧掉 Android 14+ 的一次性授权，导致下次本可复用同一 resultIntent 却被迫重新向孩子弹框。
+            consentConsumed = true
         }.onFailure {
-            Logger.e(TAG, it) { "obtain projection failed" }
-            resultIntent = null
+            // 失败时**不要**把持久化的授权事实一起抹掉：resultIntent 留着供诊断与 revoke 清理，
+            // consentConsumed 保持 false，下次可用同一凭据立即重试，无需重新申请授权。
+            Logger.e(TAG, it) { "obtain projection failed (consent retained for retry)" }
         }.getOrNull()
     }
 
@@ -109,27 +139,48 @@ object ScreenCaptureSession {
     fun projection(): MediaProjection? = mediaProjection
 
     /**
-     * 暂停投影（退出看屏/录屏时调用）：停止活动投影实例、释放编解码资源，
-     * **但保留原始授权凭据（resultIntent）**。
+     * 暂停推流（退出看屏/录屏/息屏时调用）：**只停推流，不销毁投影**。
      *
-     * ## 与 [revoke] 的区别（权限钉死架构核心）
-     * 旧实现在此把 resultIntent 一并清空，导致"返回主页再进入看屏"必须重新向孩子弹
-     * 系统录屏授权框。保留凭据后，同一进程内再次看屏可直接复用，全程零弹窗。
-     * 仅当系统真正回收投影（[onStop] 触发）时活动实例被置空，凭据仍保留供复用；
-     * 若凭据已失效（IBinder 死亡），[obtainProjection] 会安全失败并清除凭据。
+     * ## 为什么绝不能在这里 `mediaProjection.stop()`（2026-11-07 授权反复丢失根因）
+     * Android 14+ 的用户确认只能换取一次 MediaProjection。旧实现每轮看屏结束都 `stop()`
+     * 投影，却把同一个 `resultIntent` 留着当"令牌还在"；下次开流复用一次性 consent
+     * 必然抛 SecurityException，`obtainProjection` 的 onFailure 又把 Intent 清空 →
+     * 孩子端再次弹出「是否允许录制屏幕」。服务端 8s 重发开流指令把这个闭环反复重放，
+     * 表现就是"刚刚看屏还要孩子再确认一次授权"。
+     *
+     * 现在投影、常驻 VirtualDisplay 与 ImageReader 在整个进程生命周期内保活，
+     * 多轮看屏复用**同一个**投影实例，不需要再取一次 consent。
+     * 代价：采集前台服务（状态栏投影芯片）在看屏结束后仍可见，直到解绑或系统回收；
+     * 对儿童设备来说这是必要且更透明的取舍，见 [ScreenCaptureService.stopIfIdle]。
      */
     fun suspendProjection() {
-        runCatching { mediaProjection?.stop() }
-        mediaProjection = null
+        // 故意空实现：调用方以为在"挂起"，实际语义是"保留会话，仅停推流"。
+        Logger.i(TAG) { "live stream suspended, projection session kept alive (no re-consent needed)" }
     }
 
     /**
-     * 撤销授权（仅设备解绑时调用）：彻底清空投影实例与原始凭据。
-     * 与 [suspendProjection] 相对——后者保活凭据，本方法销毁凭据。
+     * 撤销授权（仅设备解绑时调用）：彻底清空投影实例与原始凭据，并复位一次性标志。
      */
     fun revoke() {
         runCatching { mediaProjection?.stop() }
         mediaProjection = null
         resultIntent = null
+        consentConsumed = false
     }
 }
+
+/**
+ * 投影凭据状态判定（纯 Kotlin，无 Android 依赖，供 JVM 单测）。
+ *
+ * 修复前的 `hasToken()` = `mediaProjection != null || resultIntent != null`：
+ * 投影被 `stop()` 后 `resultIntent` 仍在，于是返回 true → 静默起服务 →
+ * 复用一次性 consent 失败 → 中途弹授权框。这两条纯函数把「一次性」语义显式钉住。
+ */
+internal fun projectionHasToken(hasProjection: Boolean, hasIntent: Boolean, consumed: Boolean): Boolean =
+    hasProjection || (hasIntent && !consumed)
+
+internal fun projectionNeedsFreshConsent(
+    hasProjection: Boolean,
+    hasIntent: Boolean,
+    consumed: Boolean
+): Boolean = !hasProjection && (!hasIntent || consumed)

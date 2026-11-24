@@ -48,8 +48,33 @@ data class LocationUiState(
     /** 是否已下发「立即定位」指令、正在等待孩子端回传新坐标。 */
     val isLocating: Boolean = false,
     val toast: String? = null,
+    /**
+     * 最近一次成功读到位置/围栏的时刻（墙钟毫秒）。
+     *
+     * 位置页的失败此前**完全不显示**（`error` 字段无人消费）：地图继续画着上一个点，
+     * 家长看不出这是刚刚的位置还是一小时前的。必须把"这份坐标是哪一刻的"钉在界面上，
+     * 否则"孩子现在在学校"这个结论可能建立在过期坐标上。
+     */
+    val lastSuccessAt: Long? = null,
     val error: String? = null
 )
+
+/**
+ * 围栏提交前校验的单一真相源（纯 JVM，无 Android 依赖）。
+ *
+ * 与服务端 `GeofenceService.validateZone` 同口径：UI slider 只是第一层，
+ * 旧版本/深链/被篡改的入参必须在发请求前拦住，避免越界值写进台账后
+ * 越界告警永久失真。抽成顶层对象让契约测试能直接验证边界，而不是靠源码扫描。
+ */
+object GeofenceInputValidator {
+    const val RADIUS_MIN = 100
+    const val RADIUS_MAX = 5000
+
+    fun isValid(zone: GeofenceConfig): Boolean =
+        zone.radiusMeters in RADIUS_MIN..RADIUS_MAX &&
+            zone.centerLatitude.isFinite() && zone.centerLatitude in -90.0..90.0 &&
+            zone.centerLongitude.isFinite() && zone.centerLongitude in -180.0..180.0
+}
 
 @HiltViewModel
 class LocationViewModel @Inject constructor(
@@ -85,6 +110,9 @@ class LocationViewModel @Inject constructor(
     fun refreshLocation() {
         if (deviceId.isBlank()) return
         viewModelScope.launch {
+            // 新一轮尝试开始即清错误：成功路径不再各自清 error（否则"围栏读取失败"会被
+            // 紧随其后的位置成功抹掉），由"新一次尝试"统一复位，语义才是"最近一次刷新的结果"。
+            _uiState.value = _uiState.value.copy(error = null)
             refreshLocationInternal()
             refreshBatteryInternal()
             _uiState.value = applyGeofenceStatus(_uiState.value)
@@ -134,9 +162,16 @@ class LocationViewModel @Inject constructor(
     private suspend fun refreshLocationInternal() {
         locationRepository.getDeviceLocation(deviceId)
             .onSuccess { location ->
-                _uiState.value = applyGeofenceStatus(_uiState.value.copy(location = location))
+                _uiState.value = applyGeofenceStatus(
+                    _uiState.value.copy(
+                        location = location,
+                        // 成功即刷新时刻：
+                        // 角标要说的是"这份坐标是哪一刻的"，而位置成功本身就是最有力的时间证据。
+                        lastSuccessAt = System.currentTimeMillis()
+                    )
+                )
             }
-            .onFailure { _uiState.value = _uiState.value.copy(error = it.message) }
+            .onFailure { _uiState.value = _uiState.value.copy(error = it.message ?: "位置读取失败") }
     }
 
     /** 刷新设备电量（与位置并列，反映设备当前是否在身边 / 是否低电）。 */
@@ -201,6 +236,12 @@ class LocationViewModel @Inject constructor(
     /** 保存某条围栏（id 为空按新建，否则按更新）。 */
     fun saveZone(zone: GeofenceConfig) {
         if (deviceId.isBlank()) return
+        if (!GeofenceInputValidator.isValid(zone)) {
+            _uiState.value = _uiState.value.copy(
+                toast = "围栏参数不合法：半径需在 ${GeofenceInputValidator.RADIUS_MIN}~${GeofenceInputValidator.RADIUS_MAX} 米，坐标需在有效范围内"
+            )
+            return
+        }
         viewModelScope.launch {
             val task = if (zone.id.isBlank()) locationRepository.createGeofence(zone)
             else locationRepository.updateGeofence(zone)

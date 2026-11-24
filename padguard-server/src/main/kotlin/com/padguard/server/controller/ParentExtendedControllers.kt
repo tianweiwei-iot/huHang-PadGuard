@@ -148,7 +148,8 @@ class ParentLocationController(private val geofenceService: GeofenceService) {
 class ParentPolicyExtendedController(
     private val policyExtensionService: PolicyExtensionService,
     private val usageSessionService: UsageSessionService,
-    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard
+    private val ownershipGuard: com.padguard.server.security.DeviceOwnershipGuard,
+    private val usageStartRequestService: UsageStartRequestService
 ) {
 
     @GetMapping("/{deviceId}/time-restrictions")
@@ -268,6 +269,24 @@ class ParentPolicyExtendedController(
             // 当日配额、已用时长、剩余秒数与延时申请——是跨家庭的儿童使用数据泄漏。
             ownershipGuard.requireOwned(userId, deviceId)
             usageSessionService.get(deviceId)
+        }
+    )
+
+    /**
+     * 家长发起「开始计时」：落/复用当日 PENDING 工单 + 下发 START_TIMER_CONFIRM 指令，
+     * 孩子端 force 弹出确认框；孩子点「开始计时」后工单转 CONFIRMED（随 usage-session 轮询同步）。
+     *
+     * 幂等：今日已有 PENDING → 重发指令（催办）；已 CONFIRMED → 原样返回不打扰孩子。
+     * 设备离线时同样落单：指令走 MQTT + 孩子端轮询双通道，上线后取走。
+     */
+    @PostMapping("/{deviceId}/usage-session/start-request")
+    fun requestUsageStart(
+        @RequestAttribute("userId") userId: String,
+        @PathVariable deviceId: String
+    ) = ApiResponse.ok(
+        run {
+            ownershipGuard.requireOwned(userId, deviceId)
+            usageStartRequestService.request(userId, deviceId)
         }
     )
 

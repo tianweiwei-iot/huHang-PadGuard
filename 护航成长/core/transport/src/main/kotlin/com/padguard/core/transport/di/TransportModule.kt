@@ -1,5 +1,6 @@
 package com.padguard.core.transport.di
 
+import android.content.Context
 import com.padguard.core.common.Logger
 import com.padguard.core.transport.BuildConfig
 import com.padguard.core.transport.RealRemoteDataSource
@@ -12,9 +13,11 @@ import com.padguard.core.transport.http.LoginHostInterceptor
 import com.padguard.core.transport.http.PadGuardApi
 import com.padguard.core.transport.http.RetryInterceptor
 import com.padguard.core.transport.mock.MockRemoteDataSource
+import com.padguard.core.transport.security.CertPinTrustManager
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import kotlinx.serialization.json.Json
 import javax.inject.Named
@@ -62,6 +65,7 @@ object TransportModule {
     @Provides
     @Singleton
     fun provideOkHttpClient(
+        @ApplicationContext context: Context,
         authInterceptor: AuthInterceptor,
         hostSelectionInterceptor: HostSelectionInterceptor,
         retryInterceptor: RetryInterceptor
@@ -83,6 +87,17 @@ object TransportModule {
                     .apply { level = HttpLoggingInterceptor.Level.BODY }
             )
         }
+
+        // P0-1 证书固定：阻断导入自定义 CA 的主动中间人（Fiddler/Charles 解密观测）。
+        // 静态 pin 来自 BuildConfig.CERT_PINS；为空时走 TOFU 兜底（首次可信握手记下公钥）。
+        runCatching {
+            val (sf, tm) = CertPinTrustManager.forOkHttp(
+                context,
+                CertPinTrustManager.parsePins(BuildConfig.CERT_PINS)
+            )
+            builder.sslSocketFactory(sf, tm)
+        }.onFailure { Logger.w(TAG) { "cert pin setup failed, falling back to system trust: ${it.message}" } }
+
         return builder.build()
     }
 

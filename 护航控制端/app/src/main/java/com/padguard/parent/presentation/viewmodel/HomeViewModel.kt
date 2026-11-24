@@ -63,6 +63,15 @@ data class HomeUiState(
     /** 各龄档合规默认值 */
     val ageBandDefaults: Map<AgeBand, AgeBandDefault> = emptyMap(),
     val todayUsage: UsageStats? = null,
+    /**
+     * 当日累计加时（分钟，来自服务端 UsageSession.extendedMinutes）。
+     *
+     * 家长批准「延时申请」或「整机使用时间解锁申请」后，服务端会把批准时长累加进
+     * extendedMinutes。首页 Hero 卡此前只用 [effectiveDailyLimitMinutes]（家长配置的**基础**额度）
+     * 算「每日限额 / 剩余」，于是家长明明同意加 30 分钟，首页数字却纹丝不动 ——
+     * 与孩子端首页（quota = 基础额度 + 加时）和时间管控页「当日额度」都不一致。
+     */
+    val extendedMinutes: Int = 0,
     val latestActivity: String? = null,
     val isRefreshing: Boolean = false,
     /**
@@ -76,6 +85,22 @@ data class HomeUiState(
     val hasLoadedOnce: Boolean = false,
     /** 当前选中设备的整机管控是否生效：true=管控中，false=已释放（设备完全可用）。默认 true */
     val managementActive: Boolean = true,
+    /**
+     * 最近一次成功刷新首页数据的时刻（墙钟毫秒）。
+     *
+     * 首页是家长最先看的一屏：设备名、今日用量、管控开关全在这里。
+     * 刷新失败时这些数字仍是旧值，若不标注时间，家长会把"今日 42 分钟"当成此刻的事实。
+     */
+    val lastSuccessAt: Long? = null,
+    /**
+     * 看板用量（30s 兜底轮询 / WS 推送）最近一次失败的原因。
+     *
+     * 与 [error] 分开是必须的：
+     * - [error] 是"设备列表 / 限额"这类**低频配置数据**的失败，只有它们自己重新成功才能清；
+     * - 看板用量是 30s 高频轮询，若也写进 [error]，一次网络抖动就会让横幅挂住——
+     *   后续轮询成功却清不掉，横幅会一直说"刷新失败"，而数字其实早就是新的。
+     */
+    val usageError: String? = null,
     val error: String? = null
 )
 
@@ -183,7 +208,10 @@ class HomeViewModel @Inject constructor(
                 .onSuccess {
                     // 成功即清掉上一次的错误：否则"重试成功后仍显示错误条"，
                     // 家长会以为还是坏的。
-                    _uiState.value = _uiState.value.copy(error = null)
+                    _uiState.value = _uiState.value.copy(
+                        error = null,
+                        lastSuccessAt = System.currentTimeMillis()
+                    )
                     applyDeviceList(it)
                     // 网络已经给出答案（哪怕是"确实没有设备"）——此时才允许退出加载态。
                     _uiState.value = _uiState.value.copy(hasLoadedOnce = true)
@@ -231,13 +259,16 @@ class HomeViewModel @Inject constructor(
             // 选中设备被解绑/已无可选项时，清空其用量数据：
             // 否则首页会残留一台已解绑设备的今日统计，看起来像"还在管控里"。
             todayUsage = if (sel == null) null else current.todayUsage,
+            extendedMinutes = if (sel == null) 0 else current.extendedMinutes,
             latestActivity = if (sel == null) null else current.latestActivity
         )
         if (selectionChanged && sel != null) {
             // 切到另一台设备后必须先清空旧用量：A→B 切换后的一个 RTT 内，
             // B 的名字下若还挂着 A 的今日统计（跨孩子数据串台），家长会读出错误结论。
             // 空值态交给随后的 loadTodayUsage 填充；加载失败显示"—"比显示别人的数据安全。
-            _uiState.value = _uiState.value.copy(todayUsage = null, latestActivity = null)
+            _uiState.value = _uiState.value.copy(
+                todayUsage = null, extendedMinutes = 0, latestActivity = null
+            )
             // 换设备后上一台设备的推送时刻不再有参考意义，必须清零：
             // 否则新设备的第一条轮询响应会被误判为"比推送旧"而丢弃，看板一直空着。
             usagePushAppliedAt = 0L
@@ -261,15 +292,42 @@ class HomeViewModel @Inject constructor(
                     val topApp = stats.appUsages.firstOrNull()
                     _uiState.value = _uiState.value.copy(
                         todayUsage = stats,
+                        // 看板数字的"新鲜度"由用量本身决定：轮询/推送任一成功都算刷新成功，
+                        // 否则角标会把 30s 内刚更新的数字说成"几小时前的"。
+                        lastSuccessAt = System.currentTimeMillis(),
+                        // 用量自己成功了，就清掉"用量失败"这条记录（横幅随数据自愈）
+                        usageError = null,
                         latestActivity = topApp?.let {
                             "使用了 ${it.appName} ${TimeFormat.formatDurationFromMinutes(it.usageMinutes)}"
                         }
                     )
+                    // 当日累计加时随同一轮询刷新：家长批准延时/整机解锁后，首页「每日限额」
+                    // 才能跟着增加，而不是停在家长配置的基础额度上。
+                    loadExtendedMinutes(deviceId)
                 }
                 .onFailure { e ->
                     if (_uiState.value.selectedDeviceId != deviceId) return@onFailure
-                    _uiState.value = _uiState.value.copy(error = e.message)
+                    // 只记在 usageError 上，不动页面级 error：见 HomeUiState.usageError 的说明。
+                    _uiState.value = _uiState.value.copy(usageError = e.message ?: "用量刷新失败")
                 }
+        }
+    }
+
+    /**
+     * 读取当日累计加时（extendedMinutes），补齐首页 Hero 卡的「每日限额」口径。
+     *
+     * 服务端把家长批准的延时 / 整机使用时间解锁时长累加在 UsageSession.extendedMinutes，
+     * 而 [HomeUiState.effectiveDailyLimitMinutes] 只是家长配置的基础额度。两者相加才是
+     * 孩子端实际生效的当日总时长（与孩子端首页 `quota + extended`、时间管控页「当日额度」同源）。
+     *
+     * 失败时保留上一次的值，不把加时误写成 0（否则首页额度会突然缩水、显示"已超额"）。
+     */
+    private fun loadExtendedMinutes(deviceId: String) {
+        viewModelScope.launch {
+            val session = policyRepository.getUsageSession(deviceId).getOrNull() ?: return@launch
+            // 乱序防线：慢响应回来时家长可能已切到另一台设备，不能把 A 的加时写到 B 看板。
+            if (_uiState.value.selectedDeviceId != deviceId) return@launch
+            _uiState.value = _uiState.value.copy(extendedMinutes = session.extendedMinutes)
         }
     }
 
@@ -291,6 +349,9 @@ class HomeViewModel @Inject constructor(
                     usagePushAppliedAt = android.os.SystemClock.elapsedRealtime()
                     _uiState.value = _uiState.value.copy(
                         todayUsage = msg.stats,
+                        // WS 是看板主通道：推送落地即代表看板数字是最新的，同步刷新"哪一刻"。
+                        lastSuccessAt = System.currentTimeMillis(),
+                        usageError = null,
                         latestActivity = topApp?.let {
                             "使用了 ${it.appName} ${TimeFormat.formatDurationFromMinutes(it.usageMinutes)}"
                         }
@@ -374,7 +435,10 @@ class HomeViewModel @Inject constructor(
                 dailyLimitMinutes = tablet?.weekdayLimitMinutes ?: 0,
                 minorMode = minor,
                 ageBandDefaults = defaults,
-                effectiveDailyLimitMinutes = effective
+                effectiveDailyLimitMinutes = effective,
+                // 限额确实读到了就撤掉上一次的失败记录：否则"限额读取失败"会永久挂在横幅上，
+                // 即使后续每次都成功——家长会以为功能坏了。
+                error = null
             )
         }
     }

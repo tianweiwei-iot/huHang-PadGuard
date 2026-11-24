@@ -37,6 +37,15 @@ signing*.properties
 bin/
 gen/
 out/
+# 历史排查遗留的替代构建目录（altbuild.gradle 实验 / R44 临时产物）。
+# 它们与 build/ 同样是编译输出，但名字不匹配 build/ 规则，会污染 git status
+# （实测 600+ 个文件），掩盖真正未入库的源码/迁移脚本。
+build-alt/
+build-r*/
+build-tmp/
+# Python 排查脚本的字节码缓存
+__pycache__/
+*.py[cod]
 
 # ===================== Windows 误建文件 =====================
 nul

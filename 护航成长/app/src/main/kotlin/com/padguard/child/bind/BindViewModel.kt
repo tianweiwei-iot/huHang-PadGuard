@@ -5,8 +5,11 @@ import android.os.Build
 import android.provider.Settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import android.content.Intent
+import com.padguard.core.data.model.BindResult
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.child.permission.DeviceAdminRequest
 import com.padguard.core.transport.TransportSettings
 import com.padguard.core.transport.http.ApiCaller
 import com.padguard.core.transport.http.ApiCode
@@ -47,6 +50,7 @@ class BindViewModel @Inject constructor(
     private val apiCaller: ApiCaller,
     private val padGuardApi: PadGuardApi,
     private val deviceAdminBridge: DeviceAdminBridge,
+    private val deviceAdminRequest: DeviceAdminRequest,
     private val app: Application
 ) : ViewModel() {
 
@@ -55,6 +59,23 @@ class BindViewModel @Inject constructor(
 
     /** 当前生效的服务器地址（绑定欢迎页「高级设置」可修改并持久化，绑定后立即生效）。 */
     val serverUrl: StateFlow<String> = transportSettings.baseUrl
+
+    /**
+     * 服务端绑定码是否已被本 ViewModel 成功消费（R27）。
+     *
+     * 扫码 / NFC 的码经 `BindScreen` 的 `LaunchedEffect(presetCode)` 自动提交；
+     * 绑定成功但停在「激活设备管理员」引导页时（[nextStepAfterBind] 返回 DeviceAdmin，
+     * 尚未 Success、不会触发 onBound 跳转），旋转屏幕 / 配置变更会让组合重建、Effect 重放，
+     * 而 ViewModel 跨配置保留、`code` 仍是 6 位 → 同一个码被提交第二次。
+     * 服务端回「码已使用」，第二次协程把**已绑定成功**的页面覆盖成失败页，
+     * 家长卡在"绑定码无效"里无法继续激活设备管理员，且会重复拉起守护服务。
+     *
+     * 只判 `step == Submitting` 挡不住：第二次提交发生在第一次**已经完成**之后。
+     * 这里记录的是「服务端动作已发生」这一事实，与 UI step 解耦。
+     * 仅在回到欢迎页（明确重新开始一轮绑定）时复位；失败重试不置位，仍可重试。
+     */
+    @Volatile
+    private var bindSucceeded = false
 
     fun setServerUrl(url: String) {
         transportSettings.setBaseUrl(url)
@@ -100,6 +121,7 @@ class BindViewModel @Inject constructor(
     }
 
     fun submit() {
+        if (bindSucceeded || _state.value.step == BindStep.Submitting) return
         val code = _state.value.code
         if (code.length != 6) {
             _state.value = _state.value.copy(errorMessage = "请输入 6 位数字绑定码")
@@ -133,6 +155,7 @@ class BindViewModel @Inject constructor(
      * 只要能连上服务器且账号密码正确即可绑定。
      */
     fun submitByAccount() {
+        if (bindSucceeded || _state.value.step == BindStep.Submitting) return
         val account = _state.value.account
         val pwd = _state.value.accountPassword
         if (account.isBlank() || pwd.isBlank()) {
@@ -151,6 +174,9 @@ class BindViewModel @Inject constructor(
             is ApiResult.Success -> {
                 runCatching {
                     authRepository.saveBindResult(result.value, deviceSn = req.deviceSn)
+                    // 应用服务端绑定响应下发的接入点覆盖（契约 V1.1，私有化部署切换服务器）。
+                    // 仅非空时动作，空值保持构建期配置，故不改变既有部署行为。
+                    applyServerEndpoints(result.value)
                     // 绑定镜像：暖令牌的前置门到此打开——设备有了家长，才允许向孩子补
                     // "是否允许录制屏幕"这类高侵扰确认（装机阶段一次都不弹）。
                     CaptureConsent.markDeviceBound(app, true)
@@ -165,13 +191,17 @@ class BindViewModel @Inject constructor(
                     // 每次启动都崩，设备永远上不了线"。必须验证 + 前台补拉。
                     ensureGuardAlive()
                 }.getOrElse { e ->
+                    // 取消（离开页面 / VM 清理）不是保存失败：放行，避免在已取消的协程里继续改状态（R37）。
+                    if (e is kotlinx.coroutines.CancellationException) throw e
                     _state.value = _state.value.copy(
                         step = BindStep.Failed,
                         errorMessage = "绑定成功但本地凭据保存失败：${e.message}"
                     )
                     return
                 }
-                _state.value = _state.value.copy(step = BindStep.Success)
+                // 绑定码已在服务端消费：此后任何 Effect 重放 / 连点都必须被 submit 守卫挡住。
+                bindSucceeded = true
+                _state.value = _state.value.copy(step = nextStepAfterBind())
             }
             is ApiResult.BizError -> _state.value = _state.value.copy(
                 step = BindStep.Failed,
@@ -186,25 +216,46 @@ class BindViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 绑定成功后应用服务端绑定响应（契约 V1.1）下发的接入点覆盖。
+     *
+     * baseUrl / mqttBroker 统一走 [com.padguard.core.transport.TransportSettings] 的 EndpointSafety 闸门落盘：
+     * 空值不覆盖（保持构建期/既有配置），不安全地址被闸门拒绝且不落盘。tenantId 写入凭据仓库。
+     * 仅当服务端实际返回非空值时才动作，因此**不改变既有部署行为**——
+     * 普通部署的绑定响应里这些字段为空，设备继续沿用构建期接入点。
+     */
+    private suspend fun applyServerEndpoints(result: BindResult) {
+        if (result.baseUrl.isNotBlank()) transportSettings.setBaseUrl(result.baseUrl)
+        if (result.mqttBroker.isNotBlank()) transportSettings.setMqttBroker(result.mqttBroker)
+        if (result.tenantId.isNotBlank()) authRepository.saveTenantId(result.tenantId)
+    }
+
     private suspend fun performBind(code: String) {
         val req = buildBindRequest(code)
         when (val result = apiCaller.call("child-bind") { padGuardApi.bind(req) }) {
             is ApiResult.Success -> {
                 val saved = runCatching {
                     authRepository.saveBindResult(result.value, deviceSn = req.deviceSn)
+                    // 应用服务端绑定响应下发的接入点覆盖（契约 V1.1，私有化部署切换服务器）。
+                    // 仅非空时动作，空值保持构建期配置，故不改变既有部署行为。
+                    applyServerEndpoints(result.value)
                     // 同账号密码方式：绑定镜像在此写入，暖令牌前置门打开。
                     CaptureConsent.markDeviceBound(app, true)
                     // 同上：绑定码方式同样必须在成功后立刻拉起守护服务，否则设备永远离线。
                     GuardService.start(app, "bindSuccess-code")
                     ensureGuardAlive()
                 }.getOrElse { e ->
+                    // 取消（离开页面 / VM 清理）不是保存失败：放行，避免在已取消的协程里继续改状态（R37）。
+                    if (e is kotlinx.coroutines.CancellationException) throw e
                     _state.value = _state.value.copy(
                         step = BindStep.Failed,
                         errorMessage = "绑定成功但本地凭据保存失败：${e.message}"
                     )
                     return
                 }
-                _state.value = _state.value.copy(step = BindStep.Success)
+                // 绑定码已在服务端消费：此后任何 Effect 重放 / 连点都必须被 submit 守卫挡住。
+                bindSucceeded = true
+                _state.value = _state.value.copy(step = nextStepAfterBind())
             }
             is ApiResult.BizError -> _state.value = _state.value.copy(
                 step = BindStep.Failed,
@@ -304,8 +355,47 @@ class BindViewModel @Inject constructor(
         }
 
     fun backToWelcome() {
+        // 明确重新开始一轮绑定：允许再次提交（服务端会换一个新码）。
+        bindSucceeded = false
         _state.value = BindUiState()
     }
+
+    /**
+     * 绑定成功后是否需要补"设备管理员"激活引导。
+     *
+     * ## 为什么必须有这一步（2026-11-11 卸载防护复盘）
+     * 历史实现里「绑定」与「激活设备管理员」是两条互不相干的流程：绑定只连服务器、存令牌、
+     * 拉起守护服务，**从不**触碰设备管理员。于是绑定成功的设备在被管控端只是一个普通 App——
+     * 设备管理员既未激活、更非 Device Owner，[com.padguard.core.engine.admin.DeviceAdminBridge]
+     * 的 `can(BLOCK_UNINSTALL)` 为 false、`setUninstallBlocked` 永不执行，[AppGuardPolicyStore]
+     * 的 `selfProtectApplies()` 也为 false。结果就是：长按图标 / 进设置即可**直接卸载**，
+     * 与"未解绑却能卸载"的现场完全一致。
+     *
+     * 设备管理员是**非 DO 机型**上唯一能竖起的卸载防线（ADMIN_SHIELD：系统要求先停用管理员才能卸载）。
+     * 即使无法成为 Device Owner，也必须把它激活，否则整层软防护都无从谈起。
+     *
+     * @return true 当且仅当「非 Device Owner 且设备管理员尚未激活」——已激活 / 已是 DO 则无需引导。
+     */
+    fun needsDeviceAdmin(): Boolean =
+        !deviceAdminBridge.isDeviceOwner() && !deviceAdminBridge.isAdminActive()
+
+    /** 构造「激活设备管理员」的系统意图（交由 Activity 弹确认框）。 */
+    fun deviceAdminIntent(): Intent = deviceAdminRequest.intent(deviceAdminBridge)
+
+    /**
+     * 设备管理员激活引导结束后的推进：无论家长是确认激活还是选择稍后，都进入成功页。
+     *
+     * 不在此硬阻塞：部分 ROM 上系统确认框可能不弹出或被厂商管家拦截，硬卡死会让孩子困在绑定页。
+     * 若家长跳过，守护服务的 [com.padguard.child.guard.UninstallDefenseModule] 会持续告警并引导补激活，
+     * 形成闭环（治本仍需 Device Owner）。
+     */
+    fun advanceToSuccess() {
+        _state.value = _state.value.copy(step = BindStep.Success)
+    }
+
+    /** 绑定成功后该进哪一步：需激活设备管理员则先引导，否则直接成功。 */
+    private fun nextStepAfterBind(): BindStep =
+        if (needsDeviceAdmin()) BindStep.DeviceAdmin else BindStep.Success
 
     fun backToInput() {
         _state.value = _state.value.copy(step = BindStep.InputCode, errorMessage = null)
@@ -313,7 +403,7 @@ class BindViewModel @Inject constructor(
 }
 
 /** 绑定流程状态机。 */
-enum class BindStep { Welcome, InputCode, InputAccount, Submitting, Waiting, Success, Failed }
+enum class BindStep { Welcome, InputCode, InputAccount, Submitting, Waiting, DeviceAdmin, Success, Failed }
 
 data class BindUiState(
     val step: BindStep = BindStep.Welcome,

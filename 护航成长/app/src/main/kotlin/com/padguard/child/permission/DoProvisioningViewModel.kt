@@ -2,6 +2,7 @@ package com.padguard.child.permission
 
 import android.app.Application
 import com.padguard.core.data.model.policy.ControlMode
+import com.padguard.core.data.model.policy.ManagementMode
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -39,6 +40,14 @@ class DoProvisioningViewModel @Inject constructor(
     /** 家长执行完 adb / 扫码后点「重新检测」，重读管控身份。 */
     fun refresh() = admin.refreshControlMode()
 
-    /** 家长显式确认已知风险仍要继续（放弃 DO 能力），持久化后放行。 */
-    suspend fun ackSkip() = authRepository.setDeviceOwnerPromptAck()
+    /**
+     * 家长在硬管控引导页选择「改用软管控」。
+     *
+     * 两个标记都要写：ack 保留给旧分流 / 验收脚本兼容，management_mode 是新分流的事实源。
+     * **不清除**已授予的三件套权限与已下发的策略配置——两档各自保留，日后切回硬管控无需重配。
+     */
+    suspend fun fallbackToSoft() {
+        authRepository.setDeviceOwnerPromptAck()
+        authRepository.setManagementMode(ManagementMode.SOFT)
+    }
 }

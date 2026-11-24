@@ -24,7 +24,8 @@ import javax.inject.Singleton
  *
  * ## 为什么不动 `DISALLOW_UNINSTALL_APPS`
  * 卸载闸门走 `setUninstallBlocked(self,true)`，家长卸载流程([com.padguard.child.hidden.ExitController])
- * 会先解封再拉卸载页，闭环清晰；而 `DISALLOW_UNINSTALL_APPS` 会连同 DPC 自身的卸载意图一并拦截，
+ * 先开设备操作解锁窗（否则无障碍闸门顶回卸载确认页），再经 `releaseControl()` 解封并清 DO；
+ * 而 `DISALLOW_UNINSTALL_APPS` 会连同 DPC 自身的卸载意图一并拦截，
  * 反而堵死家长的正规卸载路径，故不在此设（该限制仍由 SecurityEnforcer 按策略条件施加）。
  *
  * ## 非 DO/PO 设备（含纯 DEVICE_ADMIN）

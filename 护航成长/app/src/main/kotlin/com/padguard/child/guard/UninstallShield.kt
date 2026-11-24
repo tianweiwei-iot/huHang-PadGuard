@@ -76,3 +76,29 @@ object UninstallShieldResolver {
         else -> UninstallShield.NONE
     }
 }
+
+/**
+ * 常驻通知「还差什么」的文案选择器（纯函数，零 Android 依赖，便于 JVM 单测锁死）。
+ *
+ * ## 为什么必须按 [UninstallShield] 分支，而不是一句写死的"请激活设备管理员或开启无障碍"
+ * 事故后加的旧文案把所有「弱防护」都归成同一句，可 `SOFT_GATE_WITHOUT_PASSWORD`
+ * 的真实缺口是**家长端还没下发操作密码**——无障碍服务其实开着、设备管理员也不是必需的。
+ * 家长按通知反复去开无障碍，状态始终不变，通知也就永远不消失，看起来就像"授权了还在报未开启"。
+ * 提示必须指向**这一步真能修好的动作**，否则告警等于噪音。
+ *
+ * @return null = 防护已就绪（或尚未算出，未知不等于故障），调用方显示正常"守护中"文案。
+ */
+object ShieldNotice {
+    fun text(
+        shield: UninstallShield?,
+        unguardedText: String,
+        missingPasswordText: String
+    ): String? = when (shield) {
+        null -> null
+        UninstallShield.NONE -> unguardedText
+        UninstallShield.SOFT_GATE_WITHOUT_PASSWORD -> missingPasswordText
+        UninstallShield.SOFT_GATE,
+        UninstallShield.ADMIN_SHIELD,
+        UninstallShield.DO_BLOCKED -> null
+    }
+}

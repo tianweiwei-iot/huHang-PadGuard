@@ -8,6 +8,18 @@ data class LoginSmsRequest(val phone: String, val smsCode: String)
 data class SendSmsRequest(val phone: String)
 
 /**
+ * 家长自助修改登录密码。
+ *
+ * 为什么必须有这个入口：账号的初始密码与后台「重置密码」生成的都是**服务端随机强口令**，
+ * 口令文件与后台弹窗都写着"请登录后尽快修改"，但改造前服务端根本没有修改接口 ——
+ * 家长只能一直用一张纸质/截图里的随机串登录，且运营重置一次就要再转告一次。
+ *
+ * [oldPassword] 必填而不是靠 token 免旧密码：令牌可能长期留在设备上（二手平板、
+ * 借用他人手机），改密码是"夺回账号控制权"的动作，必须证明知道当前口令。
+ */
+data class ChangePasswordRequest(val oldPassword: String, val newPassword: String)
+
+/**
  * 操作密码闸门：家长端设置/清除「设备操作密码」的请求。
  *
  * - [password] 非空 → 设置密码（服务端按 SHA-256(明文) 的 Base64 哈希落库，明文不出服务端）；
@@ -455,4 +467,18 @@ data class EyeProtectionRequest(
 data class EyeProtectionDto(
     val enabled: Boolean,
     val level: Int
+)
+
+/**
+ * 设备「使用授权协议」签署状态（说明书 §5.4 合规留存的管控端查询口径）。
+ *
+ * [signed] 为 false 只代表**服务端没有查到可信的签署凭证**，不等于「孩子没同意」：
+ * 可能是旧版本孩子端未上报、日志尚未上行、或设备刚解绑易主清过档。
+ * 家长端必须按这个语义措辞（"暂未查询到签署记录"），不能显示"未同意"制造误会。
+ */
+data class AgreementStatusDto(
+    val signed: Boolean,
+    val version: String? = null,
+    val signedAt: Long? = null,
+    val snMask: String? = null
 )

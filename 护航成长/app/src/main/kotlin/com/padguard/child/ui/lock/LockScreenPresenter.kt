@@ -7,6 +7,7 @@ import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
 import com.padguard.core.engine.guard.GuardMasterSwitch
 import com.padguard.core.engine.lock.LockController
+import com.padguard.child.guard.PermissionHealthChecker
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -68,7 +69,8 @@ class LockScreenPresenter     @Inject constructor(
     private val admin: DeviceAdminBridge,
     private val lockController: LockController,
     private val keyguardBridge: SystemKeyguardBridge,
-    private val guardMasterSwitch: GuardMasterSwitch
+    private val guardMasterSwitch: GuardMasterSwitch,
+    private val health: PermissionHealthChecker
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -87,6 +89,7 @@ class LockScreenPresenter     @Inject constructor(
                     systemLockPushed = false
                     notifier.cancel()
                     LockScreenActivity.dismiss(context)
+                    clearLockUnprotectedIfReported()
                     return@collect
                 }
                 if (!state.locked) {
@@ -96,6 +99,7 @@ class LockScreenPresenter     @Inject constructor(
                     systemLockPushed = false
                     notifier.cancel()
                     LockScreenActivity.dismiss(context)
+                    clearLockUnprotectedIfReported()
                 } else if (desiredDetail == null) {
                     // 由未锁定 → 锁定首帧：立即渲染锁定层。即便 App 在后台，
                     // 全屏通知也会由系统代拉锁屏页；下方 show() 内升级链同时重试，
@@ -131,6 +135,15 @@ class LockScreenPresenter     @Inject constructor(
     /** 本轮是否已打过系统级 lockNow()，避免反复灭屏 */
     @Volatile
     private var systemLockPushed = false
+
+    /**
+     * 本次锁定会话是否已上报过「锁屏没能覆盖到前台」（`RiskType.LOCK_SCREEN_UNPROTECTED`）。
+     *
+     * 只用于**成对关闭**：只有确实报过，覆盖成功时才会发一次 resolve。
+     * 否则每次锁屏都要发一条无意义的网络请求。
+     */
+    @Volatile
+    private var lockUnprotectedReported = false
 
     /**
      * 是否存在「系统级硬锁」能力：设备所有者(DO) 或设备管理员已激活，**且系统锁屏是安全锁**。
@@ -208,7 +221,10 @@ class LockScreenPresenter     @Inject constructor(
             // 现锁定覆盖力收口为「锁屏页 Activity + 全屏 intent 通知（系统代拉）+ 无障碍
             // 看门狗兜底」：锁屏页前台时即刻可见，后台由 FSI 通知借系统之力拉起、或由无障碍
             // 看门狗重新顶回前台（无障碍服务可后台启动 Activity，绕过华为后台限制）。
-            LockScreenActivity.show(context, detail)
+            // 必须走 attemptOnce 而不只是 startActivity：API 29+ 后台启动在多数 ROM 上
+            // 会被静默丢弃，此时**全屏 intent（FSI）是唯一还能借系统之力代拉**的通道。
+            // 旧实现在非硬锁分支漏发 FSI，首锁恰逢应用退到后台时锁屏页可能永远不出现。
+            attemptOnce(detail)
             return
         }
         // 有硬锁能力：沿用「Activity 真锁 + 屏幕固定(Lock Task)」原链路（系统 keyguard 已取消、悬浮窗地板已删除）。
@@ -243,6 +259,7 @@ class LockScreenPresenter     @Inject constructor(
         systemLockPushed = false
         notifier.cancel()
         LockScreenActivity.dismiss(context)
+        clearLockUnprotectedIfReported()
     }
 
     /**
@@ -345,11 +362,15 @@ class LockScreenPresenter     @Inject constructor(
             // 已解锁：全部收掉
             notifier.cancel()
             LockScreenActivity.dismiss(context)
+            // 锁定会话结束，本次"没锁住"的告警也随之失效（它描述的是那一次锁定的空洞，
+            // 会话结束后继续挂着只会变成永久红点）。
+            clearLockUnprotectedIfReported()
             return
         }
         if (LockScreenActivity.visible && !LockScreenActivity.inMultiWindow) {
             notifier.cancel()
             Logger.i(TAG) { "lock screen confirmed on foreground" }
+            clearLockUnprotectedIfReported()
         } else if (LockScreenActivity.inMultiWindow) {
             // 半屏锁屏不算锁住：继续重铺，直到它回到全屏形态或被看门狗接手
             Logger.w(TAG) { "lock screen windowed (split/freeform) after escalation; re-arming fullscreen" }
@@ -358,8 +379,46 @@ class LockScreenPresenter     @Inject constructor(
             // 升级链走到头仍未拉起 Activity：悬浮地板已按产品决策删除，已无「悬浮层」可兜底，
             // 退而依赖无障碍看门狗（可后台拉起 Activity）与全屏 intent 通知继续把页面顶回前台。
             Logger.w(TAG) { "lock screen not confirmed visible after escalation; relying on watchdog/FSI" }
+            reportLockUnprotected(
+                "锁屏界面未能覆盖到前台（家长已下发锁屏，锁屏页不可见）。" +
+                    "常见原因：未授予悬浮窗 / 后台弹出界面权限，且未激活设备管理员。"
+            )
             LockScreenActivity.show(context, detail)
         }
+    }
+
+    /**
+     * 锁屏没能覆盖到前台 → **如实上报**（R-P1-9 配套）。
+     *
+     * ## 为什么必须上报
+     * 走到这里意味着「锁屏页 Activity + 全屏通知 + 无障碍看门狗」三条通道在重试链后
+     * 都没能把锁屏页留在前台，而家长端回执早已是 SUCCESS、界面显示「已锁定」。
+     * 孩子手上什么都没发生，家长却以为管住了 —— 此前这里只写一行本地日志，
+     * 等于把最危险的空洞留成"静默空转"。
+     *
+     * ## 防误报
+     * - **息屏不报**：息屏不拉锁屏页是设计行为（避免把屏幕点亮），此时"不可见"是预期结果；
+     * - **只在完整重试链之后报**：单次后台 `startActivity` 被 ROM 丢弃是常态；
+     * - **30 分钟去抖**在 [PermissionHealthChecker] 内部，锁定态持续巡查不会刷屏。
+     */
+    private fun reportLockUnprotected(reason: String) {
+        if (!PermissionHealthChecker.shouldReportLockUnprotected(
+                screenOn = isScreenOn(),
+                // 走到本分支即为"未确认覆盖"（分屏形态在上一个分支已排除）
+                coverageConfirmed = false
+            )
+        ) {
+            return
+        }
+        lockUnprotectedReported = true
+        scope.launch { health.reportLockScreenUnprotected(reason) }
+    }
+
+    /** 覆盖已确认 或 锁定会话结束 → 关闭本次会话上报过的告警（成对闭环，避免永久红点）。 */
+    private fun clearLockUnprotectedIfReported() {
+        if (!lockUnprotectedReported) return
+        lockUnprotectedReported = false
+        scope.launch { health.clearLockScreenUnprotected() }
     }
 
     /**

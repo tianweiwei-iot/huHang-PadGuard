@@ -48,6 +48,7 @@ fun AboutScreen(onBack: () -> Unit) {
         }
     ) { padding ->
         var showAgreement by remember { mutableStateOf(false) }
+        var showCapability by remember { mutableStateOf(false) }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -86,9 +87,21 @@ fun AboutScreen(onBack: () -> Unit) {
                     .clickable { showAgreement = true }
                     .padding(vertical = 8.dp)
             )
+            Text(
+                text = "管控能力说明（重要）",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showCapability = true }
+                    .padding(vertical = 8.dp)
+            )
         }
         if (showAgreement) {
             AgreementDialog(onDismiss = { showAgreement = false })
+        }
+        if (showCapability) {
+            CapabilityNoticeDialog(onDismiss = { showCapability = false })
         }
     }
 }

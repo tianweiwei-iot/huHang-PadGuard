@@ -3,6 +3,7 @@ package com.padguard.core.engine.enforcer
 import android.os.Build
 import android.os.UserManager
 import com.padguard.core.common.Logger
+import java.util.concurrent.ConcurrentHashMap
 import com.padguard.core.data.model.policy.PeripheralPolicy
 import com.padguard.core.data.model.policy.PolicySwitch
 import com.padguard.core.engine.admin.Capability
@@ -36,7 +37,7 @@ import javax.inject.Singleton
 @Singleton
 class PeripheralEnforcer @Inject constructor(
     private val admin: DeviceAdminBridge
-) {
+) : PeripheralEnforcerPort {
 
     fun apply(policy: PeripheralPolicy): EnforceReport {
         val report = EnforceReport()
@@ -196,7 +197,7 @@ class PeripheralEnforcer @Inject constructor(
      * @param item 外设项名，兼容驼峰 / 下划线 / 大小写（wifi、mobileData、mobile_data 均可）
      * @param enabled true = 放行（清限制），false = 禁用（加限制）
      */
-    fun override(item: String, enabled: Boolean): OpResult {
+    override fun override(item: String, enabled: Boolean): OpResult {
         val normalized = normalizeItem(item)
         val op = "peripheralOverride:$normalized=$enabled"
 
@@ -335,7 +336,9 @@ class PeripheralEnforcer @Inject constructor(
         )
     }
 
-    private val _overrides = mutableMapOf<String, Boolean>()
+    // 并发原语：override()（指令通道，不持 applyMutex）与 clearOverrides()（策略 apply 通道，
+    // 持 applyMutex）跨协程访问同一份临时覆盖快照；用 ConcurrentHashMap 避免脏读/CME。
+    private val _overrides = ConcurrentHashMap<String, Boolean>()
 }
 
 /**

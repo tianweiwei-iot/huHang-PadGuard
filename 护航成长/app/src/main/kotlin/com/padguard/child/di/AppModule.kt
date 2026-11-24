@@ -1,8 +1,12 @@
 package com.padguard.child.di
 
+import android.content.Context
+import com.padguard.child.time.PrefsSingleSessionStore
+import com.padguard.core.engine.enforcer.SingleSessionStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,4 +60,20 @@ object AppModule {
     @ApplicationScope
     fun provideApplicationScope(): CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /**
+     * 单次会话快照的存储实现绑定。
+     *
+     * **必须是显式 @Provides，不能给构造参数留默认值**：`AppLimitEnforcer` 的
+     * `sessionStore` 若带默认值（比如内存版），Dagger 仍会要求绑定，但一旦哪天有人
+     * 改成 `@Inject constructor(... = InMemoryStore())` 又恰好编译通过，
+     * 后果是"会话永远不落盘、重启即续杯"且**没有任何报错**——这类静默 fail-open
+     * 在 10 号不变量里已经踩过一次（WS 推送的 UserRepository）。所以这里写死绑定，
+     * 缺实现直接编译失败。
+     */
+    @Provides
+    @Singleton
+    fun provideSingleSessionStore(
+        @ApplicationContext context: Context
+    ): SingleSessionStore = PrefsSingleSessionStore(context)
 }

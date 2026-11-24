@@ -187,12 +187,16 @@ class MJPEGHandler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", default="http://localhost:8080")
-    ap.add_argument("--phone", default="13800000000")
-    ap.add_argument("--password", default="admin123")
+    ap.add_argument("--phone", required=True, help="家长账号（勿用硬编码明文，仅限本地测试账号）")
+    ap.add_argument("--password", required=True, help="家长密码（仅限本地测试账号）")
     ap.add_argument("--fps", type=int, default=4)
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--frames", type=int, default=0)
     args = ap.parse_args()
+
+    # 安全护栏：非本机服务端时，本脚本会向该账号注入合成设备并推送合成画面，存在污染风险。
+    if not (args.server.startswith("http://localhost") or args.server.startswith("http://127.0.0.1")):
+        print("[WARN] 目标服务端非本机：此脚本会向该账号注入合成设备并推送合成画面，仅限本地测试！", flush=True)
 
     # 1) 家长登录
     login_url = args.server.rstrip("/") + "/v1/auth/login/password"

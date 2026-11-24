@@ -8,6 +8,9 @@ import com.padguard.server.dto.LocationPoint
 import com.padguard.server.dto.LogItem
 import com.padguard.server.dto.LogsRequest
 import com.padguard.server.dto.LocationsRequest
+import com.padguard.server.common.Audience
+import com.padguard.server.common.BizException
+import com.padguard.server.common.ParentErr
 import com.padguard.server.dto.UsageStatsDto
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UsageLogRepository
@@ -35,7 +38,23 @@ class IngestService(
     /** 哪些日志类型的变化会影响今日用量看板：只有这些才值得触发一次 usage.today 推送 */
     private companion object {
         val USAGE_PUSH_TYPES = setOf("USAGE_TOTAL", "APP_USAGE", "URL_VISIT", "URL_BLOCKED")
+        /** S-4：单次日志上报的条数硬上限（防御 OOM / 连接池占用） */
+        const val MAX_LOGS_PER_BATCH = 2_000
+        /** S-4 同款：单次轨迹点硬上限（轨迹批只增不删、单点含 address 回填，内存放大比日志更明显） */
+        const val MAX_POINTS_PER_BATCH = 2_000
     }
+    /**
+     * 设备上报日志查询（家长端「通知记录」等台账读取）。
+     *
+     * 归属校验由调用方（Controller 经 [DeviceService.getDevice]）完成——
+     * 本方法只负责按设备 + 类型取时间倒序的前 [limit] 条（钳制 1..500）。
+     * 返回 [UsageLog] 实体，Controller 映射为仅含元数据的精简视图（不含通知正文）。
+     */
+    fun listDeviceLogs(deviceId: String, type: String, limit: Int): List<UsageLog> =
+        usageLogRepository.findByDeviceIdAndTypeOrderByTimestampDesc(
+            deviceId, type, PageRequest.of(0, limit.coerceIn(1, 500))
+        )
+
     /**
      * 孩子端批量上报行为日志：按 logId 幂等去重；UNLOCK_REQUEST 转临时解锁工单。
      *
@@ -50,6 +69,18 @@ class IngestService(
     fun saveLogs(req: LogsRequest): Map<String, Int> {
         val items = req.logs
         if (items.isEmpty()) return mapOf("accepted" to 0, "duplicated" to 0)
+        // S-4：单次批量上限，防御恶意/异常设备发送超大批次（整批读入内存去重会放大内存压力）。
+        // 超过即拒绝，避免服务端在连接线程上长时间占住连接池。
+        if (items.size > MAX_LOGS_PER_BATCH) {
+            throw BizException(ParentErr.PARAM_ERROR, "日志批量过大（上限 $MAX_LOGS_PER_BATCH 条）", Audience.CHILD)
+        }
+
+        // 撤回授权后停止采集（PIPL 撤回同意）：该设备的个人数据不再落库。
+        // 设备在线状态由心跳链路单独维护，不受影响。
+        val dev = deviceRepository.findById(req.deviceId).orElse(null)
+        if (dev?.consentRevoked == true) {
+            return mapOf("accepted" to 0, "duplicated" to items.size, "revoked" to 1)
+        }
 
         // 批内也要去重：同一批里出现重复 logId 会撞 unique 约束，导致整批失败
         val candidates = items.distinctBy { it.logId }
@@ -141,6 +172,25 @@ class IngestService(
     fun saveLocations(req: LocationsRequest): Int {
         val points = req.points
         if (points.isEmpty()) return 0
+        // S-4 同款：单批上限，防御恶意/异常设备发送超大批次（saveAll 会整批物化实体，内存放大）。
+        if (points.size > MAX_POINTS_PER_BATCH) {
+            throw BizException(ParentErr.PARAM_ERROR, "轨迹批量过大（上限 $MAX_POINTS_PER_BATCH 点）", Audience.CHILD)
+        }
+
+        // 撤回授权后停止采集位置轨迹（PIPL 撤回同意）。
+        val dev = deviceRepository.findById(req.deviceId).orElse(null)
+        if (dev?.consentRevoked == true) return 0
+
+        // 入口坐标钳制：lat∈[-90,90]、lng∈[-180,180]，非有限值（NaN/±Inf）置 null。
+        // 心跳链路早有同款裁剪（见 DeviceService.applyHeartbeat），轨迹主路径漏配——
+        // 畸形坐标会原样落轨迹表、污染设备最新位置，并让 haversine 围栏判定得出错误结果
+        // （999° 会被当成合法弧度参与三角函数），误触 GEOFENCE_ENTER/EXIT 告警。
+        val sanitized = points.map { p ->
+            p.copy(
+                lat = p.lat?.takeIf { it.isFinite() }?.coerceIn(-90.0, 90.0),
+                lng = p.lng?.takeIf { it.isFinite() }?.coerceIn(-180.0, 180.0)
+            )
+        }
 
         // 批前最后一点：必须在批量落库「之前」取，否则落库后该点会被本批 newer 点覆盖。
         // 它代表「本批之前设备上最后已知位置」，是判断批次起点是否刚越出围栏的依据。
@@ -153,7 +203,7 @@ class IngestService(
         // 每批可达数百个点会变成数百次同步请求，频控 / 超时将直接拖慢入库。
         // 坐标先以纯数据落库（address 暂留空），地址反查交由 [LocationAddressBackfill] 在后台异步回填。
         val saved = locationTrackRepository.saveAll(
-            points.map { p ->
+            sanitized.map { p ->
                 LocationTrack(
                     id = UUID.randomUUID().toString(), deviceId = req.deviceId,
                     lat = p.lat, lng = p.lng, accuracy = p.accuracy,
@@ -177,10 +227,10 @@ class IngestService(
         }
 
         // 围栏进入/离开检测（多围栏，内存批处理，仅一次回查）
-        geofenceService.detectTransitions(req.deviceId, points, prevPoint)
+        geofenceService.detectTransitions(req.deviceId, sanitized, prevPoint)
 
         // 更新设备最新位置（取本批中 ts 最大者，而非简单取列表末项，避免乱序上报）
-        val last = points.maxByOrNull { it.ts ?: 0L } ?: points.last()
+        val last = sanitized.maxByOrNull { it.ts ?: 0L } ?: sanitized.last()
         deviceRepository.findById(req.deviceId).ifPresent { dev ->
             last.lat?.let { dev.latitude = it }
             last.lng?.let { dev.longitude = it }

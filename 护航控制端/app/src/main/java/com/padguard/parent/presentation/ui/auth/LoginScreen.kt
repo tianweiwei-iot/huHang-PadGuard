@@ -8,6 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowDropUp
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -28,7 +29,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.unit.dp
+import com.padguard.parent.BuildConfig
+import com.padguard.parent.data.remote.EndpointSafety
+import com.padguard.parent.data.remote.LoginFailureAdvisor
+import com.padguard.parent.data.remote.ServerProbe
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
+import kotlinx.coroutines.launch
 import com.padguard.parent.presentation.ui.components.SoftCard
 import com.padguard.parent.di.AccountPrefs
 import com.padguard.parent.presentation.viewmodel.LoginViewModel
@@ -53,6 +59,11 @@ import android.widget.Toast
 @Composable
 fun LoginScreen(
     onLoginSuccess: () -> Unit,
+    /**
+     * 会话被动失效的原因（令牌过期 / 别处改密 / 账号被停用）。
+     * 由导航层从 TokenManager 取出后传入；主动退出登录时为 null（不需要解释）。
+     */
+    sessionNotice: String? = null,
     viewModel: LoginViewModel = androidx.hilt.navigation.compose.hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -96,7 +107,38 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(48.dp))
 
-            // 登录方式切换入口：**有意不提供**。
+            // 会话被动失效的原因横幅。
+            // 不加这一条时的实际体验：家长在另一台手机改了密码（或令牌到期），
+            // 本机下一次请求 401 → 本地会话被清 → 整栈退回登录页，全程一句解释都没有，
+            // 家长只会认为"App 又抽风了"。这里把原因摆在要动手的位置上。
+            if (!sessionNotice.isNullOrBlank()) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.errorContainer
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = sessionNotice.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
+
             // 短信登录在服务端未开通（sms-login-enabled=false，且无短信服务商），
             // 发码与校验都不成立。若摆出一个"短信登录"tab，用户点进去只会发现
             // 验证码永远收不到 —— 那比不给这个选项更糟。
@@ -159,6 +201,16 @@ fun LoginScreen(
                         )
                     }
 
+                    // 失败原因之后的"下一步"：只说"用户不存在"等于把球踢回给用户。
+                    //
+                    // 这里只做"改写既有入口"，不新增第二个按钮 —— 否则同屏会出现
+                    // 『该手机号还没有账号，去注册』与『还没有账号？立即注册』两个一模一样的入口。
+                    // 连接类失败不在此加动作：下方「高级设置」会自动展开并可点「测试连接」。
+                    val notRegistered = !uiState.isRegisterMode &&
+                        LoginFailureAdvisor.suggestsRegistration(uiState.error)
+                    val wrongPassword = !uiState.isRegisterMode &&
+                        LoginFailureAdvisor.suggestsPasswordReset(uiState.error)
+
                     // 登录 ↔ 注册 互转入口。
                     // 必须显眼：新装的 App 里没有账号，若只放登录框，
                     // 用户会以为"要用初始账号登录"，而系统其实已经改为自助注册。
@@ -168,25 +220,44 @@ fun LoginScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = if (uiState.isRegisterMode) "已有账号？" else "还没有账号？",
+                            text = when {
+                                notRegistered -> "该手机号还没有账号？"
+                                uiState.isRegisterMode -> "已有账号？"
+                                else -> "还没有账号？"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
                         )
-                        TextButton(onClick = viewModel::toggleRegisterMode) {
-                            Text(
-                                text = if (uiState.isRegisterMode) "返回登录" else "立即注册",
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                        // 判定为"没注册"时用实心按钮：这是此刻唯一能走通的动作，
+                        // 跟"密码错/被冻结"那些应该止步的情况必须区分开。
+                        if (notRegistered) {
+                            Button(
+                                onClick = viewModel::toggleRegisterMode,
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                                modifier = Modifier.padding(start = 8.dp)
+                            ) { Text("去注册") }
+                        } else {
+                            TextButton(onClick = viewModel::toggleRegisterMode) {
+                                Text(
+                                    text = if (uiState.isRegisterMode) "返回登录" else "立即注册",
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
 
-                    // 忘记密码（仅登录模式有意义：注册流程里还没有可找回的密码）
+                    // 忘记密码（仅登录模式有意义：注册流程里还没有可找回的密码）。
+                    // 口令输错时把文案换成更具体的引导，其余时候保持安静，不做无谓的强调。
                     if (!uiState.isRegisterMode) {
                         TextButton(
                             onClick = viewModel::forgotPassword,
                             modifier = Modifier.align(Alignment.End)
                         ) {
-                            Text("忘记密码？", color = MaterialTheme.colorScheme.primary)
+                            Text(
+                                text = if (wrongPassword) "忘记了密码？去重置" else "忘记密码？",
+                                color = MaterialTheme.colorScheme.primary
+                            )
                         }
                     }
                 }
@@ -223,11 +294,15 @@ fun LoginScreen(
             // 表现就是"登录页没有高级设置"。
             AdvancedSettingsSection(
                 serverUrl = serverUrl,
+                // 失败原因是"连不上服务器"时自动展开地址表单：
+                // 文案里已经把出错地址写清楚了，紧接着给出可改的输入框与「测试连接」，
+                // 用户不用再自己去找入口（"不知道在哪改地址"是最常见的现场反馈）。
+                autoExpandOn = uiState.error.takeIf { ServerProbe.looksLikeConnectionFailure(it) },
                 onSave = { url ->
                     val ok = viewModel.saveServerUrl(url)
                     Toast.makeText(
                         context,
-                        if (ok) "已保存，立即生效" else "地址无效，请检查后重试",
+                        if (ok) "已保存，立即生效" else "地址无效或不安全，请查看下方提示",
                         Toast.LENGTH_SHORT
                     ).show()
                     ok
@@ -616,9 +691,16 @@ private fun SmsLoginForm(
 private fun AdvancedSettingsSection(
     serverUrl: String,
     onSave: (String) -> Boolean,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    autoExpandOn: String? = null
 ) {
     var expanded by remember { mutableStateOf(false) }
+
+    // 只在"连接类失败"出现时自动展开一次；用户手动收起后不会被再次弹开
+    // （key 是错误文案本身，同一条错误重复出现不会反复触发）。
+    LaunchedEffect(autoExpandOn) {
+        if (autoExpandOn != null) expanded = true
+    }
 
     OutlinedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -694,13 +776,19 @@ fun ServerConfigEditor(
     var path by remember { mutableStateOf(cfg.path) }
     var scheme by remember { mutableStateOf(cfg.scheme) }
     var error by remember { mutableStateOf<String?>(null) }
+    // 测试连接：不需要先保存就能验证表单里的地址是否真的有服务端在跑。
+    // 之所以值得单独做，是因为"保存后去登录、失败再回来改地址"这个循环一次要十几秒，
+    // 而地址错了 90% 的用户会先去怀疑密码 —— 探测把这条反馈压到 1 次点击。
+    val scope = rememberCoroutineScope()
+    var testing by remember { mutableStateOf(false) }
+    var probeResult by remember { mutableStateOf<ServerProbe.Result?>(null) }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         OutlinedTextField(
             value = host,
-            onValueChange = { host = it.trim(); error = null },
+            onValueChange = { host = it.trim(); error = null; probeResult = null },
             label = { Text("服务器地址") },
-            placeholder = { Text("如 8.148.68.183") },
+            placeholder = { Text("如 192.168.1.10") },
             singleLine = true,
             isError = error != null,
             modifier = Modifier.fillMaxWidth(),
@@ -708,7 +796,7 @@ fun ServerConfigEditor(
         )
         OutlinedTextField(
             value = port,
-            onValueChange = { port = it.filter { c -> c.isDigit() }; error = null },
+            onValueChange = { port = it.filter { c -> c.isDigit() }; error = null; probeResult = null },
             label = { Text("端口") },
             placeholder = { Text("如 8090") },
             singleLine = true,
@@ -718,7 +806,7 @@ fun ServerConfigEditor(
         )
         OutlinedTextField(
             value = path,
-            onValueChange = { path = it; error = null },
+            onValueChange = { path = it; error = null; probeResult = null },
             label = { Text("接口前缀（可选）") },
             placeholder = { Text("如 /v1 或 /api/v1") },
             singleLine = true,
@@ -734,7 +822,7 @@ fun ServerConfigEditor(
             listOf("http" to "HTTP", "https" to "HTTPS").forEach { (value, label) ->
                 val selected = scheme == value
                 OutlinedButton(
-                    onClick = { scheme = value; error = null },
+                    onClick = { scheme = value; error = null; probeResult = null },
                     shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.outlinedButtonColors(
                         containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
@@ -754,6 +842,51 @@ fun ServerConfigEditor(
             Text(
                 text = error!!,
                 color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        // 测试连接：直接用表单当前值探测（不必先保存），命中 /health 即说明地址可用。
+        // 这一行是为「地址填错却不自知」准备的：用户点一下就能区分"服务器没连上"和
+        // "连上了但账号/口令不对"，不用再靠反复试登录去猜。
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(
+                onClick = {
+                    val built = buildServerConfig(host, port, path, scheme)
+                    if (built == null) {
+                        error = "请填写有效的服务器地址与端口（1–65535）"
+                        probeResult = null
+                    } else {
+                        error = null
+                        scope.launch {
+                            testing = true
+                            probeResult = null
+                            probeResult = ServerProbe.check(built)
+                            testing = false
+                        }
+                    }
+                },
+                enabled = !testing,
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                if (testing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(if (testing) "正在测试…" else "测试连接")
+            }
+        }
+        probeResult?.let { r ->
+            Text(
+                text = r.message,
+                color = if (r.ok) PadGuardColors.SuccessGreen else MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall
             )
         }
@@ -779,8 +912,16 @@ fun ServerConfigEditor(
                     if (built == null) {
                         error = "请填写有效的服务器地址与端口（1–65535）"
                     } else {
-                        error = null
-                        onSave(built)
+                        // 安全准入与网络层（HostSelectionInterceptor）用同一套规则，避免
+                        // 「表单让存、请求却被拦」这种用户无从自救的割裂状态。
+                        // 公网 http 会在这里被明确拒绝并展示原因；内网 http 仍然放行。
+                        when (val verdict = EndpointSafety.check(built, BuildConfig.ALLOW_CLEARTEXT_PUBLIC)) {
+                            is EndpointSafety.Verdict.Rejected -> error = verdict.reason
+                            is EndpointSafety.Verdict.Allowed -> {
+                                error = null
+                                onSave(verdict.normalizedUrl)
+                            }
+                        }
                     }
                 },
                 shape = RoundedCornerShape(10.dp)
@@ -788,7 +929,8 @@ fun ServerConfigEditor(
         }
 
         Text(
-            text = "默认已填好当前地址。若连不上，请改为「手机用 USB 线直连电脑」时电脑显示的地址（见安装说明）。",
+            text = "默认已填好当前地址。若连不上，请改为「手机用 USB 线直连电脑」时电脑显示的地址（见安装说明）。" +
+                "家庭/校园内网可用 HTTP；公网地址必须使用 HTTPS（会在保存时校验）。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
         )

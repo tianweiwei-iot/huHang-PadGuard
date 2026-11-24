@@ -37,8 +37,7 @@ class FilesAccessRegressionTest {
     private fun newController(): FilesController =
         FilesController(
             fileStorageService = FileStorageService(tempDir.toString(), "", uploadedRepo),
-            uploadedFileRepository = uploadedRepo,
-            deviceRepository = deviceRepo
+            fileAccessService = com.padguard.server.service.FileAccessService(uploadedRepo, deviceRepo)
         )
 
     /** 在临时存储目录落一个真实文件并登记元数据 */
@@ -89,6 +88,56 @@ class FilesAccessRegressionTest {
 
         val resp = newController().get(request(viewerUserId = null, viewerDeviceId = null), "shot-4")
         assertEquals(200, resp.statusCode.value())
+    }
+
+    // ---- 新增缺陷 N：家长发布的共享素材不是「任何登录态都可读」 ----
+
+    @Test
+    fun `another parent cannot download shared material published by parent A`() {
+        // 旧实现 ownerUserId != null && deviceId == null 一律放行，家长 B 的普通 JWT 即可越权读取。
+        seedFile("material-1", "image/png", "material-1_s.png", ownerUserId = "parent-A", deviceId = null)
+
+        val resp = newController().get(request(viewerUserId = "parent-B", viewerDeviceId = null), "material-1")
+        assertEquals(403, resp.statusCode.value())
+    }
+
+    @Test
+    fun `uploader can still download own shared material`() {
+        seedFile("material-2", "image/png", "material-2_s.png", ownerUserId = "parent-A", deviceId = null)
+
+        val resp = newController().get(request(viewerUserId = "parent-A", viewerDeviceId = null), "material-2")
+        assertEquals(200, resp.statusCode.value())
+    }
+
+    @Test
+    fun `child device credential can download material published by parent`() {
+        // 信息发布功能本身必须保留：孩子端图片库用设备令牌加载家长发的素材。
+        // 归属收窄后只放行"上传者名下的设备"，故这里必须显式给出设备归属（真实台账里必然有）。
+        seedFile("material-3", "image/png", "material-3_s.png", ownerUserId = "parent-A", deviceId = null)
+        Mockito.`when`(deviceRepo.findByUserId("parent-A")).thenReturn(listOf(Device(id = "device-A", userId = "parent-A")))
+
+        val resp = newController().get(request(viewerUserId = null, viewerDeviceId = "device-A"), "material-3")
+        assertEquals(200, resp.statusCode.value())
+    }
+
+    @Test
+    fun `credential-free capability url for shared material keeps working`() {
+        // 无凭证不进 ownershipDenied，能力 URL 的历史语义不受本次收窄影响。
+        seedFile("material-4", "image/png", "material-4_s.png", ownerUserId = "parent-A", deviceId = null)
+
+        val resp = newController().get(request(viewerUserId = null, viewerDeviceId = null), "material-4")
+        assertEquals(200, resp.statusCode.value())
+    }
+
+    @Test
+    fun `svg content type is forced to attachment despite image wildcard`() {
+        // 历史落盘的 SVG 也必须安全：`image/svg+xml` 能匹配 image/* 白名单，
+        // 但浏览器把它当 XML 文档执行 <script>，与 /admin 同源即存储型 XSS。
+        seedFile("evil-svg", "image/svg+xml", "evil-svg_pic.svg", ownerUserId = null, deviceId = null)
+
+        val resp = newController().get(request(viewerUserId = null, viewerDeviceId = null), "evil-svg")
+        assertEquals("application/octet-stream", resp.headers.contentType.toString())
+        assertTrue(resp.headers.getFirst("Content-Disposition")!!.startsWith("attachment"))
     }
 
     @Test

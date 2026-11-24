@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  受管孩子设备的应用数据提取规则（Android 12+ dataExtractionRules）。
+
+  本应用已在 AndroidManifest 将 android:allowBackup="false"，理论上云备份与设备迁移
+  都已关闭；这里再显式声明空 domain，作为双重保险。
+
+  注意：data-extraction-rules 这套 schema 仅对 API 31+ 生效；对 API 26-30，lint 还要求
+  并行的 full-backup-content（见 full_backup_content.xml）。两者 schema 不互通，必须各一份。
+
+  设计立场：受管子设备上的会话快照 / 设备令牌 / 策略缓存属于管控敏感数据，
+  不应被 adb backup、云备份或「设备到设备迁移」工具提取到另一台设备（提取即等于
+  克隆一份管控上下文）。两个 domain 均为空 → 不提取任何域。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- 空：不向云备份贡献任何文件 / 数据库 / SharedPreferences -->
+    </cloud-backup>
+    <device-transfer>
+        <!-- 空：设备迁移（如厂商换机助手）时不迁移本应用数据 -->
+    </device-transfer>
+</data-extraction-rules>

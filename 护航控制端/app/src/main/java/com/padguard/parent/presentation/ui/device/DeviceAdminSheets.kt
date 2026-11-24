@@ -97,7 +97,7 @@ fun DeviceAdminSheetHost(
     onDispatchApp: (String) -> Unit,
     onForceDispatchApp: (String) -> Unit,
     onStartUpgrade: (String) -> Unit,
-    onUploadApp: (ByteArray, AppUploadMeta, String) -> Unit,
+    onUploadApp: (com.padguard.parent.domain.model.MediaSource, AppUploadMeta) -> Unit,
     onDeleteApp: (String) -> Unit,
     onUninstallApp: (String) -> Unit
 ) {
@@ -238,7 +238,7 @@ private fun AppDispatchSheet(
     onClose: () -> Unit,
     onDispatch: (String) -> Unit,
     onForceDispatch: (String) -> Unit,
-    onUpload: (ByteArray, AppUploadMeta, String) -> Unit,
+    onUpload: (com.padguard.parent.domain.model.MediaSource, AppUploadMeta) -> Unit,
     onDelete: (String) -> Unit,
     onUninstall: (String) -> Unit
 ) {
@@ -260,14 +260,15 @@ private fun AppDispatchSheet(
                 return@launch
             }
             onUpload(
-                info.bytes,
+                // 流式来源：APK 已在 ApkFileReader 落成 cache 临时文件，
+                // 不再整份 readBytes 进堆（200MB 安装包会直接把家长端推到 OOM）。
+                info.asMediaSource(),
                 AppUploadMeta(
                     packageName = info.packageName,
                     versionCode = info.versionCode,
                     versionName = info.versionName,
                     appName = info.appName ?: info.packageName
-                ),
-                info.fileName
+                )
             )
         }
     }

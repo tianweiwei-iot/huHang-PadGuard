@@ -1,7 +1,11 @@
 package com.padguard.child.di
 
 import com.padguard.child.guard.GuardInfraProbeImpl
+import com.padguard.child.guard.WebGuardSelfVpnProbe
+import com.padguard.core.data.repository.RealtimeAlertPublisher
 import com.padguard.core.engine.guard.GuardInfraProbe
+import com.padguard.core.engine.guard.SelfVpnProbe
+import com.padguard.core.transport.mqtt.MqttRealtimeAlertPublisher
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -22,4 +26,14 @@ abstract class GuardInfraModule {
     @Binds
     @Singleton
     abstract fun bindGuardInfraProbe(impl: GuardInfraProbeImpl): GuardInfraProbe
+
+    /** B：HIGH 告警即时单发通道（MQTT QoS1）的注入绑定 */
+    @Binds
+    @Singleton
+    abstract fun bindRealtimeAlertPublisher(impl: MqttRealtimeAlertPublisher): RealtimeAlertPublisher
+
+    /** A1：让代理检测能区分自家 Web 过滤隧道与孩子的绕过 VPN */
+    @Binds
+    @Singleton
+    abstract fun bindSelfVpnProbe(impl: WebGuardSelfVpnProbe): SelfVpnProbe
 }

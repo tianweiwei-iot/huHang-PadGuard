@@ -3,6 +3,7 @@ package com.padguard.child.capture
 import com.padguard.core.common.Logger
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.transport.TransportSettings
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -16,6 +17,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
+import android.os.Build
 import android.os.SystemClock
 
 /**
@@ -53,7 +55,11 @@ class AccessibilityLiveStreamer @Inject constructor(
     private val transportSettings: TransportSettings
 ) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, t ->
+            Logger.e("AccessibilityLiveStreamer", t) { "uncaught exception in AccessibilityLiveStreamer scope" }
+        }
+    )
     private val streaming = AtomicBoolean(false)
 
     @Volatile private var deadlineMs = 0L
@@ -182,8 +188,14 @@ class AccessibilityLiveStreamer @Inject constructor(
                 var consecutiveFailures = 0
                 var lastWriteAt = 0L
                 while (streaming.get() && SystemClock.elapsedRealtime() < deadlineMs) {
-                    val jpeg: ByteArray? = kotlinx.coroutines.runBlocking {
-                        a11y.grabScaledJpeg(maxWidth, quality)
+                    // `grabScaledJpeg` 标了 @RequiresApi(R)：显式版本门下再调用，
+                    // 避免旧系统上解析到不存在的方法（NoSuchMethodError → 进程崩溃）。
+                    val jpeg: ByteArray? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        kotlinx.coroutines.runBlocking {
+                            a11y.grabScaledJpeg(maxWidth, quality)
+                        }
+                    } else {
+                        null
                     }
                     if (jpeg == null) {
                         // 限频/锁屏拒拍等瞬时失败：跳帧重试；连续过多次说明通道已实质失效

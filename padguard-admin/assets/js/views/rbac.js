@@ -238,7 +238,7 @@
         if (!allowed) return '<td style="text-align:center;color:var(--border)">·</td>';
         const has = (working[area.key] || []).indexOf(act) >= 0;
         return `<td style="text-align:center">
-          <input type="checkbox" data-area="${area.key}" data-act="${act}" ${has ? "checked" : ""} ${canWrite ? "" : "disabled"}>
+          <input type="checkbox" data-area="${U.esc(area.key)}" data-act="${U.esc(act)}" ${has ? "checked" : ""} ${canWrite ? "" : "disabled"}>
         </td>`;
       }).join("");
       const n = (working[area.key] || []).length;
@@ -247,8 +247,8 @@
           <span class="muted" style="font-size:12px">${n}/${area.actions.length}</span></td>
         ${cells}
         <td style="white-space:nowrap">${canWrite ? `
-          <button class="btn btn-xs" data-row-all="${area.key}">全选</button>
-          <button class="btn btn-xs" data-row-none="${area.key}">清空</button>` : ""}</td>
+          <button class="btn btn-xs" data-row-all="${U.esc(area.key)}">全选</button>
+          <button class="btn btn-xs" data-row-none="${U.esc(area.key)}">清空</button>` : ""}</td>
       </tr>`;
     }).join("");
 

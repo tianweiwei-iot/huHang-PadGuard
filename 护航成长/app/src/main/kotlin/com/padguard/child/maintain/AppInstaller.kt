@@ -3,8 +3,10 @@ package com.padguard.child.maintain
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.os.Build
 import com.padguard.core.common.Logger
 import com.padguard.core.transport.TransportSettings
@@ -71,6 +73,14 @@ class AppInstaller @Inject constructor(
             Logger.e(TAG, it) { "apk download failed: $apkUrl" }
             return@withContext "下载失败：${it.message}"
         }
+        // 落盘后、提交安装前做 fail-closed 校验（包名一致 + 自身升级签名一致），
+        // 防止下载链路被劫持/替换后，把冒名或伪造的 APK 以受信包名静默装上。
+        val verifyError = verifyApk(file, packageName)
+        if (verifyError != null) {
+            Logger.e(TAG) { "apk verification rejected: $verifyError ($packageName)" }
+            runCatching { file.delete() }
+            return@withContext verifyError
+        }
         try {
             commit(file, packageName)
             null
@@ -89,9 +99,9 @@ class AppInstaller @Inject constructor(
         val intent = Intent(context, InstallResultReceiver::class.java)
             .setAction(InstallResultReceiver.ACTION_UNINSTALL)
             .putExtra(InstallResultReceiver.EXTRA_PACKAGE, packageName)
-        val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-            (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
-        val pending = PendingIntent.getBroadcast(context, packageName.hashCode(), intent, flags)
+        val pending = PendingIntent.getBroadcast(
+            context, packageName.hashCode(), intent, statusReceiverFlags()
+        )
 
         return@withContext try {
             installer.uninstall(packageName, pending.intentSender)
@@ -172,13 +182,30 @@ class AppInstaller @Inject constructor(
                 .setAction(InstallResultReceiver.ACTION_INSTALL)
                 .putExtra(InstallResultReceiver.EXTRA_PACKAGE, packageName)
                 .putExtra(InstallResultReceiver.EXTRA_SESSION_ID, sessionId)
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-                (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
-            val pending = PendingIntent.getBroadcast(context, sessionId, intent, flags)
+            val pending = PendingIntent.getBroadcast(context, sessionId, intent, statusReceiverFlags())
             session.commit(pending.intentSender)
         }
         Logger.i(TAG) { "install session $sessionId committed for $packageName (${file.length()}B)" }
     }
+
+    /**
+     * PackageInstaller 的 statusReceiver 必须**可变**（R27）。
+     *
+     * 系统是以 `IntentSender.sendIntent()` + fillIn 的方式，把 `EXTRA_STATUS` /
+     * `EXTRA_STATUS_MESSAGE` / `EXTRA_SESSION_ID` 回填到我们创建的 PendingIntent 上。
+     * 若沿用全项目通用的 `FLAG_IMMUTABLE`，这些 extras 会被丢弃：
+     * - [InstallResultReceiver] 恒读到默认的 `STATUS_FAILURE`，每次安装都被误记失败，
+     *   还会对其实已成功的会话调用 `abandonSession`；
+     * - Android 15+（本仓 targetSdk 35）对 statusReceiver 有硬性校验，
+     *   `session.commit()` 直接抛 `IllegalArgumentException`，远程静默安装 / 自升级在提交阶段全废。
+     *
+     * 这里两处 Intent 都是指向自身 `exported=false` 接收器的**显式** Intent，
+     * IntentSender 只交给 system_server，改 mutable 不扩大攻击面；
+     * 其余 PendingIntent 一律保持 immutable、不走本方法。
+     */
+    private fun statusReceiverFlags(): Int =
+        PendingIntent.FLAG_UPDATE_CURRENT or
+            (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0)
 
     /** 目标包是否已安装，供回执与日志判断"安装是否真的生效" */
     fun isInstalled(packageName: String): Boolean = runCatching {
@@ -190,6 +217,74 @@ class AppInstaller @Inject constructor(
         }
         true
     }.getOrDefault(false)
+
+    /**
+     * 安装前完整性校验（fail-closed：任何不一致都拒绝安装）。
+     *
+     * 1. 包名一致性：下载下来的 APK 真实包名必须等于请求安装的包名，
+     *    防止下载链路被劫持/替换后，把一个别的 APK 以受信包名静默装上。
+     * 2. 自身升级：APK 的签名证书必须与本机已装版本一致，
+     *    防止用不同密钥签名的木马冒名升级管控端（系统升级本就拒签不同，这里双保险且覆盖首装异常路径）。
+     *
+     * 第三方受管控应用的静默推送：服务端已鉴权下发，此处仅做包名一致性校验；
+     * 若未来引入"可信公钥白名单"，应在此扩展——但绝不把未知签名的任意 APK 当可信。
+     *
+     * @return null 表示校验通过；否则返回失败原因（用于回执与日志）
+     */
+    private fun verifyApk(file: File, requestedPkg: String): String? {
+        // GET_SIGNATURES 自 API 1 起可用、在所有版本（含 33+）都能拿到签名证书，
+        // 故统一用它而非 API 28+ 才有的 GET_SIGNING_CERTIFICATES / SigningInfo，
+        // 避免对低版本 minSdk(26) 引入 NewApi 依赖（见 signaturesMatch 注释）。
+        @Suppress("DEPRECATION")
+        val sigFlag = PackageManager.GET_SIGNATURES
+        val archive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageArchiveInfo(
+                file.absolutePath,
+                PackageManager.PackageInfoFlags.of(sigFlag.toLong())
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageArchiveInfo(file.absolutePath, sigFlag)
+        } ?: return "APK 无法解析或已损坏"
+
+        if (archive.packageName != requestedPkg) {
+            return "APK 包名(${archive.packageName})与请求($requestedPkg)不一致，疑似被篡改"
+        }
+
+        if (requestedPkg == context.packageName) {
+            val installed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                runCatching {
+                    context.packageManager.getPackageInfo(
+                        requestedPkg,
+                        PackageManager.PackageInfoFlags.of(sigFlag.toLong())
+                    )
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                runCatching { context.packageManager.getPackageInfo(requestedPkg, sigFlag) }
+            }.getOrNull() ?: return null // 本机未装自身（极端首装）无法比对，放行交系统校验
+            if (!signaturesMatch(installed, archive)) {
+                return "升级包签名证书与已安装版本不一致，疑似伪造升级包"
+            }
+        }
+        return null
+    }
+
+    /**
+     * 比较两个 [PackageInfo] 的签名证书集合（顺序无关），一致返回 true。
+     *
+     * 用 [PackageInfo.signatures]（[PackageManager.GET_SIGNATURES]，全版本可用）而非
+     * API 28+ 的 [android.content.pm.SigningInfo]，以兼容 minSdk 26。该字段虽被标记
+     * 为弃用，但在 28+ 仍有效返回签名证书，是跨版本最稳的取法；弃用警告由本函数抑制。
+     */
+    @Suppress("DEPRECATION")
+    private fun signaturesMatch(installed: PackageInfo, archive: PackageInfo): Boolean {
+        val a: Array<Signature> = installed.signatures ?: return false
+        val b: Array<Signature> = archive.signatures ?: return false
+        val setA = a.map { it.toByteArray().contentToString() }.toSet()
+        val setB = b.map { it.toByteArray().contentToString() }.toSet()
+        return setA == setB
+    }
 
     companion object {
         private const val TAG = "AppInstaller"

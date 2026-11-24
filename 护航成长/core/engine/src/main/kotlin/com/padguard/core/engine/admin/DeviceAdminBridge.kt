@@ -6,6 +6,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.annotation.TargetApi
 import android.os.Build
 import android.os.UserManager
 import com.padguard.core.common.Logger
@@ -38,7 +39,7 @@ import javax.inject.Singleton
  * | 禁用相机 | ✅ | ✅ | ✅ | ❌ |
  * | 禁截屏 | ✅ | ✅ | ❌ | ❌ |
  * | 应用挂起 / 隐藏 | ✅ | ✅ | ❌ | ❌ |
- * | 阻止卸载自身 | ✅ | ✅ | 部分（靠 admin 激活态） | ❌ |
+ * | 阻止卸载自身 | ✅ | ✅ | ❌（纯设备管理员无法调 setUninstallBlocked，靠无障碍 SOFT_GATE 事后拦截兜底） | ❌ |
  * | 用户限制（WiFi/USB/开发者选项…） | ✅ | 部分（仅工作资料内） | ❌ | ❌ |
  * | 全局设置（自动对时/状态栏） | ✅ | ❌ | ❌ | ❌ |
  * | 静默安装 / 卸载 | ✅ | ✅ | ❌ | ❌ |
@@ -51,7 +52,7 @@ import javax.inject.Singleton
 @Singleton
 class DeviceAdminBridge @Inject constructor(
     @ApplicationContext private val context: Context
-) {
+) : DeviceAdminBridgePort {
 
     /**
      * 设备策略管理器。
@@ -151,7 +152,7 @@ class DeviceAdminBridge @Inject constructor(
     fun isAdminActive(): Boolean = adminComponent?.let { dpm.isAdminActive(it) } == true
 
     /** 能力查询：Enforcer 据此决定"执行"还是"回执 UNSUPPORTED" */
-    fun can(capability: Capability): Boolean {
+    override fun can(capability: Capability): Boolean {
         val mode = _controlMode.value
         return when (capability) {
             Capability.LOCK_NOW,
@@ -187,7 +188,7 @@ class DeviceAdminBridge @Inject constructor(
         dpm.lockNow()
     }
 
-    fun reboot(): OpResult = guarded("reboot") {
+    override fun reboot(): OpResult = guarded("reboot") {
         val admin = requireAdmin()
         require(can(Capability.REBOOT)) { "reboot requires Device Owner" }
         dpm.reboot(admin)
@@ -198,7 +199,7 @@ class DeviceAdminBridge @Inject constructor(
      * 高危操作，engine 层只提供能力，是否执行由 [com.padguard.core.engine.command.CommandExecutor]
      * 依据指令类型与签名校验结果决定。
      */
-    fun wipeData(): OpResult = guarded("wipeData") {
+    override fun wipeData(): OpResult = guarded("wipeData") {
         require(can(Capability.WIPE)) { "wipeData requires Device Owner" }
         dpm.wipeData(0)
     }
@@ -307,7 +308,7 @@ class DeviceAdminBridge @Inject constructor(
      *
      * 普通设备管理员（无 DO/PO）会返回 [OpResult.Unsupported]，上层据此在 UI 上引导走系统授权。
      */
-    fun setRuntimePermission(packageName: String, permission: String, grant: Boolean): OpResult =
+    override fun setRuntimePermission(packageName: String, permission: String, grant: Boolean): OpResult =
         guarded("setPermission:$packageName:$permission=$grant") {
             require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 "setPermissionGrantState requires API 23+"
@@ -430,7 +431,7 @@ class DeviceAdminBridge @Inject constructor(
      * 注意方向：`*_disabled` 类开关值为 true 表示"禁用"（施加限制）；
      * `auto_time_enforced` 值为 true 表示"强制自动对时"；`usb_data_disabled` 为 true 表示关闭 USB 数据传输。
      */
-    fun applyFeaturePolicy(features: Map<String, Boolean>): List<Pair<String, OpResult>> {
+    override fun applyFeaturePolicy(features: Map<String, Boolean>): List<Pair<String, OpResult>> {
         val results = mutableListOf<Pair<String, OpResult>>()
         for ((key, enabled) in features) {
             if (key !in FeatureKey.ALL) continue
@@ -526,6 +527,7 @@ class DeviceAdminBridge @Inject constructor(
      * 注意方向性：这是「封」与「解封」共用的开关。debug 构建或策略放开调试通道时
      * 必须显式调 [enabled]=true 恢复，否则关掉之后 adb 再也连不上，只能擦机救援。
      */
+    @TargetApi(Build.VERSION_CODES.S)
     fun setUsbDataSignaling(enabled: Boolean): OpResult = guarded("usbDataSignaling:$enabled") {
         val admin = requireAdmin()
         // setUsbDataSignalingEnabled 是 API 31 才有的方法；旧系统上调用会直接 NoSuchMethodError
@@ -548,6 +550,7 @@ class DeviceAdminBridge @Inject constructor(
      * 的坑最难排查，因此必须走 API 28 才有的 `setSystemSetting`，
      * 且它只接受系统白名单内的少数几个键。
      */
+    @TargetApi(Build.VERSION_CODES.P)
     fun setSystemSetting(key: String, value: String): OpResult = guarded("systemSetting:$key=$value") {
         val admin = requireAdmin()
         require(can(Capability.GLOBAL_SETTINGS)) { "requires Device Owner" }
@@ -561,7 +564,7 @@ class DeviceAdminBridge @Inject constructor(
      * 挂起应用：图标变灰、点击弹系统提示，但应用数据保留。
      * 比"隐藏"体验更好（孩子能看到应用还在，只是现在不可用），是黑名单的首选手段。
      */
-    fun setPackagesSuspended(packages: List<String>, suspended: Boolean): SuspendResult {
+    override fun setPackagesSuspended(packages: List<String>, suspended: Boolean): SuspendResult {
         val admin = adminComponent
         if (admin == null || !can(Capability.SUSPEND_PACKAGES)) {
             return SuspendResult(emptyList(), packages, "requires DO/PO")
@@ -581,7 +584,7 @@ class DeviceAdminBridge @Inject constructor(
         }
     }
 
-    fun isPackageSuspended(packageName: String): Boolean {
+    override fun isPackageSuspended(packageName: String): Boolean {
         val admin = adminComponent ?: return false
         if (!can(Capability.SUSPEND_PACKAGES)) return false
         return runCatching { dpm.isPackageSuspended(admin, packageName) }.getOrDefault(false)
@@ -594,7 +597,7 @@ class DeviceAdminBridge @Inject constructor(
      * （[authzPrefs]）——否则"为了弹密码门禁而把图标显示回来"会把家长的
      * "取消授权"意图连带抹掉（这是授权自动恢复事故的直接成因）。
      */
-    fun setApplicationHidden(packageName: String, hidden: Boolean): OpResult =
+    override fun setApplicationHidden(packageName: String, hidden: Boolean): OpResult =
         guarded("setApplicationHidden:$packageName=$hidden") {
             val admin = requireAdmin()
             require(can(Capability.HIDE_PACKAGES)) { "requires DO/PO" }
@@ -607,7 +610,7 @@ class DeviceAdminBridge @Inject constructor(
         runCatching {
             sysHiddenPrefs.edit().apply {
                 if (hidden) putBoolean(packageName, true) else remove(packageName)
-            }.apply()
+            }.commit()
         }
     }
 
@@ -618,7 +621,7 @@ class DeviceAdminBridge @Inject constructor(
 
     /** 从系统隐藏态账本中删除一条记录（应用已卸载、或已不在隐藏态时清理残留） */
     fun forgetSystemHidden(packageName: String) {
-        runCatching { sysHiddenPrefs.edit().remove(packageName).apply() }
+        runCatching { sysHiddenPrefs.edit().remove(packageName).commit() }
     }
 
     /**
@@ -631,11 +634,11 @@ class DeviceAdminBridge @Inject constructor(
      * 但"关闭权限 = 打开需密码"这条软拦截闸门不依赖 DO，必须在此落地，
      * 否则非 DO 设备上"关闭权限"会既不隐藏、也不弹密码（完全失效）。
      */
-    fun persistHidden(packageName: String, hidden: Boolean) {
+    override fun persistHidden(packageName: String, hidden: Boolean) {
         runCatching {
             authzPrefs.edit().apply {
                 if (hidden) putBoolean(packageName, true) else remove(packageName)
-            }.apply()
+            }.commit()
         }
     }
 
@@ -665,14 +668,14 @@ class DeviceAdminBridge @Inject constructor(
                 for (pkg in known) {
                     if (pkg in revoked) putBoolean(pkg, true) else remove(pkg)
                 }
-            }.apply()
+            }.commit()
         }
     }
 
     /** 清空两份账本（解绑 / 关闭管控时调用） */
     fun clearHiddenLedgers() {
-        runCatching { authzPrefs.edit().clear().apply() }
-        runCatching { sysHiddenPrefs.edit().clear().apply() }
+        runCatching { authzPrefs.edit().clear().commit() }
+        runCatching { sysHiddenPrefs.edit().clear().commit() }
     }
 
     /**
@@ -691,7 +694,7 @@ class DeviceAdminBridge @Inject constructor(
     }
 
     /** 本应用自身的包名：用于拒绝"把自己隐藏掉"这类自杀式指令 */
-    val selfPackageName: String get() = context.packageName
+    override val selfPackageName: String get() = context.packageName
 
     fun setUninstallBlocked(packageName: String, blocked: Boolean): OpResult =
         guarded("setUninstallBlocked:$packageName=$blocked") {
@@ -837,6 +840,8 @@ class DeviceAdminBridge @Inject constructor(
         results += "screenCapture" to setScreenCaptureDisabled(false)
 
         // 3d：清除用户限制（加固基线 + 安装 / 卸载限制）
+        // DISALLOW_APPS_CONTROL 来自 SelfProtectionModule（强停/清数据置灰），
+        // 漏清会让卸载成功后转手设备仍无法管理应用；必须在 relinquish 之前清。
         val restrictions = listOf(
             UserManager.DISALLOW_DEBUGGING_FEATURES,
             UserManager.DISALLOW_FACTORY_RESET,
@@ -844,7 +849,8 @@ class DeviceAdminBridge @Inject constructor(
             UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES,
             UserManager.DISALLOW_CONFIG_DATE_TIME,
             UserManager.DISALLOW_INSTALL_APPS,
-            UserManager.DISALLOW_UNINSTALL_APPS
+            UserManager.DISALLOW_UNINSTALL_APPS,
+            UserManager.DISALLOW_APPS_CONTROL
         )
         restrictions.forEach { key -> results += "clearRestriction:$key" to clearUserRestriction(key) }
 
@@ -856,6 +862,10 @@ class DeviceAdminBridge @Inject constructor(
 
         // 4：释放 Device Owner / 设备管理员 —— 使应用可被常规卸载（最后执行）
         results += "relinquish" to relinquishDeviceControl()
+        // 立刻重探：_controlMode 是缓存值，若仍停在 DEVICE_OWNER，
+        // 紧随其后的策略自检会在 DO 已被清掉的事实下继续尝试重压卸载封锁（失败但刷屏），
+        // 「家长退出并卸载」链路也在此时需要一个准确的模式读数（见 ExitController）。
+        refreshControlMode()
 
         return results
     }
@@ -869,6 +879,10 @@ class DeviceAdminBridge @Inject constructor(
     private fun relinquishDeviceControl(): OpResult = guarded("relinquishDeviceControl") {
         when {
             dpm.isDeviceOwnerApp(context.packageName) -> {
+                // clearDeviceOwnerApp 在 API 34 起被标 deprecated，但替代 API（removeActiveAdmin
+                // 对 DO 不适用）无法覆盖"释放设备所有者"这一语义；目标机型 EMUI 10 / API 29
+                // 仍只有此 API 可用。此处是唯一合法的 DO 释放路径，抑制编译告警并留说明。
+                @Suppress("DEPRECATION")
                 dpm.clearDeviceOwnerApp(context.packageName)
             }
             adminComponent?.let { dpm.isAdminActive(it) } == true -> {
@@ -879,6 +893,7 @@ class DeviceAdminBridge @Inject constructor(
     }
 
     /** 枚举"桌面上能点开"的应用（用于放出挂起 / 隐藏），与 [AppPolicyEnforcer] 同源 */
+    @TargetApi(Build.VERSION_CODES.TIRAMISU)
     private fun launchablePackages(): Set<String> {
         val intent = Intent(Intent.ACTION_MAIN)
             .addCategory(Intent.CATEGORY_LAUNCHER)

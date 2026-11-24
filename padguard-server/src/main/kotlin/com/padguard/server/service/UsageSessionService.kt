@@ -17,6 +17,12 @@ import java.time.Instant
 import java.time.ZoneId
 
 /**
+ * 护眼休息上报的 CAS 最大尝试次数。4 次足够覆盖「两段休息同时结束 / 一次网络重试」这类
+ * 真实并发；超出即记为告警，不再无限自旋占用事务与数据库连接。
+ */
+private const val MAX_REST_CAS_ATTEMPTS = 4
+
+/**
  * 平板使用计时会话服务（三端时间一致的权威来源）。
  *
  * 计时由服务端统一锚定：孩子端确认"计时开始"时记录 `startEpoch`，三端据此派生剩余时长，
@@ -31,7 +37,8 @@ class UsageSessionService(
     private val usageSessionRepository: UsageSessionRepository,
     private val deviceSettingRepository: DeviceSettingRepository,
     private val deviceService: DeviceService,
-    private val usageDelayService: UsageDelayService
+    private val usageDelayService: UsageDelayService,
+    private val usageStartRequestService: UsageStartRequestService
 ) {
     private val log = LoggerFactory.getLogger(UsageSessionService::class.java)
     private val zoneId = SERVER_ZONE_ID
@@ -56,8 +63,14 @@ class UsageSessionService(
     /**
      * 孩子端确认"计时开始"。
      *
-     * 幂等：今日已确认过则沿用原起点，避免孩子重启应用/息屏重新解锁后把时钟重置，
-     * 否则"确认一次 = 额度刷新一次"会让管控形同虚设。
+     * 幂等：今日已确认过则**原样返回、一个字都不写**，避免孩子重启应用/息屏重新解锁
+     * 后把时钟重置，否则"确认一次 = 额度刷新一次"会让管控形同虚设。
+     *
+     * 跨日重置走条件 UPDATE 而不是「读实体 → 改字段 → save(整行)」：后者在日切瞬间
+     * 被双通道/网络重试并发触发时，两个事务都读到昨天的旧快照，各自用自己的墙钟写回，
+     * 后写者把起点推迟（重试白赚时长），并把并发的延时批准、护眼休息 CAS 累加一起清零。
+     * 现在由数据库行锁裁决唯一赢家，输家影响 0 行后**重读权威行**返回，两侧拿到同一份
+     * 数字 —— 这也是三端时间一致的底线。
      */
     @Transactional
     fun start(deviceId: String): UsageSessionDto {
@@ -65,24 +78,31 @@ class UsageSessionService(
         val today = dayKey(now)
         val existing = usageSessionRepository.findByDeviceId(deviceId)
         if (existing != null && existing.dayKey == today && existing.startEpoch != null) {
+            // 今日已开始（幂等快路径）：仍尝试闭环当日家长工单——孩子可能从等待页/浮层确认
+            // 而上一请求只起了表、工单确认被网络吞掉（重试幂等，确认过则影响 0 行）。
+            usageStartRequestService.confirmPendingToday(deviceId, today, now)
             return toDto(existing, now, deviceId)
         }
         val quota = resolveQuota(deviceId, now)
-        val entity = (existing ?: UsageSession(deviceId = deviceId)).apply {
-            this.dayKey = today
-            this.startEpoch = now
-            this.quotaMinutes = quota
-            this.extendedMinutes = 0
-            this.lastDelayEpoch = null
-            // 新的一天重置护眼休息累计与去重集合（休息累计按日清零，避免跨日延续）
-            this.restAccumulatedMs = 0L
-            this.restIds = ""
-            if (this.createdAt == 0L) this.createdAt = now
-            this.updatedAt = now
+        // 无行时先幂等插入；并发另一请求已插入则冲突方影响 0 行，下面的条件更新同样
+        // 不满足（已是今日且有起点），最终走重读 —— 三个分支汇合到同一份权威数据。
+        val inserted = if (existing == null) {
+            usageSessionRepository.insertIfAbsent(deviceId, today, now, quota, now)
+        } else 0
+        val reset = usageSessionRepository.startFreshIfStale(deviceId, today, now, quota, now)
+        val current = usageSessionRepository.findByDeviceId(deviceId)
+            ?: UsageSession(
+                deviceId = deviceId, dayKey = today, startEpoch = now, quotaMinutes = quota,
+                createdAt = now, updatedAt = now
+            )
+        if (inserted > 0 || reset > 0) {
+            log.info("usage session started device={} quota={} day={}", deviceId, quota, today)
         }
-        usageSessionRepository.save(entity)
-        log.info("usage session started device={} quota={} day={}", deviceId, quota, today)
-        return toDto(entity, now, deviceId)
+        // 孩子确认了「开始计时」：把家长端当日 PENDING 工单闭环为 CONFIRMED（幂等，
+        // 无工单时影响 0 行）。孩子可能经等待页按钮 / 日切浮层 / 家长指令浮层确认，
+        // 这里按设备+日期收敛，不依赖孩子端回传 requestId（链路缺一环工单就会悬空）。
+        usageStartRequestService.confirmPendingToday(deviceId, today, now)
+        return toDto(current, now, deviceId)
     }
 
     /**
@@ -172,22 +192,53 @@ class UsageSessionService(
             return
         }
         val now = System.currentTimeMillis()
-        val entity = usageSessionRepository.findByDeviceId(deviceId) ?: return
-        // 非今日会话：该次休息属于已过期会话，不再计入当前额度
-        if (entity.dayKey != dayKey(now)) return
-        // 幂等去重：restId 已记录则跳过（应对重试 / 乱序）。
-        // 用有序 List 而非 Set：takeLast(16) 依赖写入顺序（末尾即最近），且保证"最近16条"语义正确。
-        val recorded = entity.restIds.split(',').map { it.trim() }.filter { it.isNotBlank() }
-        if (restId in recorded) return
+        val today = dayKey(now)
 
-        val totalMs = (resolveQuota(deviceId, now) + entity.extendedMinutes) * 60_000L
-        val capped = restMs.coerceIn(0L, totalMs)
-        entity.restAccumulatedMs = (entity.restAccumulatedMs + capped).coerceAtLeast(0L)
-        // 维护去重集合（保留最近 16 条，防止字段无限增长）
-        entity.restIds = (recorded + restId).takeLast(16).joinToString(",")
-        entity.updatedAt = now
-        usageSessionRepository.save(entity)
-        log.info("usage rest reported device={} restId={} restMs={} totalRestMs={}", deviceId, restId, capped, entity.restAccumulatedMs)
+        // 条件累加 + 有限重试，而不是「读实体 → 改字段 → save(整行)」。
+        //
+        // 孩子端一段护眼休息结束就上报一次，多段连续结束、网络重试、家长端同时刷新
+        // 都会让两个请求读到同一份旧快照。整行 save 会把对方刚写入的累加值与去重 id
+        // 一起覆盖掉：休息被算进额度（孩子提前锁屏），同一个 restId 也可能被重复扣减。
+        // appendRestIfUnchanged 把「读到的旧值」同时作为 WHERE 条件，输家影响 0 行，
+        // 重读一次即可自愈。这里绝不能再改 entity 的字段，否则提交时脏检查会整行写回。
+        repeat(MAX_REST_CAS_ATTEMPTS) { attempt ->
+            val entity = usageSessionRepository.findByDeviceId(deviceId) ?: return
+            // 非今日会话：该次休息属于已过期会话，不再计入当前额度
+            if (entity.dayKey != today) return
+            // 幂等去重：restId 已记录则跳过（应对重试 / 乱序）。
+            // 用有序 List 而非 Set：takeLast(16) 依赖写入顺序（末尾即最近），且保证"最近16条"语义正确。
+            val recorded = entity.restIds.split(',').map { it.trim() }.filter { it.isNotBlank() }
+            if (restId in recorded) return
+
+            val totalMs = (resolveQuota(deviceId, now) + entity.extendedMinutes) * 60_000L
+            val capped = restMs.coerceIn(0L, totalMs)
+            val oldAccum = entity.restAccumulatedMs
+            // 与旧实现的 coerceAtLeast(0) 完全对齐：正常数据下 delta == capped，
+            // 历史脏数据（负值）下差值会把累加值抬回 0，而不是继续往下减。
+            val delta = (oldAccum + capped).coerceAtLeast(0L) - oldAccum
+            // 维护去重集合（保留最近 16 条，防止字段无限增长）
+            val newRestIds = (recorded + restId).takeLast(16).joinToString(",")
+            val updated = usageSessionRepository.appendRestIfUnchanged(
+                deviceId = deviceId,
+                dayKey = today,
+                delta = delta,
+                newRestIds = newRestIds,
+                now = now,
+                oldAccum = oldAccum,
+                oldRestIds = entity.restIds
+            )
+            if (updated > 0) {
+                log.info(
+                    "usage rest reported device={} restId={} restMs={} totalRestMs={}",
+                    deviceId, restId, capped, oldAccum + delta
+                )
+                return
+            }
+            log.debug("usage rest CAS conflict, retry {}/{}: device={} restId={}", attempt + 1, MAX_REST_CAS_ATTEMPTS, deviceId, restId)
+        }
+        // 正常并发远达不到这个次数；真到了说明有持续写热点，留一条可检索的告警，
+        // 宁可少算一次休息（孩子端下次上报会带上新的去重 id），也不静默成功。
+        log.warn("usage rest report gave up after {} CAS conflicts: device={} restId={}", MAX_REST_CAS_ATTEMPTS, deviceId, restId)
     }
 
     /**
@@ -248,7 +299,10 @@ class UsageSessionService(
             maxDailyExtendMinutes = UsageSession.MAX_DAILY_EXTEND_MINUTES,
             lastDelayEpoch = s.lastDelayEpoch,
             pendingDelayMinutes = usageDelayService.pendingDelayMinutes(s.deviceId),
-            timeControlEnabled = isTimeControlEnabled(deviceId)
+            timeControlEnabled = isTimeControlEnabled(deviceId),
+            // 家长端「开始计时」当日工单状态（null=今日家长未发起；PENDING=已发送等待孩子确认）。
+            // 孩子端 Json 配了 ignoreUnknownKeys，此字段对老终端透明。
+            startRequest = usageStartRequestService.todayRequest(deviceId)
         )
     }
 }

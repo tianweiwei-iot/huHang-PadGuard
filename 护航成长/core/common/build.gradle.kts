@@ -8,10 +8,10 @@ plugins {
 
 android {
     namespace = "com.padguard.core.common"
-    compileSdk = project.findProperty("COMPILE_SDK").toString().toInt()
+    compileSdk = project.findProperty("COMPILE_SDK")?.toString()?.toInt() ?: 35
 
     defaultConfig {
-        minSdk = project.findProperty("MIN_SDK").toString().toInt()
+        minSdk = project.findProperty("MIN_SDK")?.toString()?.toInt() ?: 26
         consumerProguardFiles("consumer-rules.pro")
     }
 

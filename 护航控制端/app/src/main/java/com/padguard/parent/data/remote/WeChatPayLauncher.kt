@@ -94,15 +94,21 @@ class WeChatPayLauncher @Inject constructor(
      * 所以只落一个标记，由订阅页读取后主动拉一次订单状态，避免"付了钱但界面说没付"。
      */
     fun markResultPending() {
+        // R41：这是状态转移标记，不是偏好设置。WXPayEntryActivity 写完就 finish()，
+        // apply() 只保证内存可见；进程在异步落盘前再次被回收，标记就永久丢失，
+        // 订阅页不会去查单 —— 表现为"钱扣了但一直显示未开通"且无自助恢复入口。
+        // 与项目红线「状态转移 SharedPreferences 必须 commit()」一致。
         runCatching {
-            prefs().edit().putBoolean(KEY_RESULT_PENDING, true).apply()
+            prefs().edit().putBoolean(KEY_RESULT_PENDING, true).commit()
         }
     }
 
     /** 读取并清除"支付结果待确认"标记；为 true 时调用方应主动刷新一次订单状态。 */
     fun consumeResultPending(): Boolean = runCatching {
         val pending = prefs().getBoolean(KEY_RESULT_PENDING, false)
-        if (pending) prefs().edit().putBoolean(KEY_RESULT_PENDING, false).apply()
+        // 同样必须同步落盘：清标记后紧接着查单，若进程被杀而清除尚未落盘，
+        // 下次冷启动会把同一个"待确认"重复消费一次。
+        if (pending) prefs().edit().putBoolean(KEY_RESULT_PENDING, false).commit()
         pending
     }.getOrDefault(false)
 

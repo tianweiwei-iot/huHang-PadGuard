@@ -26,17 +26,110 @@ import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
 /**
- * v3 -> v4：给 app_usage 补两列墙钟时间。
+ * 迁移辅助：列存在则跳过，不存在才 ADD。
  *
- * 历史行没有这两个时间点，用 lastUpdateAt 兜底回填（它至少是"最近一次写入的时刻"），
- * 比直接填 0 更接近真实；后续写入会由 DAO 层按真实首次/末次语义覆盖。
+ * 为什么不用裸 ALTER ADD COLUMN：Android SQLite（API 29 = SQLite 3.22）不支持
+ * `ADD COLUMN IF NOT EXISTS`；历史版本的 schema 导出与迁移标注出现过错位
+ * （v3 的导出 json 已含 firstUsedAt/lastUsedAt，但迁移 3→4 还在做 ADD），
+ * 防御式检查让迁移在"真实设备库状态与导出 json 有出入"时幂等执行，
+ * 而不是 duplicate column 崩溃。
  */
-private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
-    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+private fun columnExists(db: SupportSQLiteDatabase, table: String, column: String): Boolean {
+    db.query("PRAGMA table_info($table)").use { cursor ->
+        val nameIdx = cursor.getColumnIndex("name")
+        while (cursor.moveToNext()) {
+            if (cursor.getString(nameIdx) == column) return true
+        }
+    }
+    return false
+}
+
+private fun ensureAppUsageWallClockColumns(db: SupportSQLiteDatabase) {
+    if (!columnExists(db, "app_usage", "firstUsedAt")) {
         db.execSQL("ALTER TABLE app_usage ADD COLUMN firstUsedAt INTEGER NOT NULL DEFAULT 0")
+    }
+    if (!columnExists(db, "app_usage", "lastUsedAt")) {
         db.execSQL("ALTER TABLE app_usage ADD COLUMN lastUsedAt INTEGER NOT NULL DEFAULT 0")
-        db.execSQL("UPDATE app_usage SET firstUsedAt = lastUpdateAt WHERE firstUsedAt = 0")
-        db.execSQL("UPDATE app_usage SET lastUsedAt = lastUpdateAt WHERE lastUsedAt = 0")
+    }
+    // 历史行没有这两个时间点，用 lastUpdateAt 兜底回填（它至少是"最近一次写入的时刻"），
+    // 比直接填 0 更接近真实；后续写入会由 DAO 层按真实首次/末次语义覆盖。
+    db.execSQL("UPDATE app_usage SET firstUsedAt = lastUpdateAt WHERE firstUsedAt = 0")
+    db.execSQL("UPDATE app_usage SET lastUsedAt = lastUpdateAt WHERE lastUsedAt = 0")
+}
+
+/**
+ * v1 -> v2：新增 unlock_request（解锁申请本地留痕）。
+ *
+ * 此前该步骤没有显式迁移：v1 老库升级只能触发 destructive 清库，
+ * 日志缓存/风险事件全部丢失。按 schema 1.json→2.json 差异补齐。
+ */
+private val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS unlock_request (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                requestId TEXT NOT NULL,
+                packageName TEXT NOT NULL,
+                appLabel TEXT NOT NULL,
+                reasonText TEXT NOT NULL,
+                durationMinutes INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                decidedAt INTEGER,
+                uploaded INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_unlock_request_requestId ON unlock_request(requestId)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_unlock_request_status ON unlock_request(status)")
+    }
+}
+
+/**
+ * v2 -> v3：app_usage 补两列墙钟时间 + 新增 agreement（协议签署留痕）。
+ * 此前同样无显式迁移路径，全靠 destructive 兜底。
+ */
+private val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        ensureAppUsageWallClockColumns(db)
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS agreement (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                version TEXT NOT NULL,
+                signedAt INTEGER NOT NULL,
+                snMask TEXT NOT NULL,
+                deviceId TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_agreement_signedAt ON agreement(signedAt)")
+    }
+}
+
+/**
+ * v3 -> v4：schema 3.json 与 4.json 结构完全一致（仅版本号递增），本步骤按理应为 no-op。
+ *
+ * 历史包袱：旧代码在这里执行 ADD COLUMN firstUsedAt——但 v3 库已含该列，
+ * 真实升级会 duplicate column 崩溃。改为防御式补列（列在则跳过），
+ * 兼容"导出 json 与真实设备库状态错位"的历史库。
+ */
+private val MIGRATION_3_4 = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        ensureAppUsageWallClockColumns(db)
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS agreement (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                version TEXT NOT NULL,
+                signedAt INTEGER NOT NULL,
+                snMask TEXT NOT NULL,
+                deviceId TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_agreement_signedAt ON agreement(signedAt)")
     }
 }
 
@@ -72,6 +165,14 @@ private val MIGRATION_4_5 = object : Migration(4, 5) {
 private val Context.authDataStore: DataStore<Preferences> by preferencesDataStore(name = "padguard_auth")
 private val Context.configDataStore: DataStore<Preferences> by preferencesDataStore(name = "padguard_config")
 
+/**
+ * 全量升级链。暴露为 internal 供 MigrationChainTest 校验"任何存量版本号
+ * （1..5）都有相邻迁移路径"——这是防 destructive 清库的核心保证：
+ * 缺一步，该版本的老库升级时就会整库重建（当日累计时长归零=绕过限额）。
+ */
+internal val PADGUARD_MIGRATIONS: List<Migration> =
+    listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -80,13 +181,13 @@ object DatabaseModule {
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): PadGuardDatabase =
         Room.databaseBuilder(context, PadGuardDatabase::class.java, PadGuardDatabase.NAME)
-            // v3 -> v4：app_usage 增加首次/末次使用时间两列。
-            // 必须显式迁移而不能依赖 destructive：老库里存着当日累计时长，
-            // 一旦重建，孩子已用的时长归零，等于白送一段绕过限额的使用时间。
-            .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
-            // 离线管控场景下数据库损坏会导致管控失效，这里允许重建
-            // （策略可从服务端重新拉取，日志丢失可接受，优先保证可用性）
-            .fallbackToDestructiveMigration()
+            // 全量升级链 1..5（见 PADGUARD_MIGRATIONS）：老库里存着当日累计时长，
+            // 一旦整库重建，孩子已用的时长归零，等于白送一段绕过限额的使用时间。
+            .addMigrations(*PADGUARD_MIGRATIONS.toTypedArray())
+            // destructive 只允许发生在降级（schema 版本回退，如回滚安装）：
+            // 升级路径必须全部显式迁移，缺路径宁可启动失败（开发期立刻暴露），
+            // 也不能静默清掉本地管控数据。
+            .fallbackToDestructiveMigrationOnDowngrade()
             .build()
 
     @Provides

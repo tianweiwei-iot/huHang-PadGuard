@@ -1,6 +1,7 @@
 package com.padguard.core.data.repository
 
 import com.padguard.core.common.Logger
+import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.db.UnlockRequestDao
 import com.padguard.core.data.db.UnlockRequestEntity
 import com.padguard.core.data.model.LogType
@@ -30,7 +31,8 @@ import javax.inject.Singleton
 @Singleton
 class UnlockRequestRepository @Inject constructor(
     private val dao: UnlockRequestDao,
-    private val logRepository: LogRepository
+    private val logRepository: LogRepository,
+    private val timeProvider: TimeProvider
 ) {
 
     /**
@@ -49,7 +51,10 @@ class UnlockRequestRepository @Inject constructor(
         durationMinutes: Int
     ): String {
         val requestId = "ur-${UUID.randomUUID().toString().replace("-", "").take(20)}"
-        val now = System.currentTimeMillis()
+        // 全类统一走受信钟：这里的时间戳会原样进入 UNLOCK_REQUEST 行为日志
+        // （见 enqueueUplink），用裸墙钟等于给 R27 的日志时间戳加固开一个绕过口——
+        // 孩子改系统时间即可伪造"申请时刻"这一审计证据。
+        val now = timeProvider.now()
         val minutes = durationMinutes.coerceIn(MIN_MINUTES, MAX_MINUTES)
 
         dao.insert(
@@ -146,12 +151,14 @@ class UnlockRequestRepository @Inject constructor(
      */
     suspend fun approveLatest(packageName: String) {
         val target = dao.latestPending(packageName) ?: return
-        dao.updateStatus(
+        val updated = dao.updateStatus(
             requestId = target.requestId,
             status = UnlockRequestEntity.STATUS_APPROVED,
-            decidedAt = System.currentTimeMillis()
+            decidedAt = timeProvider.now()
         )
-        Logger.i(TAG) { "unlock request approved: ${target.requestId}" }
+        // 守卫拦下 = 并发中已被拒绝/已决，属正常；不能误记成"已批准"
+        if (updated > 0) Logger.i(TAG) { "unlock request approved: ${target.requestId}" }
+        else Logger.d(TAG) { "unlock request already decided, skip: ${target.requestId}" }
     }
 
     /** 家长明确拒绝（服务端可通过 SHOW_MESSAGE 附带 requestId 下发） */
@@ -159,19 +166,20 @@ class UnlockRequestRepository @Inject constructor(
         dao.updateStatus(
             requestId = requestId,
             status = UnlockRequestEntity.STATUS_REJECTED,
-            decidedAt = System.currentTimeMillis()
+            decidedAt = timeProvider.now()
         )
     }
 
     /** 把超时未审批的申请置为失效，允许重新发起 */
     suspend fun expireStale() {
-        val before = System.currentTimeMillis() - UnlockRequestEntity.STALE_HOURS * 60L * 60 * 1000
+        // 与 createdAt（同为受信钟）同源：前拨/回拨墙钟不会整体平移或冻结失效窗口
+        val before = timeProvider.now() - UnlockRequestEntity.STALE_HOURS * 60L * 60 * 1000
         dao.expireStale(before)
     }
 
     /** 清理历史申请记录（与日志保留策略一致） */
     suspend fun purge(retentionDays: Int) {
-        dao.deleteBefore(System.currentTimeMillis() - retentionDays * 24L * 60 * 60 * 1000)
+        dao.deleteBefore(timeProvider.now() - retentionDays * 24L * 60 * 60 * 1000)
     }
 
     private fun UnlockRequestEntity.toModel() = UnlockRequest(

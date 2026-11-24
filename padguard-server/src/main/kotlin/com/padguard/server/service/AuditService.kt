@@ -8,6 +8,7 @@ import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
@@ -38,19 +39,29 @@ class AuditService(
         result: String = "SUCCESS",
         ip: String? = null
     ) {
+        val id = "al_" + UUID.randomUUID().toString().replace("-", "")
+        val createdAt = System.currentTimeMillis()
+        val detailCapped = detail?.take(4000)
+        // 防篡改哈希：对整行规范化内容取 SHA-256，落库时一并写入。
+        // 任何字段被非法篡改都会导致重算 hash 与落库值不一致（verifyIntegrity 可批量检出）。
+        val canonical = listOf(
+            id, userId, deviceId, action, targetType, targetId, detailCapped, result, ip, createdAt
+        ).joinToString("|")
+        val hash = sha256Hex(canonical)
         runCatching {
             auditLogRepository.save(
                 AuditLog(
-                    id = "al_" + UUID.randomUUID().toString().replace("-", ""),
+                    id = id,
                     userId = userId,
                     deviceId = deviceId,
                     action = action,
                     targetType = targetType,
                     targetId = targetId,
-                    detail = detail?.take(4000),
+                    detail = detailCapped,
                     result = result,
                     ip = ip,
-                    createdAt = System.currentTimeMillis()
+                    createdAt = createdAt,
+                    hash = hash
                 )
             )
         }.onFailure { log.warn("audit log write failed (action={}): {}", action, it.message) }
@@ -86,21 +97,63 @@ class AuditService(
             else -> emptyList()
         }
         return rows.map {
-                mapOf(
-                    "id" to it.id,
-                    "userId" to it.userId,
-                    "deviceId" to it.deviceId,
-                    "action" to it.action,
-                    "targetType" to it.targetType,
-                    "targetId" to it.targetId,
-                    "detail" to it.detail,
-                    "result" to it.result,
-                    "ip" to it.ip,
-                    "createdAt" to it.createdAt
-                )
+            mapOf(
+                "id" to it.id,
+                "userId" to it.userId,
+                "deviceId" to it.deviceId,
+                "action" to it.action,
+                "targetType" to it.targetType,
+                "targetId" to it.targetId,
+                "detail" to it.detail,
+                "result" to it.result,
+                "ip" to it.ip,
+                "createdAt" to it.createdAt
+            )
+        }
+    }
+
+    // ---- 审计防篡改 ----
+
+    private fun sha256Hex(input: String): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        return md.digest(input.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * 审计日志完整性校验（PRD M14-3「日志不可随意篡改」）。
+     *
+     * 重算每行 hash 与落库值比对，返回不一致数量与样本 id。
+     * 迁移前历史行（hash 为 NULL）不参与校验。供后台「审计防篡改」巡检调用（W7 接管理端点）。
+     */
+    fun verifyIntegrity(limit: Int = 5000): AuditIntegrityReport {
+        // 必须走数据库侧 LIMIT：审计表增长极快，整表 findAll 再 take(limit) 会把全部历史行
+        // （含大文本 detail）物化到堆里再丢弃绝大部分，巡检一次就可能拖垮后台。
+        // 与 AdminAuditService.auditPage 同一分页重载，语义仍是"最近 limit 行"。
+        val rows = auditLogRepository.findAllByOrderByCreatedAtDesc(PageRequest.of(0, limit)).content
+        var mismatch = 0
+        val samples = mutableListOf<String>()
+        for (r in rows) {
+            if (r.hash.isNullOrBlank()) continue
+            val canonical = listOf(
+                r.id, r.userId, r.deviceId, r.action, r.targetType,
+                r.targetId, r.detail, r.result, r.ip, r.createdAt
+            ).joinToString("|")
+            if (sha256Hex(canonical) != r.hash) {
+                mismatch++
+                if (samples.size < 10) samples.add(r.id)
             }
+        }
+        return AuditIntegrityReport(checked = rows.size, mismatch = mismatch, samples = samples)
     }
 }
+
+/** 审计完整性校验结果。 */
+data class AuditIntegrityReport(
+    val checked: Int,
+    val mismatch: Int,
+    val samples: List<String>
+)
 
 /** 审计动作常量（语义化，便于统计与过滤） */
 object AuditAction {
@@ -111,6 +164,11 @@ object AuditAction {
     const val POLICY_TABLET_USAGE_UPDATE = "POLICY_TABLET_USAGE_UPDATE"
     const val POLICY_SYSTEM_LOCK_UPDATE = "POLICY_SYSTEM_LOCK_UPDATE"
     const val POLICY_TEMPLATE_APPLY = "POLICY_TEMPLATE_APPLY"
+    /** 第二步：策略版本回滚 / 定时生效窗口 / 批量重新发布 / 批量指令下发 */
+    const val POLICY_ROLLBACK = "POLICY_ROLLBACK"
+    const val POLICY_SCHEDULE_UPDATE = "POLICY_SCHEDULE_UPDATE"
+    const val POLICY_BATCH_PUBLISH = "POLICY_BATCH_PUBLISH"
+    const val COMMAND_BATCH_ISSUE = "COMMAND_BATCH_ISSUE"
     const val UNLOCK_APPROVE = "UNLOCK_APPROVE"
     const val UNLOCK_REJECT = "UNLOCK_REJECT"
     const val UNLOCK_DISMISS = "UNLOCK_DISMISS"
@@ -127,4 +185,24 @@ object AuditAction {
     const val CONTENT_CATEGORY_BLOCK_UPDATE = "CONTENT_CATEGORY_BLOCK_UPDATE"
     /** 护眼模式变更：涉及孩子用眼健康，家长有权事后核对是谁在什么时候改的 */
     const val POLICY_EYE_PROTECTION_UPDATE = "POLICY_EYE_PROTECTION_UPDATE"
+
+    // ---- 数据主体权利（第四步合规） ----
+    const val CONSENT_WITHDRAW = "CONSENT_WITHDRAW"
+    const val CONSENT_REINSTATE = "CONSENT_REINSTATE"
+    /** 不满十四周岁监护人单独同意（家长申报年龄 + 同意文案版本留痕） */
+    const val GUARDIAN_CONSENT_UNDER14 = "GUARDIAN_CONSENT_UNDER14"
+    const val CONSENT_ACCOUNT_DELETE_REQUEST = "CONSENT_ACCOUNT_DELETE_REQUEST"
+    const val CONSENT_ACCOUNT_DELETED = "CONSENT_ACCOUNT_DELETED"
+    const val APPEAL_SUBMIT = "APPEAL_SUBMIT"
+    const val APPEAL_UPDATE = "APPEAL_UPDATE"
+
+    // ---- 家长凭证与会话治理（R45） ----
+    // 改密/登出/吊销会话都会 tokenVersion+1 令全部或部分设备下线，属关键写操作；
+    // 旧实现只写应用日志不留审计行，事后无法追溯"谁在什么时候"改的凭证。
+    /** 家长修改登录密码（全员令牌吊销 + 旧 refresh 会话作废） */
+    const val PARENT_PASSWORD_CHANGE = "PARENT_PASSWORD_CHANGE"
+    /** 家长登出（吊销其全部令牌与会话） */
+    const val PARENT_LOGOUT = "PARENT_LOGOUT"
+    /** 家长吊销单设备会话 */
+    const val PARENT_SESSION_REVOKE = "PARENT_SESSION_REVOKE"
 }

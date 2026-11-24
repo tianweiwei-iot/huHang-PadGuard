@@ -8,6 +8,7 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
+import android.os.SystemClock
 import android.os.ParcelFileDescriptor
 import androidx.core.app.ServiceCompat
 import com.padguard.core.common.Logger
@@ -15,8 +16,10 @@ import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
 import com.padguard.core.engine.PolicyEngine
+import com.padguard.core.engine.enforcer.BlockReason
 import com.padguard.core.engine.enforcer.WebVerdict
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -29,6 +32,7 @@ import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import kotlin.concurrent.thread
 
@@ -69,7 +73,14 @@ class WebGuardVpnService : VpnService() {
     private var fd: ParcelFileDescriptor? = null
     private var loopThread: Thread? = null
     // SupervisorJob：单次告警上报失败不得取消整个作用域，否则后续拦截全部不再上报。
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, t ->
+            Logger.e("WebGuardVpn", t) { "uncaught exception in WebGuardVpnService scope" }
+        }
+    )
+
+    /** 按 host 记录上次拦截告警时间（elapsedRealtime），用于 [reportBlocked] 节流。基数受黑名单规模约束，有界。 */
+    private val lastBlockReportedAt = ConcurrentHashMap<String, Long>()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -115,7 +126,9 @@ class WebGuardVpnService : VpnService() {
         addRoute(TUN_LOCAL, 32)
         addDnsServer(TUN_LOCAL)
         // 不让本应用自身流量进隧道（避免回环）
-        try { addDisallowedApplication(packageName) } catch (_: Throwable) {}
+        try { addDisallowedApplication(packageName) } catch (t: Throwable) {
+            Logger.w(TAG, t) { "web guard: exclude self from vpn failed (own DNS may loop into tunnel)" }
+        }
         setMtu(MTU)
     }
 
@@ -161,7 +174,13 @@ class WebGuardVpnService : VpnService() {
                     val pkt = buffer.copyOf(len)
                     // 交给线程池：读循环只负责收包，绝不在 IO 上等待上游 DNS
                     try {
-                        poolRef.execute { handlePacket(pkt, output) }
+                        poolRef.execute {
+                            // 即便队列满触发 CallerRunsPolicy 在「读循环线程」执行，
+                            // 单包解析/转发异常也必须就地吞掉（只记日志），
+                            // 绝不允许冒泡到读循环 catch → stopVpn（那会让整条过滤 fail-open）。
+                            runCatching { handlePacket(pkt, output) }
+                                .onFailure { Logger.w(TAG) { "handlePacket dropped: ${it.message}" } }
+                        }
                     } catch (_: java.util.concurrent.RejectedExecutionException) {
                         // 池已关闭 = 通道正在停：安静丢弃，不刷日志
                     }
@@ -184,8 +203,11 @@ class WebGuardVpnService : VpnService() {
         if (udp.dstPort != 53) return
         val dns = DnsMessage.parse(udp.payload) ?: return
         val queryName = dns.queryName ?: return
+        // fail-closed：匹配逻辑任何异常都默认「拦截」而非「放行」，
+        // 杜绝"匹配器偶发异常 → 该查询被静默放过"的 fail-open 缺口。
+        // 当前匹配器仅用 ==/endsWith/contains 极少抛错，但作为安全兜底必须朝"拦"方向。
         val verdict = runCatching { policyEngine.matchUrl(queryName, "") }
-            .getOrElse { WebVerdict.Allowed }
+            .getOrElse { WebVerdict.Blocked(queryName, BlockReason.CATEGORY) }
         if (verdict is WebVerdict.Blocked) {
             Logger.i(TAG) { "DNS BLOCKED: $queryName (${verdict.reason})" }
             scope.launch { reportBlocked(queryName, verdict) }
@@ -215,7 +237,7 @@ class WebGuardVpnService : VpnService() {
     @Volatile private var cachedAt: Long = 0L
 
     private fun upstreamDns(): String {
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         cachedUpstream?.let { if (now - cachedAt < UPSTREAM_TTL_MS) return it }
         val resolved = runCatching { systemDns() }.getOrNull()
         val chosen = resolved?.takeIf { it.isNotBlank() } ?: FALLBACK_DNS
@@ -293,6 +315,13 @@ class WebGuardVpnService : VpnService() {
      * 在非挂起函数里直接调用编译不过；由调用方在 `scope.launch` 内使用。
      */
     private suspend fun reportBlocked(name: String, verdict: com.padguard.core.engine.enforcer.WebVerdict.Blocked) {
+        // 按 host 节流：同一站点在节流窗内只上报一次，避免风险告警表被高频重试域名灌爆、
+        // 挤占真正关键的控制失效告警。首次（prev==null）或窗外才放行。
+        val host = verdict.host
+        val now = SystemClock.elapsedRealtime()
+        val prev = lastBlockReportedAt[host]
+        if (prev != null && now - prev < BLOCK_REPORT_THROTTLE_MS) return
+        lastBlockReportedAt[host] = now
         runCatching {
             logRepository.raise(
                 type = RiskType.BLOCKED_URL_ACCESS,
@@ -375,6 +404,15 @@ class WebGuardVpnService : VpnService() {
         /** 上游 DNS 缓存时长：兼顾"切网络后尽快纠正"与"不必每包查一次系统" */
         private const val UPSTREAM_TTL_MS = 60_000L
 
+        /**
+         * 同一 host 的拦截告警节流窗。
+         * 被拦域名（广告/统计 SDK 反复重试、解析 TTL 轮转）可能在短时间内高频触发，
+         * 若不节流会灌爆 [com.padguard.core.data.repository.LogRepository] 的 risk_event，
+         * 并在"最旧优先 50 条批"的回执队列里挤占 UNINSTALL_ATTEMPT / CONTROL_LOST 等关键告警。
+         * 按 host 节流后：既能反映"该站点被拦"，又避免淹没真正危险的告警。
+         */
+        private const val BLOCK_REPORT_THROTTLE_MS = 60_000L
+
         /** DNS 并发处理线程数：8 足以覆盖单机浏览行为，又不至于把 CPU 拉满 */
         private const val DNS_THREADS = 8
 
@@ -412,6 +450,9 @@ private data class IpPacket(
             val ihl = (raw[0].toInt() and 0x0F) * 4
             if (ihl < 20 || raw.size < ihl) return null
             val totalLen = ((raw[2].toInt() and 0xFF) shl 8) or (raw[3].toInt() and 0xFF)
+            // 畸形包守卫：totalLen 小于首部长度或超出报文实际长度时直接丢弃（返回 null），
+            // 否则 copyOfRange(ihl, totalLen) 会因 from>to 抛 IllegalArgumentException。
+            if (totalLen < ihl || totalLen > raw.size) return null
             val protocol = raw[9].toInt() and 0xFF
             val src = inet4(raw, 12)
             val dst = inet4(raw, 16)

@@ -209,7 +209,26 @@ interface DailyUsageDao {
 @Dao
 interface RiskEventDao {
 
-    @Query("SELECT * FROM risk_event WHERE uploaded = 0 ORDER BY timestamp ASC LIMIT :limit")
+    /**
+     * 待上报告警：按 RiskLevel 优先级出队（HIGH 永远排在最前），同级内再按时间升序（FIFO）。
+     *
+     * 为什么不是纯 `ORDER BY timestamp ASC`：良性事件（环境自检 / 应用装卸 / 代理检测等
+     * NORMAL/INFO）洪泛时，纯时间序会把 `CONTROL_LOST` / `UNINSTALL_ATTEMPT` 这类高危告警
+     * 压在队尾，每批（ALERT_BATCH_SIZE=50）只能慢慢排空前面的良性事件，导致家长延迟收到
+     * 「正在被卸载 / 管控完整性丢失」等关键信号。改为按级别优先后，HIGH 告警在任意批次都
+     * 会被优先取走，链路不被良性噪声淹没。
+     * 优先级映射与 [com.padguard.core.data.model.RiskLevel] 保持一致（HIGH<NORMAL<INFO）。
+     */
+    @Query(
+        "SELECT * FROM risk_event WHERE uploaded = 0 " +
+            "ORDER BY CASE level " +
+            "WHEN 'HIGH' THEN 0 " +
+            "WHEN 'NORMAL' THEN 1 " +
+            "WHEN 'INFO' THEN 2 " +
+            "ELSE 3 END ASC, " +
+            "timestamp ASC " +
+            "LIMIT :limit"
+    )
     suspend fun pending(limit: Int): List<RiskEventEntity>
 
     @Query("SELECT COUNT(*) FROM risk_event WHERE uploaded = 0")
@@ -269,8 +288,21 @@ interface UnlockRequestDao {
     @Query("UPDATE unlock_request SET uploaded = 1 WHERE requestId IN (:requestIds)")
     suspend fun markUploaded(requestIds: List<String>)
 
-    @Query("UPDATE unlock_request SET status = :status, decidedAt = :decidedAt WHERE requestId = :requestId")
-    suspend fun updateStatus(requestId: String, status: String, decidedAt: Long)
+    /**
+     * 审批状态转移：**只能从 PENDING 出发**，终态不可回退（与服务端状态机同一纪律）。
+     *
+     * 原 SQL 只按 requestId 更新：`approveLatest` 的 latestPending 查询与这里的 UPDATE
+     * 之间存在竞态窗口，家长已拒绝（REJECTED）后迟到的 TEMP_UNLOCK 指令仍可把
+     * 终态覆盖回 APPROVED；反之 `reject` 也能把已放行的申请改回 REJECTED。
+     * 把守卫放进 DB 的 WHERE（而非"先读后判"），跨协程原子。
+     *
+     * @return 实际更新的行数：0 表示已是终态或被并发抢先，调用方按正常情况处理。
+     */
+    @Query(
+        "UPDATE unlock_request SET status = :status, decidedAt = :decidedAt " +
+            "WHERE requestId = :requestId AND status = 'PENDING'"
+    )
+    suspend fun updateStatus(requestId: String, status: String, decidedAt: Long): Int
 
     /** 超时未审批的申请统一置为失效，让孩子可以重新发起 */
     @Query("UPDATE unlock_request SET status = 'EXPIRED' WHERE status = 'PENDING' AND createdAt < :before")

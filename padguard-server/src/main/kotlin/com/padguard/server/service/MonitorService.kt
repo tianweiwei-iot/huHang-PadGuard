@@ -1,5 +1,7 @@
 package com.padguard.server.service
 
+import com.padguard.server.config.TraceIds
+
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
@@ -17,6 +19,7 @@ import com.padguard.server.repository.ScreenshotRepository
 import com.padguard.server.ws.WebSocketPushService
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import org.slf4j.LoggerFactory
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -229,7 +232,10 @@ class MonitorService(
      * 因此"杀进程重开"能在数秒内自动恢复，家长无需任何操作。重发指令带冷却，避免未推流时高频刷指令。
      */
     @Scheduled(fixedDelay = 3_000L)
-    fun reconcileLiveSessions() {
+    fun reconcileLiveSessions() = TraceIds.withNewTrace("sched") { reconcileLiveSessionsInternal() }
+
+    /** 原扫描逻辑；公开入口只负责给每次调度一个独立 traceId（见 TraceIdFilter 说明）。 */
+    private fun reconcileLiveSessionsInternal() {
         if (liveSessions.isEmpty()) return
         val now = System.currentTimeMillis()
         val iterator = liveSessions.entries.iterator()
@@ -316,6 +322,17 @@ class MonitorService(
         )
     }
 
+    /**
+     * 更新看屏设置。
+     *
+     * 必须 `@Transactional`：`deviceSettingOf` 在无事务时返回**脱管实体**，
+     * `save()` 走 merge 会把 `device_settings` **整行所有列**写回。
+     * 这张表同一行上还放着家长管理密码哈希、每日额度、护眼、应用名单模式等
+     * 十几个互不相关的字段：家长在「时间管控」页改额度的同时有人点开看屏设置，
+     * 整行回写就会把刚提交的额度/密码/名单覆盖成旧快照（表现为"改完立刻变回去"）。
+     * 有事务后实体是托管态，只 UPDATE 本方法真正改的那 5 个字段。
+     */
+    @Transactional
     fun updateScreenSettings(userId: String, deviceId: String, req: ScreenMonitorSettingsDto): ScreenMonitorSettingsDto {
         requireOwned(userId, deviceId)
         val s = deviceSettingOf(deviceId)

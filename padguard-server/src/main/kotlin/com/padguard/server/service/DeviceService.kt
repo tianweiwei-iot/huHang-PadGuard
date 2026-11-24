@@ -5,6 +5,7 @@ import com.padguard.server.common.BizException
 import com.padguard.server.common.ChildErr
 import com.padguard.server.common.HashUtil
 import com.padguard.server.common.ParentErr
+import com.padguard.server.common.SensitiveData
 import com.padguard.server.domain.Device
 import com.padguard.server.dto.BindRequest
 import com.padguard.server.dto.BindResult
@@ -17,6 +18,7 @@ import com.padguard.server.mqtt.MqttGateway
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.PolicyRepository
 import com.padguard.server.repository.UserRepository
+import com.padguard.server.security.ParentCredentialGate
 import com.padguard.server.security.Passwords
 import com.padguard.server.service.AuditAction
 import com.padguard.server.service.AuditService
@@ -70,6 +72,19 @@ class DeviceService(
 ) {
 
     private val log = LoggerFactory.getLogger(DeviceService::class.java)
+
+    /**
+     * 账号密码绑定通道与家长登录共用同一组锁定配置（新增缺陷 M）。
+     *
+     * 用字段注入而不是再加构造参数：本类已被多处 JVM 单测按现有签名直构，
+     * 加参数会连锁改动与本次缺陷无关的 fixture；@Value 直构时取代码里的默认值 5 / 15，
+     * 与 `AuthService` 的 `@Value` 默认值及 `application.yml` 同一配置键，不会漂移。
+     */
+    @field:Value("\${padguard.auth.max-fail-attempts:5}")
+    private var maxFailAttempts: Int = 5
+
+    @field:Value("\${padguard.auth.lock-minutes:15}")
+    private var lockMinutes: Int = 15
 
     /**
      * 孩子端绑定：消费绑定码 -> **按硬件指纹复用或新建设备** -> 下发令牌/MQTT 凭据/HMAC 密钥 -> 建默认策略
@@ -213,10 +228,44 @@ class DeviceService(
      */
     @Transactional
     fun bindChildByAccount(req: com.padguard.server.dto.BindByAccountRequest): BindResult {
-        val user = userRepository.findByPhone(req.phone.trim())
+        val phone = req.phone.trim()
+        val user = userRepository.findByPhone(phone)
             ?: throw BizException(ChildErr.TOKEN_INVALID, "家长账号不存在", Audience.CHILD)
+
+        // 新增缺陷 M：这里校验的是与 `AuthService.loginWithPassword` **同一份** password_hash，
+        // 旧实现却只做 matches，绕开了账号级锁定、失败计数与冻结/待激活状态。
+        // 结果是攻击者换到绑定通道即可低速长跑字典（IP 频控 8 次/分钟之外没有第二道闸门），
+        // 命中后拿走 deviceToken / mqttPassword / hmacSecret 冒充设备。
+        // 判定口径统一走 [ParentCredentialGate]，顺序与登录一致：先凭据、后状态（防号码枚举）。
+        val now = System.currentTimeMillis()
+        if (ParentCredentialGate.isLocked(user.loginLockedUntil, now)) {
+            val remainMin = ParentCredentialGate.remainingMinutes(user.loginLockedUntil, now)
+            log.warn("bind-by-account rejected: account locked, phone={}", SensitiveData.maskPhone(phone))
+            throw BizException(
+                ChildErr.TOO_MANY_REQUESTS,
+                "密码连续错误次数过多，账号已临时锁定，请约 ${remainMin} 分钟后再试",
+                Audience.CHILD
+            )
+        }
         if (!Passwords.matches(req.password, user.passwordHash)) {
+            // 与登录共用 users 表上的失败计数器：绑定通道的失败也会累计成账号级锁定。
+            // 写库失败不向上抛（限流 + 登录侧计数仍是兜底），仍返回统一的"账号或密码错误"。
+            runCatching {
+                userRepository.registerLoginFailure(
+                    phone,
+                    ParentCredentialGate.maxAttempts(maxFailAttempts),
+                    ParentCredentialGate.lockUntilAfter(now, lockMinutes)
+                )
+            }.onFailure { log.warn("record bind-by-account failure failed for {}: {}", SensitiveData.maskPhone(phone), it.message) }
             throw BizException(ChildErr.TOKEN_INVALID, "家长账号或密码错误", Audience.CHILD)
+        }
+        if (ParentCredentialGate.shouldClearFailure(user.loginFailCount, user.loginLockedUntil)) {
+            runCatching { userRepository.clearLoginFailure(phone) }
+                .onFailure { log.warn("clear login failure count failed for {}: {}", SensitiveData.maskPhone(phone), it.message) }
+        }
+        if (!ParentCredentialGate.isUsable(user)) {
+            log.info("bind-by-account rejected: userId={}, status={}", user.id, user.status)
+            throw BizException(ChildErr.TOKEN_INVALID, "家长账号状态异常，无法绑定设备", Audience.CHILD)
         }
         // 复用既有绑定实现：把「已确认的 userId」当作绑定码消费的结果
         return bindChildWithUser(req.req, user.id)
@@ -286,16 +335,19 @@ class DeviceService(
                 failures += "第${lineNo}行：设备编号为空"
                 return@forEachIndexed
             }
-            // 与绑定主流程共用同一把按 SN 的键锁：导入原先**一把锁都没有**，
-            // 家长连点两次导入、或导入与孩子扫码绑定同时发生，两边都查不到台账 → 各建一条，
-            // 同一台平板出现两条 deviceId，用量/策略/指令从此分裂（这正是绑定路径早就堵掉的那个缺陷）。
-            DeviceBindLocks.withKey(DeviceBindLocks.bindKey(hardwareId, null)) {
-                runCatching {
-                    // 每行一个独立事务：既要"失败只影响该行"（不能整批回滚），
-                    // 又要"台账 + 默认策略 + 审计"三件事原子。
-                    // 原先三步各自成事务，createDefault 一旦失败就留下"有台账、无策略、无审计"的半成品：
-                    // 家长按返回的失败原因改完重试，这一行会被判"已存在"跳过，半成品永久留存。
-                    txTemplate.execute<Boolean> {
+            runCatching {
+                // 每行一个独立事务：既要"失败只影响该行"（不能整批回滚），
+                // 又要"台账 + 默认策略 + 审计"三件事原子。
+                // 原先三步各自成事务，createDefault 一旦失败就留下"有台账、无策略、无审计"的半成品：
+                // 家长按返回的失败原因改完重试，这一行会被判"已存在"跳过，半成品永久留存。
+                txTemplate.execute<Boolean> {
+                    // 与绑定主流程共用同一把按 SN 的键锁：导入原先**一把锁都没有**，
+                    // 家长连点两次导入、或导入与孩子扫码绑定同时发生，两边都查不到台账 → 各建一条，
+                    // 同一台平板出现两条 deviceId，用量/策略/指令从此分裂（这正是绑定路径早就堵掉的那个缺陷）。
+                    // 关键：加锁必须放在事务**内**。PG 咨询锁是事务级锁、JVM 解锁挂在事务回调上，
+                    // 若在 txTemplate.execute 之外加锁（活跃事务尚未开启），两层锁都会退化成
+                    // 「方法返回即释放」，多副本下照样重复建台账。放在这里，锁活到本行事务提交。
+                    DeviceBindLocks.withKey(DeviceBindLocks.bindKey(hardwareId, null)) {
                         val existing = findImportableDevice(userId, hardwareId)
                         if (existing != null) {
                             // 已在我的名下，或已被别人占用：都算跳过，不做任何改写（避免抢设备 / 覆盖别名）
@@ -326,11 +378,11 @@ class DeviceService(
                             true
                         }
                     }
-                }.onFailure {
-                    // 单行失败不能中断整批；记录原因让家长知道改哪一行
-                    log.warn("批量导入第{}行失败：{}", lineNo, it.message)
-                    failures += "第${lineNo}行：${it.message ?: "导入失败"}"
                 }
+            }.onFailure {
+                // 单行失败不能中断整批；记录原因让家长知道改哪一行
+                log.warn("批量导入第{}行失败：{}", lineNo, it.message)
+                failures += "第${lineNo}行：${it.message ?: "导入失败"}"
             }
         }
 
@@ -374,10 +426,14 @@ class DeviceService(
             val wasOffline = dev.onlineStatus != "ONLINE"
             dev.onlineStatus = "ONLINE"
             dev.lastOnlineAt = System.currentTimeMillis()
-            (hb.battery?.get("level") as? Number)?.toInt()?.let { dev.batteryLevel = it }
+            // 电量范围裁剪：心跳 battery 是裸 Map，负数/超大值会被 as? Number 原样收下并落库
+            // （曾实测 -5 被写入 devices.battery_level，导致家长端显示异常健康度），
+            // 此处钳到 [0,100]，坏数据在入口被消化而非污染库与下游阈值逻辑。
+            (hb.battery?.get("level") as? Number)?.toInt()?.coerceIn(0, 100)?.let { dev.batteryLevel = it }
             hb.location?.let { loc ->
-                (loc["lat"] as? Number)?.toDouble()?.let { dev.latitude = it }
-                (loc["lng"] as? Number)?.toDouble()?.let { dev.longitude = it }
+                // 经纬度同理裁剪到合法半球范围，避免畸形坐标污染地图/围栏计算。
+                (loc["lat"] as? Number)?.toDouble()?.coerceIn(-90.0, 90.0)?.let { dev.latitude = it }
+                (loc["lng"] as? Number)?.toDouble()?.coerceIn(-180.0, 180.0)?.let { dev.longitude = it }
             }
             hb.controlMode?.let { dev.controlMode = it }
             // P3 守护健康度快照：持久化孩子端上报的守护状态，供 T3 失联判定与家长端展示。
@@ -393,10 +449,17 @@ class DeviceService(
             hb.permissionVersion?.let { dev.permissionVersion = it }
             deviceRepository.save(dev)
             if (wasOffline) {
-                webSocketPush.pushToUser(dev.userId, mapOf(
-                    "type" to "device.online", "deviceId" to deviceId,
-                    "timestamp" to System.currentTimeMillis()
-                ))
+                // 本方法带 @Transactional：事务内直接推 WS，回滚时家长端会收到
+                // 数据库里并不存在的上线事件。挂到提交之后；无事务时 afterCommit 立即执行。
+                // 值先取到局部变量：回调执行时 EntityManager 可能已关闭，不再触碰托管实体。
+                val ownerId = dev.userId
+                val at = System.currentTimeMillis()
+                afterCommit {
+                    webSocketPush.pushToUser(ownerId, mapOf(
+                        "type" to "device.online", "deviceId" to deviceId,
+                        "timestamp" to at
+                    ))
+                }
             }
         }
     }
@@ -405,6 +468,14 @@ class DeviceService(
      * T3 守护失联：标记已推送告警，避免 [OfflineMonitorService] 每轮重复推送。
      * 守护恢复后由 [applyHeartbeat] 在 daemonAlive 回到 true 时清零。
      */
+    /**
+     * T3 守护失联：标记已推送告警，避免 [OfflineMonitorService] 每轮重复推送。
+     * 守护恢复后由 [applyHeartbeat] 在 daemonAlive 回到 true 时清零。
+     *
+     * 同样必须 `@Transactional`（理由见 [setOffline]）：30s 扫描线程与绑定/解绑并发，
+     * 脱管实体 merge 会把整行写回，覆盖并发提交的归属与令牌。
+     */
+    @Transactional
     fun markDaemonLost(deviceId: String) {
         deviceRepository.findById(deviceId).ifPresent { dev ->
             dev.daemonLostAlerted = true
@@ -439,17 +510,46 @@ class DeviceService(
      * 无论谁调，都顺手把 presence 表里的这条摘掉 —— 否则内存里它还是"在线"，
      * [DevicePresenceRegistry.touch] 不会认为这是一次"离线→在线"的恢复，
      * 家长端就看不到它重新上线的那条推送（表现为"设备回来了但一直显示离线"）。
+     *
+     * ## 为什么必须 `@Transactional`
+     * 与 [markAlive] 同一类缺陷：`findById` 在没有事务时返回**脱管实体**，
+     * 随后 `save(dev)` 走 merge —— Hibernate 会把**整行所有列**写回。
+     * 本方法由 30s 定时扫描线程调用，与绑定 / 解绑 / 易主完全并发：
+     * 若在这个"读 → 改 → 写"的窗口里另一个事务刚提交了 `user_id = null`（解绑）
+     * 或换了新的 `device_token_hash`，merge 就会把旧归属与旧令牌一起写回 ——
+     * 设备重新挂到上一任家长名下、**解绑后旧 deviceToken 继续可用**。
+     * 同一窗口还会把并发心跳写入的 `battery_level / last_online_at / daemon_alive` 打回旧值，
+     * `daemon_alive` 回退会诱发下一次 `GUARD_DAEMON_LOST` 误告警。
+     * 有了事务，实体处于托管态，只 UPDATE 真正变了的列，归属类字段不在 SET 子句里。
      */
+    /**
+     * 登记孩子端一次指令长轮询挂起（见 [DevicePresenceRegistry.hold]）。
+     *
+     * 长轮询期间端上在等这一个响应、不会发任何新 HTTP 请求；不登记宽限的话，
+     * 秒级在线态扫描会在每轮长轮询返回前把设备判成离线，返回后下一请求又拉回在线 ——
+     * 家长端表现为「一会儿上线、一会儿掉线」，并连带刷出脱管 / 守护失联告警。
+     * 由 Controller 在挂起前调用，[holdMs] 已按 `CommandService.MAX_WAIT_MS` 裁剪。
+     */
+    fun holdPresence(deviceId: String, holdMs: Long) {
+        presence.hold(deviceId, holdMs)
+    }
+
+    @Transactional
     fun setOffline(deviceId: String) {
         presence.markOffline(deviceId)
         deviceRepository.findById(deviceId).ifPresent { dev ->
             if (dev.onlineStatus == "ONLINE") {
                 dev.onlineStatus = "OFFLINE"
                 deviceRepository.save(dev)
-                webSocketPush.pushToUser(dev.userId, mapOf(
-                    "type" to "device.offline", "deviceId" to deviceId,
-                    "lastSeen" to System.currentTimeMillis()
-                ))
+                // 同 applyHeartbeat：离线状态由本事务提交后才成立，推送不得抢在提交前。
+                val ownerId = dev.userId
+                val at = System.currentTimeMillis()
+                afterCommit {
+                    webSocketPush.pushToUser(ownerId, mapOf(
+                        "type" to "device.offline", "deviceId" to deviceId,
+                        "lastSeen" to at
+                    ))
+                }
             }
         }
     }
@@ -480,14 +580,54 @@ class DeviceService(
     fun getUserId(deviceId: String): String? =
         deviceRepository.findById(deviceId).orElse(null)?.userId
 
+    /**
+     * 取设备 HMAC 密钥（R-P0-3 上行验签用）。
+     *
+     * 返回 null 当且仅当：设备不存在，或该设备从未下发过密钥（历史遗留 / 未绑定完成的台账）。
+     * 调用方据此区分"应验签却未签名"（伪造）与"无法验签"（兼容旧设备）。
+     */
+    fun getHmacSecret(deviceId: String): String? =
+        deviceRepository.findById(deviceId).orElse(null)?.hmacSecret?.takeIf { it.isNotBlank() }
+
     /** 家长解绑设备：清空归属与令牌，旧 deviceToken 立即失效 */
     fun unbind(userId: String, deviceId: String) {
+        val seed = deviceRepository.findById(deviceId).orElse(null)
+            ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
+        // 与绑定主流程共用按 SN/指纹的键锁：解绑原先一把锁都没有，
+        // 与 bindChildWithUser / 设备导入并发时，脱管实体整行 merge 会把刚写入的
+        // user_id / device_token_hash 用旧快照覆盖（设备变无主或回退到前一任家长）。
+        // SN/指纹缺失时退化为按 deviceId 加锁，至少串行化并发解绑。
+        val lockKey = DeviceBindLocks.bindKey(seed.deviceSn, seed.fingerprint).ifBlank { "id:$deviceId" }
+        // 锁必须在事务内获取：PG 咨询锁是事务级锁，JVM 解锁挂在事务回调上；
+        // 若在 txTemplate.execute 之外加锁，多副本下锁会在方法返回时提前释放（见 importDevices 注释）。
+        txTemplate.execute<Unit> {
+            DeviceBindLocks.withKey(lockKey) { clearOwnershipForUnbind(userId, deviceId) }
+        }
+        // 解绑即清理该设备全部私有业务数据：截图、轨迹、用量、指令、告警、已装应用、围栏、
+        // 设备设置等。早期只把 userId 置空，这些行永久残留在库里（且下次有人绑到同一台平板
+        // 时会被新孩子继承）。审计日志刻意保留，供管理员追责。
+        purgeDeviceDataWithRetry(deviceId, "UNBIND")
+        // 清除该设备下行通道上的 retained 策略/配置消息，避免重绑/易主后新家长上线先拉到旧 retained。
+        runCatching { mqttGateway.clearRetained(deviceId) }
+            .onFailure { log.warn("clear retained on unbind failed deviceId={}: {}", deviceId, it.message) }
+        auditService.record(userId, deviceId, AuditAction.DEVICE_UNBIND, targetType = "device", targetId = deviceId)
+        // 关键：必须通知被控端。否则平板本地仍持有旧令牌、继续上报心跳并处于受控态，
+        // 家长端看着"解绑了"，但孩子端其实还挂在管控里 —— 这就是"解绑无效"的体感来源。
+        // 复用下行 config 通道下发 unbind=1，孩子端收到后清除本地凭据并回到绑定页。
+        pushUnbind(deviceId)
+    }
+
+    /**
+     * 持锁后的归属清除：必须在锁内**重新读取**台账，不能用锁外 seed 快照改写。
+     * 事务内 findById 返回托管实体，提交时只更新本次改动的字段，避免脱管实体整行 merge 覆盖并发写。
+     */
+    private fun clearOwnershipForUnbind(userId: String, deviceId: String) {
         val dev = deviceRepository.findById(deviceId).orElse(null)
             ?: throw BizException(ParentErr.DEVICE_NOT_FOUND, "设备不存在", Audience.PARENT)
         if (dev.userId != userId) {
             // 孤儿设备兜底：原归属家长账号已不存在（清库/删号）时，允许当前家长接管并解绑。
             // 否则这类设备会永远卡在"别人的设备"状态，家长端点解绑只得到
-            // 「设备不属于当前用户」，且再也无法重新绑定 —— 这是"以前绑的设备解绑报错"的成因之一。
+            // 「设备不属于当前用户」，且再也无法重新绑定。
             val ownerExists = dev.userId?.let { userRepository.existsById(it) } ?: false
             if (ownerExists) {
                 throw BizException(ParentErr.DEVICE_NOT_OWNED, "设备不属于当前用户", Audience.PARENT)
@@ -502,15 +642,6 @@ class DeviceService(
         // （Bug ⑦ 在重绑场景复现）；且隐藏形态前置校验会把应用留在可见态，家长无法补设密码。
         dev.guardPasswordHash = ""
         deviceRepository.save(dev)
-        // 解绑即清理该设备全部私有业务数据：截图、轨迹、用量、指令、告警、已装应用、围栏、
-        // 设备设置等。早期只把 userId 置空，这些行永久残留在库里（且下次有人绑到同一台平板
-        // 时会被新孩子继承）。审计日志刻意保留，供管理员追责。
-        purgeDeviceDataWithRetry(deviceId, "UNBIND")
-        auditService.record(userId, deviceId, AuditAction.DEVICE_UNBIND, targetType = "device", targetId = deviceId)
-        // 关键：必须通知被控端。否则平板本地仍持有旧令牌、继续上报心跳并处于受控态，
-        // 家长端看着"解绑了"，但孩子端其实还挂在管控里 —— 这就是"解绑无效"的体感来源。
-        // 复用下行 config 通道下发 unbind=1，孩子端收到后清除本地凭据并回到绑定页。
-        pushUnbind(deviceId)
     }
 
     /** 下发解绑通知给孩子端（尽力而为：平板离线时会在其下次上线后由重连逻辑兜底）。 */
@@ -546,6 +677,7 @@ class DeviceService(
     }
 
     /** 家长修改设备别名 */
+    @Transactional
     fun rename(userId: String, deviceId: String, name: String) {
         val dev = requireOwned(userId, deviceId)
         val safeName = sanitizeDeviceName(name, Audience.PARENT)
@@ -557,6 +689,7 @@ class DeviceService(
     }
 
     /** 孩子端自定义设备名（凭设备令牌鉴权，不依赖家长 userId） */
+    @Transactional
     fun updateNameByDevice(deviceId: String, name: String) {
         val safe = sanitizeDeviceName(name, Audience.CHILD)
         deviceRepository.findById(deviceId).ifPresent { dev ->
@@ -576,11 +709,14 @@ class DeviceService(
      */
     private fun sanitizeDeviceName(raw: String, audience: Audience): String {
         val trimmed = raw.trim()
+        // 孩子端改名也走这个函数；孩子端码表是 40xxx，抛家长码 1001 会被异常处理器
+        // 落到 else -> HTTP 200，端上按"成功"处理。按调用方选择码表。
+        val paramErrorCode = if (audience == Audience.CHILD) ChildErr.PARAM_ERROR else ParentErr.PARAM_ERROR
         if (trimmed.isEmpty()) {
-            throw BizException(ParentErr.PARAM_ERROR, "设备名不能为空", audience)
+            throw BizException(paramErrorCode, "设备名不能为空", audience)
         }
         if (trimmed.length > DEVICE_NAME_MAX_CHARS) {
-            throw BizException(ParentErr.PARAM_ERROR, "设备名最长 $DEVICE_NAME_MAX_CHARS 个字符", audience)
+            throw BizException(paramErrorCode, "设备名最长 $DEVICE_NAME_MAX_CHARS 个字符", audience)
         }
         return trimmed
     }
@@ -592,10 +728,36 @@ class DeviceService(
     }
 
     /** 家长分配设备到分组 */
+    @Transactional
     fun assignToGroup(userId: String, deviceId: String, groupId: String) {
         val dev = requireOwned(userId, deviceId)
         dev.groupId = groupId
         deviceRepository.save(dev)
+    }
+
+    /**
+     * 设置设备操作密码哈希（FIX R27 LOW：原控制器内事务外 findById→save 走 Hibernate merge 整行写回，
+     * 可能与令牌轮换并发、把 hmacSecret/deviceTokenHash 等安全敏感列回退成旧值）。
+     * 改在本事务内加载托管实体后只改写 guard_password_hash，避免覆盖并发写入的其它列。
+     */
+    @Transactional
+    fun setGuardPasswordHash(deviceId: String, hash: String) {
+        deviceRepository.findById(deviceId).ifPresent { dev ->
+            dev.guardPasswordHash = hash
+            deviceRepository.save(dev)
+        }
+    }
+
+    /**
+     * 记录远程锁屏状态（FIX R27 LOW：同上脱管实体整行 merge 隐患）。
+     * 仅在事务内加载托管实体后改写 remote_locked，避免覆盖并发写入的其它列。
+     */
+    @Transactional
+    fun setRemoteLocked(deviceId: String, locked: Boolean) {
+        deviceRepository.findById(deviceId).ifPresent { dev ->
+            dev.remoteLocked = locked
+            deviceRepository.save(dev)
+        }
     }
 
     /**
@@ -640,11 +802,18 @@ class DeviceService(
             }
             deviceRepository.save(dev)
             // 仅 OFFLINE/UNKNOWN -> ONLINE 这一跳推 WS：持续在线期间零推送、零副作用。
+            // 必须挂到提交之后：setOnline 由 @Transactional 的 markAlive/applyHeartbeatOnline 调用，
+            // 若在事务体内推送，后续异常回滚时家长端会收到一条"设备已上线"的假通知，
+            // 而库里仍是 OFFLINE（状态与推送分叉）。afterCommit 在无事务/单测中立即执行，
+            // 与同文件 453/547 行的既有副作用同口径。
             if (wasOffline) {
-                webSocketPush.pushToUser(dev.userId, mapOf(
-                    "type" to "device.online", "deviceId" to deviceId,
-                    "timestamp" to now
-                ))
+                val ownerId = dev.userId
+                afterCommit {
+                    webSocketPush.pushToUser(ownerId, mapOf(
+                        "type" to "device.online", "deviceId" to deviceId,
+                        "timestamp" to now
+                    ))
+                }
             }
         }
     }
@@ -862,18 +1031,28 @@ class DeviceService(
      * 任一字段为 null / 空串表示不修改（保留原值），便于孩子端逐项设置。
      * 更新后向家长端推送事件，家长端设备台账下次刷新即可看到。
      */
+    @Transactional
     fun updateChildProfile(deviceId: String, req: DeviceProfileRequest) {
         deviceRepository.findById(deviceId).ifPresent { dev ->
             req.childName?.takeIf { it.isNotBlank() }?.let { dev.childName = it }
             req.childNickname?.takeIf { it.isNotBlank() }?.let { dev.childNickname = it }
             req.childAvatar?.takeIf { it.isNotBlank() }?.let { dev.childAvatar = it }
             deviceRepository.save(dev)
-            dev.userId?.let { uid ->
-                webSocketPush.pushToUser(uid, mapOf(
-                    "type" to "device.profile.updated",
-                    "deviceId" to deviceId,
-                    "timestamp" to System.currentTimeMillis()
-                ))
+            // 推送挂 afterCommit + 异常隔离：本方法带 @Transactional，提交前推送有两个后果——
+            // ① WS 异常会把本已成功的资料写库连坐回滚（家长端"保存失败"但实际只是推送抖）；
+            // ② 回滚时家长端已收到"资料已更新"的幽灵通知。时间戳在事务内取，回调里不碰托管实体。
+            val uid = dev.userId
+            val timestamp = System.currentTimeMillis()
+            afterCommit {
+                runCatching {
+                    uid?.let {
+                        webSocketPush.pushToUser(it, mapOf(
+                            "type" to "device.profile.updated",
+                            "deviceId" to deviceId,
+                            "timestamp" to timestamp
+                        ))
+                    }
+                }.onFailure { log.warn("push device.profile.updated failed: device={} err={}", deviceId, it.message) }
             }
         }
     }

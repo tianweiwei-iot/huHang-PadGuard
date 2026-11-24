@@ -58,6 +58,8 @@ object AdminAudit {
     const val PARENTS_CREATE = "PARENTS_CREATE"
     const val PARENTS_UPDATE = "PARENTS_UPDATE"
     const val PARENTS_DELETE = "PARENTS_DELETE"
+    /** 家长账号注销：不可逆，含解绑设备与订单归属脱敏，仅超级管理员可执行 */
+    const val PARENTS_ERASE = "PARENTS_ERASE"
     const val DEVICES_LOCK = "DEVICES_LOCK"
     const val DEVICES_UNBIND = "DEVICE_UNBIND"
     const val DEVICES_UNLOCK = "DEVICES_UNLOCK"
@@ -69,6 +71,9 @@ object AdminAudit {
     const val RBAC_DELETE = "RBAC_DELETE"
     const val RBAC_RESET_PWD = "RBAC_RESET_PWD"
     const val SETTINGS_WRITE = "SETTINGS_WRITE"
+
+    /** 手动清理 uploads/ 磁盘孤儿文件（盘上有、库里没记录）。危险运维操作，必须留痕。 */
+    const val STORAGE_SWEEP = "STORAGE_SWEEP"
 }
 
 fun fmt(ms: Long?): String? {
@@ -350,6 +355,7 @@ val AUDIT_ACTION_META: Map<String, Pair<String, String>> = mapOf(
     AdminAudit.PARENTS_CREATE to ("parents" to "新建家长账号"),
     AdminAudit.PARENTS_UPDATE to ("parents" to "修改家长资料"),
     AdminAudit.PARENTS_DELETE to ("parents" to "删除家长账号"),
+    AdminAudit.PARENTS_ERASE to ("parents" to "注销家长账号"),
     AdminAudit.DEVICES_LOCK to ("devices" to "远程锁屏"),
     AdminAudit.DEVICES_UNLOCK to ("devices" to "远程解锁"),
     AdminAudit.DEVICES_UNBIND to ("devices" to "解绑设备"),
@@ -362,6 +368,7 @@ val AUDIT_ACTION_META: Map<String, Pair<String, String>> = mapOf(
     AdminAudit.RBAC_RESET_PWD to ("rbac" to "重置管理员密码"),
     "RBAC_ROLE_SAVE" to ("rbac" to "保存角色权限"),
     AdminAudit.SETTINGS_WRITE to ("settings" to "修改系统配置"),
+    AdminAudit.STORAGE_SWEEP to ("settings" to "清理磁盘孤儿文件"),
     "DEVICE_BIND" to ("devices" to "设备绑定"),
     "POLICY_WEB_UPDATE" to ("parents" to "策略变更(网页)"),
     "POLICY_APP_UPDATE" to ("parents" to "策略变更(应用)"),

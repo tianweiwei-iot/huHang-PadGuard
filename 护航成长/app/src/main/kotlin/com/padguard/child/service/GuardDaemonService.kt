@@ -8,7 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.Message
+import android.os.Messenger
 import androidx.core.app.NotificationCompat
 import com.padguard.core.common.Logger
 import kotlinx.coroutines.CoroutineScope
@@ -18,6 +22,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.launch
 
 /**
@@ -59,12 +64,29 @@ import kotlinx.coroutines.launch
  */
 class GuardDaemonService : Service() {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, t ->
+            // 仅记录：watchLoop 每拍已 try/catch 包裹，这里是未预期逃逸异常的兜底，
+            // 避免直接落到 JVM 默认 handler 而丢失上下文。CancellationException 由 SupervisorJob 正常处理。
+            Logger.e(TAG, t) { "uncaught exception in daemon scope" }
+        }
+    )
     private var watchJob: Job? = null
+
+    /**
+     * 前台化幂等闸：AB 锁已连接时主进程每 ~15s ping 一次（触发 [ensureWatching]），
+     * 若每次都重建 NotificationChannel + startForeground 就是无谓的系统调用 churn
+     * （还会让状态栏通知反复刷新）。仅在成功后置位；失败保留重试语义。
+     */
+    @Volatile
+    private var foregroundPromoted = false
 
     /** 上次尝试拉起主进程的时刻（elapsedRealtime），防止主进程反复崩溃时高频重试 */
     @Volatile
     private var lastRestartAttemptAtMs = 0L
+
+    /** 连续心跳陈旧拍数：已绑定但主循环卡住时，binder 不会死亡，ping 无效则必须补 start */
+    private var staleStreak = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -74,16 +96,45 @@ class GuardDaemonService : Service() {
         // 必须赶在 startForegroundService 的 5s 宽限内完成 —— onCreate 同步调用。
         promoteToForegroundIfNeeded()
         Logger.i(TAG) { "daemon service created (pid=${android.os.Process.myPid()})" }
+        // AB 锁的 B→A 方向：本进程持有指向主进程的 binder 绑定。
+        // 主进程一旦被杀，这里会立刻收到 onBindingDied，重绑即**创建主进程**并触发
+        // GuardService.onBind → bootstrap —— 这条路不受"后台启动前台服务"限制，
+        // 是一键清理/后台启动被禁场景下唯一可靠的重建通道。
+        // 未绑定设备不拉主进程（没有家长就没有管控依据），与 watchLoop 的判定一致。
+        if (GuardHeartbeat.readGuardState(this)) {
+            GuardLink.ensureGuardBound(this)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Logger.i(TAG) { "daemon onStartCommand (flags=$flags)" }
-        promoteToForegroundIfNeeded()
-        if (watchJob == null) {
-            watchJob = scope.launch { watchLoop() }
-        }
+        ensureWatching()
         // START_STICKY：被系统回收后尽力重建（重建时 intent 为 null，逻辑不依赖 intent）
         return START_STICKY
+    }
+
+    /**
+     * 被主进程 binder 拉起时也可能没有走 onStartCommand —— 补齐监视循环与前台化，
+     * 否则会出现"进程在、服务在、但没人监视主进程"的空壳。
+     */
+    private fun ensureWatching() {
+        promoteToForegroundIfNeeded()
+        GuardHeartbeat.writeDaemonAlive(this)
+        // AB 锁「补半锁」：本服务常常在设备尚未绑定家长时就由 GuardService 拉起
+        // （GuardService.onCreate 无条件 ensureDaemonBound），那时 onCreate 里的
+        // readGuardState=false 会跳过 B→A 绑定。家长绑定后主进程再调 ensureDaemonBound
+        // 只会命中「已连接」早返回 —— 由它 ping 本方法，这里补上 B→A 绑定。
+        // 缺这一步时 AB 锁是单向的：主进程被杀，daemon 没有 binder 即时死亡事件，
+        // 只能等 5s 心跳轮询（最坏 ~40s），与 AB 锁设计承诺不符。
+        // 未绑定设备不拉主进程（没有家长就没有管控依据），与 watchLoop 判定一致。
+        if (GuardHeartbeat.readGuardState(this)) {
+            GuardLink.ensureGuardBound(this)
+        }
+        // 必须判断 !isActive：watchLoop 在「设备解绑」分支 return 后 Job 已完成但引用非 null，
+        // 若设备重新绑定、服务未重建就只靠这个引用，监视循环再也不会启动（永久失明）。
+        if (watchJob == null || !watchJob!!.isActive) {
+            watchJob = scope.launch { watchLoop() }
+        }
     }
 
     /**
@@ -96,22 +147,49 @@ class GuardDaemonService : Service() {
         GuardHeartbeat.writeDaemonAlive(this)
         while (scope.isActive) {
             delay(POLL_INTERVAL_MS)
+            try {
             GuardHeartbeat.writeDaemonAlive(this)
-            val guardAge = GuardHeartbeat.readGuardAliveAgeMs(this)
-            val stale = guardAge == null || guardAge > GuardHeartbeat.GUARD_STALE_MS
-            if (!stale) continue
-
+            // 加固：解绑判定必须**先于**心跳新鲜判定。旧实现把 readGuardState 放在
+            // `if (!stale) continue` 之后 —— 设备解绑但主进程还活着（心跳新鲜）时
+            // 永远走不到自停分支：daemon 继续持有 B→A 绑定，主进程因仍有绑定而
+            // 无法销毁，两条常驻通知与自停全部失效（正是 exit 管控的隐私事故）。
             if (!GuardHeartbeat.readGuardState(this)) {
-                Logger.i(TAG) { "guard stale but device NOT bound; daemon stops itself" }
+                Logger.i(TAG) { "device NOT bound; daemon stops itself (guard heartbeat freshness irrelevant)" }
+                // 先解除对主进程的绑定再自停：有绑定的服务 stopSelf 不会销毁，
+                // 留着就是一个杀不掉的空服务和一条常驻通知（解绑后的隐私问题）。
+                GuardLink.releaseGuard(this)
                 stopSelf()
                 return
             }
+            val guardAge = GuardHeartbeat.readGuardAliveAgeMs(this)
+            val stale = guardAge == null || guardAge > GuardHeartbeat.GUARD_STALE_MS
+            if (!stale) {
+                staleStreak = 0
+                continue
+            }
+            staleStreak++
+
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastRestartAttemptAtMs < MIN_RESTART_INTERVAL_MS) continue
             lastRestartAttemptAtMs = now
-            Logger.w(TAG) { "guard heartbeat stale (age=$guardAge) -> restarting GuardService" }
-            runCatching { GuardService.start(this, GuardService.REASON_DAEMON) }
-                .onFailure { Logger.e(TAG, it) { "restart GuardService from daemon failed" } }
+            Logger.w(TAG) { "guard heartbeat stale (age=$guardAge, streak=$staleStreak) -> restarting GuardService" }
+            // AB 锁优先：binder 重绑会创建主进程，且不受"后台启动前台服务"限制。
+            // 但「进程活、binder 还在、主循环卡死」时 ensureGuardBound 会直接返回 true，
+            // 没有任何恢复动作 —— 所以已连接也要 pingGuard（对端 MSG_WAKE 补心跳+重启主循环）。
+            // ping 后若下一拍心跳仍陈旧（staleStreak>=2），再补一次 startForegroundService：
+            // 这是对"半活态"唯一的兜底（binder 死亡事件此时永远不会来）。
+            val bound = GuardLink.ensureGuardBound(this)
+            GuardLink.pingGuard()
+            if (!bound || staleStreak >= 2) {
+                runCatching { GuardService.start(this, GuardService.REASON_DAEMON) }
+                    .onFailure { Logger.e(TAG, it) { "restart GuardService from daemon failed" } }
+            }
+            } catch (t: Throwable) {
+                // 单拍异常只丢一跳而非整轮死掉：否则 daemon 循环静默死亡 → 主进程死后永不被重启（"装了管控却管不住"）。
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                Logger.e(TAG, t) { "watchLoop tick failed" }
+                delay(1000)
+            }
         }
     }
 
@@ -125,11 +203,23 @@ class GuardDaemonService : Service() {
      * 不把希望寄托在"下一次 onStartCommand"。
      */
     private fun promoteToForegroundIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        if (runCatching { doPromoteToForeground() }.isSuccess) return
+        // 已成功前台化过就不再重复调用（AB 锁 ping 每 ~15s 一次，无需重建通知）。
+        // 失败不置位：onCreate 的 5s 宽限内仍可同步重试。
+        if (foregroundPromoted) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            foregroundPromoted = true
+            return
+        }
+        if (runCatching { doPromoteToForeground() }.isSuccess) {
+            foregroundPromoted = true
+            return
+        }
         // 同步重试一次：startForegroundService 的 5s 宽限不等人
         val retry = runCatching { doPromoteToForeground() }
-        if (retry.isSuccess) return
+        if (retry.isSuccess) {
+            foregroundPromoted = true
+            return
+        }
         Logger.w(TAG, retry.exceptionOrNull()) {
             "daemon promote to foreground failed, running as plain service"
         }
@@ -161,6 +251,13 @@ class GuardDaemonService : Service() {
 
     override fun onDestroy() {
         isAlive = false
+        // 服务实例销毁后下一次 onCreate 是新实例，必须重新 startForeground
+        // （API 26+ startForegroundService 的 5s 宽限从新实例算起），幂等闸随之复位。
+        foregroundPromoted = false
+        // 兜底解绑：非 watchLoop 路径导致的销毁（系统回收 FGS 配额、外部 stopService）
+        // 也必须先解除对主进程的绑定，否则主进程因仍有绑定而无法销毁，
+        // 留下"已解绑/已停机但通知还在"的僵尸服务。
+        GuardLink.releaseGuard(this)
         watchJob?.cancel()
         watchJob = null
         scope.cancel()
@@ -168,7 +265,27 @@ class GuardDaemonService : Service() {
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    /**
+     * AB 锁的 B 端点：把本服务暴露给主进程绑定。
+     *
+     * 返回 null 会让 `bindService` 落到 `onNullBinding`，系统不会因此保留/创建进程，
+     * 主进程就只能靠 `startForegroundService` 拉起 daemon —— 那条路在
+     * Android 12+ 后台启动被禁、国产 ROM 按自启拦截时都会失败。
+     */
+    override fun onBind(intent: Intent?): IBinder {
+        ensureWatching()
+        return linkMessenger
+    }
+
+    private val linkMessenger: IBinder by lazy {
+        Messenger(object : Handler(Looper.getMainLooper()) {
+            override fun handleMessage(msg: Message) {
+                if (msg.what == GuardLink.MSG_WAKE) {
+                    ensureWatching()
+                }
+            }
+        }).binder
+    }
 
     companion object {
         private const val TAG = "GuardDaemon"

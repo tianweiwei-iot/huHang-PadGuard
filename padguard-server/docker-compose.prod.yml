@@ -5,11 +5,17 @@
 # 前置（一次性）：
 #   1) cp .env.prod.example .env 并填入强密码
 #   2) 生成 mosquitto/passwd（mosquitto_passwd，见 docs/控制端手机适配与云服务器迁移计划.md M3）
+#      —— 至少要含 pgserver（服务端容器连接用）；每设备用户由同步脚本开通，见 5)
 #   3) 生成 TLS 证书：bash scripts/gen-certs.sh 你的域名（自签名仅测试/内网；生产换 Let's Encrypt/商业证书）
 #
 # 用法：
 #   docker compose -f docker-compose.prod.yml up -d postgres mosquitto nginx
 #   docker compose -f docker-compose.prod.yml up -d --build app
+#
+# 每设备 MQTT 凭据（绑定新设备后执行，幂等，可放 cron）：
+#   ./scripts/sync-mqtt-users.sh          # devices 表 -> mosquitto/passwd + SIGHUP 热加载
+#   不跑的话新设备连不上 broker，MQTT 静默退化为 HTTP 轮询。
+#   broker 侧 ACL 已按 username=deviceId 收紧（见 mosquitto/aclfile），跨设备/跨租户读写被拒。
 #
 # 端口安全说明：
 #   · 公网仅暴露 80/443（Nginx，TLS 在此终止）与 8883（MQTT over TLS）。
@@ -70,7 +76,7 @@ services:
         condition: service_started
     environment:
       TZ: Asia/Shanghai
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${PG_DB:-padguard}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${PG_DB:-padguard}?reWriteBatchedInserts=true
       SPRING_DATASOURCE_USERNAME: ${PG_USER:-padguard}
       SPRING_DATASOURCE_PASSWORD: ${PG_PASSWORD}
       PADGUARD_JWT_SECRET: ${PADGUARD_JWT_SECRET:?PADGUARD_JWT_SECRET 必须在 .env 中设置强随机值}

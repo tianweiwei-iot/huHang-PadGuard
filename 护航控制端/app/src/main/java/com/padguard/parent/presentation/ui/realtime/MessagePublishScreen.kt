@@ -50,6 +50,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.padguard.parent.domain.model.MediaSource
+import com.padguard.parent.domain.model.MediaTooLargeException
 import com.padguard.parent.domain.model.MessageContentType
 import com.padguard.parent.domain.model.PublishedMessage
 import com.padguard.parent.presentation.util.TimeFormat
@@ -83,13 +85,22 @@ fun MessagePublishScreen(
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            runCatching { readMedia(context, uri) }
-                .onSuccess { (name, mime, bytes) ->
-                    viewModel.attachMedia(bytes = bytes, fileName = name, contentType = mime)
-                }
-                .onFailure {
-                    snackbarHostState.showSnackbar("读取素材失败：${it.message}")
-                }
+            // 不整份读进内存：只构造"怎么打开它"，真正的字节搬运发生在 OkHttp 写线程里。
+            // 早期这里 readBytes() 把整段视频读进堆，家长挑 4K 视频时上传刚开始就被 OOM 杀掉。
+            val source = try {
+                readMedia(context, uri)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 异常来自 ContentResolver（文件被删、权限被撤、外置存储拔出）或体积超限，
+                // message 是系统英文原文，对家长没有可执行信息，这里给"怎么做"。
+                snackbarHostState.showSnackbar(
+                    if (e is MediaTooLargeException) "素材超过 200MB 上限，请选择更小的文件"
+                    else "读取素材失败，请重新选择文件"
+                )
+                return@launch
+            }
+            viewModel.attachMedia(source)
         }
     }
 
@@ -302,29 +313,52 @@ private fun mimeFor(type: MessageContentType): String = when (type) {
 }
 
 /**
- * 读取所选素材：拿到字节、展示用文件名与真实 MIME。
+ * 读取所选素材：拿到流式来源、展示用文件名与真实 MIME。
  *
  * MIME 优先用 ContentResolver 查到的值，查不到再按扩展名兜底：
  * 部分文件管理器返回通配类型，原样上传后服务端存下的类型不可播，
  * 孩子端拿到类型错误的音频会直接播放失败且没有任何提示。
+ *
+ * **不在这里读字节**：视频几百 MB，`readBytes()` 会把家长端直接推到 OOM；
+ * 这里只产出[MediaSource][com.padguard.parent.domain.model.MediaSource]（怎么打开），
+ * 由上传层按 8KB 分段流式写出。
  */
 private suspend fun readMedia(
     context: android.content.Context,
     uri: android.net.Uri
-): Triple<String, String, ByteArray> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-    val resolver = context.contentResolver
-    val name = resolver.query(uri, null, null, null, null)?.use { cursor ->
-        val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-        if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
-    } ?: "素材_${System.currentTimeMillis()}"
+): com.padguard.parent.domain.model.MediaSource =
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val resolver = context.contentResolver
+        val name = resolver.query(uri, null, null, null, null)?.use { cursor ->
+            val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
+        } ?: "素材_${System.currentTimeMillis()}"
 
-    val mime = resolver.getType(uri)?.takeIf { it.isNotBlank() && it != "*/*" }
-        ?: guessMime(name)
+        val mime = resolver.getType(uri)?.takeIf { it.isNotBlank() && it != "*/*" }
+            ?: guessMime(name)
 
-    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
-        ?: error("无法读取所选文件")
-    Triple(name, mime, bytes)
-}
+        // 体积先探一次：① 超 200MB 立刻如实告知，别让家长传几分钟才被服务端拒；
+        // ② 拿到长度后 multipart 才能带 Content-Length（否则走 chunked，兼容性略差）。
+        // 查不到就按未知处理（-1），上传时由 OkHttp 自动切 chunked 编码。
+        val size = runCatching {
+            resolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { c ->
+                val idx = c.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                if (idx >= 0 && c.moveToFirst() && !c.isNull(idx)) c.getLong(idx) else MediaSource.UNKNOWN_SIZE
+            }
+        }.getOrNull() ?: MediaSource.UNKNOWN_SIZE
+
+        MediaSource(
+            fileName = name,
+            contentType = mime,
+            sizeBytes = size,
+            // 每次上传（含 OkHttp 重试重放）都重新打开一次：Uri 是一次性授权，
+            // 但同一次进程生命周期内 openInputStream 可重复调用。
+            opener = {
+                resolver.openInputStream(uri)
+                    ?: throw java.io.FileNotFoundException("无法读取所选文件：$name")
+            }
+        )
+    }
 
 private fun guessMime(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
     "png" -> "image/png"

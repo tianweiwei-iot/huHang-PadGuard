@@ -64,6 +64,12 @@ tasks.withType<org.springframework.boot.gradle.tasks.bundling.BootJar> {
 // 这种静默通过比报错危险得多：你会以为有测试在把关，实际上什么都没验证。
 tasks.withType<Test> {
     useJUnitPlatform()
+    // 用例数随迭代增长到 1100+，且含多个 @SpringBootTest(RANDOM_PORT) 全 Spring 上下文
+    // 实时容器测试；Gradle forked test worker 的默认堆在某些情况下不足以承载，
+    // 会在 TransportCompressionLiveTest 等用例的上下文加载阶段抛 OutOfMemoryError，
+    // 表现为"随机几例测试失败"。显式抬到 2g 让门禁在任何干净机器/CI 上可复现通过。
+    maxHeapSize = "2g"
+    minHeapSize = "512m"
     testLogging {
         events("passed", "failed", "skipped")
         showStandardStreams = false

@@ -71,6 +71,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.parent.domain.model.ScreenMonitorSettings
 import com.padguard.parent.domain.model.ScreenshotData
@@ -116,8 +119,28 @@ fun ScreenMonitorScreen(
         }
     }
 
-    // 离开页面即停止孩子端推流，避免后台无谓耗电
-    DisposableEffect(Unit) { onDispose { viewModel.stopLive() } }
+    // 看屏是**持续消耗流量与电量**的操作（家长端持续收帧、孩子端持续采集编码推流），
+    // 因此必须跟着页面可见性走（R-P2-18）：
+    // - ON_STOP（退到后台 / 锁屏）：取消拉流 + 通知孩子端停推，双端同时止血；
+    // - ON_START（切回前台）：自动续流，家长不用手点重连；
+    // - onDispose（离开本页）：彻底停流。
+    // 只用 onDispose 是不够的：App 退到后台时 Composable 并未销毁，onDispose 不会触发，
+    // 旧实现下家长把 App 切到后台，平板仍在被持续录屏推流。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> viewModel.setForegroundActive(true)
+                Lifecycle.Event.ON_STOP -> viewModel.setForegroundActive(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.stopLive()
+        }
+    }
 
     Scaffold(
         containerColor = Color.Transparent,

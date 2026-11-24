@@ -1,0 +1,14 @@
+-- 用量日志保留期清理的目标索引。
+--
+-- 背景：UsageLogRepository.deleteExpiredExcept 按 received_at < threshold 批量删除，
+-- 源码注释声称"配合 idx_usage_logs_received_at 走范围扫描，不会全表扫"，
+-- 但此前**没有任何迁移真正创建过这个索引**（V12 只建了 device_id/timestamp、
+-- device_id/type/timestamp 两条）。usage_logs 是全库增长最快的表，缺索引意味着
+-- 每天 04:00 的清理都是全表顺序扫描 + 单事务删除，数据量上来后必然拖垮写入。
+--
+-- 用普通 CREATE INDEX IF NOT EXISTS（可写进 Flyway 事务、H2/PG 双兼容）：
+--   * 新上线库表小，建索引无感；
+--   * 存量库若 usage_logs 已到百万级，普通 CREATE INDEX 会持 ShareLock 阻塞写入——
+--     这种场景请先停服窗口执行，或手工 `CREATE INDEX CONCURRENTLY`（不能在事务/Flyway 里跑）
+--     后 `flyway repair` 对齐版本，与 V2026110302 的处置口径一致。
+CREATE INDEX IF NOT EXISTS idx_usage_logs_received_at ON usage_logs (received_at);

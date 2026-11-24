@@ -38,6 +38,10 @@ import java.util.concurrent.atomic.AtomicInteger
 @AutoConfigureMockMvc
 @ActiveProfiles("local")
 @TestPropertySource(properties = [
+    "padguard.storage.dir=build/test-uploads",
+    // 集成测试会在几秒内为每个用例开一个家长账号；真实注册频控（默认 6 次/分钟/IP）
+    // 是给生产拦批量建号的，不该干预用例本身——频控行为由 RateLimitTest 单测覆盖。
+    "padguard.ratelimit.register=200",
     "spring.datasource.url=jdbc:h2:mem:adminlist;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE",
     "spring.jpa.hibernate.ddl-auto=create-drop",
     "padguard.jwt.secret=admin-list-test-secret-key-32-bytes-min",

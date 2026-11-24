@@ -1,3 +1,7 @@
+# 开发/测试编排 —— 绝不用于生产/公网：
+#   · EMQX 未配认证（匿名可连），1883/18083 等端口直接映射宿主；
+#   · Postgres 弱口令；生产形态见 docker-compose.prod.yml（Mosquitto password_file
+#     + 每设备 ACL + TLS，公网仅 443/8883）。
 services:
   postgres:
     image: postgres:16

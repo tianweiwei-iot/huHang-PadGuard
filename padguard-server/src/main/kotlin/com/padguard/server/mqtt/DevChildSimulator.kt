@@ -3,6 +3,8 @@ package com.padguard.server.mqtt
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.padguard.server.dto.AckPacket
 import com.padguard.server.dto.CommandPacket
+import com.padguard.server.security.UplinkSigning
+import com.padguard.server.service.DeviceService
 import com.padguard.server.service.FileStorageService
 import com.padguard.server.service.MonitorService
 import jakarta.annotation.PostConstruct
@@ -41,7 +43,8 @@ class DevChildSimulator(
     @Value("\${padguard.dev.child-simulator:false}") private val enabled: Boolean,
     private val objectMapper: ObjectMapper,
     private val fileStorageService: FileStorageService,
-    private val monitorService: MonitorService
+    private val monitorService: MonitorService,
+    private val deviceService: DeviceService
 ) : MqttCallback {
 
     private val log = LoggerFactory.getLogger(DevChildSimulator::class.java)
@@ -87,7 +90,14 @@ class DevChildSimulator(
                 msgId = packet.msgId, deviceId = deviceId,
                 status = "SUCCESS", executedAt = System.currentTimeMillis()
             )
-            val ackMsg = MqttMessage(objectMapper.writeValueAsBytes(ack))
+            val ackJson = objectMapper.writeValueAsString(ack)
+            // R-P0-3：模拟器也按真实孩子端口径对上行做应用层签名（若设备已下发 hmacSecret），
+            // 既保证 local/dev 联调闭环不被服务端强制验签打断，也端到端演练新安全链路。
+            val out = deviceService.getHmacSecret(deviceId)?.let { secret ->
+                val sig = UplinkSigning.hmac(secret, ackJson)
+                objectMapper.writeValueAsString(mapOf("s" to sig, "p" to ackJson))
+            } ?: ackJson
+            val ackMsg = MqttMessage(out.toByteArray(StandardCharsets.UTF_8))
             ackMsg.qos = 1
             client?.publish("pg/v1/$tenant/up/$deviceId/ack", ackMsg)
             log.info("Sim auto-ack command ${packet.msgId} (${packet.type}) for $deviceId")

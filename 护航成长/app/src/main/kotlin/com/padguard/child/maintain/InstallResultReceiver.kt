@@ -32,8 +32,9 @@ class InstallResultReceiver : BroadcastReceiver() {
                         "install failed: $packageName status=$status(${statusName(status)}) $message"
                     }
                 }
-                // 失败会话必须主动放弃，否则残留的 session 会一直占着 /data 空间
-                if (status != PackageInstaller.STATUS_SUCCESS && sessionId >= 0) {
+                // 失败会话必须主动放弃，否则残留的 session 会一直占着 /data 空间。
+                // 但仅「终态失败」才放弃（决策抽成 shouldAbandonSession 便于单测，见下方）。
+                if (shouldAbandonSession(status) && sessionId >= 0) {
                     runCatching { context.packageManager.packageInstaller.abandonSession(sessionId) }
                 }
             }
@@ -50,6 +51,27 @@ class InstallResultReceiver : BroadcastReceiver() {
                 }
             }
         }
+    }
+
+    /**
+     * 是否应放弃安装会话（R15·M1 抽离，便于单测，无 Android 依赖）。
+     *
+     * 仅「终态失败」返回 true；显式排除 [PackageInstaller.STATUS_SUCCESS] 与
+     * [PackageInstaller.STATUS_PENDING_USER_ACTION]：后者（系统等用户确认授权/未知来源弹窗，
+     * 属可恢复安装）若被 abandon，会把本可完成的自更新/远程安装变成硬失败。
+     * 因 PENDING_USER_ACTION 与部分 STATUS_FAILURE 码数值可能重叠，先排除该常量再判失败族，
+     * 确保子弹不误伤可恢复安装。
+     */
+    internal fun shouldAbandonSession(status: Int): Boolean {
+        if (status == PackageInstaller.STATUS_SUCCESS) return false
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) return false
+        return status == PackageInstaller.STATUS_FAILURE ||
+            status == PackageInstaller.STATUS_FAILURE_BLOCKED ||
+            status == PackageInstaller.STATUS_FAILURE_ABORTED ||
+            status == PackageInstaller.STATUS_FAILURE_INVALID ||
+            status == PackageInstaller.STATUS_FAILURE_CONFLICT ||
+            status == PackageInstaller.STATUS_FAILURE_STORAGE ||
+            status == PackageInstaller.STATUS_FAILURE_INCOMPATIBLE
     }
 
     private fun statusName(status: Int): String = when (status) {

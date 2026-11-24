@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.net.VpnService
+import android.os.Build
+import android.os.SystemClock
 import android.os.UserManager
 import com.padguard.core.common.Logger
 import com.padguard.core.data.model.policy.WebFilterMode
@@ -74,14 +76,20 @@ class WebGuardVpnController @Inject constructor(
     fun isActive(): Boolean {
         if (WebGuardVpnService.running) return true
         val last = prefs.getLong(KEY_ACTIVE_AT, 0L)
-        if (last == 0L) return false
-        return System.currentTimeMillis() - last <= ACTIVE_GRACE_MS
+        // 短时窗一律用单调钟：裸墙钟下孩子把系统时间回拨会让 now-last 恒为负，
+        // 判活永远成立；此时 VPN 服务若已被系统回收，sync() 直接返回 RUNNING 不再拉起，
+        // 域名拦截静默失效而家长端仍显示"防护中"。
+        val now = SystemClock.elapsedRealtime()
+        // 旧版本落盘的是墙钟毫秒，单调域下必然远大于 now；与"重启后单调归零"同等待遇：
+        // 一律视为心跳已过期，宁可多拉起一次 VPN（服务侧幂等），也不能静默脱管。
+        if (last <= 0L || last > now) return false
+        return now - last <= ACTIVE_GRACE_MS
     }
 
-    /** 由服务在建立/断开时调用，记录心跳。 */
+    /** 由服务在建立/断开时调用，记录心跳（单调钟域，与 [isActive] 同源）。 */
     internal fun markActive(active: Boolean) {
         runCatching {
-            prefs.edit().putLong(KEY_ACTIVE_AT, if (active) System.currentTimeMillis() else 0L).apply()
+            prefs.edit().putLong(KEY_ACTIVE_AT, if (active) SystemClock.elapsedRealtime() else 0L).apply()
         }
     }
 
@@ -164,7 +172,14 @@ class WebGuardVpnController @Inject constructor(
         }.onFailure { t ->
             // Android 12+ 后台启动前台服务受限（非 DO 且无豁免时会抛这个）：
             // 不吞掉、不重试打转，记录后由下一轮对账（周期自检 / 回前台 / 开机）再试。
-            if (t is android.app.ForegroundServiceStartNotAllowedException) {
+            //
+            // ⚠️ 必须先判 SDK_INT 再做 `is` 判断：`ForegroundServiceStartNotAllowedException`
+            // 是 **API 31 才有的类**，在 Android 10/11（本产品实测机型为 Android 10）上
+            // 对该类型做 instanceof 会抛 `NoClassDefFoundError` —— 那会把「VPN 启动失败」
+            // 这件小事升级成进程崩溃。短路求值保证旧系统根本不会去解析这个类。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                t is android.app.ForegroundServiceStartNotAllowedException
+            ) {
                 Logger.w(TAG) { "web guard vpn start blocked by FGS background restriction" }
             } else {
                 Logger.e(TAG, t) { "failed to start web guard vpn" }
@@ -197,8 +212,18 @@ class WebGuardVpnController @Inject constructor(
             Logger.w(TAG) { "setAlwaysOnVpn failed: $result" }
             return false
         }
-        admin.setUserRestriction(UserManager.DISALLOW_CONFIG_VPN, true)
-        prefs.edit().putBoolean(KEY_ALWAYS_ON, true).apply()
+        // keyguard 锁（DISALLOW_CONFIG_VPN）是"孩子关不掉 VPN"的另一半：
+        // 若设置失败，VPN 虽被设为 always-on，孩子仍可在系统设置里手动关掉，
+        // 管控静默失效。必须如实记录失败，不能让调用方以为锁定完整生效。
+        val restriction = admin.setUserRestriction(UserManager.DISALLOW_CONFIG_VPN, true)
+        if (!restriction.isOk) {
+            Logger.w(TAG) { "DISALLOW_CONFIG_VPN failed=$restriction: always-on vpn set but user can still turn it off" }
+        }
+        // KEY_ALWAYS_ON 是"本端确实设过系统级 always-on 锁"的记账，决定将来
+        // disableAlwaysOn 是否会去清除它。属状态转移，必须 commit() 同步落盘：
+        // 用 apply() 时若设锁后进程立即被杀，落盘丢失 → 关上网管控时守卫
+        // "没设过"直接 return，孩子端永久留一个关不掉的 VPN。
+        prefs.edit().putBoolean(KEY_ALWAYS_ON, true).commit()
         return true
     }
 
@@ -209,7 +234,9 @@ class WebGuardVpnController @Inject constructor(
         runCatching { admin.setAlwaysOnVpn(null, lockdown = false) }
             .onFailure { Logger.w(TAG, it) { "clear always-on vpn failed" } }
         runCatching { admin.setUserRestriction(UserManager.DISALLOW_CONFIG_VPN, false) }
-        prefs.edit().putBoolean(KEY_ALWAYS_ON, false).apply()
+        // 与置位侧对称：清除记账同样必须同步落盘，否则进程被杀后记账残留 true，
+        // 下次 enableAlwaysOn 之外的路径可能误判"设过锁"而跳过设置。
+        prefs.edit().putBoolean(KEY_ALWAYS_ON, false).commit()
         Logger.i(TAG) { "always-on vpn cleared (web guard turned off)" }
     }
 

@@ -37,19 +37,22 @@ class ParentAuthInterceptor(
         if (handler !is HandlerMethod) return true
         val auth = request.getHeader("Authorization")
         if (auth.isNullOrBlank() || !auth.startsWith("Bearer ")) {
-            throw BizException(ParentErr.UNAUTHORIZED, "missing or invalid Authorization", Audience.PARENT)
+            // 这些 message 会经 GlobalExceptionHandler 原样回到客户端并上屏，必须是中文具体原因。
+            throw BizException(ParentErr.UNAUTHORIZED, "登录状态已失效，请重新登录（缺少有效的登录令牌）", Audience.PARENT)
         }
         val payload = try {
             jwt.parseUserToken(auth.substring(7), "access")
         } catch (e: Exception) {
-            throw BizException(ParentErr.UNAUTHORIZED, "invalid token", Audience.PARENT)
+            throw BizException(ParentErr.UNAUTHORIZED, "登录状态已失效，请重新登录（令牌无效或已过期）", Audience.PARENT)
         }
         val user = users.findById(payload.userId).orElse(null)
             ?: throw BizException(ParentErr.UNAUTHORIZED, "账号不存在或已被重置，请重新登录", Audience.PARENT)
         // 吊销校验：登出 / 后台重置密码会把 users.token_version +1，
         // 此前签发的令牌都停留在旧版本，必须与"账号不存在"同样处理（退回登录页）。
         // 没有这一步，/auth/logout 就只是客户端删了个本地文件，服务端令牌照常可用。
-        if (payload.version < user.tokenVersion) {
+        // 版本不等于（而非仅小于）即吊销：库被回滚/手工降版后，持超前版本令牌同样不可信，
+        // 否则"恢复旧备份"反而会让已吊销令牌重新可用。
+        if (payload.version != user.tokenVersion) {
             throw BizException(ParentErr.UNAUTHORIZED, "登录状态已失效，请重新登录", Audience.PARENT)
         }
         val status = UserStatus.of(user.status)
@@ -102,7 +105,7 @@ class FileAccessInterceptor(
             // 已登出的令牌同样不认——否则登出后仍能以家长身份下载本家素材与截图。
             ?.let { p ->
                 runCatching { users.findById(p.userId).orElse(null) }.getOrNull()
-                    ?.takeIf { UserStatus.isUsable(it.status) && p.version >= it.tokenVersion }
+                    ?.takeIf { UserStatus.isUsable(it.status) && p.version == it.tokenVersion }
             }
             ?.id
         if (matchedParent != null) {
@@ -133,16 +136,16 @@ class ChildAuthInterceptor(
     override fun preHandle(request: HttpServletRequest, response: HttpServletResponse, handler: Any): Boolean {
         if (handler !is HandlerMethod) return true
         val deviceId = request.getHeader("X-Device-Id")
-            ?: throw BizException(ChildErr.TOKEN_INVALID, "missing X-Device-Id", Audience.CHILD)
+            ?: throw BizException(ChildErr.TOKEN_INVALID, "设备凭证缺失：请求未带设备标识，请重新绑定设备", Audience.CHILD)
         val auth = request.getHeader("Authorization")
-            ?: throw BizException(ChildErr.TOKEN_INVALID, "missing Authorization", Audience.CHILD)
+            ?: throw BizException(ChildErr.TOKEN_INVALID, "设备凭证缺失：请求未带设备令牌，请重新绑定设备", Audience.CHILD)
         if (!auth.startsWith("Bearer ")) {
-            throw BizException(ChildErr.TOKEN_INVALID, "invalid Authorization", Audience.CHILD)
+            throw BizException(ChildErr.TOKEN_INVALID, "设备凭证格式不正确，请重新绑定设备", Audience.CHILD)
         }
         val device = deviceRepository.findById(deviceId).orElse(null)
-            ?: throw BizException(ChildErr.DEVICE_UNBOUND, "device not found", Audience.CHILD)
+            ?: throw BizException(ChildErr.DEVICE_UNBOUND, "设备未绑定或已被解绑，请在家长端重新绑定", Audience.CHILD)
         if (device.deviceTokenHash != HashUtil.sha256(auth.substring(7))) {
-            throw BizException(ChildErr.TOKEN_INVALID, "invalid device token", Audience.CHILD)
+            throw BizException(ChildErr.TOKEN_INVALID, "设备令牌已失效，请重新绑定设备", Audience.CHILD)
         }
         request.setAttribute("deviceId", deviceId)
         // 任何已鉴权的孩子端 HTTP 活动都视为存活信号（见 DeviceService.markAlive 注释）：

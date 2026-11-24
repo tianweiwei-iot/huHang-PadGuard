@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.parent.domain.model.DistributableApp
 import com.padguard.parent.domain.model.InstalledApp
+import com.padguard.parent.domain.model.MediaSource
 import com.padguard.parent.di.AppManagePrefs
 import com.padguard.parent.domain.repository.DeviceRepository
 import com.padguard.parent.domain.repository.PolicyRepository
@@ -57,7 +58,15 @@ data class AppManageUiState(
      */
     val guardPasswordSet: Boolean = false,
     val toast: String? = null,
-    val error: String? = null
+    val error: String? = null,
+    /**
+     * 最近一次成功读到应用台账的时刻（墙钟毫秒）。
+     *
+     * 台账是"孩子平板上装了什么、哪些被禁用"的唯一事实来源。刷新失败时列表仍显示旧台账，
+     * 但家长会以为这就是当前状态——比如刚在平板上装了新游戏，这里看不到，
+     * 家长会得出"没装"的结论。所以必须把时间钉在界面上。
+     */
+    val lastSuccessAt: Long? = null
 ) {
     /** 按"是否显示系统应用 + 搜索关键字"过滤后的列表 */
     val visibleApps: List<InstalledApp>
@@ -112,7 +121,7 @@ class AppManageViewModel @Inject constructor(
             // 成功必须顺手清掉 error：首屏若因网络抖动失败一次，界面会渲染整页错误；
             // 之后轮询成功却只更新 apps 不清 error 的话，列表数据回来了界面仍卡在错误页，
             // 只有手动点"重试"才恢复 —— 家长观感是"应用管理彻底坏了"。
-            .onSuccess { list -> _uiState.value = _uiState.value.copy(apps = list, error = null) }
+            .onSuccess { list -> _uiState.value = _uiState.value.copy(apps = list, error = null, lastSuccessAt = System.currentTimeMillis()) }
             .onFailure { Log.w("AppManageVM", "refreshInventory failed: ${it.message}") }
     }
 
@@ -137,7 +146,11 @@ class AppManageViewModel @Inject constructor(
                 .onFailure { /* 拿不到密码状态不阻塞应用列表，开关按"未设"处理 */ }
             policyRepository.getAppInventory(deviceId)
                 .onSuccess { list ->
-                    _uiState.value = _uiState.value.copy(apps = list, isLoading = false)
+                    _uiState.value = _uiState.value.copy(
+                        apps = list,
+                        isLoading = false,
+                        lastSuccessAt = System.currentTimeMillis()
+                    )
                 }
                 .onFailure { e ->
                     _uiState.value = _uiState.value.copy(
@@ -291,36 +304,40 @@ class AppManageViewModel @Inject constructor(
     /**
      * 从家长手机本地选一个 APK，上传后远程安装到孩子端。
      *
+     * @param apk 已落盘的流式来源；本方法负责在结束（含失败、协程取消）时 `close()` 删除临时副本。
      * @param packageName 从 APK 里解出的包名。服务端要靠它预置台账、
      *                    孩子端要靠它确认安装目标，不能拿文件名凑。
      *
      * 整个过程要十几秒到几分钟（上传 + 孩子端下载 + 静默安装），
      * 所以这里如实提示"已下发"，而不是假装成功或一直转圈。
      */
-    fun installLocalApk(bytes: ByteArray, fileName: String, packageName: String, appName: String?) {
-        if (packageName.isBlank()) {
-            _uiState.value = _uiState.value.copy(toast = "无法识别这个安装包的包名，请确认是有效的 APK")
-            return
-        }
+    fun installLocalApk(apk: MediaSource, packageName: String, appName: String?) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(installing = true)
-            policyRepository.installLocalApk(
-                deviceId = deviceId,
-                fileName = fileName,
-                contentType = "application/vnd.android.package-archive",
-                bytes = bytes,
-                packageName = packageName,
-                appName = appName
-            ).onSuccess {
-                _uiState.value = _uiState.value.copy(
-                    installing = false,
-                    toast = "已下发安装指令：${appName ?: packageName}，稍后自动出现在列表中"
-                )
-            }.onFailure { e ->
-                _uiState.value = _uiState.value.copy(
-                    installing = false,
-                    toast = "安装失败：${e.message}"
-                )
+            try {
+                if (packageName.isBlank()) {
+                    _uiState.value = _uiState.value.copy(toast = "无法识别这个安装包的包名，请确认是有效的 APK")
+                    return@launch
+                }
+                _uiState.value = _uiState.value.copy(installing = true)
+                policyRepository.installLocalApk(
+                    deviceId = deviceId,
+                    apk = apk,
+                    packageName = packageName,
+                    appName = appName
+                ).onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        installing = false,
+                        toast = "已下发安装指令：${appName ?: packageName}，稍后自动出现在列表中"
+                    )
+                }.onFailure { e ->
+                    _uiState.value = _uiState.value.copy(
+                        installing = false,
+                        toast = "安装失败：${e.message}"
+                    )
+                }
+            } finally {
+                // 上传结束即删 cache 里的 APK 副本；漏删会积压几十 MB（ApkFileReader 另有 2 小时孤儿清扫兜底）
+                runCatching { apk.close() }
             }
         }
     }

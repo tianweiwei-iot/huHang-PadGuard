@@ -1,8 +1,7 @@
 package com.padguard.child.guard
 
-import android.app.AppOpsManager
 import android.content.Context
-import android.os.Process
+import com.padguard.child.permission.SpecialPermission
 import com.padguard.core.engine.guard.GuardInfraProbe
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -11,12 +10,18 @@ import javax.inject.Singleton
 /**
  * [GuardInfraProbe] 的 app 层实现（S12）。
  *
- * 两项探测的口径来源：
- * - 无障碍：复用 [GuardA11y.isEnabled]（匹配本包名 + OperationGuardAccessibilityService 类名），
- *   与 GuardService.ensureGuardInfra、「我的」页状态横幅共用同一判定，避免多处口径漂移；
- * - Usage Access：AppOpsManager.checkOpNoThrow(OPSTR_GET_USAGE_STATS) == MODE_ALLOWED，
- *   与 ProfileViewModel.isUsageStatsGranted 同一口径 —— 普通 checkSelfPermission 拿不到
- *   这个权限的真实状态，必须走 AppOps。
+ * 两项探测一律复用 app 层的**单一事实源**，不在本类另写一套系统 API 查询：
+ * - 无障碍：[GuardA11y.isEnabled] / [GuardA11y.isAlive]（匹配本包名 + 服务类名，
+ *   带存活心跳），与 GuardService.ensureGuardInfra、「我的」页状态横幅同源；
+ * - Usage Access：[SpecialPermission.USAGE_STATS] 的 `isGranted()`。
+ *
+ * ## 为什么不能再手写 AppOps
+ * 本类旧实现用已废弃的 `AppOpsManager.checkOpNoThrow` + `Process.myUid()`，
+ * 而单一事实源在 Q+ 用 `unsafeCheckOpNoThrow` + `applicationInfo.uid`。
+ * 本类是 [com.padguard.core.engine.guard.TamperDetector] 的输入，`PolicyEngine`
+ * 每轮自检都会读它：一旦两套口径在某台 ROM 上分歧，「使用情况访问」明明开着，
+ * 也会被判定为 `USAGE_ACCESS_LOST` 上报家长端，且该告警没有恢复闭环，会一直挂着。
+ * 口径不一致比误判更危险——它让界面与告警互相打脸、无法自证。
  */
 @Singleton
 class GuardInfraProbeImpl @Inject constructor(
@@ -29,15 +34,6 @@ class GuardInfraProbeImpl @Inject constructor(
     override fun isAccessibilityServiceAlive(): Boolean =
         GuardA11y.isAlive(context)
 
-    override fun isUsageAccessGranted(): Boolean {
-        val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
-            ?: return false
-        return runCatching {
-            appOps.checkOpNoThrow(
-                AppOpsManager.OPSTR_GET_USAGE_STATS,
-                Process.myUid(),
-                context.packageName
-            ) == AppOpsManager.MODE_ALLOWED
-        }.getOrDefault(false)
-    }
+    override fun isUsageAccessGranted(): Boolean =
+        SpecialPermission.USAGE_STATS.isGranted(context)
 }

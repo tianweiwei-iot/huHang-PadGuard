@@ -1,5 +1,6 @@
 package com.padguard.server.config
 
+import com.padguard.server.common.SensitiveData
 import com.padguard.server.domain.Plan
 import com.padguard.server.domain.PolicyTemplate
 import com.padguard.server.domain.SubStatus
@@ -37,7 +38,7 @@ class DataInitializer(
      * 演示/测试账号开关。
      *
      * 默认关闭（false）。仅当「local profile + 显式开启」时才播种弱口令演示账号
-     * （便于开发联调）。正式部署（start-server.bat 走 local 但未开启此开关）不会播种
+     * （便于开发联调）。正式部署（start-server.bat 走 home 档位，本开关默认 false）不会播种
      * 任何弱口令账号，转而走下方安全分支：无账号时随机生成强口令并落盘、存量弱口令账号
      * 每次启动强制重置。
      *
@@ -91,7 +92,7 @@ class DataInitializer(
      */
     private fun seedParentAccount() {
         // 演示账号只在「local profile 且显式开启 demo-accounts」时播种，避免随发布包分发弱口令账号。
-        // 正式部署（start-server.bat 走 local 但未开启此开关）走下方安全分支：
+        // 正式部署（start-server.bat 走 home 档位）走下方安全分支：
         // 库里无账号时随机生成强口令并落盘；存量仍在使用出厂弱口令的账号强制重置。
         if (demoAccountsEnabled && env.activeProfiles.contains(PROFILE_LOCAL)) {
             seedDemoAccount()
@@ -201,7 +202,7 @@ class DataInitializer(
     private fun seedTestAccount() {
         val phone = TEST_ACCOUNT_PHONE
         if (userRepository.existsByPhone(phone)) {
-            log.info("测试账号已存在，跳过播种: {}", phone)
+            log.info("测试账号已存在，跳过播种: {}", SensitiveData.maskPhone(phone))
             return
         }
         val now = System.currentTimeMillis()
@@ -229,7 +230,12 @@ class DataInitializer(
                 updatedAt = now
             )
         )
-        log.warn("已播种测试账号：手机号={} / 永久会员（仅限 local 联调环境）", phone)
+        // 播种号是代码里的固定假号，联调要看完整号码直接查 TEST_ACCOUNT_PHONE 常量即可；
+        // 日志统一不留完整手机号，便于上线后用「完整号码出现数 = 0」这一条做硬校验。
+        log.warn(
+            "已播种测试账号：手机号={} / 永久会员（仅限 local 联调环境；完整号码见 TEST_ACCOUNT_PHONE 常量）",
+            SensitiveData.maskPhone(phone)
+        )
     }
 
     /** 去掉了 0/O、1/l/I 等易看错的字符，避免家长照抄时反复失败 */

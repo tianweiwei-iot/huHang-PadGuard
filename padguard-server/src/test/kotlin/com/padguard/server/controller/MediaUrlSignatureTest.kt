@@ -8,6 +8,7 @@ import com.padguard.server.security.JwtTokenProvider
 import com.padguard.server.security.MediaUrlSigner
 import com.padguard.server.service.FileStorageService
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -45,8 +46,7 @@ class MediaUrlSignatureTest {
 
     private fun newController(requireSignature: Boolean = false) = FilesController(
         fileStorageService = newStorage(),
-        uploadedFileRepository = uploadedRepo,
-        deviceRepository = deviceRepo,
+        fileAccessService = com.padguard.server.service.FileAccessService(uploadedRepo, deviceRepo),
         mediaUrlSigner = signer,
         requireSignature = requireSignature
     )
@@ -146,5 +146,28 @@ class MediaUrlSignatureTest {
             setParameter("sig", signedUrl.substringAfter("sig="))
         }
         assertEquals(403, newController().get(request, "priv-1").statusCode.value())
+    }
+
+    @Test
+    fun `jwt raw secret cannot forge media signature (domain separation)`() {
+        // 密码学域分离：媒体子密钥 = HMAC(jwtSecret, "media-url-signing-v1")，
+        // 拿 JWT 密钥本体按 "file|id|exp" 直签的签名必须验不过——
+        // 否则 JWT 侧被攻破即可连带伪造媒体签名（反之亦然）。
+        val secret = "unit-test-media-sign-secret-0123456789abcdef"
+        val exp = (System.currentTimeMillis() + 60_000L).toString()
+        val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+        mac.init(javax.crypto.spec.SecretKeySpec(secret.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        val forged = mac.doFinal("file|domsep-1|$exp".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        assertFalse(signer.verify("domsep-1", exp, forged), "JWT 密钥本体直签不得通过媒体验签")
+        // 正确路径：同一 secret 派生子密钥后签名 → 通过
+        val mac2 = javax.crypto.Mac.getInstance("HmacSHA256")
+        mac2.init(javax.crypto.spec.SecretKeySpec(secret.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        val subkey = mac2.doFinal("media-url-signing-v1".toByteArray(Charsets.UTF_8))
+        val mac3 = javax.crypto.Mac.getInstance("HmacSHA256")
+        mac3.init(javax.crypto.spec.SecretKeySpec(subkey, "HmacSHA256"))
+        val valid = mac3.doFinal("file|domsep-1|$exp".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        assertTrue(signer.verify("domsep-1", exp, valid), "按派生子密钥计算的签名应通过验签")
     }
 }

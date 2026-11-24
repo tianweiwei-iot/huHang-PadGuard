@@ -3,6 +3,7 @@ package com.padguard.parent.di
 import com.padguard.parent.domain.repository.BillingRepository
 import com.padguard.parent.domain.repository.AlertRepository
 import com.padguard.parent.domain.repository.AuthRepository
+import com.padguard.parent.domain.repository.ComplianceRepository
 import com.padguard.parent.domain.repository.DeviceRepository
 import com.padguard.parent.domain.repository.LocationRepository
 import com.padguard.parent.domain.repository.MessageRepository
@@ -20,8 +21,9 @@ import javax.inject.Singleton
  * Hilt 依赖注入 - Repository 绑定模块
  * 将 Domain 层接口绑定到真实的 [ApiDataSource]（接真线，连后端 REST）。
  *
- * 说明：Mock 实现的 [com.padguard.parent.data.local.LocalDataSource] 已停止作为仓储实现绑定，
- * 但保留其类定义以便历史测试或回退；生产代码统一走 [ApiDataSource]。
+ * 说明：早期用于前端联调的 Mock 实现（`LocalDataSource`）已彻底删除（R-P3-4）——
+ * 它在第 4 轮起就不再被绑定，纯死代码，但内部仍留着 `mock_token_*` 这类
+ * "看起来像凭据"的字符串，混淆后仍有被误引用的风险。生产代码统一走 [ApiDataSource]。
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -80,5 +82,11 @@ object RepositoryModule {
     fun provideBillingRepository(
         apiDataSource: ApiDataSource
     ): BillingRepository = apiDataSource
+
+    @Provides
+    @Singleton
+    fun provideComplianceRepository(
+        apiDataSource: ApiDataSource
+    ): ComplianceRepository = apiDataSource
 
 }

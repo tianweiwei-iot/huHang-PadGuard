@@ -4,7 +4,10 @@ import com.padguard.server.common.ApiResponse
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
+import com.padguard.server.config.TraceIds
+import com.padguard.server.domain.UserStatus
 import com.padguard.server.repository.DeviceRepository
+import com.padguard.server.repository.UserRepository
 import jakarta.servlet.http.HttpServletRequest
 import org.slf4j.LoggerFactory
 import org.springframework.http.MediaType
@@ -114,7 +117,8 @@ class ChildStreamController(
 @RequestMapping("/v1/stream")
 class ParentStreamController(
     private val hub: ScreenStreamHub,
-    private val deviceRepository: DeviceRepository
+    private val deviceRepository: DeviceRepository,
+    private val users: UserRepository
 ) {
 
     /**
@@ -147,37 +151,62 @@ class ParentStreamController(
             "该设备的观看人数已达上限，请稍后再试",
             Audience.PARENT
         )
+        // lambda 由 Spring 交给容器异步线程执行，MDC 天然为空；Filter 的 ASYNC 二次派发
+        // 管不到这个线程。必须在请求线程捕获 ID 显式传进去，否则下面的「流终止」日志与
+        // finally 的 unsubscribe 都无法归属到发起观看的那次请求。withTrace 会恢复旧值，
+        // 容器线程池复用时不会把上一条流的 ID 带到下一条。
+        val requestTrace = TraceIds.current() ?: TraceIds.newId("stream")
         val body = StreamingResponseBody { out: OutputStream ->
-            try {
-                var idle = 0L
-                while (!sub.closed) {
-                    val frame = sub.poll(POLL_TIMEOUT_MS)
-                    if (frame != null && frame.isNotEmpty()) {
-                        writeFrame(out, frame, deviceId)
-                        idle = 0L
-                    } else {
-                        // 心跳：既保活，也让家长端能区分"没帧"和"连接断了"
-                        writeFrame(out, ByteArray(0), deviceId)
-                        // 断流判定要看**设备是否还在推**，而不是本订阅者队列空了多久。
-                        // 队列空只是说明这一瞬间没新帧（订阅者刚连上、帧被丢旧、瞬时抖动），
-                        // 用它累计计时会在设备明明正常推流时把连接掐掉 ——
-                        // 表现为家长端每 30 秒闪一次"连接中"，观感就是"画面一直连不上"。
-                        val last = hub.lastFrameAt(deviceId)
-                        val deviceAlive = last != 0L && System.currentTimeMillis() - last <= MAX_IDLE_MS
-                        if (deviceAlive) {
-                            idle = 0L   // 设备还在推，只是这一轮没轮到，继续等
-                        } else {
-                            // 设备从未推流 / 已停推，才按空闲累计收尾，避免连接永久悬挂
-                            idle += POLL_TIMEOUT_MS
-                            if (idle >= MAX_IDLE_MS) break
+            TraceIds.withTrace(requestTrace) {
+                try {
+                    var idle = 0L
+                    var lastOwnershipCheck = System.currentTimeMillis()
+                    while (!sub.closed) {
+                        // 长连接只在建立瞬间验过归属/账号状态：设备被解绑易主、家长被冻结后，
+                        // 这条流仍会持续吐帧（WS 侧已有运行期复核，看屏这条此前是盲区）。
+                        // 读库异常时本次跳过（null），与 WS 复核同口径：DB 抖动不该掐断全服流。
+                        val checkAt = System.currentTimeMillis()
+                        if (checkAt - lastOwnershipCheck >= OWNERSHIP_RECHECK_MS) {
+                            lastOwnershipCheck = checkAt
+                            val stillOwned = runCatching {
+                                deviceRepository.findById(deviceId).orElse(null)?.userId == userId
+                            }.getOrNull()
+                            val accountUsable = runCatching {
+                                users.findById(userId).orElse(null)?.let { UserStatus.isUsable(it.status) }
+                            }.getOrNull()
+                            if (stillOwned == false || accountUsable == false) {
+                                log.info("live stream revoked: device=$deviceId user=$userId stillOwned=$stillOwned usable=$accountUsable")
+                                break
+                            }
                         }
+                        val frame = sub.poll(POLL_TIMEOUT_MS)
+                        if (frame != null && frame.isNotEmpty()) {
+                            writeFrame(out, frame, deviceId)
+                            idle = 0L
+                        } else {
+                            // 心跳：既保活，也让家长端能区分"没帧"和"连接断了"
+                            writeFrame(out, ByteArray(0), deviceId)
+                            // 断流判定要看**设备是否还在推**，而不是本订阅者队列空了多久。
+                            // 队列空只是说明这一瞬间没新帧（订阅者刚连上、帧被丢旧、瞬时抖动），
+                            // 用它累计计时会在设备明明正常推流时把连接掐掉 ——
+                            // 表现为家长端每 30 秒闪一次"连接中"，观感就是"画面一直连不上"。
+                            val last = hub.lastFrameAt(deviceId)
+                            val deviceAlive = last != 0L && System.currentTimeMillis() - last <= MAX_IDLE_MS
+                            if (deviceAlive) {
+                                idle = 0L   // 设备还在推，只是这一轮没轮到，继续等
+                            } else {
+                                // 设备从未推流 / 已停推，才按空闲累计收尾，避免连接永久悬挂
+                                idle += POLL_TIMEOUT_MS
+                                if (idle >= MAX_IDLE_MS) break
+                            }
+                        }
+                        out.flush()
                     }
-                    out.flush()
+                } catch (e: Throwable) {
+                    log.info("live stream terminated: device=$deviceId reason=${e.javaClass.simpleName}")
+                } finally {
+                    hub.unsubscribe(deviceId, sub)
                 }
-            } catch (e: Throwable) {
-                log.info("live stream terminated: device=$deviceId reason=${e.javaClass.simpleName}")
-            } finally {
-                hub.unsubscribe(deviceId, sub)
             }
         }
         return ResponseEntity.ok()
@@ -275,6 +304,8 @@ class ParentStreamController(
         /** 同一个设备 30 秒没有任何帧就收流：孩子端已经停了，没必要继续吊着连接 */
         const val MAX_IDLE_MS = 30_000L
         const val LIVE_THRESHOLD_MS = 5_000L
+        /** 长连接运行期归属/账号状态复核间隔：与 MAX_IDLE_MS 同量级，不让失权画面多流太久 */
+        const val OWNERSHIP_RECHECK_MS = 30_000L
         val log = LoggerFactory.getLogger(ParentStreamController::class.java)
     }
 }

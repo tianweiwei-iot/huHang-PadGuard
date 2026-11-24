@@ -8,17 +8,40 @@ import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor
 import java.util.UUID
+import java.util.concurrent.ThreadPoolExecutor
 
 @Configuration
 class MqttConfig(
     @Value("\${padguard.mqtt.broker-url}") private val brokerUrl: String,
     @Value("\${padguard.mqtt.username:}") private val username: String,
     @Value("\${padguard.mqtt.password:}") private val password: String,
-    @Value("\${padguard.mqtt.keep-alive-seconds:90}") private val keepAlive: Int
+    @Value("\${padguard.mqtt.keep-alive-seconds:90}") private val keepAlive: Int,
+    @Value("\${padguard.mqtt.uplink-pool-size:8}") private val uplinkPoolSize: Int,
+    @Value("\${padguard.mqtt.uplink-queue-capacity:2048}") private val uplinkQueueCapacity: Int,
+    @Value("\${padguard.mqtt.max-inflight:200}") private val maxInflight: Int
 ) {
 
     private val log = LoggerFactory.getLogger(MqttConfig::class.java)
+
+    /**
+     * 上行处理线程池：Paho 的回调线程全局只有一条，验签/查库/落库/推 WS 都塞在里面时，
+     * 一台设备卡住会让全部设备的 ack、心跳和告警排队。回调只负责投递，业务在这里并发处理。
+     *
+     * 队列有界 + AbortPolicy：过载时明确丢弃并记日志，绝不退化成 CallerRunsPolicy
+     * 把负载重新压回 Paho 回调线程（那就等于没有隔离）。容量需结合实际压测再调。
+     */
+    @Bean(name = ["uplinkExecutor"])
+    fun uplinkExecutor(): ThreadPoolTaskExecutor = ThreadPoolTaskExecutor().apply {
+        corePoolSize = uplinkPoolSize.coerceAtLeast(1)
+        maxPoolSize = (uplinkPoolSize * 2).coerceAtLeast(2)
+        queueCapacity = uplinkQueueCapacity.coerceAtLeast(1)
+        setThreadNamePrefix("pg-uplink-")
+        setRejectedExecutionHandler(ThreadPoolExecutor.AbortPolicy())
+        setWaitForTasksToCompleteOnShutdown(true)
+        setAwaitTerminationSeconds(10)
+    }
 
     /**
      * 仅当 padguard.mqtt.enabled=true 时创建 MQTT 客户端；本地免 Docker 运行置为 false，避免强连 EMQX 导致启动失败。
@@ -40,6 +63,9 @@ class MqttConfig(
             setCleanStart(false)
             keepAliveInterval = keepAlive
             setAutomaticReconnect(true)
+            // MQTT 5 用 ReceiveMaximum 约束在途 QoS1/2 报文（v3 的 maxInflight）。
+            // 默认值过小会让高并发上行直接被 broker/客户端限流，表现为指令回执/心跳成片迟到。
+            setReceiveMaximum(maxInflight.coerceAtLeast(10))
             if (username.isNotBlank()) {
                 this.userName = username
                 setPassword(pwBytes)

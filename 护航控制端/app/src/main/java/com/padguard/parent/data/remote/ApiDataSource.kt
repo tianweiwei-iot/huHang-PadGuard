@@ -2,12 +2,17 @@ package com.padguard.parent.data.remote
 
 import com.padguard.parent.data.api.BillingApi
 import com.padguard.parent.domain.repository.BillingRepository
+import com.padguard.parent.domain.repository.ComplianceRepository
 import com.padguard.parent.data.model.CreateOrderRequest
 import com.padguard.parent.data.model.CreateOrderResponse
+import com.padguard.parent.data.model.ChangePasswordRequest
+import com.padguard.parent.data.model.AgreementStatusDto
 import com.padguard.parent.data.model.AppListPolicyDto
 import com.padguard.parent.data.model.AppListPolicyRequest
 import com.padguard.parent.data.model.DeviceImportRequestDto
+import com.padguard.parent.data.model.GuardianConsentStatusDto
 import com.padguard.parent.data.model.DeviceImportRowDto
+import com.padguard.parent.data.model.DeviceLogDto
 import com.padguard.parent.data.model.EyeProtectionDto
 import com.padguard.parent.data.model.EyeProtectionRequest
 import com.padguard.parent.data.model.LanBindRequestDto
@@ -24,6 +29,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import com.padguard.parent.data.api.AlertApi
 import com.padguard.parent.data.api.AppManageApi
 import com.padguard.parent.data.api.AuthApi
+import com.padguard.parent.data.api.ComplianceApi
 import com.padguard.parent.data.api.DeviceApi
 import com.padguard.parent.data.api.FileApi
 import com.padguard.parent.data.api.LocationApi
@@ -40,6 +46,14 @@ import com.padguard.parent.data.api.UpgradeCheckItemDto
 import com.padguard.parent.data.auth.TokenManager
 import com.padguard.parent.data.model.AlertDto
 import com.padguard.parent.data.model.ApiResponse
+import com.padguard.parent.data.model.AppealDto
+import com.padguard.parent.data.model.DataExportDto
+import com.padguard.parent.data.model.DeletionRequestDto
+import com.padguard.parent.data.model.DeletionRequestReasonDto
+import com.padguard.parent.data.model.DeletionTicketDto
+import com.padguard.parent.data.model.SubmitAppealRequestDto
+import com.padguard.parent.data.model.Under14GuardianConsentRequestDto
+import com.padguard.parent.data.model.WithdrawConsentRequestDto
 import com.padguard.parent.data.model.AppHiddenRequest
 import com.padguard.parent.data.model.AppHiddenBatchRequest
 import com.padguard.parent.data.model.AppLimitRequest
@@ -53,6 +67,9 @@ import com.padguard.parent.data.model.AppUsageDto
 import com.padguard.parent.data.model.AssignGroupRequest
 import com.padguard.parent.data.model.EnrollmentDto
 import com.padguard.parent.domain.model.Enrollment
+import com.padguard.parent.domain.model.MediaSource
+import com.padguard.parent.domain.model.AgreementStatus
+import com.padguard.parent.domain.model.UsageStartRequest
 import com.padguard.parent.domain.model.EnrollmentCompleted
 import com.padguard.parent.domain.model.EnrollmentState
 import com.padguard.parent.data.model.BrowserDisableRequest
@@ -180,7 +197,7 @@ import javax.inject.Singleton
 /**
  * 真实后端数据源（接真线）。
  *
- * 取代 Mock 实现的 [com.padguard.parent.data.local.LocalDataSource]，将 8 个领域仓储接口映射到
+ * 取代早期 Mock 实现（已删除，见 R-P3-4），将 8 个领域仓储接口映射到
  * `https://<域名>/v1/` 下的真实 REST 接口（统一响应体 [ApiResponse]，约定 `code == 0` 为成功）。
  *
  * 设计原则（与用户稳定性要求一致）：
@@ -203,6 +220,7 @@ class ApiDataSource @Inject constructor(
     private val appManageApi: AppManageApi,
     private val fileApi: FileApi,
     private val billingApi: BillingApi,
+    private val complianceApi: ComplianceApi,
     private val tokenManager: TokenManager,
     private val authenticatedClient: OkHttpClient,
     private val retrofit: Retrofit,
@@ -212,7 +230,7 @@ class ApiDataSource @Inject constructor(
     private val parentPushClient: ParentPushClient
 ) : AuthRepository, DeviceRepository, MonitorRepository, PolicyRepository,
     StatisticsRepository, AlertRepository, MessageRepository, LocationRepository,
-    BillingRepository {
+    BillingRepository, ComplianceRepository {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -254,17 +272,24 @@ class ApiDataSource @Inject constructor(
             if (resp.isSuccessful) {
                 val body = resp.body()
                 if (body == null) {
-                    Result.failure(Exception("服务端返回空响应"))
+                    Result.failure(Exception("服务端返回空响应，请稍后重试"))
                 } else if (body.code == 0) {
                     Result.success(body)
                 } else {
-                    Result.failure(ParentBizException(body.code, "[${body.code}] ${body.message}"))
+                    // 业务码仍由 ParentBizException 承载供上层分支，文案只留服务端给的中文具体原因。
+                    Result.failure(
+                        ParentBizException(
+                            body.code,
+                            body.message.ifBlank { "操作未被服务端接受，请稍后重试" }
+                        )
+                    )
                 }
             } else {
                 val err = runCatching { resp.errorBody()?.string() }.getOrNull()
-                Result.failure(
-                    Exception("HTTP ${resp.code()}: ${err?.let(::readableError) ?: resp.message()}")
-                )
+                // 服务端错误体里已经是中文具体原因（密码错误 / 用户不存在 / 账号已被冻结 …），
+                // 直接透传；不再拼 "HTTP 401: [1002] " 这类英文与码前缀。
+                val detail = err?.let(::readableError)?.takeIf { it.isNotBlank() }
+                Result.failure(Exception(detail ?: httpStatusHint(resp.code())))
             }
         } catch (e: Exception) {
             // CancellationException 必须原样抛出，不能被包成 Result.failure：
@@ -272,27 +297,24 @@ class ApiDataSource @Inject constructor(
             // 本该静默中止的请求会被当成"业务失败"走 onFailure 分支，
             // 弹出「网络异常」之类的错误提示，而实际上什么都没出错。
             if (e is kotlinx.coroutines.CancellationException) throw e
-            Result.failure(e)
+            // OkHttp 抛的是英文 IOException（Failed to connect / timeout / Unable to resolve host），
+            // 原样上屏就是英文提示。换成中文具体原因；业务异常保持类型不变，上层仍可按 code 分支。
+            Result.failure(translateNetworkFailure(e))
         }
     }
 
     /**
-     * 把服务端错误响应体还原成人能读的一句话。
+     * 把服务端错误响应体还原成家长能读、能照做的一句中文。
      *
-     * 服务端对鉴权类失败会带 HTTP 401/403 + `{code,message}` 响应体（例如冻结账号的 1004）。
-     * 直接把整个 JSON 抛给上层，家长看到的是一长串花括号，等于没有提示；
-     * 这里取出 message（带错误码），让"账号已被冻结，无法登录"这类可执行的提示真正显示出来。
+     * 服务端对登录失败会带 HTTP 401 + `{code,message}`（如「密码错误」「用户不存在」
+     * 「账号已被冻结，无法登录」）。旧实现把 `[1002]` 码前缀甚至整段 JSON 抛给界面，
+     * 既不是纯中文也不够直接。这里只取 message 原文；code 仍留在异常对象与日志里供排障。
      */
     private fun readableError(raw: String): String = try {
-        val o = org.json.JSONObject(raw)
-        val message = o.optString("message").orEmpty()
-        if (message.isBlank()) raw
-        else {
-            val code = o.optInt("code", -1)
-            if (code > 0) "[$code] $message" else message
-        }
+        val message = org.json.JSONObject(raw).optString("message").orEmpty().trim()
+        message.ifBlank { "服务端未返回具体原因，请稍后重试或联系管理员" }
     } catch (e: Exception) {
-        raw
+        "服务端返回了无法解析的错误响应，请稍后重试或联系管理员"
     }
 
     /**
@@ -309,7 +331,8 @@ class ApiDataSource @Inject constructor(
             val resp = call()
             if (!resp.isSuccessful) {
                 val err = runCatching { resp.errorBody()?.string() }.getOrNull()
-                Result.failure(Exception("HTTP ${resp.code()}: ${err?.let(::readableError) ?: resp.message()}"))
+                val detail = err?.let(::readableError)?.takeIf { it.isNotBlank() }
+                Result.failure(Exception(detail ?: httpStatusHint(resp.code())))
             } else {
                 val rawBody = runCatching { resp.body()?.string() }.getOrNull()
                 val bizError = rawBody?.takeIf { it.isNotBlank() }?.let { parseBizError(it) }
@@ -319,7 +342,7 @@ class ApiDataSource @Inject constructor(
         } catch (e: Exception) {
             // 同 exec()：协程取消不是失败，必须放行而不是包成 Result.failure
             if (e is kotlinx.coroutines.CancellationException) throw e
-            Result.failure(e)
+            Result.failure(translateNetworkFailure(e))
         }
     }
 
@@ -333,8 +356,8 @@ class ApiDataSource @Inject constructor(
         val o = org.json.JSONObject(raw)
         val code = o.optInt("code", 0)
         if (code != 0) {
-            val message = o.optString("message").orEmpty()
-            ParentBizException(code, "[$code] ${if (message.isBlank()) "操作未被服务端接受" else message}")
+            val message = o.optString("message").orEmpty().trim()
+            ParentBizException(code, message.ifBlank { "操作未被服务端接受，请稍后重试" })
         } else null
     } catch (e: Exception) {
         null
@@ -413,6 +436,27 @@ class ApiDataSource @Inject constructor(
         return Result.success(Unit)
     }
 
+    /**
+     * 修改登录密码。
+     *
+     * 关键在 [TokenManager.saveTokens]：服务端在这个动作里把 `token_version` +1，
+     * 该账号**全部**旧令牌（包括本机手里这对）立即失效，同时返回一对新令牌。
+     * 不落盘就会在下一个请求被 401 踢回登录页 —— 用户看到的是"改密码成功后立刻被登出"，
+     * 比不能改还糟，因为他会以为自己把账号锁死了。
+     *
+     * 失败原因直接透出服务端的中文文案（"原密码不正确""新密码不能与原密码相同"
+     * "密码至少 6 位"），不需要在这里再套一层映射。
+     */
+    override suspend fun changePassword(oldPassword: String, newPassword: String): Result<Unit> {
+        return exec {
+            authApi.changePassword(ChangePasswordRequest(oldPassword, newPassword))
+        }.map { resp ->
+            val tr = resp.data ?: throw Exception("修改密码成功但服务端未返回新令牌，请重新登录")
+            tokenManager.saveTokens(tr.token, tr.refreshToken)
+            Unit
+        }
+    }
+
     override suspend fun refreshToken(): Result<User> {
         val refresh = tokenManager.getRefreshToken()
             ?: return Result.failure(Exception("无刷新令牌，请重新登录"))
@@ -441,6 +485,9 @@ class ApiDataSource @Inject constructor(
      */
     private fun resetSessionCaches() {
         _deviceListFlow.value = emptyList()
+        // 整机管控开关态以 deviceId 为键，是**账号维度**的内存缓存。换账号不清会让 B
+        // 看到 A 设备的开关值（设备 ID 复用时更直接），必须随设备列表一起清空。
+        _managementActive.value = emptyMap()
     }
 
     init {
@@ -519,6 +566,14 @@ class ApiDataSource @Inject constructor(
 
     override suspend fun getDeviceDetail(deviceId: String): Result<Device> =
         exec { deviceApi.getDeviceDetail(deviceId) }.map { it.data?.toDomain() ?: throw Exception("设备不存在") }
+
+    override suspend fun getAgreementStatus(deviceId: String): Result<AgreementStatus> =
+        exec { deviceApi.getAgreementStatus(deviceId) }.map {
+            it.data?.toDomain() ?: AgreementStatus(signed = false)
+        }
+
+    override suspend fun getDeviceLogs(deviceId: String, type: String, limit: Int): Result<List<DeviceLogDto>> =
+        exec { deviceApi.getDeviceLogs(deviceId, type, limit) }.map { it.data.orEmpty() }
 
     override suspend fun bindDevice(deviceId: String, alias: String?): Result<Device> =
         Result.failure(
@@ -661,12 +716,11 @@ class ApiDataSource @Inject constructor(
 
     override suspend fun uploadAppCatalog(
         deviceId: String,
-        bytes: ByteArray,
-        meta: AppUploadMeta,
-        fileName: String
+        apk: MediaSource,
+        meta: AppUploadMeta
     ): Result<DistributableApp> {
         val filePart = okhttp3.MultipartBody.Part.createFormData(
-            "file", fileName, bytes.toRequestBody("application/octet-stream".toMediaTypeOrNull())
+            "file", apk.fileName, MediaSourceRequestBody(apk)
         )
         val packageNameBody = meta.packageName.toRequestBody("text/plain".toMediaTypeOrNull())
         val versionCodeBody = meta.versionCode.toString().toRequestBody("text/plain".toMediaTypeOrNull())
@@ -879,13 +933,11 @@ class ApiDataSource @Inject constructor(
     override suspend fun getPublishedMessages(deviceId: String, limit: Int): Result<List<PublishedMessage>> =
         exec { messageApi.getPublishedMessages(deviceId, limit) }.map { it.data.orEmpty().map { m -> m.toDomain() } }
 
-    override suspend fun uploadMedia(
-        fileName: String,
-        contentType: String,
-        bytes: ByteArray
-    ): Result<UploadedMedia> {
+    override suspend fun uploadMedia(source: MediaSource): Result<UploadedMedia> {
+        // 流式组包：素材不落堆，OkHttp 按 8KB 分段从源流搬进 socket。
+        // 这里的 "file" 字段名与服务端 ParentMediaUploadController 的 @RequestParam 对齐。
         val part = okhttp3.MultipartBody.Part.createFormData(
-            "file", fileName, bytes.toRequestBody(contentType.toMediaTypeOrNull())
+            "file", source.fileName, MediaSourceRequestBody(source)
         )
         return exec { fileApi.upload(part) }.map {
             val dto = it.data ?: throw Exception("素材上传失败：服务端未返回文件信息")
@@ -1032,15 +1084,12 @@ class ApiDataSource @Inject constructor(
      */
     override suspend fun installLocalApk(
         deviceId: String,
-        fileName: String,
-        contentType: String,
-        bytes: ByteArray,
+        apk: MediaSource,
         packageName: String,
         appName: String?
     ): Result<Unit> {
         val part = okhttp3.MultipartBody.Part.createFormData(
-            "file", fileName,
-            bytes.toRequestBody(contentType.toMediaTypeOrNull())
+            "file", apk.fileName, MediaSourceRequestBody(apk)
         )
         val uploaded = exec { fileApi.upload(part) }
             .map { it.data ?: throw Exception("上传失败：服务端未返回文件信息") }
@@ -1052,7 +1101,7 @@ class ApiDataSource @Inject constructor(
                 AppInstallRequest(
                     apkUrl = uploaded.url,
                     packageName = packageName,
-                    appName = appName ?: fileName.removeSuffix(".apk")
+                    appName = appName ?: apk.fileName.removeSuffix(".apk")
                 )
             )
         }.map { Unit }
@@ -1246,6 +1295,11 @@ class ApiDataSource @Inject constructor(
         exec { policyApi.getUsageSession(deviceId) }
             .map { resp -> resp.data?.toDomain() ?: throw Exception("读取使用会话失败") }
 
+    override suspend fun requestUsageStart(deviceId: String): Result<Unit> =
+        // 响应体只用于确认请求受理（工单状态随 usage-session 轮询同步），
+        // 走 exec：成功即 Result.success，服务端错误走既有 BizError 文案链路。
+        exec { policyApi.requestUsageStart(deviceId) }.map { Unit }
+
     override suspend fun getMinorMode(deviceId: String): Result<MinorMode> =
         exec { policyApi.getMinorMode(deviceId) }
             .map { resp -> resp.data?.toDomain(deviceId) ?: throw Exception("读取未成年人模式失败") }
@@ -1420,6 +1474,54 @@ class ApiDataSource @Inject constructor(
         exec { billingApi.mockPay(orderNo) }.mapCatching {
             it.data ?: throw Exception("支付失败：服务端未返回订阅状态")
         }
+
+    // ==================== ComplianceRepository ====================
+
+    override suspend fun withdrawConsent(deviceIds: List<String>?): Result<Int> =
+        exec { complianceApi.withdrawConsent(WithdrawConsentRequestDto(deviceIds)) }
+            .mapCatching { it.data?.affected ?: 0 }
+
+    override suspend fun reinstateConsent(deviceIds: List<String>?): Result<Int> =
+        exec { complianceApi.reinstateConsent(WithdrawConsentRequestDto(deviceIds)) }
+            .mapCatching { it.data?.affected ?: 0 }
+
+    override suspend fun exportData(): Result<DataExportDto> =
+        exec { complianceApi.exportData() }.mapCatching {
+            it.data ?: throw Exception("服务端未返回导出数据")
+        }
+
+    override suspend fun submitUnder14GuardianConsent(
+        deviceId: String, childBirthDate: String, consentTextVersion: String
+    ): Result<GuardianConsentStatusDto> =
+        exec {
+            complianceApi.submitUnder14GuardianConsent(
+                Under14GuardianConsentRequestDto(deviceId, childBirthDate, true, consentTextVersion)
+            )
+        }.mapCatching { it.data ?: throw Exception("服务端未返回单独同意凭证") }
+
+    override suspend fun guardianConsentStatus(deviceId: String): Result<GuardianConsentStatusDto?> =
+        exec { complianceApi.guardianConsentStatus(deviceId) }.mapCatching { it.data }
+
+    override suspend fun requestDeletion(reason: String?): Result<DeletionRequestDto> =
+        exec { complianceApi.requestDeletion(DeletionRequestReasonDto(reason)) }.mapCatching {
+            it.data ?: throw Exception("服务端未返回注销凭证")
+        }
+
+    override suspend fun confirmDeletion(ticket: String): Result<Unit> =
+        // 服务端 data=null，exec 已判 code==0，这里不取 data，直接映射成功。
+        exec { complianceApi.confirmDeletion(DeletionTicketDto(ticket)) }.map { Unit }
+
+    override suspend fun cancelDeletion(ticket: String): Result<Unit> =
+        exec { complianceApi.cancelDeletion(DeletionTicketDto(ticket)) }.map { Unit }
+
+    override suspend fun submitAppeal(
+        deviceId: String?, subject: String, detail: String?, contact: String?
+    ): Result<String> =
+        exec { complianceApi.submitAppeal(SubmitAppealRequestDto(deviceId, subject, detail, contact)) }
+            .mapCatching { it.data?.appealId ?: throw Exception("服务端未返回申诉单号") }
+
+    override suspend fun listAppeals(): Result<List<AppealDto>> =
+        exec { complianceApi.listAppeals() }.mapCatching { it.data.orEmpty() }
 
 }
 
@@ -1603,7 +1705,8 @@ private fun UsageSessionDto.toDomain(): UsageSession = UsageSession(
     delayOptions = delayOptions,
     maxDailyExtendMinutes = maxDailyExtendMinutes,
     lastDelayEpoch = lastDelayEpoch,
-    pendingDelayMinutes = pendingDelayMinutes
+    pendingDelayMinutes = pendingDelayMinutes,
+    startRequest = startRequest?.let { UsageStartRequest(it.requestId, it.status, it.createdAt, it.confirmedAt) }
 )
 
 private fun InstalledAppDto.toDomain(): InstalledApp = InstalledApp(
@@ -1725,10 +1828,142 @@ class ParentBizException(val code: Int, message: String) : RuntimeException(mess
     }
 }
 
-/** 把业务异常翻译成"家长能照着做"的提示：订阅过期 → 引导续费；其余原样返回 */
-fun Throwable.readableActionMessage(fallback: String): String {
-    if (this is ParentBizException && code == ParentBizException.CODE_SUBSCRIPTION_REQUIRED) {
-        return "订阅已到期，请到「我的-订阅」页续费后再试"
-    }
-    return message?.takeIf { it.isNotBlank() } ?: fallback
+/**
+ * 操作类失败（下发指令、读列表、设置策略……）的统一文案出口。
+ *
+ * ## 为什么不能再返回 `message`
+ * 早期实现是"有 message 就返回 message"，看上去无害，实际把 OkHttp 的英文原文
+ * 原样推到了家长面前：`Failed to connect to /192.168.1.12:8090`、`timeout`、
+ * `CLEARTEXT communication to ... not permitted`。这些字符串由运行时生成、
+ * 源码里搜不到，只能在这一层按异常类型翻译。
+ *
+ * 与登录场景的区别只有一处：[ParentBizException] 的 1002。
+ * 登录时它表示"账号或密码错误"，而在这里（拿着有效令牌调接口）它只可能是
+ * 令牌过期/被吊销 —— 说成"密码错误"会让家长反复去改一个本来正确的密码。
+ */
+fun Throwable.readableActionMessage(fallback: String): String =
+    readableError(this, fallback, onUnauthorized = "登录状态已失效，请重新登录")
+
+// ==================== 面向家长的中文错误文案 ====================
+
+/** 用码点判断中文，避免转义写法带来的歧义。 */
+private fun String.hasChinese(): Boolean = any { it.code in 0x4E00..0x9FFF }
+
+/** OkHttp / JVM 运行时抛出的英文网络异常特征（这些原文并不存在于仓库字符串里）。 */
+private val ENGLISH_NETWORK_WORDS = listOf(
+    "failed", "timeout", "timed out", "unable to", "refused", "connect",
+    "network", "ssl", "http", "eof", "closed", "resolve host", "unreachable"
+)
+
+private fun String.looksLikeEnglishNetworkError(): Boolean {
+    val lower = lowercase()
+    return ENGLISH_NETWORK_WORDS.any { lower.contains(it) }
 }
+
+/** 剥掉历史实现留下的英文/码前缀："HTTP 401: [1002] 密码错误" → "密码错误"。 */
+private fun stripLegacyPrefix(raw: String): String {
+    var s = raw.trim()
+    if (s.startsWith("HTTP ", ignoreCase = true)) {
+        val colon = s.indexOf(':')
+        if (colon > 0) s = s.substring(colon + 1).trim()
+    }
+    if (s.startsWith("[")) {
+        val close = s.indexOf(']')
+        if (close > 1 && s.substring(1, close).all { it.isDigit() }) {
+            s = s.substring(close + 1).trim()
+        }
+    }
+    return s
+}
+
+/** 服务端没给具体原因时，按 HTTP 状态码补一句中文。 */
+private fun httpStatusHint(code: Int): String = when (code) {
+    400 -> "请求参数有误，请检查后重试"
+    401 -> "登录状态校验未通过，请重新登录"
+    403 -> "没有权限执行该操作"
+    404 -> "请求的服务端接口不存在，请检查服务器地址是否正确"
+    409 -> "数据状态已变化，请刷新后重试"
+    413 -> "文件太大，服务端拒绝接收（上限 200MB），请换成更小的素材"
+    429 -> "操作过于频繁，请稍后再试"
+    in 500..599 -> "服务端内部错误，请稍后重试或联系管理员"
+    else -> "服务端返回错误（状态码 $code），请稍后重试"
+}
+
+/**
+ * 把 OkHttp / JVM 抛出的英文网络异常翻译成「中文 + 具体原因」。
+ *
+ * 典型原文："Failed to connect to /192.168.1.12:8090"、"timeout"、"Unable to resolve host"。
+ * 这些字符串是运行时产生的、不在源码里，靠改字符串找不到，必须在这一层做映射。
+ * 地址安全校验（HostSelectionInterceptor）抛的已经是中文，原样保留，家长才知道该改哪里。
+ */
+fun readableNetworkFailure(e: Throwable): String {
+    val raw = e.message?.trim().orEmpty()
+    return when {
+        raw.hasChinese() -> raw
+        e is java.net.UnknownHostException || raw.contains("Unable to resolve host", true) ->
+            "连不上服务器：无法解析服务器地址，请检查「高级设置」里的地址与网络"
+        e is java.net.SocketTimeoutException || raw.contains("timeout", true) || raw.contains("timed out", true) ->
+            "连不上服务器：连接超时，请检查网络或稍后重试"
+        else -> "连不上服务器，请确认服务端已启动、地址与端口正确、网络可达"
+    }
+}
+
+/** 网络异常统一换成中文消息；业务异常保持类型不变（上层仍要按 code 分支，如 4001 订阅过期）。 */
+internal fun translateNetworkFailure(e: Exception): Exception =
+    if (e is java.io.IOException) Exception(readableNetworkFailure(e), e) else e
+
+/**
+ * 登录 / 注册 / 发码等认证场景的**统一错误文案出口**：保证家长看到的是中文，且带具体原因
+ * （账号不存在、密码错误、账号冻结、临时锁定、连不上服务器、连接超时……）。
+ *
+ * 服务端 AuthService 已经返回中文具体原因，但客户端历史上直接显示 `e.message`，
+ * 于是 OkHttp 的英文异常、"HTTP 401: [1002] " 前缀都会原样上屏。这里做最后一道收口：
+ * ① 剥掉英文/码前缀；② 网络异常按原因翻译；③ 业务码给中文兜底；④ 其余一律中文 fallback。
+ */
+fun readableUserFacingError(e: Throwable?, fallback: String): String {
+    if (e == null) return fallback
+    return readableError(e, fallback, onUnauthorized = "账号或密码错误，请检查后重试")
+}
+
+/**
+ * 「异常 → 家长能看懂的中文」的唯一实现，两个对外入口只是 1002 的解释不同。
+ *
+ * 判定顺序刻意如此：
+ * 1. 订阅过期优先 —— 它虽然是业务异常，但家长唯一能做的动作是去续费；
+ * 2. 业务码且本身带中文 → 原样透传（服务端的文案比客户端编的更贴业务）；
+ * 3. 网络异常 → 按类型翻译（拒绝连接 / 超时 / DNS）;
+ * 4. 其余英文原文 → 只有当它像网络错误时才翻译，否则一律 fallback，
+ *    避免把 `NullPointerException` 之类的内部字样当成"连不上服务器"骗家长。
+ */
+private fun readableError(e: Throwable, fallback: String, onUnauthorized: String): String {
+    if (e is ParentBizException) {
+        if (e.code == ParentBizException.CODE_SUBSCRIPTION_REQUIRED) {
+            return "订阅已到期，请到「我的-订阅」页续费后再试"
+        }
+        val cleaned = stripLegacyPrefix(e.message.orEmpty())
+        if (cleaned.hasChinese()) return cleaned
+        return when (e.code) {
+            1002 -> onUnauthorized
+            1004 -> "账号已被冻结，无法登录，如需恢复请联系客服"
+            1005 -> "账号尚未激活，请等待开通后再登录"
+            1006 -> "操作过于频繁，请稍后再试"
+            5001 -> "服务端内部错误，请稍后重试"
+            else -> fallback
+        }
+    }
+    if (e is java.io.IOException) return readableNetworkFailure(e)
+    val cleaned = stripLegacyPrefix(e.message.orEmpty())
+    if (cleaned.hasChinese()) return cleaned
+    if (cleaned.isNotBlank() && cleaned.looksLikeEnglishNetworkError()) {
+        return readableNetworkFailure(e)
+    }
+    return fallback
+}
+
+/** 协议签署凭证 DTO → 领域模型：保守口径，data 为空即「未查询到」。 */
+private fun AgreementStatusDto.toDomain(): AgreementStatus = AgreementStatus(
+    signed = signed,
+    version = version,
+    signedAt = signedAt,
+    snMask = snMask
+)

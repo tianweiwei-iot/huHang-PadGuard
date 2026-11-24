@@ -1,6 +1,7 @@
 package com.padguard.parent.presentation.ui
 
 import com.padguard.parent.presentation.ui.profile.AboutScreen
+import com.padguard.parent.presentation.ui.profile.DataRightsScreen
 import com.padguard.parent.presentation.ui.profile.SubscriptionScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -39,6 +40,7 @@ import com.padguard.parent.presentation.ui.components.UnlockRequestDialog
 import com.padguard.parent.presentation.ui.components.UsageDelayRequestDialog
 import com.padguard.parent.presentation.ui.control.ControlPolicyScreen
 import com.padguard.parent.presentation.ui.device.DeviceDetailScreen
+import com.padguard.parent.presentation.ui.device.NotificationRecordScreen
 import com.padguard.parent.presentation.ui.main.MainScreen
 import com.padguard.parent.presentation.ui.realtime.LocationScreen
 import com.padguard.parent.presentation.ui.realtime.MessagePublishScreen
@@ -109,7 +111,12 @@ sealed class Screen(val route: String) {
     object AppManage : Screen("app_manage/{deviceId}") {
         fun create(deviceId: String) = "app_manage/$deviceId"
     }
+    object NotificationRecord : Screen("notification_record/{deviceId}") {
+        fun create(deviceId: String) = "notification_record/$deviceId"
+    }
     object AlertList : Screen("alert_list")
+    // 数据权利与合规（导出/撤回同意/注销/申诉）
+    object DataRights : Screen("data_rights")
     // 关于页
     object About : Screen("about")
 }
@@ -156,6 +163,9 @@ fun PadGuardNavHost(
     // 避免先闪一帧登录页再跳主页的视觉抖动。
     val bootResolved by sessionViewModel.bootResolved.collectAsState()
     val user by sessionViewModel.user.collectAsState()
+    // 会话被动失效的原因：随"退回登录页"一起交给登录页展示，展示后消费掉。
+    // 只取一次快照（remember 住），避免登录页在用户开始输入后又被重组刷新提示。
+    val sessionNotice by sessionViewModel.sessionNotice.collectAsState()
 
     // 会话在运行中被清空（如令牌刷新失败、退出登录）时，全局退回登录页。
     // 用「目标页不是登录页」做防重入，退出登录自身的导航不会被二次叠加。
@@ -182,6 +192,17 @@ fun PadGuardNavHost(
     // 后台时新 CRITICAL 告警转本地通知触达家长）
     val riskVm: RiskAlertCenterViewModel = hiltViewModel()
     val riskState by riskVm.uiState.collectAsState()
+
+    // 账号切换（登出→null、换账号登录→新 id）时清空三个 Activity 作用域消息中心的会话态。
+    // 这几个 VM 由根 Composable 的 hiltViewModel() 创建，Activity 不随账号切换重建，
+    // 不清就会出现：B 在首次轮询回来前看到 A 的工单/告警、铃铛红点，甚至弹出 A 的申请。
+    // 以 user?.id 为键：同一账号内的重组（配置变更等）不会误清。
+    LaunchedEffect(user?.id) {
+        unlockVm.resetForSessionChange()
+        delayVm.resetForSessionChange()
+        riskVm.resetForSessionChange()
+    }
+
     val snackbarHostState = remember { SnackbarHostState() }
 
     // 通知点击直达消息中心。
@@ -267,7 +288,11 @@ fun PadGuardNavHost(
             // 登录成功后申请通知权限，使"孩子求解锁"能本地触达家长
             val activity = LocalContext.current as? MainActivity
             LoginScreen(
+                sessionNotice = sessionNotice,
                 onLoginSuccess = {
+                    // 登录成功即消费掉"上次为什么被踢出来"的提示，
+                    // 否则它会一直挂着，下次被动失效时家长分不清是哪一次。
+                    sessionViewModel.consumeSessionNotice()
                     activity?.requestNotificationPermissionIfNeeded()
                     navController.navigate(Screen.Main.route) {
                         popUpTo(Screen.Login.route) { inclusive = true }
@@ -296,11 +321,18 @@ fun PadGuardNavHost(
                 onBack = { navController.safePopBackStack() },
                 onApprove = { entry, minutes -> unlockVm.approve(entry.ticket, minutes) },
                 onReject = { entry -> unlockVm.reject(entry.ticket) },
-                onRefresh = unlockVm::refresh,
+                // 重试必须覆盖三个分区：此前只重试解锁工单，延时申请与风险告警失败后
+                // 点"重试"根本不会重新拉取，角标会一直挂着。
+                onRefresh = {
+                    unlockVm.refresh()
+                    delayVm.refresh()
+                    riskVm.refresh()
+                },
                 // 风险告警分区（同一页面承载，根层 VM 已在此处之上取出）
                 riskAlerts = riskState.alerts,
                 riskUnreadCount = riskState.unreadCount,
                 riskProcessing = riskState.processing,
+                riskError = riskState.error,
                 onAcknowledgeRisk = { alert -> riskVm.acknowledge(alert) },
                 // 延时申请分区（同一页面承载，根层 VM 已在此处之上取出）
                 delayState = delayState,
@@ -313,6 +345,10 @@ fun PadGuardNavHost(
         composable(Screen.About.route) {
             AboutScreen(onBack = { navController.safePopBackStack() })
         }
+        // 数据权利与合规页
+        composable(Screen.DataRights.route) {
+            DataRightsScreen(onBack = { navController.safePopBackStack() })
+        }
         composable(Screen.DeviceDetail.route) { backStackEntry ->
             val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
             DeviceDetailScreen(
@@ -320,7 +356,15 @@ fun PadGuardNavHost(
                 onBack = { navController.safePopBackStack() },
                 onNavigateToControl = { id -> navController.navigate(Screen.Control.create(id)) },
                 onViewScreen = { id -> navController.navigate(Screen.ScreenMonitor.create(id)) },
-                onNavigateToAppManage = { id -> navController.navigate(Screen.AppManage.create(id)) }
+                onNavigateToAppManage = { id -> navController.navigate(Screen.AppManage.create(id)) },
+                onNavigateToNotificationRecord = { id -> navController.navigate(Screen.NotificationRecord.create(id)) }
+            )
+        }
+        composable(Screen.NotificationRecord.route) { backStackEntry ->
+            val deviceId = backStackEntry.arguments?.getString("deviceId").orEmpty()
+            NotificationRecordScreen(
+                deviceId = deviceId,
+                onBack = { navController.safePopBackStack() }
             )
         }
         composable(Screen.Control.route) { backStackEntry ->

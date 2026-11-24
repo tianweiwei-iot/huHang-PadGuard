@@ -128,8 +128,8 @@ fun ChildLoginScreen(viewModel: ChildLoginViewModel = hiltViewModel()) {
             )
             Spacer(Modifier.height(8.dp))
 
-            // 「记住账号密码」：勾选后写入本机 DataStore，下次进入自动填充；
-            // 取消勾选会立即清除已保存的密码（见 ChildLoginViewModel.onRememberChanged）。
+            // 「记住账号」：勾选后仅账号写入本机 DataStore，下次进入自动填充账号；
+            // 取消勾选会立即清除已保存的账号（密码按设计从不持久化，见 ChildLoginViewModel）。
             Row(
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
@@ -140,7 +140,7 @@ fun ChildLoginScreen(viewModel: ChildLoginViewModel = hiltViewModel()) {
                     enabled = state !is LoginUiState.Loading
                 )
                 Text(
-                    text = "记住账号密码（仅保存在本机，可在「我的」中清除）",
+                    text = "记住账号（仅保存在本机，可在「我的」中清除）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
                 )

@@ -7,9 +7,15 @@ import kotlinx.serialization.Serializable
  * 服务端下发的远程指令（对应接口契约 §4.1）。
  *
  * 安全校验（在终端侧强制执行，任一失败即丢弃并记录告警）：
- * 1. [expiresAt] 早于当前时间 → 防重放
+ * 1. [expiresAt] 早于当前时间 → 防重放；**该字段不在签名覆盖内**，见下方说明
  * 2. [signature] HMAC-SHA256 校验失败 → 防伪造
  * 3. [msgId] 重复 → 幂等丢弃，但仍回执 DUPLICATED
+ *
+ * ## [expiresAt] 的信任边界（新增缺陷 H）
+ * 签名串只覆盖 `msgId|type|timestamp|payload`，[expiresAt] 可被中间人改成 0 或远期而不破坏
+ * [signature]。因此终端侧 `CommandFreshness`（core:transport）会把它封顶在
+ * `timestamp + 15min`（timestamp 已被签名、改不动），`expiresAt` 只能缩短不能延长有效期。
+ * 根治需 v2 签名把 [expiresAt] 纳入 canonical，属跨端协议变更，两端须同步发布并留兼容期。
  */
 @Serializable
 data class Command(
@@ -96,6 +102,16 @@ enum class CommandType {
 
     /** 全屏消息推送 */
     SHOW_MESSAGE,
+
+    /**
+     * 家长端发起「开始计时」：孩子端弹出确认框（"家长已为你开启今日计时"），
+     * 孩子点「开始计时」后才真正起表（调 usage session start 接口）；
+     * 未确认则不开始计时（等待页常驻，永不自动起表）。
+     * payload { requestId } —— 与家长端的 start-request 工单关联，确认后回传。
+     * ACK 语义：SUCCESS = 已送达并弹出确认框（**不是**"已开始计时"），
+     * 计时是否真的开始由会话接口的 active 状态与工单状态回传。
+     */
+    START_TIMER_CONFIRM,
 
     /** 远程截屏 */
     SCREENSHOT,

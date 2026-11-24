@@ -50,6 +50,13 @@ data class ControlPolicyUiState(
     val timeRestrictionsLoaded: Boolean = false,
     /** 时段列表读取失败的原因；与 [timeRestrictionsLoaded] 一起把"空/失败/加载中"三态分开 */
     val timeRestrictionsError: String? = null,
+    /**
+     * 最近一次成功读到时段列表的时刻（墙钟毫秒）。
+     *
+     * 时段是**孩子端正在生效的规则**：读取失败时界面要么整段消失、要么只剩旧值，
+     * 家长看到"这一条时段还在"时无法判断它是否已与服务端脱节。角标要把时刻说明白。
+     */
+    val lastSuccessAt: Long? = null,
     val installedApps: List<AppPolicy> = emptyList(),
     val webPolicy: WebPolicy? = null,
     val templates: List<PolicyTemplate> = emptyList(),
@@ -117,7 +124,8 @@ class ControlPolicyViewModel @Inject constructor(
                     _uiState.value = _uiState.value.copy(
                         timeRestrictions = list,
                         timeRestrictionsLoaded = true,
-                        timeRestrictionsError = null
+                        timeRestrictionsError = null,
+                        lastSuccessAt = System.currentTimeMillis()
                     )
                 }
                 .onFailure { e ->

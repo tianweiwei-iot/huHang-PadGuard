@@ -136,6 +136,41 @@ class ScheduleEvaluatorTest {
     }
 
     @Test
+    fun workdayOverrideWinsWhenDateConflictsWithHoliday_RP24() {
+        // 同一天同时被标记为节假日与调休上班日（数据不一致，如服务端/内置表冲突）。
+        // R-P2-4：调休上班日优先，fail-closed 向"工作日"(更严格)倾斜。
+        val conflict = LocalDate.of(2026, 9, 5) // 实际是周六
+        val ev = ScheduleEvaluator(
+            timeProvider,
+            FakeHolidayProvider(
+                holidays = setOf(conflict),
+                workdayOverrides = setOf(conflict)
+            )
+        )
+        assertEquals(DayType.WEEKDAY, ev.dayTypeOf(conflict))
+    }
+
+    @Test
+    fun degenerateStartEqualsEndRuleDoesNotLock_RP25() {
+        // R-P2-5：start == end 的退化区间（零长度）不算跨零点，也不应命中任何时刻 -> 不锁。
+        // 防止被误判为"全天锁定"（与 SmartShutdownEnforcer 的"不锁"语义对齐）。
+        val rule = ScheduleRule(
+            dayTypes = listOf(DayType.WEEKDAY),
+            start = "21:00", end = "21:00",
+            action = ScheduleAction.LOCK
+        )
+        val policy = SchedulePolicy(timezone = "UTC", rules = listOf(rule))
+        val monday = LocalDate.of(2026, 8, 31)
+        // 恰好在 start==end 这一刻与区间任意其他时刻都不应锁定
+        assertTrue(evaluator.evaluate(policy, at(monday, 21, 0)) is ScheduleVerdict.Unlocked)
+        assertTrue(evaluator.evaluate(policy, at(monday, 21, 1)) is ScheduleVerdict.Unlocked)
+        assertTrue(evaluator.evaluate(policy, at(monday, 20, 59)) is ScheduleVerdict.Unlocked)
+        // 跨零点判定（matches 的跨零点分支）也不应被退化区间触发
+        val tuesday = LocalDate.of(2026, 9, 1)
+        assertTrue(evaluator.evaluate(policy, at(tuesday, 0, 0)) is ScheduleVerdict.Unlocked)
+    }
+
+    @Test
     fun holidayDegeneratesToWeekendRule() {
         val tuesday = LocalDate.of(2026, 9, 1) // 强制节假日
         val ev = ScheduleEvaluator(
@@ -248,6 +283,82 @@ class ScheduleEvaluatorTest {
         assertEquals(false, p.isHoliday(LocalDate.of(2024, 10, 1)))
         // 未被服务端覆盖的年份仍用内置表
         assertTrue(p.isHoliday(LocalDate.of(2025, 10, 1)))
+    }
+
+    // ==================== R-P2-6：时段边界精确闹钟 ====================
+
+    @Test
+    fun `nextTransitionAt returns null when schedule disabled`() {
+        val rule = ScheduleRule(
+            dayTypes = listOf(DayType.WEEKDAY), start = "21:00", end = "22:00", action = ScheduleAction.LOCK
+        )
+        val policy = SchedulePolicy(timezone = "UTC", enabled = false, rules = listOf(rule))
+        val monday = LocalDate.of(2026, 8, 31)
+        assertEquals(null, evaluator.nextTransitionAt(policy, at(monday, 20, 0)))
+    }
+
+    @Test
+    fun `nextTransitionAt points at the upcoming lock start`() {
+        val rule = ScheduleRule(
+            dayTypes = listOf(DayType.WEEKDAY), start = "21:00", end = "22:00", action = ScheduleAction.LOCK
+        )
+        val policy = SchedulePolicy(timezone = "UTC", rules = listOf(rule))
+        val monday = LocalDate.of(2026, 8, 31)
+        // 20:00 未锁：下一次翻转就是 21:00 开始锁
+        assertEquals(at(monday, 21, 0), evaluator.nextTransitionAt(policy, at(monday, 20, 0)))
+    }
+
+    @Test
+    fun `nextTransitionAt while locked points at the unlock time`() {
+        val rule = ScheduleRule(
+            dayTypes = listOf(DayType.WEEKDAY), start = "21:00", end = "22:00", action = ScheduleAction.LOCK
+        )
+        val policy = SchedulePolicy(timezone = "UTC", rules = listOf(rule))
+        val monday = LocalDate.of(2026, 8, 31)
+        // 21:30 锁定中：下一次翻转是 22:00 解锁
+        assertEquals(at(monday, 22, 0), evaluator.nextTransitionAt(policy, at(monday, 21, 30)))
+    }
+
+    @Test
+    fun `nextTransitionAt handles a midnight-crossing rule`() {
+        val rule = ScheduleRule(
+            dayTypes = listOf(DayType.WEEKDAY), start = "22:00", end = "06:00", action = ScheduleAction.LOCK
+        )
+        val policy = SchedulePolicy(timezone = "UTC", rules = listOf(rule))
+        val monday = LocalDate.of(2026, 8, 31)
+        // 23:00 已锁：解锁点是**次日** 06:00
+        assertEquals(
+            at(monday.plusDays(1), 6, 0),
+            evaluator.nextTransitionAt(policy, at(monday, 23, 0))
+        )
+    }
+
+    @Test
+    fun `nextTransitionAt also considers UNLOCK window ends`() {
+        val lockAllDay = ScheduleRule(
+            dayTypes = listOf(DayType.WEEKDAY), start = "00:00", end = "23:59", action = ScheduleAction.LOCK
+        )
+        val unlockWindow = ScheduleRule(
+            dayTypes = listOf(DayType.WEEKDAY), start = "14:00", end = "16:00", action = ScheduleAction.UNLOCK
+        )
+        val policy = SchedulePolicy(timezone = "UTC", rules = listOf(lockAllDay, unlockWindow))
+        val monday = LocalDate.of(2026, 8, 31)
+        // 13:00（锁定时）→ 14:00 起进入放行窗，状态会翻转
+        assertEquals(at(monday, 14, 0), evaluator.nextTransitionAt(policy, at(monday, 13, 0)))
+        // 15:00（放行窗内）→ 16:00 窗口结束，锁定重新生效
+        assertEquals(at(monday, 16, 0), evaluator.nextTransitionAt(policy, at(monday, 15, 0)))
+    }
+
+    @Test
+    fun `nextTransitionAt looks ahead to the weekend for weekend-only rules`() {
+        val weekendRule = ScheduleRule(
+            dayTypes = listOf(DayType.WEEKEND), start = "09:00", end = "10:00", action = ScheduleAction.LOCK
+        )
+        val policy = SchedulePolicy(timezone = "UTC", rules = listOf(weekendRule))
+        val monday = LocalDate.of(2026, 8, 31)
+        // 周一没有任何规则生效，但必须能算出"本周六 09:00"这个边界
+        val next = evaluator.nextTransitionAt(policy, at(monday, 12, 0))
+        assertEquals(at(LocalDate.of(2026, 9, 5), 9, 0), next)
     }
 
     /** 可控的节假日/调休实现，供测试注入特定日期 */

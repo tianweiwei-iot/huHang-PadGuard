@@ -1,5 +1,6 @@
 package com.padguard.child.consent
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -86,10 +87,16 @@ fun OneTimeConsentScreen(
     val items by viewModel.items.collectAsStateWithLifecycle()
     val currentKey by viewModel.currentKey.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
+    val notice by viewModel.notice.collectAsStateWithLifecycle()
+    val guide by viewModel.guide.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     // 跳过确认弹窗：默认收起，避免误触直接退出授权流程
     var showSkipDialog by remember { mutableStateOf(false) }
+
+    // 退出授权流程确认弹窗：默认收起。授权进行中按系统返回键不再直接关掉整个 App
+    // （"返回键把App整关了"的根因就是缺这一步拦截），而是先确认；进度已落盘，确认退出后重进从断点续跑。
+    var showExitConfirm by remember { mutableStateOf(false) }
 
     val runtimeLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -147,8 +154,23 @@ fun OneTimeConsentScreen(
         if (autoStart && !viewModel.hasStarted) viewModel.retryCurrent()
     }
 
+    // 进程被系统回收 / 上次未完成退出后重进：进度已落盘，进入即自动从断点续跑，
+    // 不再让家长从头点「同意并开始授权」（这正是之前"设置页待会儿回来重置"的根因之一）。
+    // 仅 autoStart=false 时接管，避免与上方补授权场景重复触发。
+    LaunchedEffect(Unit) {
+        if (!autoStart && viewModel.hasStarted && phase == OneTimeConsentViewModel.Phase.IDLE) {
+            viewModel.retryCurrent()
+        }
+    }
+
     // 兜底：个别 ROM 的系统设置页不会回传 result，只靠 ActivityResult 会永远停在等待态。
     ResumeEffect(onResume = viewModel::onReturnedToApp)
+
+    // 拦截系统返回键：授权流程未走完时，按返回不直接 finish 整个 App（此前"返回键把App整关了"
+    // 正是这个缺失导致的）。进度已落盘，这里弹确认；完成态（DONE）放行系统默认行为。
+    BackHandler(enabled = phase != OneTimeConsentViewModel.Phase.DONE) {
+        showExitConfirm = true
+    }
 
     val doneCount = items.count { it.state == ConsentItem.State.DONE }
     val waitingCount = items.count { it.state == ConsentItem.State.NEED_MANUAL }
@@ -213,6 +235,48 @@ fun OneTimeConsentScreen(
                 }
             }
 
+            // 跳转系统设置页前的分步指引：无障碍 / 电池优化这类"列表型"页面不直达本应用
+            // 开关，家长进了设置页不知道去哪找——真机反馈"逻辑不清"的直接来源。
+            // 用中性信息色（secondaryContainer）而不是错误色：它是"教你怎么做"，不是报错。
+            if (guide != null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
+                ) {
+                    Text(
+                        text = guide!!,
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+
+            // 中性告知单独一层：跳过某项、复检进行中/未检测到变化都属于正常路径，
+            // 用信息色而不是错误色。早期实现把它们和真错误一起塞进 message 走红底，
+            // 家长反馈"授权过程一直在报错"即由此而来。
+            if (notice != null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
+                ) {
+                    Text(
+                        text = notice!!,
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+
             if (message != null) {
                 Spacer(modifier = Modifier.height(12.dp))
                 Card(
@@ -243,7 +307,7 @@ fun OneTimeConsentScreen(
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Text(
-                    text = primaryActionLabel(phase, waitingItem, remainingCount),
+                    text = primaryActionLabel(phase, waitingItem, remainingCount, viewModel.hasStarted),
                     style = MaterialTheme.typography.titleMedium
                 )
             }
@@ -269,9 +333,12 @@ fun OneTimeConsentScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "说明：每开启一项后无需按返回，本页会自动回到前台并跳到下一项。" +
-                    "使用情况访问、悬浮窗、无障碍服务与屏幕采集属于 Android 隐私保护项，" +
-                    "任何应用（包括设备所有者）都无法代替用户开启，必须由您在系统页面上确认。",
+                text = "说明：能自动检测的项（使用情况访问、悬浮窗、无障碍、电池优化、精确闹钟、通知等）" +
+                    "开完即自动回到本页并跳到下一项，无需按返回、也无需再点继续。" +
+                    "厂商「自启动 / 后台弹出界面」没有公开状态接口，带您到设置页后按返回即自动接续，" +
+                    "若按了 HOME，通知栏会留一条可点的「回来继续」。" +
+                    "以上开关与屏幕采集均属 Android 隐私保护项，任何应用（包括设备所有者）" +
+                    "都无法代替用户开启，必须由您在系统页面上确认。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
             )
@@ -288,6 +355,23 @@ fun OneTimeConsentScreen(
             onConfirm = {
                 showSkipDialog = false
                 viewModel.finishAnyway()
+            }
+        )
+    }
+
+    if (showExitConfirm) {
+        AlertDialog(
+            onDismissRequest = { showExitConfirm = false },
+            title = { Text("退出授权流程？") },
+            text = { Text("授权进度已自动保存，下次进入会从当前进度继续，不会从头再来。确定退出吗？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showExitConfirm = false
+                    (context as? android.app.Activity)?.finish()
+                }) { Text("退出") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExitConfirm = false }) { Text("继续授权") }
             }
         )
     }
@@ -322,7 +406,9 @@ private fun ProgressHeader(
             ) {
                 Text(
                     text = when (phase) {
-                        OneTimeConsentViewModel.Phase.DONE -> "全部授权已完成"
+                        // 不写"全部授权已开启"：厂商私有开关没有查询接口，清单里如实保留
+                        // 「已带您前往设置（请确认开启）」行，不能把流程走完说成开关全开。
+                        OneTimeConsentViewModel.Phase.DONE -> "授权流程已完成"
                         OneTimeConsentViewModel.Phase.RUNNING -> "正在自动配置…"
                         else -> "已完成 $done / $total 项"
                     },
@@ -438,6 +524,9 @@ private fun statusText(item: ConsentItem, isCurrent: Boolean): String? = when (i
     ConsentItem.State.RUNNING -> "正在自动配置…"
     ConsentItem.State.NEED_MANUAL ->
         if (isCurrent) "正在等待你开启，开完自动跳到下一项" else "需你在系统页面中确认"
+    // 平台不提供查询接口：如实说明"带去过了，开关是否打开由您确认"，
+    // 但明确告诉家长流程已自动接续，不必回来再点一次。
+    ConsentItem.State.CONFIRMED -> "已带您前往设置（请确认开启），流程已自动继续"
     ConsentItem.State.SKIPPED -> if (item.optional) "未开启（可稍后补开）" else "已跳过"
     ConsentItem.State.PENDING -> if (item.optional) "未开启（可选）" else "排队等待处理"
 }
@@ -449,6 +538,9 @@ private fun indicatorFor(state: ConsentItem.State): Pair<Color, androidx.compose
         ConsentItem.State.DONE -> MaterialTheme.colorScheme.primary to Icons.Filled.CheckCircle
         ConsentItem.State.RUNNING -> MaterialTheme.colorScheme.primary to Icons.Filled.RadioButtonUnchecked
         ConsentItem.State.NEED_MANUAL -> MaterialTheme.colorScheme.tertiary to Icons.Filled.RadioButtonUnchecked
+        // 半确认：用半透明的主色 + 空心圈，既不冒充"已完成"，也不像"还没办"
+        ConsentItem.State.CONFIRMED ->
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.6f) to Icons.Filled.RadioButtonUnchecked
         ConsentItem.State.SKIPPED ->
             MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f) to Icons.Filled.RadioButtonUnchecked
         ConsentItem.State.PENDING ->
@@ -464,9 +556,10 @@ private fun indicatorFor(state: ConsentItem.State): Pair<Color, androidx.compose
 private fun primaryActionLabel(
     phase: OneTimeConsentViewModel.Phase,
     waitingItem: ConsentItem?,
-    remaining: Int
+    remaining: Int,
+    resumed: Boolean = false
 ): String = when (phase) {
-    OneTimeConsentViewModel.Phase.IDLE -> "同意并开始授权"
+    OneTimeConsentViewModel.Phase.IDLE -> if (resumed) "继续授权（从断点）" else "同意并开始授权"
     OneTimeConsentViewModel.Phase.RUNNING -> "正在自动配置…"
     OneTimeConsentViewModel.Phase.DONE -> "全部完成，正在进入下一步…"
     OneTimeConsentViewModel.Phase.ERROR -> "重试"

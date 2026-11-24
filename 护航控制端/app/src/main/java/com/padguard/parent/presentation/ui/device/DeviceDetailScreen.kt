@@ -27,12 +27,17 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import android.graphics.BitmapFactory
 import android.net.Uri
+import com.padguard.parent.domain.model.AgreementStatus
 import com.padguard.parent.domain.model.Device
 import com.padguard.parent.domain.model.DeviceOnlineStatus
 import com.padguard.parent.domain.model.ProtectionLevel
 import com.padguard.parent.presentation.ui.components.FeatureGridItem
 import com.padguard.parent.presentation.ui.components.FeatureItem
+import com.padguard.parent.presentation.ui.components.HighRiskAction
+import com.padguard.parent.presentation.ui.components.HighRiskActions
+import com.padguard.parent.presentation.ui.components.HighRiskConfirmDialog
 import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.components.StaleDataHint
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.util.TimeFormat
 import com.padguard.parent.presentation.viewmodel.DeviceDetailViewModel
@@ -59,10 +64,15 @@ fun DeviceDetailScreen(
     onNavigateToControl: (String) -> Unit,
     onViewScreen: (String) -> Unit,
     onNavigateToAppManage: (String) -> Unit = {},
+    onNavigateToNotificationRecord: (String) -> Unit = {},
     viewModel: DeviceDetailViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    // 高风险指令的待确认项（R-P3-2）：锁屏 / 暂停整机管控这类"一触即发"的操作先弹确认，
+    // 确认前不下发任何指令 —— 详情页的快捷网格里它们紧挨着定位、看屏等常用按钮，易误触。
+    var pendingRisk by remember { mutableStateOf<HighRiskAction?>(null) }
+    val deviceLabel = uiState.device?.name
 
     LaunchedEffect(Unit) {
         // 必须用 collect 而不是 collectLatest：showSnackbar 会挂起约 4 秒，
@@ -144,6 +154,17 @@ fun DeviceDetailScreen(
                 ChildProfileCard(device)
                 GuardianHealthCard(device)
                 ProtectionLevelCard(device)
+                AgreementStatusRow(uiState.agreement)
+            }
+
+            // 设备对象拿到了、但本次刷新失败：下面的守护状态 / 权限 chip 全是上一次的快照。
+            // 这页是家长判断"管控还有没有效"的入口，绝不能让它看起来像实时状态。
+            if (uiState.error != null) {
+                StaleDataHint(
+                    message = uiState.error,
+                    lastSuccessAt = uiState.lastSuccessAt,
+                    onRetry = { viewModel.loadDeviceDetail() }
+                )
             }
 
             // 原网格中「重启」「授权」与「定位」一样只弹假 toast（一个请求都不发），
@@ -155,7 +176,8 @@ fun DeviceDetailScreen(
                 locating = uiState.locating,
                 onCommand = { cmd ->
                     when (cmd) {
-                        "一键锁屏" -> viewModel.lockScreen()
+                        // 锁屏会让孩子的平板当场不可用，先二次确认再下发
+                        "一键锁屏" -> pendingRisk = HighRiskActions.lockScreen(deviceLabel) { viewModel.lockScreen() }
                         "定位" -> viewModel.locateNow()
                         "看屏" -> onViewScreen(deviceId)
                         "显示管理台" -> viewModel.revealConsole()
@@ -164,10 +186,19 @@ fun DeviceDetailScreen(
             )
 
             // 整机管控 暂停/恢复 主开关：真正释放 / 恢复对平板的全部管控（跨页面共享开关态）。
+            // 只有「暂停」是高风险方向（管控全面失效）；恢复管控是收紧防护，无需确认。
             ManagementActiveCard(
                 active = uiState.managementActive,
                 busy = uiState.managementBusy,
-                onToggle = viewModel::setManagementActive
+                onToggle = { wantActive ->
+                    if (wantActive) {
+                        viewModel.setManagementActive(true)
+                    } else {
+                        pendingRisk = HighRiskActions.pauseManagement(deviceLabel) {
+                            viewModel.setManagementActive(false)
+                        }
+                    }
+                }
             )
 
             // 未成年人模式（分龄合规底座）：一键开启即套用分龄时长 / 护眼 / 宵禁基线
@@ -209,6 +240,38 @@ fun DeviceDetailScreen(
 
             TodayUsageDetailCard(uiState.todayUsage?.totalUsageMinutes ?: 0)
 
+            // A2：通知记录入口（孩子端代收的系统通知，仅包名 + 标题，不含正文）
+            SoftCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onNavigateToNotificationRecord(deviceId) }
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.Notifications,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("通知记录", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "查看孩子端代收的系统通知（仅包名 + 标题）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                        )
+                    }
+                    Icon(
+                        Icons.Filled.ArrowForward,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.4f)
+                    )
+                }
+            }
+
             val detailLocation = uiState.location
             if (detailLocation != null) {
                 LocationCard(address = detailLocation.address, lat = detailLocation.latitude, lng = detailLocation.longitude)
@@ -243,6 +306,8 @@ fun DeviceDetailScreen(
         }
     }
 
+    HighRiskConfirmDialog(action = pendingRisk, onDismiss = { pendingRisk = null })
+
     // 设备管理面板（权限管理 / 功能管理 / 应用分发 / 远程升级 / 数据统计）
     DeviceAdminSheetHost(
         uiState = uiState,
@@ -252,7 +317,7 @@ fun DeviceDetailScreen(
         onDispatchApp = { id -> viewModel.dispatchApp(id) },
         onForceDispatchApp = { id -> viewModel.dispatchApp(id, force = true) },
         onStartUpgrade = { id -> viewModel.startUpgrade(id) },
-        onUploadApp = { bytes, meta, name -> viewModel.uploadApp(bytes, meta, name) },
+        onUploadApp = { apk, meta -> viewModel.uploadApp(apk, meta) },
         onDeleteApp = { id -> viewModel.deleteApp(id) },
         onUninstallApp = { pkg -> viewModel.uninstallDistributedApp(pkg) }
     )
@@ -393,6 +458,52 @@ private fun ChildProfileCard(device: Device) {
 }
 
 /**
+ * 使用授权协议签署凭证（说明书 §5.4 合规留存的管控端回显）。
+ *
+ * 措辞是刻意保守的：`signed=false` 只表示服务端**没有查到凭证**（旧版本孩子端未上报、
+ * 日志尚未上行、设备易主清档），绝不能写成「未同意」——那会把"查不到"伪造成一个
+ * 关于孩子行为的确定结论。查询失败时 [status] 为 null，整行不显示，
+ * 不让一个次要合规接口的抖动在详情页里制造焦虑。
+ */
+@Composable
+private fun AgreementStatusRow(status: AgreementStatus?) {
+    if (status == null) return
+    val detail = if (status.signed) {
+        val at = status.signedAt?.let { TimeFormat.describeStamp(it) }
+        "已阅已同意 · 协议 v${status.version.orEmpty()}" + (at?.let { " · $it" } ?: "")
+    } else {
+        "暂未查询到签署记录（旧版本设备或日志尚未同步）"
+    }
+    SoftCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(
+                imageVector = if (status.signed) Icons.Default.CheckCircle else Icons.Default.Info,
+                contentDescription = null,
+                tint = if (status.signed) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                modifier = Modifier.size(18.dp)
+            )
+            Column {
+                Text(
+                    text = "使用授权协议",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+        }
+    }
+}
+
+/**
  * 守护健康度卡（P3 可观测性）：展示孩子端守护进程 / 无障碍服务存活与链路状态。
  * 数据来自服务端 devices 守护快照（孩子端随心跳上报）。守护失联（多为被强制停止）时给出醒目告警，
  * 引导家长重新打开孩子端。设备尚未上报（旧孩子端）时温和提示，不报错。
@@ -425,9 +536,15 @@ private fun GuardianHealthCard(device: Device) {
                         val text = when (state) {
                             "ONLINE" -> "链路在线"
                             "MQTT_DOWN" -> "链路断开"
+                            "MQTT_DOWN_HTTP_OK" -> "链路降级·监管中"
+                            "HTTP_DOWN" -> "HTTPS异常·推送中"
+                            "OFFLINE" -> "已离线"
                             else -> state
                         }
-                        StatusChip(label = text, isActive = state == "ONLINE")
+                        // 只要 HTTPS 骨干或传输通道任一存活，监管就未中断，chip 仍为"正常"色；
+                        // 只有双通道皆断（OFFLINE）或传输通道彻底断（MQTT_DOWN 旧值）才标红。
+                        val active = state == "ONLINE" || state == "MQTT_DOWN_HTTP_OK" || state == "HTTP_DOWN"
+                        StatusChip(label = text, isActive = active)
                     }
                 }
                 if (lost) {

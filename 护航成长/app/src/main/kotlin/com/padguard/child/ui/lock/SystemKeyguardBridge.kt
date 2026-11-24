@@ -163,7 +163,7 @@ class SystemKeyguardBridge @Inject constructor(
     /** 清除「系统锁由我们压着」的记账。撤锁完成后调用 */
     fun clearPushed() {
         if (prefs.getLong(KEY_PUSHED_AT, 0L) == 0L) return
-        prefs.edit().remove(KEY_PUSHED_AT).apply()
+        prefs.edit().remove(KEY_PUSHED_AT).commit()
         // 系统锁已不在，"待撤锁"自然也无从谈起 —— 必须同步清，否则残留标记
         // 会让自愈触发点反复追逐一个不存在的锁
         clearUnlockPending()
@@ -177,19 +177,21 @@ class SystemKeyguardBridge @Inject constructor(
      * 无法立即确认撤锁成功时调用它，把意图交给自愈触发点。
      */
     fun markUnlockPending() {
-        prefs.edit().putLong(KEY_PENDING_UNLOCK_AT, System.currentTimeMillis()).apply()
+        // 状态转移必须同步落盘：家长解锁后进程随时可能被回收，异步 apply()
+        // 会让"待撤锁"意图在落盘前丢失，自愈触发点再也追不回遗留的系统锁。
+        prefs.edit().putLong(KEY_PENDING_UNLOCK_AT, System.currentTimeMillis()).commit()
         Logger.i(TAG) { "unlock pending recorded (system keyguard still held by us)" }
     }
 
     /** 撤锁成功 / 系统锁确认不在时清除待办 */
     fun clearUnlockPending() {
         if (prefs.getLong(KEY_PENDING_UNLOCK_AT, 0L) == 0L) return
-        prefs.edit().remove(KEY_PENDING_UNLOCK_AT).apply()
+        prefs.edit().remove(KEY_PENDING_UNLOCK_AT).commit()
         Logger.i(TAG) { "unlock pending cleared" }
     }
 
     private fun markPushed() {
-        prefs.edit().putLong(KEY_PUSHED_AT, System.currentTimeMillis()).apply()
+        prefs.edit().putLong(KEY_PUSHED_AT, System.currentTimeMillis()).commit()
     }
 
     /**
@@ -394,12 +396,12 @@ class SystemKeyguardBridge @Inject constructor(
 
         fun markUnlockPending(context: Context) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit().putLong(KEY_PENDING_UNLOCK_AT, System.currentTimeMillis()).apply()
+                .edit().putLong(KEY_PENDING_UNLOCK_AT, System.currentTimeMillis()).commit()
         }
 
         fun clearUnlockPending(context: Context) {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit().remove(KEY_PENDING_UNLOCK_AT).apply()
+                .edit().remove(KEY_PENDING_UNLOCK_AT).commit()
         }
 
         /**
@@ -411,7 +413,7 @@ class SystemKeyguardBridge @Inject constructor(
             if (!isUnlockPending(context)) return
             if (isKeyguardLocked(context)) return
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit().remove(KEY_PENDING_UNLOCK_AT).remove(KEY_PUSHED_AT).apply()
+            prefs.edit().remove(KEY_PENDING_UNLOCK_AT).remove(KEY_PUSHED_AT).commit()
             Logger.i(TAG) { "keyguard gone by user, unlock pending + record cleared" }
         }
 

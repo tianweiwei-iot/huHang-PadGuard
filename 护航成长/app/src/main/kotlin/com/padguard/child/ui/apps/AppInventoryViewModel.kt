@@ -40,12 +40,18 @@ class AppInventoryViewModel @Inject constructor(
     policyRepository: PolicyRepository
 ) : ViewModel() {
 
-    /** 本机可启动应用台账（含家长后续隐藏补回来的包），生命周期内采集一次。 */
-    private val apps: StateFlow<List<AppInventoryItem>> = flow {
+    /**
+     * 本机可启动应用台账（含家长后续隐藏补回来的包），生命周期内采集一次。
+     *
+     * 初值刻意用 `null`：**"还没采完"与"采完了、确实一个应用都没有"是两种状态**。
+     * 旧实现以 `emptyList()` 起流，扫包（250 个包数百毫秒）期间首帧就被当成失败结果，
+     * 页面先显示"加载已完成但列表为空"＋一条红色错误横幅，采集完才突然刷出真实列表。
+     */
+    private val apps: StateFlow<List<AppInventoryItem>?> = flow {
         emit(inventoryCollector.collect())
     }
         .flowOn(Dispatchers.IO)
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error
@@ -55,8 +61,9 @@ class AppInventoryViewModel @Inject constructor(
         policyRepository.observePolicy()
     ) { items, policy ->
         AppInventoryUiState(
-            items = items.map { it.toRow(policy) },
-            loaded = true
+            items = items.orEmpty().map { it.toRow(policy) },
+            // 采集未完成时展示加载态，绝不把"还没读到"显示成"没有受管控的应用"。
+            loaded = items != null
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppInventoryUiState())
 
@@ -64,10 +71,13 @@ class AppInventoryViewModel @Inject constructor(
         // 采集失败必须暴露：静默吞掉会让页面显示"一个应用都没有"，
         // 孩子据此判断"家长没管控我"，而真实情况是包可见性受限导致查不到。
         viewModelScope.launch {
-            apps.collect {
-                if (it.isEmpty()) {
-                    Logger.w(TAG) { "app inventory empty: package visibility restricted?" }
-                    _error.value = "未能读取本机应用列表。若设备限制了应用可见性，请到「隐私与安全」检查使用情况访问权限。"
+            apps.collect { snapshot ->
+                // null = 首次采集尚未完成（加载态），此时不该报任何错。
+                // 空列表也可能是采集侧判定"本轮不完整"后主动作废的结果（R27），
+                // 故文案不武断说成"包可见性受限"，只如实提示重试并给出排查方向。
+                if (snapshot?.isEmpty() == true) {
+                    Logger.w(TAG) { "app inventory empty: package visibility restricted or incomplete scan?" }
+                    _error.value = "本轮未能读取完整应用列表，请稍后重试；若设备限制了应用可见性，请到「隐私与安全」检查使用情况访问权限。"
                 } else {
                     _error.value = null
                 }

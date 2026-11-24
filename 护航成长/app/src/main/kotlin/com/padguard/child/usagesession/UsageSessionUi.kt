@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
@@ -38,7 +36,8 @@ import kotlinx.coroutines.delay
 /**
  * 使用计时会话宿主：覆盖在 Tab 之上的全局浮层。
  *
- * - [UsageSessionManager.UiState.needsStartConfirm] 为真 → 弹出"计时开始"确认框（不点确认不消失）；
+ * - 「计时开始」确认已统一收敛到全屏系统浮层 [UsageStartOverlay]（由 [com.padguard.child.service.GuardService]
+ *   在 [UsageSessionManager.UiState.needsStartConfirm] 为真且亮屏/已绑定时拉起），本宿主不再重复渲染确认框；
  * - [UsageSessionManager.UiState.countdownActive] 为真 → 屏幕正上方显示 10 分钟倒计时条 + 延时申请。
  *
  * 放在 [com.padguard.child.ui.nav.PadGuardApp] 内、NavHost 之上，因此无论停在哪个 Tab 都能看到。
@@ -47,13 +46,9 @@ import kotlinx.coroutines.delay
 fun UsageSessionHost(viewModel: UsageSessionViewModel = hiltViewModel()) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
-    if (state.needsStartConfirm) {
-        UsageStartDialog(
-            loading = state.loading,
-            onConfirm = viewModel::confirmStart
-        )
-    }
-
+    // 「计时开始」确认已统一收敛到全屏系统浮层 UsageStartOverlay（由 GuardService 在
+    // needsStartConfirm 为真且亮屏/已绑定时拉起），无论 App 是否在前台都能提示孩子确认。
+    // 这里只承载屏幕正上方的倒计时浮层，不再重复渲染确认框（否则会与系统浮层叠两层）。
     if (state.countdownActive) {
         CountdownBanner(
             liveRemainingMs = viewModel::liveRemainingMs,
@@ -65,39 +60,6 @@ fun UsageSessionHost(viewModel: UsageSessionViewModel = hiltViewModel()) {
             onExtend = viewModel::requestDelay
         )
     }
-}
-
-/**
- * "平板使用计时开始"确认框。
- *
- * 需求：孩子打开平板即开始计时，但必须经孩子确认后方才真正计时。
- * 因此这是模态框——不点"开始计时"就不会 dismiss，避免计时被绕过。
- */
-@Composable
-internal fun UsageStartDialog(
-    loading: Boolean,
-    onConfirm: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = { /* 必须孩子确认后才开始计时，禁止点外部/返回关闭 */ },
-        confirmButton = {
-            Button(onClick = onConfirm, enabled = !loading) {
-                Text(if (loading) "正在开始…" else "开始计时")
-            }
-        },
-        title = { Text("平板使用计时开始") },
-        text = {
-            Text(
-                "系统已开始记录你的平板使用时间。到达今日限额后平板会自动进入管控，" +
-                    "剩余 10 分钟时可在屏幕顶部申请延时。请合理使用，保护视力与作息。"
-            )
-        },
-        // 关键：禁用返回键与点击外部关闭，确保"确认"是计时起点
-        properties = androidx.compose.ui.window.DialogProperties(
-            dismissOnBackPress = false,
-            dismissOnClickOutside = false
-        )
-    )
 }
 
 /**

@@ -36,6 +36,8 @@ object MqttTopics {
     fun upHeartbeat(tenant: String, deviceId: String) = "$PREFIX/$tenant/up/$deviceId/heartbeat"
     fun upAck(tenant: String, deviceId: String) = "$PREFIX/$tenant/up/$deviceId/ack"
     fun upEvent(tenant: String, deviceId: String) = "$PREFIX/$tenant/up/$deviceId/event"
+    /** HIGH 级告警的即时单发通道（QoS1），与批量 event 区分以便服务端优先消费 */
+    fun upRealtimeAlert(tenant: String, deviceId: String) = "$PREFIX/$tenant/up/$deviceId/alert/realtime"
     fun upStatus(tenant: String, deviceId: String) = "$PREFIX/$tenant/up/$deviceId/status"
 
     /** 判断收到的 topic 属于哪类下行消息 */

@@ -1,6 +1,16 @@
 package com.padguard.server.admin
 
 /**
+ * ⚠️ DEPRECATED REFERENCE — 勿当作接口契约。
+ * 本文件是早期骨架，缺漏约 15 个真实端点（/logout、/me/password、PUT/DELETE /parents/{id}、
+ * POST /parents/{id}/erase、/devices/{id}/unbind、/rbac/*、/server/logs、/server-profile、
+ * /audit/areas 等），与 `padguard-admin` 前端实际调用**不一致**。
+ * 权威契约以 `padguard-server/src/main/kotlin/com/padguard/server/controller/AdminController.kt`
+ * （+ ServerProfileController.kt + dto/AdminDtos.kt + security/AdminPermissionService.kt）为准。
+ * 若据此文件"删功能/判死代码"会误伤线上能力。
+ *
+
+/**
  * PadGuard 管控后台 · Admin 端点参考实现（骨架）
  * ------------------------------------------------------------------
  * 落地说明（务必阅读）：

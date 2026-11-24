@@ -10,15 +10,18 @@
     <!--
       定位（实时定位 / 电子围栏，说明书 §6.5）。
 
-      ⚠️ 刻意**没有**声明 ACCESS_BACKGROUND_LOCATION，也不要给任何服务加
-      `android:foregroundServiceType="location"` —— 这不是遗漏，是合规决策：
+      ⚠️ 刻意**没有**声明 ACCESS_BACKGROUND_LOCATION —— 这不是遗漏，是合规决策：
       1) ACCESS_BACKGROUND_LOCATION 属于 Google Play 受限权限，需专项申报；
       2) 更关键的是 **Play 家庭政策禁止面向儿童的 App 申请后台位置**，本 App 正是孩子端。
 
-      代价与对策（已实现，勿绕回去）：Android 10(API29)+ 起，App 在后台**读不到位置**
-      （getLastKnownLocation 会被直接拒绝），而本 App 的定位是在后台守护服务里响应
-      家长指令触发的 —— 因此后台期间不读位置，而是登记待办，等界面回到前台时自动补传。
-      详见 LocationCollector 类注释。
+      当前实现（旧注释曾写"不要给任何服务加 location 类型"，已过时，勿据此误删）：
+      守护服务在【API 29+ 且此刻仍持有 ACCESS_FINE/COARSE_LOCATION】时叠加
+      foregroundServiceType="location"（见 GuardService.fgsType()），借"定位类型前台服务"
+      把后台采集视为"使用中"，从而在不申请后台位置权限的前提下响应家长「立即定位」；
+      危险权限被孩子撤销时自动退回 dataSync|specialUse，守护进程照常存活。
+      Manifest 里的 FOREGROUND_SERVICE_LOCATION 权限与 service 声明的 location 类型是
+      这条链路的必需配套（API 34+ 缺权限会抛 SecurityException）。
+      详见 GuardService.fgsType() 与 LocationCollector 类注释。
     -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -102,6 +105,32 @@
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="http" />
         </intent>
+
+        <!--
+          厂商「权限管家」私有设置页的包可见性声明（Android 11 / API 30+ 必需）。
+
+          RomSettings.privateComponents 用**显式 ComponentName** 跳「自启动 / 后台弹出界面 /
+          受保护应用」页，再由 resolveActivity 逐个校验。targetSdk 35 下，包可见性限制会让
+          未在 <queries> 中声明的包在查询时直接消失：resolveActivity 返回 null，
+          所有厂商候选被逐个跳过，四级降级链退化成「应用详情页」—— 不崩，但家长要从
+          应用详情里自己翻找开关，"适配所有厂商"名存实亡。目标机型 EMUI 10 是 API 29，
+          不受此限制，所以这个缺口在真机上没有被暴露过；API 30+ 的华为/小米/OPPO/vivo 会中招。
+
+          合规边界：这里是**逐个包名**声明，不是 QUERY_ALL_PACKAGES，
+          不触发 Play 全量包可见性专项申报，也不读取任何应用列表内容。
+          用途只有一件：让系统允许本应用解析并打开下列系统预装设置页。
+          与 RomSettings.privateComponents 的候选包名一一对应，新增厂商时两处同步。
+        -->
+        <package android:name="com.huawei.systemmanager" />
+        <package android:name="com.miui.securitycenter" />
+        <package android:name="com.miui.powerkeeper" />
+        <package android:name="com.coloros.safecenter" />
+        <package android:name="com.oppo.safe" />
+        <package android:name="com.vivo.permissionmanager" />
+        <package android:name="com.iqoo.secure" />
+        <package android:name="com.samsung.android.lool" />
+        <package android:name="com.meizu.safe" />
+        <package android:name="com.lenovo.security" />
     </queries>
 
     <!--
@@ -187,6 +216,21 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!--
+      WRITE_SECURE_SETTINGS：无障碍静默自愈（2026-11-17 EMUI 锁屏「一键清理」事故的源头修复）。
+      signature|privileged 级权限，安装时系统**不会**自动授予，装机时经 USB 执行一次：
+        adb shell pm grant <包名> android.permission.WRITE_SECURE_SETTINGS
+      （debug 包 com.padguard.child.debug / release 包 com.padguard.child；卸载重装后需重新授权。）
+      授予后 AccessibilityCapabilityHealer 在无 DO 的设备上也能把被 EMUI 清理停用的
+      无障碍开关写回 ENABLED_ACCESSIBILITY_SERVICES，实现清理后全自动恢复（约 1~3 分钟内）；
+      未授予时行为与旧版一致：检测 + 告警 + 引导人工重开（绝不假装能自愈）。
+      权限本身持有与否由 canSilentHeal() 运行时自查，未授权即自动退回引导路径。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+
+
+    <!--
       SYSTEM_ALERT_WINDOW 权限声明（必须保留）。
       说明：原「锁屏覆盖层（LockScreenOverlay）」这一深灰全屏浮窗已按产品决策**彻底删除**
       （类文件 ui/lock/LockScreenOverlay.kt 已移除；该层在部分 ROM 上会导致「灰色锁屏无法解锁」的
@@ -203,6 +247,8 @@
     <application
         android:name=".PadGuardApplication"
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/full_backup_content"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -216,17 +262,45 @@
             若任务卡仍驻留"最近任务"，孩子划一下就能看到管控应用 UI 并把它杀掉
             （2026-10-20 现场反馈：历史应用记录里能看到管控应用 UI，划掉后守护不重启）。
             声明后任务不再出现在最近任务列表；从通知/悬浮球启动不受影响。
+
+            ⚠️ 本 Activity **不再持有 MAIN/LAUNCHER**：桌面图标由下面的 activity-alias 承载。
+            原因是一个真实事故（2026-11-18 现场）：家长在控制台里点「去开启」跳到系统设置页时，
+            MainActivity 会收到 onUserLeaveHint → AppHider.hideManagementUi() 把
+            MainActivity 组件置为 disabled → 系统立刻 finishDisabledPackageActivitiesLocked
+            强杀**正在运行的本 Activity**（连同同任务栈的系统设置页），家长看到的就是
+            "控制台一闪就没了、设置页也一起关掉"。
+            把图标挪到 alias 上后，隐藏只禁用 alias，运行中的 MainActivity 与它所在的
+            任务栈完全不受影响，返回键即可回到控制台继续授权。
+        -->
+        <!--
+          管理控制台宿主必须保持 non-exported：外部 App 曾可用显式 Intent +
+          EXTRA_REVEAL=true 直接绕过悬浮卡密码闸门进入控制台（P0 越权）。
+          桌面入口只由下方已导出的 .hidden.LauncherAlias 承载；alias 转发到本 Activity
+          时不会携带合法的一次性令牌，因此从 alias 进入仍是隐藏态，必须走密码验证。
         -->
         <activity
             android:name=".MainActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true" />
+
+        <!--
+          桌面图标（唯一 LAUNCHER 入口）。AppHider 隐藏/揭示的是**这个别名**，不是 MainActivity：
+          别名被禁用只会让桌面图标消失，不会杀掉正在运行的 MainActivity。
+          名称必须与 [com.padguard.child.hidden.AppHider] 中的 LAUNCHER_ALIAS 一致。
+        -->
+        <activity-alias
+            android:name=".hidden.LauncherAlias"
+            android:enabled="true"
             android:exported="true"
+            android:targetActivity=".MainActivity"
             android:launchMode="singleTop"
             android:excludeFromRecents="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
         <!--
           孩子桌面（自定义 Launcher / 应用管控可视网关）。
@@ -354,6 +428,32 @@
             android:noHistory="true"
             android:theme="@style/Theme.PadGuard.Gate" />
 
+        <!--
+          玻璃球「长按 → 暂停计时」确认对话框：一次性交互，透明 Gate 主题。
+          确认后冻结计时并挂 TIMER_PAUSED 锁屏；不进最近任务，避免孩子从任务卡逃逸或误触。
+        -->
+        <activity
+            android:name=".glassball.TimerPauseDialogActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.PadGuard.Gate" />
+
+        <!--
+          操作闸门（无障碍服务）失效时的本地引导页（R-P0-2 缓解项）。
+          由 A11yRebindNotifier 经全屏通知系统代拉到前台，告知脱管状态 + 非 DO 防护边界，
+          并一键前往系统无障碍设置重新开启。
+          Gate 透明主题 + singleInstance + noHistory + excludeFromRecents：一次性引导，不驻留最近任务。
+        -->
+        <activity
+            android:name=".guard.A11yRebindGuideActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.PadGuard.Gate" />
+
         <!-- 常驻守护服务（GuardService） -->
         <service
             android:name=".service.GuardService"
@@ -434,6 +534,20 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="com.padguard.child.action.GUARD_ALARM" />
+                <action android:name="com.padguard.child.action.GUARD_ALARM_IMMEDIATE" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          时段边界精确闹钟（R-P2-6）：到"锁机开始 / 解锁"时刻精确唤醒进程复查一次。
+          Doze 下协程 delay() 不会唤醒 CPU，只靠 15s 轮询会出现"21:00 该锁，21:20 才锁"。
+          仅应用自身拉起（exported=false），无外部入口。
+        -->
+        <receiver
+            android:name=".receiver.LockBoundaryAlarmReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.padguard.child.action.LOCK_BOUNDARY" />
             </intent-filter>
         </receiver>
 
@@ -499,6 +613,23 @@
             </intent-filter>
         </receiver>
 
+        <!--
+          日切加速器：时间/日期/时区变化时立即做一次日切对账（checkDayRollover），
+          把跨零点后最长 15s 的"昨天锁屏残留"窗口压到秒级。
+          三条均为受保护系统广播（仅系统可发），exported=false；
+          它只是加速器，正确性由 GuardService 每 15s tick 的兜底保证（见 DayRolloverReceiver）。
+        -->
+        <receiver
+            android:name=".receiver.DayRolloverReceiver"
+            android:exported="false"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.DATE_CHANGED" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
         <!-- 霸屏通知被划掉后的兜底重发（见 MessageActivity.handleNotificationDeleted） -->
         <receiver
             android:name=".ui.message.MessageDismissReceiver"
@@ -524,6 +655,16 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/operation_guard_accessibility" />
+        </service>
+
+        <!-- A2：通知代收监听（说明书 §6.9，默认关闭，须家长显式开启且授予系统通知使用权） -->
+        <service
+            android:name=".notify.ChildNotificationListenerService"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
     </application>
 </manifest>

@@ -61,6 +61,9 @@ class PadGuardDeviceAdminReceiver : DeviceAdminReceiver() {
         selfProtection.applyBaseline()
         // 权限刚拿到，立刻拉起守护服务并重新下发一次策略
         GuardService.start(context, reason = "adminEnabled")
+        // 设备管理员是卸载防护判定的一层：激活后立刻按实时状态刷新常驻通知，
+        // 别让"卸载防护未开启"再挂到下一次 10 分钟周期自检。
+        runCatching { GuardService.refreshPermissionNotice(context) }
     }
 
     /**
@@ -100,6 +103,8 @@ class PadGuardDeviceAdminReceiver : DeviceAdminReceiver() {
         super.onDisabled(context, intent)
         val mode = admin.refreshControlMode()
         Logger.w(TAG) { "device admin DISABLED, controlMode=$mode" }
+        // 停用是「真降级」：通知栏必须立刻如实反映，不能等 10 分钟周期自检。
+        runCatching { GuardService.refreshPermissionNotice(context) }
         recordAsync {
             logRepository.raise(
                 type = RiskType.PERMISSION_REVOKED,

@@ -91,6 +91,41 @@ class UninstallEntryDetectorTest {
         )
     }
 
+    // ==================== R-P2-8：多桌面 ====================
+
+    @Test
+    fun `装了多个桌面时，非默认桌面的长按浮层同样要拦`() {
+        // 孩子把默认桌面切到第三方桌面后，旧实现只 arm 了"服务连接那一刻的默认桌面"，
+        // 另一套桌面的长按菜单会被直接放行。现在所有 HOME 包都 arm。
+        val launchers = mapOf(
+            "com.huawei.android.launcher" to "com.huawei.android.launcher.Launcher",
+            "com.example.thirdparty.launcher" to "com.example.thirdparty.launcher.Home"
+        )
+        assertTrue(
+            UninstallEntryDetector.isUninstallSurface(
+                "com.example.thirdparty.launcher",
+                "com.example.thirdparty.launcher.dragndrop.DragLayer",
+                launchers
+            )
+        )
+        // 但它的主页本身仍然放行（否则一按 HOME 就弹密码框）
+        assertFalse(
+            UninstallEntryDetector.isUninstallSurface(
+                "com.example.thirdparty.launcher",
+                "com.example.thirdparty.launcher.Home",
+                launchers
+            )
+        )
+    }
+
+    @Test
+    fun `桌面列表为空时退化为只按类名判`() {
+        assertFalse(UninstallEntryDetector.isUninstallSurface(launcher, "android.widget.FrameLayout", emptyMap()))
+        assertTrue(
+            UninstallEntryDetector.isUninstallSurface(launcher, "xxx.UninstallDialog", emptyMap())
+        )
+    }
+
     @Test
     fun `空包名或空类名一律放行，避免事件残缺导致误拦`() {
         assertFalse(UninstallEntryDetector.isUninstallSurface("", "x.UninstallerActivity", launcher, homeClass))

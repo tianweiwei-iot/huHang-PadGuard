@@ -67,6 +67,9 @@
   }
 
   async function load(root) {
+    // 搜索框 debounce(300ms) 可能在切页/登出后才到点：本页已换走则节点不存在，
+    // 直接放弃，避免发无用请求或对已移除节点写入抛 TypeError（登出后控制台噪声）。
+    if (!root.querySelector("#p-kw")) return;
     const seq = ++loadSeq;
     const q = { keyword: root.querySelector("#p-kw").value.trim(), status: root.querySelector("#p-status").value, plan: root.querySelector("#p-plan").value, page: curPage, size: PAGE_SIZE };
     let resp;
@@ -105,10 +108,20 @@
         ${PG.guard("parents", "write", '<button class="btn btn-xs" data-act="edit" data-id="' + U.esc(p.id) + '">编辑</button>')}
         ${PG.guard("parents", "reset_pwd", '<button class="btn btn-xs" data-act="reset" data-id="' + U.esc(p.id) + '">重置密码</button>')}
         ${PG.guard("parents", "delete", '<button class="btn btn-xs btn-danger" data-act="del" data-id="' + U.esc(p.id) + '">删除</button>')}
+        ${(PG.state && PG.state.admin && PG.state.admin.roleId === "super") ? PG.guard("parents", "delete", '<button class="btn btn-xs btn-danger" data-act="erase" data-id="' + U.esc(p.id) + '">注销</button>') : ""}
       </div></td>
     </tr>`).join("");
     tb.querySelectorAll("[data-detail]").forEach(b => b.onclick = () => openDetail(b.dataset.detail));
-    tb.querySelectorAll("[data-act='suspend']").forEach(b => b.onclick = () => PG.ui.confirm("冻结账号", "确认冻结 " + b.dataset.id + "？冻结后该家长无法登录、其下设备策略暂停下发。", async () => { await PG.api.suspendParent(b.dataset.id); PG.ui.toast("ok", "已冻结", b.dataset.id); load(root); }, true));
+    tb.querySelectorAll("[data-act='suspend']").forEach(b => b.onclick = () => PG.ui.confirm("冻结账号", "确认冻结 " + b.dataset.id + "？冻结后该家长无法登录、其下设备策略暂停下发。", async () => {
+      try {
+        await PG.api.suspendParent(b.dataset.id);
+      } catch (e) {
+        PG.ui.toast("err", "冻结失败", (e && e.message) || "");
+        return;
+      }
+      PG.ui.toast("ok", "已冻结", b.dataset.id);
+      load(root);
+    }, true));
     tb.querySelectorAll("[data-act='activate']").forEach(b => b.onclick = async () => {
       try {
         await PG.api.activateParent(b.dataset.id);
@@ -122,6 +135,7 @@
     tb.querySelectorAll("[data-act='edit']").forEach(b => b.onclick = () => openEdit(b.dataset.id));
     tb.querySelectorAll("[data-act='reset']").forEach(b => b.onclick = () => resetPwd(b.dataset.id));
     tb.querySelectorAll("[data-act='del']").forEach(b => b.onclick = () => delParent(b.dataset.id));
+    tb.querySelectorAll("[data-act='erase']").forEach(b => b.onclick = () => eraseParent(b.dataset.id));
     // 分页器（B3/B4）：渲染上/下一页与页码，点击翻页
     const pagerEl = root.querySelector("#p-pager");
     pagerEl.innerHTML = U.pager(resp.page, resp.totalPages);
@@ -135,7 +149,13 @@
     // 注意：后端目前没有"强制下次登录修改"的实现，文案必须如实，不得承诺不存在的约束
     // 注意：confirm 内部会对 text 做一次 esc，这里传原始值——双重转义会把引号显示成 &#39;
     PG.ui.confirm("重置密码", "将为家长 " + phone + " 生成随机强密码（明文仅显示一次），原密码立即失效。请转告家长并提醒其尽快修改。", async () => {
-      const r = await PG.api.resetParentPwd(id);
+      let r;
+      try {
+        r = await PG.api.resetParentPwd(id);
+      } catch (e) {
+        PG.ui.toast("err", "重置密码失败", (e && e.message) || "");
+        return;
+      }
       const emailed = r && r.emailed;
       // newPwd 缺失时显示 "—"（绝不能现场编一个假密码展示）
       const m = PG.ui.modal({ title: "新密码", body: '<div class="stat-line"><span>账号</span><span>' + U.esc(phone) + '</span></div><div class="stat-line"><span>临时密码</span><span style="font-family:monospace;color:var(--brand)">' + U.esc(r.newPwd || "—") + '</span></div><p class="muted" style="font-size:12px">' + (emailed ? "新密码已同步发送至家长登记邮箱。" : "请通过安全渠道发送给家长，并提醒其尽快修改。") + '</p>', foot: '<button class="btn btn-primary" id="ok">知道了</button>' });
@@ -182,22 +202,85 @@
         m.close(); PG.ui.toast("ok", "已保存", p.phone);
         PG.router.refresh();
       };
-    });
+    }).catch(e => PG.ui.toast("err", "读取家长信息失败", (e && e.message) || ""));
   }
 
   function delParent(id) {
     PG.api.getParent(id).then(p => {
       if (!p) { PG.ui.toast("err", "未找到", id); return; }
       const devCount = p.deviceCount || 0;
-      const warn = devCount > 0
-        ? '<p style="color:var(--danger);font-size:12px;margin-top:8px">该账号下仍有 ' + devCount + ' 台已绑定设备，请先解绑或转交设备后再删除，否则将产生孤儿设备。</p>'
-        : '';
-      PG.ui.confirm("删除家长账号", "确认删除 " + (p.name || p.phone) + "（" + p.phone + "）？删除后该家长无法登录，且关联订阅一并清除，操作不可恢复。" + warn, async () => {
-        await PG.api.deleteParent(id);
+      // 明知会被服务端拒绝，就别再让运营点一次"确认删除"再吃一个失败 toast。
+      // 直接给出可执行的下一步：先解绑，或走不受此限制的「注销账号」。
+      if (devCount > 0) {
+        const m = PG.ui.modal({
+          title: "无法直接删除 · " + (p.name || p.phone),
+          width: 460,
+          body: '<p>该账号下仍有 <b>' + devCount + '</b> 台已绑定设备，普通删除会被服务端拒绝。</p>' +
+            '<p class="muted" style="font-size:12px;margin-top:8px">可先到设备页解绑/转交后再删除；或直接使用「注销账号」——它会一并解绑设备、作废旧设备令牌、清除设备历史数据、脱敏订单归属并清理关联数据。</p>',
+          foot: '<button class="btn btn-ghost" id="dp-cancel">取消</button><button class="btn btn-danger" id="dp-erase">去注销账号</button>'
+        });
+        m.el.querySelector("#dp-cancel").onclick = m.close;
+        m.el.querySelector("#dp-erase").onclick = () => { m.close(); eraseParent(id); };
+        return;
+      }
+      PG.ui.confirm("删除家长账号", "确认删除 " + (p.name || p.phone) + "（" + p.phone + "）？删除后该家长无法登录，且关联订阅一并清除，操作不可恢复。", async () => {
+        try {
+          await PG.api.deleteParent(id);
+        } catch (e) {
+          const msg = (e && e.message) || "";
+          PG.ui.toast("err", "删除失败", msg + (/订单|设备|关联数据|历史数据|注销账号/.test(msg) ? "；可改用「注销账号」处理" : ""));
+          return;
+        }
         PG.ui.toast("ok", "已删除", p.phone);
         PG.router.refresh();
       }, true);
-    });
+    }).catch(e => PG.ui.toast("err", "读取家长信息失败", (e && e.message) || ""));
+  }
+
+  /**
+   * 注销家长账号：仅超级管理员可见/可提交。
+   * 二次确认要求输入完整手机号，后端逐字比对，避免误点即触发物理删除与财务脱敏。
+   * 文案必须如实说明"设备历史数据会被清除、旧令牌作废、孩子端需重新绑定"——
+   * 管理员若以为只是解绑，就不会预料到平板会退出管控态。
+   */
+  function eraseParent(id) {
+    PG.api.getParent(id).then(p => {
+      if (!p) { PG.ui.toast("err", "未找到", id); return; }
+      const phone = p.phone;
+      const m = PG.ui.modal({
+        title: "注销家长账号 · " + U.esc(phone),
+        width: 480,
+        body: '<div class="stat-line"><span>账号</span><span>' + U.esc(phone) + '</span></div>' +
+          '<p style="font-size:12px;margin-top:10px">注销将在一个事务内完成：解绑设备（台账保留）、<b>作废旧设备令牌</b>、' +
+            '清除该设备的截图/定位/用量/指令等历史数据、订单归属替换为匿名键（财务流水保留）、删除私有配置与订阅、删除账号。' +
+            '<b>操作不可恢复，孩子端需重新绑定后才能继续管控</b>。</p>' +
+          '<div class="field" style="margin-top:12px"><label>请输入完整手机号 ' + U.esc(phone) + ' 以确认</label><input id="ep-phone" autocomplete="off" placeholder="请输入手机号"></div>',
+        foot: '<button class="btn btn-ghost" id="ep-cancel">取消</button><button class="btn btn-danger" id="ep-ok">确认注销</button>'
+      });
+      m.el.querySelector("#ep-cancel").onclick = m.close;
+      const epOk = m.el.querySelector("#ep-ok");
+      epOk.onclick = async () => {
+        // 不可逆注销：in-flight 期间锁死按钮，防止弱网双击连发两次 POST
+        // （重复解绑设备/清历史/订单脱敏 + 写两条审计）。失败时务必恢复。
+        if (epOk.disabled) return;
+        epOk.disabled = true;
+        const v = (m.el.querySelector("#ep-phone").value || "").trim();
+        if (v !== phone) { epOk.disabled = false; PG.ui.toast("err", "手机号不一致", "请输入 " + phone); return; }
+        let r = null;
+        try {
+          r = await PG.api.eraseParent(id, v);
+        } catch (e) {
+          epOk.disabled = false;
+          PG.ui.toast("err", "注销失败", (e && e.message) || "");
+          return;
+        }
+        m.close();
+        PG.ui.toast("ok", "账号已注销",
+          phone + " · 作废设备 " + ((r && r.revokedDevices) || 0) + " 台，" +
+          "清理设备历史数据 " + ((r && r.purgedDeviceRows) || 0) + " 行");
+        PG.router.refresh();
+      };
+    }).catch(e => PG.ui.toast("err", "读取家长信息失败", (e && e.message) || ""));
   }
 
   async function openDetail(id) {

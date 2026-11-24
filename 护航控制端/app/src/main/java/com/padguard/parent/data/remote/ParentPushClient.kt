@@ -1,5 +1,6 @@
 package com.padguard.parent.data.remote
 
+import com.padguard.parent.BuildConfig
 import com.padguard.parent.data.model.UsageStatsDto
 import com.padguard.parent.data.model.toDomain
 import com.padguard.parent.domain.model.UsageStats
@@ -18,6 +19,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -32,7 +34,10 @@ import kotlin.math.min
  * 家长端实时推送通道（WebSocket）。
  *
  * ## 职责
- * 连接服务端 `/ws?token=<JWT>`，把服务端推来的实时事件按类型分发成 [Flow]。
+ * 连接服务端 `/ws`，鉴权走 **`Authorization: Bearer <JWT>` 请求头**
+ * （R-P3-6：此处旧注释写的 `/ws?token=<JWT>` 早已不成立 —— token 拼进 URL 会被反向代理
+ * 访问日志、系统代理日志长期留存；服务端仍兼容 query 形态，但仅用于旧版客户端）。
+ * 连上后把服务端推来的实时事件按类型分发成 [Flow]。
  * 事件类型：
  * - `usage.today`：孩子端上行用量后，服务端推送今日用量快照，首页据此即时刷新；
  * - `device.enrolled`：孩子端完成接入后，服务端推送接入完成，家长端据此结束等待；
@@ -70,8 +75,10 @@ class ParentPushClient @Inject constructor(
     private val usageStatsAdapter = moshi.adapter(UsageStatsDto::class.java)
     private val enrollmentAdapter = moshi.adapter(EnrollmentEventDto::class.java)
     private val usageDelayAdapter = moshi.adapter(UsageDelayEventDto::class.java)
+    private val usageStartAdapter = moshi.adapter(UsageStartEventDto::class.java)
     private val unlockAdapter = moshi.adapter(UnlockRequestedEventDto::class.java)
     private val presenceAdapter = moshi.adapter(DevicePresenceEventDto::class.java)
+    private val profileUpdatedAdapter = moshi.adapter(DeviceProfileUpdatedEventDto::class.java)
     private val envelopeAdapter = moshi.adapter(PushEnvelope::class.java)
 
     /** 应用启动后调用一次：按登录态与服务器地址自动管理连接（幂等，多次调用安全） */
@@ -155,13 +162,14 @@ class ParentPushClient @Inject constructor(
         }
     }
 
-    private fun buildWsUrl(): String? {
-        val base = serverPrefs.getBaseUrl().trim().trimEnd('/')
-        if (base.isBlank()) return null
-        val scheme = if (base.startsWith("https://", ignoreCase = true)) "wss://" else "ws://"
-        val host = base.removePrefix("http://").removePrefix("https://")
-        return "$scheme$host/ws"
-    }
+    private fun buildWsUrl(): String? =
+        // 兜底：地址构建涉及用户可编辑配置（「⚙ 高级设置」），任何解析异常都只能导致
+        // 「本轮不建连」，绝不允许把异常抛进 IO 协程把整个 App 打崩。
+        // 2026-11-07 的事故正是这里抛了 IllegalArgumentException 却无人捕获：登录后
+        // 自动连推送 → 崩溃 → 重启后自动登录 → 再崩，形成无法自救的崩溃循环。
+        runCatching { wsUrlOf(serverPrefs.getBaseUrl(), BuildConfig.ALLOW_CLEARTEXT_PUBLIC) }
+            .onFailure { android.util.Log.w("ParentPushClient", "构建 WS 地址失败，跳过本次连接", it) }
+            .getOrNull()
 
     private fun handleText(text: String) {
         runCatching {
@@ -210,6 +218,20 @@ class ParentPushClient @Inject constructor(
                         ParentPushMessage.UsageDelayUpdated(deviceId, ticketId, status)
                     )
                 }
+                // 「开始计时」工单创建（家长自己发起，多端登录时另一台设备即时看到）
+                // 与闭环（孩子确认）：消费方据此刷新计时状态卡，不必等 15s 轮询。
+                // 孩子确认尤其关键——家长正盯着"等待孩子确认"，推送让翻转秒级可见。
+                "usage.start.requested", "usage.start.confirmed" -> {
+                    val dto = usageStartAdapter.fromJson(text) ?: return
+                    val deviceId = dto.deviceId ?: return
+                    _messages.tryEmit(
+                        ParentPushMessage.UsageStartUpdated(
+                            deviceId = deviceId,
+                            status = dto.status ?: return,
+                            confirmed = dto.confirmedAt != null
+                        )
+                    )
+                }
                 // 设备上下线：服务端判定出状态翻转即刻推（孩子端 3s 一次存活信号，
                 // 服务端约 5s 无信号判离线）。家长端拿到就改本地列表状态，
                 // 不必等 10s 一次的列表轮询 —— 那条轮询现在只作为推送丢失的兜底。
@@ -222,6 +244,23 @@ class ParentPushClient @Inject constructor(
                     val dto = presenceAdapter.fromJson(text) ?: return
                     val deviceId = dto.deviceId ?: return
                     _messages.tryEmit(ParentPushMessage.DevicePresence(deviceId, online = false))
+                }
+                // 孩子端改了姓名/昵称/头像：服务端写完库即推，家长端若正停在设备详情页
+                // 必须立刻重拉。此前该 type 无人消费，详情页只有进页面那一次快照，
+                // 会出现「首页已是新昵称、详情页还是旧的」同 App 内自相矛盾。
+                // 10 秒设备列表轮询是推送丢失时的兜底（见 DeviceDetailViewModel 实时字段指纹）。
+                "device.profile.updated" -> {
+                    val dto = profileUpdatedAdapter.fromJson(text) ?: return
+                    val deviceId = dto.deviceId ?: return
+                    _messages.tryEmit(ParentPushMessage.DeviceProfileUpdated(deviceId))
+                }
+                // 风险告警新增 / 自愈关闭（服务端 AlertService 建警与批量关单时推）。
+                // 只作"有事发生"的纯信号：由 RiskAlertCenterViewModel 立即 refresh 全量重拉。
+                // 刻意不解析报文体——alert.new 的 deviceId 嵌在 alert 对象里、alert.resolved 在顶层，
+                // 两种结构不同；且 WS 不承载告警内容、不当第二事实源，解析失败反而丢信号。
+                // 此前这两个 type 无人消费，告警产生与自愈都要等 15s 轮询——"已修好却持续报警"的断裂点。
+                "alert.new", "alert.resolved" -> {
+                    _messages.tryEmit(ParentPushMessage.AlertsChanged)
                 }
             }
         }.onFailure { /* 单条报文解析失败忽略，不影响后续 */ }
@@ -280,6 +319,13 @@ private data class PushEnvelope(val type: String?)
 @JsonClass(generateAdapter = true)
 private data class DevicePresenceEventDto(val deviceId: String? = null)
 
+/** `device.profile.updated` 事件体：只带设备主键，具体内容由随后的详情接口重拉。 */
+@JsonClass(generateAdapter = true)
+private data class DeviceProfileUpdatedEventDto(
+    val deviceId: String? = null,
+    val timestamp: Long? = null
+)
+
 /** `device.enrolled` 事件体 */
 @JsonClass(generateAdapter = true)
 private data class EnrollmentEventDto(val sessionId: String?, val deviceId: String?)
@@ -302,6 +348,16 @@ private data class UsageDelayEventDto(
     val minutes: Int? = null,
     val createdAt: Long? = null,
     val status: String? = null
+)
+
+/** 「开始计时」工单事件体（`usage.start.requested` / `usage.start.confirmed` 共用） */
+@JsonClass(generateAdapter = true)
+private data class UsageStartEventDto(
+    val deviceId: String? = null,
+    val requestId: String? = null,
+    val status: String? = null,
+    val createdAt: Long? = null,
+    val confirmedAt: Long? = null
 )
 
 /** 家长端实时推送消息 */
@@ -334,10 +390,75 @@ sealed interface ParentPushMessage {
     ) : ParentPushMessage
 
     /**
+     * 「开始计时」工单状态更新（家长发起 / 孩子确认）。
+     * 家长端计时卡据此即时切换"未开始 / 等待孩子确认 / 今日已开始"，
+     * 不必等时间管控页的 15 秒轮询。
+     */
+    data class UsageStartUpdated(
+        val deviceId: String,
+        /** CONFIRMED = 孩子已确认开始计时；PENDING = 已发起待确认 */
+        val status: String,
+        val confirmed: Boolean
+    ) : ParentPushMessage
+
+    /**
      * 设备上线 / 下线（服务端约 5 秒级判定后推送）。
      *
      * 消费方（[com.padguard.parent.data.remote.ApiDataSource]）直接改本地设备列表状态，
      * 让首页/设备页的在线徽标立即翻转；HTTP 轮询退化为"推送丢失时的兜底"。
      */
     data class DevicePresence(val deviceId: String, val online: Boolean) : ParentPushMessage
+
+    /**
+     * 孩子端资料（姓名 / 昵称 / 头像）已更新。
+     *
+     * 消费方 [com.padguard.parent.presentation.viewmodel.DeviceDetailViewModel] 据此静默重拉详情；
+     * 只带主键不传内容，避免 WS 报文与详情接口出现第二份资料事实源。
+     */
+    data class DeviceProfileUpdated(val deviceId: String) : ParentPushMessage
+
+    /**
+     * 风险告警发生变化（新增 `alert.new` / 自愈关闭 `alert.resolved`）的纯信号。
+     * 消费方 [com.padguard.parent.presentation.viewmodel.RiskAlertCenterViewModel] 收到即全量 refresh，
+     * 让红点/列表在秒级跟随服务端状态，而不是等 15s 轮询。不携带告警内容，HTTP 才是唯一事实源。
+     */
+    data object AlertsChanged : ParentPushMessage
+}
+
+/**
+ * 把 HTTP baseUrl 转成 WebSocket 地址，纯函数、无 Android 依赖，便于 JVM 单测。
+ *
+ * ## 两条硬约束（都是 2026-11-07 事故的直接教训）
+ * 1. **绝不能** 对 `HttpUrl.Builder` 调 `scheme("ws")` / `scheme("wss")`：
+ *    OkHttp 的 `HttpUrl` 只认 `http` / `https`，其它 scheme 直接抛
+ *    `IllegalArgumentException: unexpected scheme: ws`。该异常发生在 IO 协程里，
+ *    没人捕获就会杀掉进程 —— 表现为「家长端一登录就闪退，重启自动登录又闪退」的死循环。
+ *    正确做法是在 http/https 域内拼好路径，再把 scheme 前缀替换成 ws/wss。
+ * 2. 主机名 / 端口 / IPv6 方括号一律交给 `HttpUrl.toString()` 渲染，
+ *    不手工拼 `"$scheme://$host:$port"`（IPv6 会丢方括号、默认端口会写出 `:443`）。
+ *
+ * 另外这里要独立过一遍 [EndpointSafety]：WS 不走 `HostSelectionInterceptor`，
+ * 握手却带着 `Authorization: Bearer <JWT>`，用 ws:// 过公网等于把令牌明文送出去。
+ * 被拒绝时返回 null（调用方走退避重连），绝不降级成明文连接。
+ */
+internal fun wsUrlOf(rawBase: String, allowCleartextPublic: Boolean): String? {
+    val base = rawBase.trim().trimEnd('/')
+    if (base.isEmpty()) return null
+
+    val verdict = EndpointSafety.check(base, allowCleartextPublic)
+    if (verdict !is EndpointSafety.Verdict.Allowed) return null
+
+    val httpUrl = verdict.normalizedUrl.toHttpUrlOrNull() ?: return null
+    // 丢掉 REST 前缀（/v1/、/api/v1/ 都归零为 /ws），否则会连到 /v1/ws —— 服务端无此端点
+    val httpForm = httpUrl.newBuilder()
+        .encodedPath("/ws")
+        .encodedQuery(null)
+        .fragment(null)
+        .build()
+        .toString()
+    return if (httpUrl.isHttps) {
+        "wss://" + httpForm.removePrefix("https://")
+    } else {
+        "ws://" + httpForm.removePrefix("http://")
+    }
 }

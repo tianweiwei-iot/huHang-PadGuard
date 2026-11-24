@@ -31,6 +31,19 @@ class UsageSessionViewModel @Inject constructor(
         viewModelScope.launch { manager.requestDelay(minutes) }
     }
 
+    /** 暂停计时（熄屏自动 / 悬浮球长按确认）：冻结剩余并立即锁住设备 */
+    fun pauseTimer(source: TimerPauseSource) {
+        manager.pause(source)
+    }
+
+    /**
+     * 恢复计时（锁屏页「继续计时」按钮 / 亮屏自动恢复同源暂停）。
+     * 传 source 可防止亮屏广播误解除手动暂停。
+     */
+    fun resumeTimer(source: TimerPauseSource? = null) {
+        manager.resume(source)
+    }
+
     /**
      * 本地平滑倒计时：当前实时剩余毫秒，供浮层每秒刷新。
      *

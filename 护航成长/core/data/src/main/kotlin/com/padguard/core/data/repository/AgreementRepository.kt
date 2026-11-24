@@ -1,5 +1,6 @@
 package com.padguard.core.data.repository
 
+import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.db.AgreementDao
 import com.padguard.core.data.db.AgreementEntity
 import com.padguard.core.data.model.LogType
@@ -19,15 +20,20 @@ import javax.inject.Singleton
 @Singleton
 class AgreementRepository @Inject constructor(
     private val agreementDao: AgreementDao,
-    private val logRepository: LogRepository
+    private val logRepository: LogRepository,
+    private val timeProvider: TimeProvider
 ) {
 
     /** 写入一次协议签署记录并上报合规日志。 */
     suspend fun record(version: String, snMask: String, deviceId: String) {
+        // 一次取时刻，三处共用（DB signedAt / 日志 payload / 日志 timestamp）：
+        // 原实现两次 System.currentTimeMillis()，既可被改系统时间伪造合规凭证，
+        // 又可能因跨毫秒导致 DB 与日志的签署时刻对不上。
+        val signedAt = timeProvider.now()
         agreementDao.insert(
             AgreementEntity(
                 version = version,
-                signedAt = System.currentTimeMillis(),
+                signedAt = signedAt,
                 snMask = snMask,
                 deviceId = deviceId
             )
@@ -36,9 +42,10 @@ class AgreementRepository @Inject constructor(
             type = LogType.AGREEMENT,
             payload = mapOf(
                 "version" to version,
-                "signedAt" to System.currentTimeMillis().toString(),
+                "signedAt" to signedAt.toString(),
                 "snMask" to snMask
-            )
+            ),
+            timestamp = signedAt
         )
     }
 

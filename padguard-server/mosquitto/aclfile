@@ -1,8 +1,40 @@
-# 临时 ACL：过渡期（批次 D S1 之前的 M4 方案）
-# 现阶段 pgserver + pgdevice 统一凭据均放开 pg/v1/# 读写；
-# S1 落地后改为 per-device 主题（pg/v1/device/{deviceId}/#），此处收紧。
+# 每设备 ACL（替代旧「pgserver + pgdevice 共享用户全通配」过渡方案）
+# ---------------------------------------------------------------------------
+# 主题契约：pg/v1/{tenant}/{up|down|broadcast}/{deviceId}/{type}
+# 设备以 username = deviceId 连接（服务端绑定时下发，见 DeviceService：
+# 未注入共享凭据时 mqttUsername 即 deviceId），密码为每设备随机的 mk_<uuid>，
+# 由 scripts/sync-mqtt-users.sh 从库同步进 mosquitto/passwd。
+#
+# 规则：
+#  · pgserver（服务端容器）——可信后端，保留通配：订阅全部上行、发布全部下行/广播。
+#  · 设备用户——按 %u（= 连接用户名 = deviceId）钉死在自己设备的主题上：
+#      - 只能【读】自己的下行三主题（command/policy/config）与租户内广播；
+#      - 只能【写】自己的上行五类（heartbeat/ack/event/status，以及双段类型 alert/realtime，含遗嘱）；
+#        实际规则用 up/%u/# 通配覆盖，若按旧"四主题"注释收窄会静默切断 HIGH 秒级告警。
+#    拿到任何一台设备凭据的攻击者，再也不能订阅其它家庭的下行指令、
+#    或伪造其它设备的上行（上行另有 HMAC 验签 fail-closed，见 UplinkSigner）。
+#
+# 注意：
+#  · broadcast 读权限是【租户内全员】的：分组批量指令（课堂锁屏）由服务端
+#    保证只推给组内设备，这是契约设计，不是漏洞。
+#    残留（已知取舍）：mosquitto 静态 aclfile 的 pattern 只能按 %u（用户名）替换，
+#    无法按租户收窄 broadcast —— 多租户形态下设备可订阅其它租户的广播主题。
+#    当前服务端尚未发布任何 broadcast 主题；若未来启用且载荷敏感，需换 EMQX
+#    （认证 ACL 可按 username=tenant/deviceId 做租户隔离）或按租户生成显式条目。
+#  · 客户端 subscribe 是一次性批量提交（MqttTransport.subscribeAll），任何一个
+#    filter 被拒都会让整次订阅失败，故 broadcast 必须放行，哪怕暂时无人发布。
+#  · 单租户家庭自建（Windows Mosquitto + 注入共享 pgdevice 凭据）如需沿用
+#    共享用户，可自行加回：
+#        user pgdevice
+#        topic readwrite pg/v1/#
+#    多租户/SaaS 形态严禁加回——那是跨家庭读写全通的洞。
+# ---------------------------------------------------------------------------
+
+# 服务端：可信后端，全通配
 user pgserver
 topic readwrite pg/v1/#
 
-user pgdevice
-topic readwrite pg/v1/#
+# 每设备：只碰自己的主题（%u = 连接用户名 = deviceId）
+pattern read pg/v1/+/down/%u/#
+pattern write pg/v1/+/up/%u/#
+pattern read pg/v1/+/broadcast/+/command

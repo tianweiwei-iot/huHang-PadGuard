@@ -37,6 +37,7 @@ import com.padguard.core.transport.RemoteDataSource
 import com.padguard.core.transport.TransportSettings
 import com.padguard.core.transport.http.ApiResult
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -91,7 +92,11 @@ class ScreenCaptureService : Service() {
     /** 上传失败的媒体进重试队列，不再"失败即删" */
     @Inject lateinit var mediaRetry: MediaUploadRetry
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, t ->
+            Logger.e("ScreenCaptureService", t) { "uncaught exception in ScreenCaptureService scope" }
+        }
+    )
 
     // ==================== 实时看屏推流状态 ====================
     private val streaming = AtomicBoolean(false)
@@ -273,11 +278,22 @@ class ScreenCaptureService : Service() {
         // 投影失效即退出：两者一体，投影没了服务继续留着只会是一条空通知
         ScreenCaptureSession.setOnProjectionLost {
             Logger.i(TAG) { "projection lost, stopping capture service" }
-            // 投影失效时若仍在录屏，不能静默丢档 —— 编码器里已攒下的帧仍可收尾成片，
-            // 让家长至少拿到失效前那段；收尾逻辑自带"0 样本/半成品不上传"的护栏。
             if (screenRecording.get()) {
+                // 投影失效时若仍在录屏，不能静默丢档 —— 编码器里已攒下的帧仍可收尾成片，
+                // 让家长至少拿到失效前那段；收尾逻辑自带"0 样本/半成品不上传"的护栏。
                 Logger.w(TAG) { "projection lost while recording, finalize what we have" }
                 scope.launch(Dispatchers.IO) { runCatching { finalizeRecording(upload = true) } }
+            } else {
+                // 看屏态：投影被吊销后，帧泵仍会从失效的会话里拿到 null 帧并写心跳，
+                // 心跳持续刷新 lastPushAtMs，于是 startLiveStream 的活性判定误以为"流还活着"。
+                // 若只走 stopIfIdle，会被 `if (streaming.get()) return` 拦住 —— 服务常驻、
+                // 投影会话不释放、家长端永久黑屏，且后续 LIVE_VIEW_START 只把 deadline 往后推，
+                // 永远不重建。这里主动拆掉推流并释放采集会话，让 stopIfIdle 真正退出，
+                // 下次家长端再看屏时由按需授权路径重新向孩子取令牌。
+                Logger.w(TAG) { "projection lost while live-viewing, tearing down stream" }
+                liveViewCommanded.set(false)
+                releaseStream("projection-lost")
+                releaseCaptureSession()
             }
             stopIfIdle()
             // 不在这里补暖令牌（历史遗留已移除）：投影被外部掐断（锁屏/ROM 回收/
@@ -346,6 +362,14 @@ class ScreenCaptureService : Service() {
         // 已入重试队列的文件不在这里（在 media_retry/ 目录，由队列自己管理）。
         runCatching { recordFile?.takeIf { it.exists() }?.delete() }
         runCatching { audioFile?.takeIf { it.exists() }?.delete() }
+        // 服务销毁时回收推流复用缓冲的 native 内存（LOW-4）：复用的位图平时随每帧重绘，
+        // 但服务真正退出时只能等 GC finalizer，长会话高清档下延迟明显，显式回收更稳妥。
+        runCatching { liveFullBitmap?.recycle() }
+        runCatching { liveCropBitmap?.recycle() }
+        runCatching { liveScaledBitmap?.recycle() }
+        liveFullBitmap = null
+        liveCropBitmap = null
+        liveScaledBitmap = null
         scope.cancel()
         super.onDestroy()
     }
@@ -622,6 +646,17 @@ class ScreenCaptureService : Service() {
                                     encoded++
                                 } else {
                                     Logger.w(TAG) { "编码器输入 Surface 取不到 Canvas，跳过本帧" }
+                                    // 帧一直能取到（image != null）却始终拿不到 Canvas：部分 ROM
+                                    // 会稳定返回 null。若不处理，encoded 恒为 0，最终走到
+                                    // finalizeRecording 的"无样本不上传"分支 —— 家长端静默无录屏、
+                                    // 且没有面向家长的失败信号。给一个宽限期，超时仍一帧都喂不进
+                                    // 编码器就主动收尾并明确报错，而不是无限空转。
+                                    if (encoded == 0 && System.currentTimeMillis() - recordStartedAt > RECORD_CANVAS_FAIL_GRACE_MS) {
+                                        Logger.e(TAG) { "encoder input surface unavailable for too long, aborting recording" }
+                                        screenRecording.set(false)
+                                        scope.launch(Dispatchers.IO) { runCatching { finalizeRecording(upload = false) } }
+                                        return@launch
+                                    }
                                 }
 
                                 // 顺手刷新推流用的缓存帧：录制循环会先把最新帧取走，
@@ -1411,11 +1446,15 @@ class ScreenCaptureService : Service() {
         if (screenRecording.get()) return
         // 推流中不能退出：服务一死投影就废，画面会断在最后一帧
         if (streaming.get()) return
-        // 主动释放投影：注意暖令牌路径（ACTION_WARMUP）只有令牌、尚未取投影，
-        // suspendProjection() 只停活动实例、保留原始凭据（避免装机向导的授权白做、
-        // 也避免"返回主页再进入看屏"被迫重新弹系统授权框）。仅在有活投影时才释放。
+        // 常驻采集会话保活（2026-11-07「看屏授权反复丢失」根因修复）：
+        // Android 14+ 一个 MediaProjection 只允许 createVirtualDisplay 一次，且 consent Intent
+        // 一次性。旧实现在这里 stop() 投影并 stopSelf() → onDestroy 释放 VD/ImageReader，
+        // 下次看屏既拿不到新 VD、也不能复用旧 consent，只能再向孩子弹一次系统授权框。
+        // 现在只要投影还活着就不销毁服务，投影 + VD + ImageReader 整体跨多轮看屏复用。
+        // 代价是采集前台服务（投影芯片）在空闲期仍存在，解绑时由 stopCaptureService 显式收尾。
         if (ScreenCaptureSession.projection() != null) {
-            ScreenCaptureSession.suspendProjection()
+            Logger.i(TAG) { "idle but keep projection session: reuse without fresh consent" }
+            return
         }
         stopSelf()
     }
@@ -1589,6 +1628,8 @@ class ScreenCaptureService : Service() {
          * 1200×1920 全屏下 10fps 是流畅度与 CPU 占用的平衡点；再高会明显拖慢整机。
          */
         private const val RECORD_POLL_MS = 40L
+        /** 录屏启动后若一直取不到编码器输入 Canvas 的宽限期（毫秒），超时即判定编码器输入不可用并主动收尾 */
+        private const val RECORD_CANVAS_FAIL_GRACE_MS = 5000L
         private const val RECORD_FRAME_RATE = 10
         private const val RECORD_BIT_RATE = 4_000_000
         private const val RECORD_I_FRAME_INTERVAL = 2
@@ -1812,6 +1853,18 @@ class ScreenCaptureService : Service() {
 
         fun stopLiveStream(context: Context) {
             stopDirect(context, liveStreamStopIntent(context))
+        }
+
+        /**
+         * 解绑时收掉常驻采集前台服务。
+         *
+         * [stopIfIdle] 现在会在投影存活时保活服务（避免反复申请 consent），因此服务不再
+         * 自行 stopSelf；若解绑不显式 stopService，采集 FGS 与投影芯片会一直挂在已解绑设备上。
+         */
+        fun stopCaptureService(context: Context) {
+            runCatching {
+                context.stopService(Intent(context, ScreenCaptureService::class.java))
+            }.onFailure { Logger.w(TAG) { "failed to stop capture service on unbind: ${it.message}" } }
         }
 
         /**

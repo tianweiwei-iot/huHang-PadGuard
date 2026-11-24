@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.os.Build
+import android.os.SystemClock
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -54,7 +55,9 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import com.padguard.child.service.GuardHeartbeat
 import com.padguard.child.service.GuardService
+import com.padguard.child.usagesession.UsageStartOverlay
 import com.padguard.child.ui.components.GlyphBadge
 import com.padguard.child.ui.theme.PadGuardTheme
 import com.padguard.core.common.Logger
@@ -117,6 +120,12 @@ class LockScreenActivity : ComponentActivity() {
     @Inject lateinit var transportSettings: TransportSettings
 
     /**
+     * 锁屏全屏通知（系统代拉通道）：持续补拉阶段周期性重发，
+     * 确保「无无障碍设备」在锁屏页被后台丢弃后仍能由系统重新拉起（见 [relaunchRunnable]）。
+     */
+    @Inject lateinit var lockNotifier: LockScreenNotifier
+
+    /**
      * 锁屏呈现的升级引擎。
      *
      * 只在分屏自救里用：自救把本页移出分屏后，需要它把"锁屏覆盖力"重新铺一遍
@@ -125,6 +134,23 @@ class LockScreenActivity : ComponentActivity() {
      * 注入不会形成环。
      */
     @Inject lateinit var presenter: LockScreenPresenter
+
+    /**
+     * 使用计时会话管理器：等待「开始计时」确认的锁屏页（AWAITING_START）上，
+     * 孩子点「开始计时」直接在这里确认（在线经服务端 start()、离线本地起表），
+     * 不必依赖系统浮层 —— 等待页本身就是最自然的确认入口。
+     */
+    @Inject lateinit var usageSessionManager: com.padguard.child.usagesession.UsageSessionManager
+
+    /**
+     * 「平板使用计时开始」全屏浮层（TYPE_APPLICATION_OVERLAY）。
+     *
+     * 每日计时=孩子确认制（A13）：跨日 / 未确认时，本浮层是全屏唯一的"开始计时"确认入口，
+     * 锁屏等待页（AWAITING_START）上的"开始计时"按钮只在浮层**无法展示**（缺 SYSTEM_ALERT_WINDOW
+     * 权限）或**当前未展示**（被"暂不开始"抑制 / 屏幕熄灭收起）时才作为兜底出现，
+     * 避免"开始计时"在两处同时弹出。浮层展示态由 [UsageStartOverlay.showingFlow] 实时驱动。
+     */
+    @Inject lateinit var usageStartOverlay: UsageStartOverlay
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -160,6 +186,38 @@ class LockScreenActivity : ComponentActivity() {
      * 一次锁屏会话内原因不变，onCreate 赋一次即可。
      */
     private var isEyeCareState by mutableStateOf(false)
+
+    /**
+     * 等待开始计时锁屏标记：主锁定原因是否为 [LockReason.AWAITING_START]。
+     * 决定底部按钮是「开始计时」（点击即确认会话，替代「申请解锁」），
+     * 以及主文案换成"今日使用计时尚未开始"。与护眼标记同源同用法：
+     * 一次锁屏会话内原因不变，onCreate 赋一次即可。
+     */
+    private var isAwaitingStartState by mutableStateOf(false)
+
+    /**
+     * 暂停计时锁屏标记：主锁定原因是否为 [LockReason.TIMER_PAUSED]。
+     *
+     * 与等待页同型（原因变化实时跟随），但底部按钮是「继续计时」而非「申请解锁」——
+     * 暂停期间不存在"申请解锁"这条旁路，否则一次误批就能让孩子在停表状态下继续玩。
+     */
+    private var isTimerPausedState by mutableStateOf(false)
+
+    /** 「继续计时」点击进行中：防连点；状态流转由会话管理器驱动，此处只做闸门 */
+    private var timerResuming by mutableStateOf(false)
+
+    /** 「开始计时」按钮的点击/结果反馈文案（仅 AWAITING_START 等待页使用） */
+    private var startConfirmHint by mutableStateOf<String?>(null)
+
+    /** 「开始计时」确认请求进行中：防连点重复发起 */
+    private var startConfirming = false
+
+    /**
+     * 全屏「开始计时」浮层当前是否正在展示（跟随 [UsageStartOverlay.showingFlow]）。
+     * 用于决定锁屏等待页的"开始计时"按钮是否作为兜底显示：浮层在展示时它就是唯一确认入口，
+     * 锁屏页不再重复提供按钮；浮层未展示（被"暂不开始"抑制 / 权限缺失 / 屏幕熄灭）时交还兜底按钮。
+     */
+    private var overlayShowing by mutableStateOf(false)
 
     /**
      * 护眼休息数字倒计时（剩余秒数）；-1 表示不显示。
@@ -224,8 +282,27 @@ class LockScreenActivity : ComponentActivity() {
      */
     private var multiWindowFixAttempts = 0
 
+    /** 预算用尽后的节流重来是否已挂起（避免看门狗每 500ms 重复挂同一条延迟） */
+    private var multiWindowRetryPending = false
+
+    /** 预算用尽不等于放弃：分屏若持续存在，冷却后重置预算再来一轮（见 onLockWindowModeChanged） */
+    private val multiWindowRetryRunnable = Runnable {
+        multiWindowRetryPending = false
+        if (!stillLocked() || !isInMultiWindowMode) return@Runnable
+        Logger.w(TAG) { "multi-window eviction retry after cooldown" }
+        multiWindowFixAttempts = 0
+        onLockWindowModeChanged(true)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 前台兜底补拉守护：本页常常是系统杀进程后唯一被恢复的界面（隐藏形态下
+        // MainActivity 已 finish）。此刻有 resumed Activity 上下文，startForegroundService
+        // 在所有 Android 版本 / 国产 ROM 上都合法，不受「后台启动前台服务」限制，
+        // 也不依赖 Job / Alarm 是否还登记。绑定态用文件标记判断，未绑定绝不拉起。
+        if (GuardHeartbeat.readGuardState(this)) {
+            GuardService.start(this, GuardService.REASON_PROCESS_RESTART)
+        }
         mode = intent.getIntExtra(EXTRA_MODE, MODE_LOCK)
         showOverLockScreen()
         // 新一轮锁屏会话：复位抢占计数，给本次锁定一个完整的重试预算。
@@ -271,6 +348,9 @@ class LockScreenActivity : ComponentActivity() {
         detailState = detail
         // 护眼强制休息锁屏采用专属主题；其余（远程/时段/总时长/限额）走通用带锁主题
         isEyeCareState = lockController.state.value.primaryReason == LockReason.EYE_CARE
+        // 等待「开始计时」：底部按钮换「开始计时」，文案换"尚未开始计时"
+        isAwaitingStartState = lockController.state.value.primaryReason == LockReason.AWAITING_START
+        isTimerPausedState = lockController.state.value.primaryReason == LockReason.TIMER_PAUSED
 
         // 解锁即退出：不等外部调 dismiss()。
         // 屏幕固定/抢占复位都可能让外部拿不到本实例，只靠 dismiss() 会留下
@@ -285,6 +365,18 @@ class LockScreenActivity : ComponentActivity() {
         // 被抢先杀掉，系统锁依旧压着，正是本次要消灭的缺陷。
         lifecycleScope.launch {
             lockController.state.collect { state ->
+                // 主锁定原因会随策略 tick 变化，必须实时跟随，不能只在 onCreate 取一次快照：
+                // 跨日重置会把 DAILY_LIMIT 换成 AWAITING_START（A13 每日计时=孩子确认制），
+                // 护眼休息进出也会切 EYE_CARE。此前两个标记只在 onCreate 赋值，
+                // 页面会永远停在旧文案/旧按钮 —— 实测「跨日后仍显示今日额度已用完、
+                // 且不出现『开始计时』按钮」，而按 A13 未确认永不开始，平板就此卡死。
+                isEyeCareState = state.primaryReason == LockReason.EYE_CARE
+                isAwaitingStartState = state.primaryReason == LockReason.AWAITING_START
+                isTimerPausedState = state.primaryReason == LockReason.TIMER_PAUSED
+                // 专属主题（等待开始计时 / 护眼 / 暂停计时）由 LockScreenContent 渲染固定文案；
+                // 这两类原因下清掉 onCreate 时带来的通用副文案（如「使用时间已用完」），
+                // 否则跨日后会出现「今日使用计时尚未开始」标题下挂着过期的旧副文案，造成困惑。
+                if (isAwaitingStartState || isEyeCareState || isTimerPausedState) detailState = ""
                 if (!state.locked) {
                     when {
                         unlockUxRunning -> Unit // UX 进行中，由它撤完锁再自行收尾
@@ -300,9 +392,25 @@ class LockScreenActivity : ComponentActivity() {
             }
         }
 
+        // 跟随全屏「开始计时」浮层的展示态：浮层在展示时锁屏页不再重复提供"开始计时"按钮，
+        // 浮层被"暂不开始"抑制 / 权限缺失 / 屏幕熄灭收起时立即把兜底按钮交还给孩子，避免卡死。
+        lifecycleScope.launch {
+            usageStartOverlay.showingFlow.collect { overlayShowing = it }
+        }
+
         setContent {
             PadGuardTheme {
-                LockScreenContent(detail = detailState, isEyeCare = isEyeCareState)
+                // 锁屏页"开始计时"按钮仅在全屏浮层无法/未展示时作为兜底出现，
+                // 否则浮层本身就是唯一确认入口，避免"开始计时"在两处同时弹出（产品级重复 bug）。
+                val startButtonVisible = isAwaitingStartState &&
+                    (!usageStartOverlay.canDraw || !overlayShowing)
+                LockScreenContent(
+                    detail = detailState,
+                    isEyeCare = isEyeCareState,
+                    isAwaitingStart = isAwaitingStartState,
+                    isTimerPaused = isTimerPausedState,
+                    showStartButton = startButtonVisible
+                )
                 if (showRequestDialog) {
                     UnlockRequestDialog()
                 }
@@ -355,6 +463,8 @@ class LockScreenActivity : ComponentActivity() {
             )
         }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // 防截屏 / 防录屏 / 防后台任务缩略图：锁屏（含解锁输入、家长留言）不允许被孩子截屏外传。
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
 
         // 锁定任务模式下系统仍会显示状态栏（时间/电量），但会禁掉手势与下拉。
         // 这里再叠一层全屏，让锁屏页真正占满视觉区域，不留"看起来能滑"的错觉。
@@ -419,6 +529,10 @@ class LockScreenActivity : ComponentActivity() {
         ) {
             awaitingKeyguardDismiss = true
             keyguardBridge.requestDismiss(this) { ok ->
+                // 与 openUnlockRequestDialog 同口径：回调若终于到达，必须撤掉兜底定时器，
+                // 否则它会在对话框打开后再把 showRequestDialog 改一遍。
+                handler.removeCallbacks(requestDismissFallback)
+                if (!awaitingKeyguardDismiss) return@requestDismiss
                 awaitingKeyguardDismiss = false
                 if (ok) {
                     keyguardDismissedForRequest = true
@@ -427,7 +541,18 @@ class LockScreenActivity : ComponentActivity() {
                     requestHint = "系统锁屏验证未通过，暂时无法填写申请理由"
                 }
             }
+            // 部分 ROM 的 KeyguardDismissCallback 永不回调：这里被 onResume 抢先执行时
+            // （onNewIntent 早于 onResume 的后台投递场景），必须和正常入口一样武装兜底，
+            // 否则 awaitingKeyguardDismiss 永远为真，申请框与软键盘再也不出现。
+            handler.postDelayed(requestDismissFallback, KEYGUARD_DISMISS_FALLBACK_MS)
         }
+        // 跨日自愈：孩子次日亮屏即本地评估日切，不必等下一轮 Guard tick（≤15s）。
+        // 昨天用满额度锁屏、整夜息屏存活跨零点后，只要本页在锁屏态，醒屏瞬间就把会话
+        // 重置为「今日待确认」（active=false → 下一轮 syncAutoReasons 释放 DAILY_LIMIT、
+        // 改挂 AWAITING_START），杜绝「锁屏到第二天依然在」。checkDayRollover 幂等：
+        // 同日多次 onResume 直接 early-return，无副作用。
+        runCatching { usageSessionManager.checkDayRollover() }
+            .onFailure { Logger.w(TAG) { "onResume checkDayRollover failed: ${it.message}" } }
         // "回到前台"不等于"覆盖恢复"：有些 ROM 在后台就把本页摆进分屏，首次 onResume 时
         // onMultiWindowModeChanged 可能已经错过。这里以权威状态补一次判定，
         // 保证以分屏/悬浮窗形态回来的锁屏页一定会被拽回全屏。
@@ -547,6 +672,8 @@ class LockScreenActivity : ComponentActivity() {
         inMultiWindow = inMultiWindowNow
         if (!inMultiWindowNow) {
             multiWindowFixAttempts = 0
+            multiWindowRetryPending = false
+            handler.removeCallbacks(multiWindowRetryRunnable)
             return
         }
         // 过渡页（MODE_UNLOCKING）允许被压缩：此时 App 侧已解锁，它只是撤系统锁的一次性载体，
@@ -557,9 +684,15 @@ class LockScreenActivity : ComponentActivity() {
                 "w=${resources.configuration.screenWidthDp}dp, attempt=$multiWindowFixAttempts"
         }
         if (multiWindowFixAttempts >= MAX_MULTI_WINDOW_EVICTIONS) {
-            // 自救限次已用完（通常是 ROM 死活不放行）：不再自己闪屏，
-            // 交给无障碍看门狗（500ms 一轮，具备后台拉起能力）与守护周期自检持续施压。
-            Logger.w(TAG) { "multi-window eviction exhausted, watchdog takes over" }
+            // 连抢 3 次仍被摆成分屏：立即继续抢会变闪屏风暴，但**绝不能就此放弃**。
+            // 看门狗虽然每 500ms 调 show()/reenforce()，但本页是 singleTask，
+            // 那条分屏任务会被原样提到前面，根本回不到全屏 —— 旧实现在这里 return，
+            // 等于非 DO 设备一旦被拖进分屏就永久半屏裸奔。
+            // 冷却后重置预算再来一轮：既保留节流，也保证锁定态下永不停止自救。
+            if (!multiWindowRetryPending) {
+                multiWindowRetryPending = true
+                handler.postDelayed(multiWindowRetryRunnable, MULTI_WINDOW_RETRY_MS)
+            }
             return
         }
         multiWindowFixAttempts++
@@ -607,21 +740,42 @@ class LockScreenActivity : ComponentActivity() {
         override fun run() {
             if (isFinishing || !stillLocked()) return
             if (resumed) return
-            // 到达上限即停：非硬锁设备后台启动 Activity 必被 ROM 拒绝，继续重试只是刷日志，
-            // 真正的兜底交给无障碍看门狗（可后台拉起）与悬浮窗地板（盖在桌面之上）。
+            // 到达初始急抢预算（约 8 秒）即转入**持续节奏**：锁定态下绝不放弃补拉。
+            // 每轮重发全屏 intent 通知（由系统代拉锁屏页），无障碍看门狗也会接力；
+            // 尤其"非 DO 且未授予无障碍"的设备，看门狗失效，本循环是唯一的后台拉起兜底 ——
+            // 一旦放弃，孩子上滑后就永久裸桌面。息屏时不唤醒屏幕、放慢节奏，待亮屏再续。
             if (relaunchCount >= MAX_RELAUNCH_ATTEMPTS) {
-                Logger.w(TAG) {
-                    "lock screen relaunch aborted after $relaunchCount attempts " +
-                        "(background start blocked by ROM; relying on watchdog/FSI to re-pull)"
+                if (!isScreenOn()) {
+                    handler.postDelayed(this, RELAUNCH_SUSTAINED_MS)
+                    return
                 }
-                // 放弃 Activity 抢占 ≠ 放弃锁定：历史版本在此处铺「深灰悬浮窗」兜底；该层已删除。
-                // 现锁定覆盖力收口为「无障碍看门狗（可后台拉起 Activity）+ 全屏 intent 通知
-                // （系统代拉）」把锁屏页重新顶回前台，避免裸桌面。
+                relaunchCount++
+                // 持续阶段仅 verbose 记录，避免长期空转刷屏（warning 级日志）。
+                Logger.v(TAG) { "lock screen sustained re-arm while locked (attempt $relaunchCount)" }
+                show(this@LockScreenActivity, currentDetail)
+                // 无无障碍设备：后台 startActivity 会被系统静默丢弃（API 29+），
+                // 持续阶段唯一可靠的「系统代拉」通道就是全屏 intent（FSI）通知。
+                // 周期性重发它（见 [shouldRepostFullScreenIntent] 的 [SUSTAINED_FSI_EVERY]），
+                // 让系统反复获得重新拉起锁屏页的机会；一旦锁屏页回到前台，本循环立即停
+                // （onResume 撤回调），不会无限刷。FSI 权限在 Android 14+ 可被撤销，
+                // 撤销时 post 返回 false 并记 warning，属如实降级（此时靠 LOCK_SCREEN_UNPROTECTED 告警兜底）。
+                if (shouldRepostFullScreenIntent(relaunchCount)) {
+                    runCatching { lockNotifier.post(currentDetail) }
+                        .onFailure { Logger.w(TAG, it) { "sustained re-arm FSI post failed" } }
+                }
+                handler.postDelayed(this, RELAUNCH_SUSTAINED_MS)
                 return
             }
             relaunchCount++
             Logger.w(TAG) { "lock screen pushed to background while locked, re-arming ($relaunchCount/$MAX_RELAUNCH_ATTEMPTS)" }
             show(this@LockScreenActivity, currentDetail)
+            // 急抢阶段同样周期性重发 FSI：初始 8 秒窗口内若 startActivity 已被系统丢弃
+            // （API 29+ 后台启动限制，非 DO 设备常态），系统代拉通道能立即把锁屏页拉回，
+            // 不必等 8 秒后进入持续阶段才重发。节奏与持续阶段共用 [shouldRepostFullScreenIntent]。
+            if (shouldRepostFullScreenIntent(relaunchCount)) {
+                runCatching { lockNotifier.post(currentDetail) }
+                    .onFailure { Logger.w(TAG, it) { "re-arm FSI post failed" } }
+            }
             handler.postDelayed(this, RELAUNCH_RETRY_MS)
         }
     }
@@ -756,7 +910,7 @@ class LockScreenActivity : ComponentActivity() {
             return false
         }
         unlockUxRunning = true
-        unlockUxStartedAt = System.currentTimeMillis()
+        unlockUxStartedAt = SystemClock.elapsedRealtime()
         keyguardBridge.markUnlockPending()
         handler.postDelayed(unlockUxTimeout, UNLOCK_UX_TIMEOUT_MS)
         if (resumed) runUnlockUx() else pendingUnlockUx = true
@@ -819,6 +973,43 @@ class LockScreenActivity : ComponentActivity() {
     }
 
     // ==================== 解锁申请 ====================
+
+    /**
+     * 等待页「开始计时」按钮：孩子确认今日计时。
+     *
+     * 在线：服务端 `start()` 锁定今日起点与额度（幂等）；离线：本地受信钟起表并落盘，
+     * 联网后由会话刷新的补发通道对齐（见 UsageSessionManager.startLocally）。
+     * 确认成功后会话转 active，下一轮策略自检（≤15s）释放 AWAITING_START、收起本页；
+     * 这里只给文字反馈、不自行 releaseLock——自动锁定原因的解除必须经 syncAutoReasons
+     * 差集（见 UsageSessionManager 类注释），否则会与自检循环互相打架。
+     */
+    private fun confirmUsageStart() {
+        if (startConfirming) return
+        startConfirming = true
+        startConfirmHint = null
+        lifecycleScope.launch {
+            val ok = runCatching { usageSessionManager.confirmStart() }.getOrDefault(false)
+            startConfirming = false
+            startConfirmHint = if (ok) "已开始计时，即将自动解锁" else "暂时无法开始计时，请稍后重试"
+        }
+    }
+
+    /**
+     * 暂停锁屏页「继续计时」按钮：恢复计时是唯一的解除出口。
+     *
+     * [UsageSessionManager.resume] 内部完成三件事：解冻本地剩余、释放 TIMER_PAUSED、
+     * 把暂停时长作为休息补报服务端（离线则留下次重试）。这里不传 expectedSource，
+     * 因为按钮本身就是孩子的显式手动恢复，可以解除任意来源的暂停。
+     */
+    private fun resumeTimer() {
+        if (timerResuming) return
+        timerResuming = true
+        lifecycleScope.launch {
+            runCatching { usageSessionManager.resume() }
+                .onFailure { Logger.w(TAG, it) { "resume timer from lock screen failed" } }
+            timerResuming = false
+        }
+    }
 
     /**
      * 打开解锁申请对话框（「申请解锁」按钮 / 悬浮层入口共用）。
@@ -937,7 +1128,14 @@ class LockScreenActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun LockScreenContent(detail: String, isEyeCare: Boolean) {
+    private fun LockScreenContent(
+        detail: String,
+        isEyeCare: Boolean,
+        isAwaitingStart: Boolean,
+        isTimerPaused: Boolean = false,
+        /** 是否显示"开始计时"按钮：全屏浮层无法/未展示时作为兜底；浮层展示时隐藏以免重复 */
+        showStartButton: Boolean
+    ) {
         // 护眼主题：柔和薄荷绿渐变 + 深绿文字；其余锁屏沿用主题默认背景。
         val eyeBgBrush = Brush.verticalGradient(
             listOf(Color(0xFFE6F4EA), Color(0xFFCDE9D6))
@@ -963,19 +1161,25 @@ class LockScreenActivity : ComponentActivity() {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    // 图标：护眼用「眼」字（护眼绿）；其余用「锁」字（主题强调色）
+                    // 图标：护眼用「眼」字（护眼绿）；等待开始用「时」字；其余用「锁」字（主题强调色）
                     GlyphBadge(
-                        char = if (isEyeCare) "眼" else "锁",
+                        char = when {
+                            isEyeCare -> "眼"
+                            isAwaitingStart -> "时"
+                            isTimerPaused -> "暂"
+                            else -> "锁"
+                        },
                         tint = if (isEyeCare) eyeAccent else MaterialTheme.colorScheme.primary
                     )
                     Spacer(Modifier.height(24.dp))
 
                     // 主提示文案：护眼专属文案 + 大字体；其余保持原文案、字体稍增
                     Text(
-                        text = if (isEyeCare) {
-                            "为了保护您的视力，请稍作休息后再继续使用"
-                        } else {
-                            "平板已锁定，需解锁后才能继续使用"
+                        text = when {
+                            isEyeCare -> "为了保护您的视力，请稍作休息后再继续使用"
+                            isAwaitingStart -> "新的一天，请先点「开始计时」"
+                            isTimerPaused -> "计时已暂停，继续计时后可继续使用"
+                            else -> "平板已锁定，需解锁后才能继续使用"
                         },
                         textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.headlineLarge,
@@ -996,7 +1200,11 @@ class LockScreenActivity : ComponentActivity() {
                     }
 
                     Text(
-                        text = "除申请解锁外，当前无法进行其它操作。",
+                        text = when {
+                            isTimerPaused -> "停止计时期间平板不可操作，点下方「继续计时」后恢复。"
+                            isAwaitingStart -> "未确认期间不计时，请先完成开始确认。"
+                            else -> "除申请解锁外，当前无法进行其它操作。"
+                        },
                         textAlign = TextAlign.Center,
                         style = if (isEyeCare) MaterialTheme.typography.titleMedium
                         else MaterialTheme.typography.bodyLarge,
@@ -1044,26 +1252,79 @@ class LockScreenActivity : ComponentActivity() {
                         .padding(bottom = 40.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Button(
-                        onClick = { openUnlockRequestDialog() },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Text(
-                            text = "申请解锁",
-                            style = if (isEyeCare) MaterialTheme.typography.titleMedium
-                            else MaterialTheme.typography.labelLarge
-                        )
-                    }
-                    if (secureKeyguardHint) {
+                    // 等待「开始计时」：
+                    // - 全屏浮层（UsageStartOverlay）正在展示时，它就是唯一确认入口，锁屏页不再重复提供按钮，
+                    //   仅给一行引导文案，避免"开始计时"在浮层与锁屏页两处同时弹出（产品级重复 bug）；
+                    // - 浮层无法展示（缺 SYSTEM_ALERT_WINDOW 权限）或当前未展示（被"暂不开始"抑制 /
+                    //   屏幕熄灭收起）时，[showStartButton] 为真，这里展示"开始计时"按钮作为兜底，
+                    //   点击即确认会话（替代「申请解锁」）。确认成功后会话转 active，
+                    //   下一轮自检（≤15s）释放 AWAITING_START 并收起本页；离线时 confirmStart 走本地起表。
+                    // 暂停计时：唯一恢复出口。刻意不展示「申请解锁」——
+                    // 暂停期间"平板不可操作"是硬承诺，家长误批也不能变成绕过入口。
+                    if (isTimerPaused) {
+                        Button(
+                            onClick = { resumeTimer() },
+                            enabled = !timerResuming,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = if (timerResuming) "正在恢复…" else "继续计时",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+                    } else if (isAwaitingStart && showStartButton) {
+                        Button(
+                            onClick = { confirmUsageStart() },
+                            enabled = !startConfirming,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = if (startConfirming) "正在开始…" else "开始计时",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+                        startConfirmHint?.let { hint ->
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = hint,
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    } else if (isAwaitingStart) {
+                        // 浮层已接管确认：锁屏页仅引导，不重复提供按钮
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            text = "填写申请前需先通过系统锁屏验证",
+                            text = "请点屏幕中央的「开始计时」确认（每天一次，正常提醒）",
                             textAlign = TextAlign.Center,
                             style = MaterialTheme.typography.bodyMedium,
-                            color = (if (isEyeCare) eyeOnSurfaceDim
-                            else MaterialTheme.colorScheme.onBackground).copy(alpha = 0.7f)
+                            color = MaterialTheme.colorScheme.primary
                         )
+                    } else {
+                        Button(
+                            onClick = { openUnlockRequestDialog() },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = "申请解锁",
+                                style = if (isEyeCare) MaterialTheme.typography.titleMedium
+                                else MaterialTheme.typography.labelLarge
+                            )
+                        }
+                        if (secureKeyguardHint) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "填写申请前需先通过系统锁屏验证",
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = (if (isEyeCare) eyeOnSurfaceDim
+                                else MaterialTheme.colorScheme.onBackground).copy(alpha = 0.7f)
+                            )
+                        }
                     }
                 }
             }
@@ -1193,8 +1454,11 @@ class LockScreenActivity : ComponentActivity() {
         // 页面被回收而锁定态仍在（进程被系统清理 / 任务栈被清）：把锁交接给锁屏升级链
         // （无障碍看门狗 / 全屏 intent 通知会重新把锁屏页顶回前台），
         // 否则孩子回到的是一个既没有锁屏页、也没有浮层的裸桌面 —— 想开什么开什么。
+        // 必须用 applicationContext 而非正被销毁的 this：用处于 finishing 的 Activity
+        // 去 startActivity，NEW_TASK 意图会被系统忽略，导致锁屏页起不来、管控彻底失联
+        // （正是「清完历史记录系统就退出管控」在 Activity 侧的同因）。
         if (mode != MODE_UNLOCKING && stillLocked() && isScreenOn()) {
-            LockScreenActivity.show(this, currentDetail)
+            LockScreenActivity.show(applicationContext, currentDetail)
         }
         if (instance === this) {
             instance = null
@@ -1243,6 +1507,12 @@ class LockScreenActivity : ComponentActivity() {
          * 交由无障碍看门狗（可后台拉起 Activity）与悬浮窗地板兜底，避免无限刷日志。
          */
         private const val MAX_RELAUNCH_ATTEMPTS = 16
+
+        /**
+         * 急抢预算用尽后的**持续**补拉间隔：锁定态下不再放弃，以较长间隔持续把锁屏页拉回前台，
+         * 直到真正回到前台（onResume 撤回调）或解除锁定。息屏时不唤醒屏幕、只放慢节奏待亮屏再续。
+         */
+        private const val RELAUNCH_SUSTAINED_MS = 1500L
 
         /** 护眼休息倒计时刷新间隔：每秒一次，足够平滑又不浪费资源 */
         private const val COUNTDOWN_INTERVAL_MS = 1000L
@@ -1330,6 +1600,13 @@ class LockScreenActivity : ComponentActivity() {
         private const val MAX_MULTI_WINDOW_EVICTIONS = 3
 
         /**
+         * 分屏自救预算用尽后的冷却时间：10 秒内不再移除任务重铺（避免闪屏），
+         * 之后若仍在分屏且仍锁定，重置预算继续自救。锁定态下这是无限循环，
+         * 但每轮 10 秒的节流保证不会刷屏/耗电失控。
+         */
+        private const val MULTI_WINDOW_RETRY_MS = 10_000L
+
+        /**
          * 服务端下发的 reason 可能是字面量 "null"（历史上下发过 {"reason":"null"}），
          * 直接显示会在锁屏页正中摆一个刺眼的 null，这里连同空串一起滤掉。
          */
@@ -1382,7 +1659,7 @@ class LockScreenActivity : ComponentActivity() {
                     // 也未兜住（极端 ROM：FSI 被吞 + 直接启动被吞），在此补拉一次
                     // 过渡页，绝不让解锁指令永久空转。
                     if (!activity.resumed &&
-                        System.currentTimeMillis() - activity.unlockUxStartedAt > UNLOCK_UX_STUCK_MS
+                        SystemClock.elapsedRealtime() - activity.unlockUxStartedAt > UNLOCK_UX_STUCK_MS
                     ) {
                         Logger.w(TAG) { "unlock ux stuck pending, re-launching unlocking page" }
                         launchUnlockingPage(context, currentDetail, MODE_UNLOCKING)
@@ -1418,7 +1695,7 @@ class LockScreenActivity : ComponentActivity() {
          */
         fun chaseUnlock(context: Context) {
             if (!SystemKeyguardBridge.isUnlockPending(context)) return
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             if (now - lastChaseAt < CHASE_MIN_INTERVAL_MS) return
             lastChaseAt = now
             Logger.i(TAG) { "chasing pending system-keyguard unlock" }
@@ -1448,3 +1725,23 @@ class LockScreenActivity : ComponentActivity() {
         }
     }
 }
+
+/**
+ * 持续补拉阶段重发全屏 intent（FSI）通知的间隔（以持续阶段尝试次数为单位）。
+ *
+ * 取 4：持续阶段约 6 秒一次（[LockScreenActivity.RELAUNCH_SUSTAINED_MS] × 本值）。
+ * 既给系统足够的重新代拉机会（无无障碍设备下 FSI 是唯一可靠的系统代拉通道），
+ * 又避免 FSI 权限被撤销时每 1.5 秒刷一条 warning 日志。
+ * **第一次逃逸（relaunchCount=1）单独立即重发**：后台 startActivity 在 API 29+
+ * 本来就会被 ROM 丢弃，若等第 4 拍才发 FSI，孩子已有约 6 秒裸桌面窗口。
+ */
+private const val SUSTAINED_FSI_EVERY = 4
+
+/**
+ * 补拉阶段是否应在本次尝试中重发全屏 intent（FSI）通知。
+ *
+ * 纯函数，便于 JVM 单测锁定行为：首次逃逸（1）立即重发，之后按
+ * [SUSTAINED_FSI_EVERY] 整数倍节流；0 表示尚未逃逸，不重发。
+ */
+internal fun shouldRepostFullScreenIntent(relaunchCount: Int): Boolean =
+    relaunchCount == 1 || (relaunchCount > 0 && relaunchCount % SUSTAINED_FSI_EVERY == 0)

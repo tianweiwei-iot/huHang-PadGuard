@@ -64,6 +64,24 @@ Device Owner（设备所有者）是 Android 为"企业管理设备"提供的最
 > 失败报错：`Cannot set the device owner because the device has accounts`
 > 这条报错不会提示"去删账号"，不看这里的话会原地重试很久。
 
+**如果账号删不掉（华为账号要密码、或本来就是孩子/家长的抖音等账号）**，还有一条纯 adb 的路子，
+2026-11-18 在华为 AGS6-W10 / EMUI 10 上实测通过：
+
+> **卸载账号所属的包**，而不是去删账号。
+> `pm clear <包>` 对账号**无效**（返回 `Success` 但账号还在）——账号记录存在
+> `accounts_de.db`（AccountManager 系统库），不在 app 私有目录；`cmd account` 也没有删除子命令，
+> shell 无 root，删不了。
+> 但把账号所属的包装卸掉之后，账号会变成 orphan，而 **orphan 账号不阻塞 `set-device-owner`**。
+>
+> ```bash
+> adb shell dumpsys account | grep "Account {"     # 看清每个账号的 type（就是包名）
+> adb shell pm uninstall --user 0 com.ss.android.ugc.aweme
+> adb shell dumpsys account | grep "Accounts: "    # 确认数量下降
+> ```
+>
+> 卸载会连应用数据一起清掉，**这一步必须先跟机主确认**。恢复 APK 用
+> `adb shell cmd package install-existing <包>`（数据不恢复）。
+
 ### 步骤 2 — 安装并授予设备管理员
 
 ```bash
@@ -97,6 +115,53 @@ Device Owner:
 ```
 
 看到 `admin=` 有值即成功；**没有 Device Owner 段就说明没设上**，别往下走。
+
+---
+
+## 2.5 已设 DO 的机型（华为 AGS6-W10 / EMUI 10 实测）
+
+> **结论修正（2026-11-18）**：此前本节写"目标机型没有 DO 部署条件，只能走软管控"，
+> 已被实测推翻。华为 AGS6-W10 / EMUI 10 / API 29 完全可以设 DO，**唯一卡点是设备上不能有账号**
+> （见 §2 步骤 1 的"卸载账号所属包"办法）。设上之后
+> `no_factory_reset` / `no_safe_boot` / `no_config_date_time` / `no_control_apps` /
+> `setUninstallBlocked` 全部落地，"孩子改系统时间绕过时段管控"这一最高优先级漏洞被治本。
+> 因此**新装机一律优先走 §2 的 DO 路径**，下面的软管控方案只作为确实无法清账号时的降级备选。
+
+软管控（无 DO）下 EMUI「一键清理/清理加速」会停用无障碍服务，App 原本只能检测+告警+等家长到场。
+**装机时补一次 `WRITE_SECURE_SETTINGS` 授权**（signature|privileged 权限，安装不会自动授予），
+App 即可在被清理拉回后自己把无障碍开关写回（`AccessibilityCapabilityHealer`），1~3 分钟内全自动恢复：
+
+```bash
+# debug 包（本 SOP 的示例包名）
+adb shell pm grant com.padguard.child.debug android.permission.WRITE_SECURE_SETTINGS
+# release 包
+adb shell pm grant com.padguard.child android.permission.WRITE_SECURE_SETTINGS
+```
+
+- **卸载重装后授权会丢**，重装必须重新执行这一步；
+- `build-and-install.sh` 已在 adb 安装后自动 best-effort 执行，手工安装时别漏；
+- 不授权不报错：App 运行时自查（`canSilentHeal()`），未授权自动退回「检测+告警+引导」旧行为；
+- 该权限只影响 `Settings.Secure` 写入面（无障碍开关自愈），**不能**替代 DO 的任何管控能力，
+  DA（设备管理员）被停用也依然无法静默重激活 —— 仍按告警+引导处理。
+
+### 2.5.1 被清理后的恢复链路（两层，装机验收必测）
+
+清理分两种落点，恢复路径不同，务必分别验证：
+
+1. **进程被杀**（一键清理的主体动作）：由 AB 双进程 binder + JobScheduler 看门狗 + AlarmManager
+   把 `GuardService` 拉回；`onCreate` 里启动即跑 `permHealNow` / `capHealNow` /
+   `permissionHealth.check()` / `authorizationKeeper.reconcile()`，**所有运行时权限与无障碍
+   在进程拉回的同一拍立即补授**，不等 5 分钟周期。
+2. **进程还活着、但无障碍开关被关**（ROM 把服务移出启用名单或把 `ACCESSIBILITY_ENABLED` 置 0）：
+   `AccessibilityCapabilityHealer.startWatching()` 注册的 `Settings.Secure` ContentObserver
+   在开关被外部改动的**毫秒级**回调，只读判定确实被关后立即静默写回，把这一刀的恢复
+   从「5 分钟自检 / 1~3 分钟」压到秒级。该观察器带主控开关闸（解绑后不写，防复活）、
+   回声抑制窗与抖动合并，订阅父 URI + descendants 以兼容 EMUI 只通知父节点的定制实现。
+
+> 验收：装新包 → `pm grant WRITE_SECURE_SETTINGS` → 模拟清理（关无障碍总开关 + `am kill`）
+> → 观察进程拉回后无障碍是否自动恢复、家长端是否收到 `GUARD_PROCESS_RECYCLED`。
+> **force-stop（STOPPED 态）非 DO 仍无解** —— 这是 Android 安全模型的硬边界，
+> 只有设成 DO（§2）后由 `DISALLOW_APPS_CONTROL` 置灰强停按钮才能治本。
 
 ---
 

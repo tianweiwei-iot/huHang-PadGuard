@@ -96,6 +96,37 @@ class GuardUnlockActivity : ComponentActivity() {
             )
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        visible = true
+    }
+
+    override fun onPause() {
+        super.onPause()
+        visible = false
+    }
+
+    override fun onDestroy() {
+        visible = false
+        super.onDestroy()
+    }
+
+    companion object {
+        /**
+         * 本密码输入页是否处于前台（供锁屏看门狗判定，**不是** Composable 里那个动画用的局部变量）。
+         *
+         * ## 为什么要暴露这个标记
+         * 锁屏看门狗原先用「前台包名 == 本包」判断"锁屏还在、无需重拉"。这个口径太宽：
+         * 本包还有儿童桌面 [com.padguard.child.KidHomeActivity] 等页面，孩子按 HOME 回到
+         * 自家桌面时包名同样是自己，看门狗于是**跳过重拉**，锁屏形同虚设。
+         * 现在只有"锁屏主体"或"本密码页"在前台才算没逃逸；本页在前台时必须放过，
+         * 否则家长正输着密码就被重拉的锁屏盖掉，永远解不开。
+         */
+        @Volatile
+        var visible: Boolean = false
+            private set
+    }
 }
 
 @Composable

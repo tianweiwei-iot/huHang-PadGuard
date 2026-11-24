@@ -105,4 +105,47 @@ class PolicyModelsTest {
     }
 
     // endregion
+
+    // region ====== MinorModePolicy.isCurfewAt（起止相等语义统一，2026-11-18）======
+
+    @Test
+    fun curfewWithEqualStartAndEndNeverLocks() {
+        val policy = MinorModePolicy(
+            enabled = true,
+            curfewEnabled = true,
+            curfewStart = "22:00",
+            curfewEnd = "22:00"
+        )
+        // 必须与 ScheduleEvaluator/SmartShutdownEnforcer 一致：退化区间不锁。
+        // 旧的"全天锁死"会让家长误填一次就把设备锁一整天。
+        assertFalse(policy.isCurfewAt(0))
+        assertFalse(policy.isCurfewAt(21 * 60 + 59))
+        assertFalse(policy.isCurfewAt(22 * 60))
+        assertFalse(policy.isCurfewAt(23 * 60 + 59))
+    }
+
+    @Test
+    fun curfewStillHonoursNormalAndCrossMidnightRanges() {
+        val normal = MinorModePolicy(enabled = true, curfewStart = "22:00", curfewEnd = "06:00")
+        assertFalse(normal.isCurfewAt(21 * 60 + 59))
+        assertTrue(normal.isCurfewAt(22 * 60))
+        assertTrue(normal.isCurfewAt(23 * 60 + 59))
+        assertTrue(normal.isCurfewAt(0))
+        assertTrue(normal.isCurfewAt(5 * 60 + 59))
+        assertFalse(normal.isCurfewAt(6 * 60))
+
+        val daytime = MinorModePolicy(enabled = true, curfewStart = "08:00", curfewEnd = "20:00")
+        assertFalse(daytime.isCurfewAt(7 * 60 + 59))
+        assertTrue(daytime.isCurfewAt(8 * 60))
+        assertFalse(daytime.isCurfewAt(20 * 60))
+    }
+
+    @Test
+    fun curfewDisabledOrExemptNeverLocks() {
+        val disabled = MinorModePolicy(enabled = true, curfewEnabled = false, curfewStart = "22:00", curfewEnd = "06:00")
+        assertFalse(disabled.isCurfewAt(23 * 60))
+        val exempt = MinorModePolicy(enabled = true, curfewStart = "22:00", curfewEnd = "06:00", parentExemptUntil = 1000L)
+        assertFalse(exempt.curfewActiveAt(23 * 60, 999L))
+        assertTrue(exempt.curfewActiveAt(23 * 60, 1000L))
+    }
 }

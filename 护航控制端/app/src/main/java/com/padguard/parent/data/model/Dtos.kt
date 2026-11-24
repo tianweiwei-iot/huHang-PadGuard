@@ -64,6 +64,20 @@ data class TokenResponse(
     val refreshToken: String
 )
 
+/**
+ * 自助修改登录密码，对应服务端 `POST /v1/auth/password`。
+ *
+ * 旧密码必填：账号的初始密码与后台重置出来的都是服务端随机强口令，
+ * 改密码是"夺回账号控制权"的动作，只凭本地 token 不足以证明身份。
+ * 服务端成功后返回一对**新令牌**（旧令牌全部作废，含本机），
+ * 端上必须用 `TokenManager.saveTokens` 立刻替换，否则下一个请求就 401。
+ */
+@JsonClass(generateAdapter = true)
+data class ChangePasswordRequest(
+    val oldPassword: String,
+    val newPassword: String
+)
+
 @JsonClass(generateAdapter = true)
 data class UserDto(
     val id: String,
@@ -164,6 +178,15 @@ data class BindDeviceRequest(
 @JsonClass(generateAdapter = true)
 data class RenameDeviceRequest(
     val name: String
+)
+
+/** 设备上报日志的精简视图（服务端只返回元数据，payloadJson 为已最小化的「包名 + 标题」） */
+@JsonClass(generateAdapter = true)
+data class DeviceLogDto(
+    val id: String? = null,
+    val type: String? = null,
+    val timestamp: Long? = null,
+    val payloadJson: String? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -575,7 +598,23 @@ data class UsageSessionDto(
     val maxDailyExtendMinutes: Int = 120,
     val lastDelayEpoch: Long? = null,
     /** 当前等待家长审批的延时分钟数（>0 表示孩子已提交、家长尚未处理） */
-    val pendingDelayMinutes: Int = 0
+    val pendingDelayMinutes: Int = 0,
+    /**
+     * 家长端「开始计时」当日工单（null = 今日家长未发起；PENDING = 已发送等待孩子确认）。
+     * 每日计时须孩子确认后才开始：家长发起后孩子端弹确认框，未确认不计时。
+     */
+    val startRequest: UsageStartRequestDto? = null
+)
+
+/** 家长端「开始计时」当日工单状态（随会话一起返回） */
+@JsonClass(generateAdapter = true)
+data class UsageStartRequestDto(
+    val requestId: String = "",
+    val deviceId: String = "",
+    /** PENDING（已发送，等待孩子确认）/ CONFIRMED（孩子已确认开始计时） */
+    val status: String = "PENDING",
+    val createdAt: Long = 0L,
+    val confirmedAt: Long? = null
 )
 
 // ==================== 指令回执（可观测性） ====================
@@ -1038,4 +1077,175 @@ data class EyeProtectionRequest(
 data class EyeProtectionDto(
     val enabled: Boolean,
     val level: Int
+)
+
+/**
+ * 使用授权协议签署凭证（说明书 §5.4，服务端 AgreementStatusDto）。
+ *
+ * `signed=false` 只代表服务端**没有查到**签署记录，不是「孩子拒绝同意」。
+ */
+@JsonClass(generateAdapter = true)
+data class AgreementStatusDto(
+    val signed: Boolean = false,
+    val version: String? = null,
+    val signedAt: Long? = null,
+    val snMask: String? = null
+)
+
+// ==================== 数据主体权利 / 合规（对应服务端 ParentDataRightsController） ====================
+
+@JsonClass(generateAdapter = true)
+data class WithdrawConsentRequestDto(val deviceIds: List<String>? = null)
+
+@JsonClass(generateAdapter = true)
+data class AffectedDto(val affected: Int = 0)
+
+@JsonClass(generateAdapter = true)
+data class Under14GuardianConsentRequestDto(
+    val deviceId: String,
+    val childBirthDate: String,
+    val consent: Boolean,
+    val consentTextVersion: String
+)
+
+@JsonClass(generateAdapter = true)
+data class GuardianConsentStatusDto(
+    val deviceId: String = "",
+    val childBirthDate: String? = null,
+    val consented: Boolean = false,
+    val consentTextVersion: String? = null,
+    val decidedAt: Long? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class DeletionRequestReasonDto(val reason: String? = null)
+
+@JsonClass(generateAdapter = true)
+data class DeletionTicketDto(val ticket: String)
+
+@JsonClass(generateAdapter = true)
+data class DeletionRequestDto(
+    val ticket: String,
+    val requestedAt: Long = 0L,
+    val executeAt: Long = 0L,
+    val cooldownMs: Long = 0L,
+    val status: String = "PENDING"
+)
+
+@JsonClass(generateAdapter = true)
+data class SubmitAppealRequestDto(
+    val deviceId: String? = null,
+    val subject: String,
+    val detail: String? = null,
+    val contact: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AppealIdDto(val appealId: String)
+
+@JsonClass(generateAdapter = true)
+data class AppealDto(
+    val id: String,
+    val deviceId: String? = null,
+    val subject: String,
+    val detail: String? = null,
+    val contact: String? = null,
+    val status: String = "OPEN",
+    val createdAt: Long = 0L,
+    val updatedAt: Long = 0L
+)
+
+/**
+ * 个人数据导出结果。字段与服务端 ComplianceService.exportData 返回的 Map 键一致。
+ * 明细按设备分页限流（服务端 detailLimitPerDevice），超出上限需走后台按设备/时间段再导出。
+ */
+@JsonClass(generateAdapter = true)
+data class DataExportDto(
+    val exportedAt: Long = 0L,
+    val account: ExportAccountDto? = null,
+    val devices: List<ExportDeviceDto> = emptyList(),
+    val appeals: List<ExportAppealDto> = emptyList(),
+    val deletionRequests: List<ExportDeletionDto> = emptyList(),
+    val detailLimitPerDevice: Int = 0,
+    val usageLogs: List<ExportUsageLogDto> = emptyList(),
+    val locationTracks: List<ExportLocationDto> = emptyList(),
+    val screenshots: List<ExportScreenshotDto> = emptyList()
+)
+
+@JsonClass(generateAdapter = true)
+data class ExportUsageLogDto(
+    val id: String = "",
+    val deviceId: String = "",
+    val logId: String = "",
+    val type: String? = null,
+    val timestamp: Long? = null,
+    val receivedAt: Long = 0L,
+    val payloadJson: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class ExportLocationDto(
+    val id: String = "",
+    val deviceId: String = "",
+    val lat: Double? = null,
+    val lng: Double? = null,
+    val accuracy: Double? = null,
+    val provider: String? = null,
+    val ts: Long? = null,
+    val address: String? = null,
+    val fresh: Boolean? = null,
+    val receivedAt: Long = 0L
+)
+
+@JsonClass(generateAdapter = true)
+data class ExportScreenshotDto(
+    val id: String = "",
+    val deviceId: String = "",
+    val shotId: String? = null,
+    val triggerType: String? = null,
+    val fileUrl: String? = null,
+    val thumbnailUrl: String? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val capturedAt: Long? = null,
+    val receivedAt: Long = 0L,
+    val status: String = ""
+)
+
+@JsonClass(generateAdapter = true)
+data class ExportAccountDto(
+    val id: String = "",
+    val phone: String? = null,
+    val nickname: String? = null,
+    val email: String? = null,
+    val status: String? = null,
+    val createdAt: Long = 0L
+)
+
+@JsonClass(generateAdapter = true)
+data class ExportDeviceDto(
+    val deviceId: String = "",
+    val name: String? = null,
+    val childName: String? = null,
+    val controlMode: String? = null,
+    val consentRevoked: Boolean = false,
+    val policyVersion: Int = 0,
+    val createdAt: Long = 0L
+)
+
+@JsonClass(generateAdapter = true)
+data class ExportAppealDto(
+    val id: String = "",
+    val deviceId: String? = null,
+    val subject: String = "",
+    val status: String = "",
+    val createdAt: Long = 0L
+)
+
+@JsonClass(generateAdapter = true)
+data class ExportDeletionDto(
+    val ticket: String = "",
+    val status: String = "",
+    val requestedAt: Long = 0L,
+    val executeAt: Long = 0L
 )

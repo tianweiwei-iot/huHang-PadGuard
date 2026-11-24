@@ -5,11 +5,15 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import com.padguard.child.capture.AccessibilityScreenshot
 import com.padguard.child.capture.CaptureConsentStore
+import com.padguard.child.receiver.GuardAlarmReceiver
+import com.padguard.child.service.GuardHeartbeat
 import com.padguard.child.service.GuardService
 import com.padguard.child.di.ApplicationScope
+import com.padguard.child.util.isOwnPackage
 import com.padguard.child.ui.lock.LockScreenActivity
 import com.padguard.child.ui.lock.LockScreenPresenter
 import com.padguard.child.ui.lock.NoPermissionOverlay
@@ -30,6 +34,19 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+/**
+ * 无障碍服务维护的"最近前台包名"对外只读出口。
+ *
+ * [OperationGuardAccessibilityService] 在每次窗口切换时把当前前台包名写进来；
+ * 当主数据源（使用情况访问 / UsageStats）因权限被撤销而不可用时，
+ * [com.padguard.child.monitor.ForegroundAppMonitor] 用它做单包兜底，
+ * 避免应用级黑名单 / Kiosk 拦截在权限缺失时完全失明（漏管）。
+ * 包名可能滞后于真实前台（无障碍只在窗口状态变化时更新），但作为降级源远好于空判定。
+ */
+object AccessibilityForegroundSource {
+    @Volatile var lastForegroundPackage: String? = null
+}
 
 /**
  * 操作闸门无障碍服务（软拦截核心）。
@@ -86,6 +103,13 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     @Inject
     lateinit var authRepository: AuthRepository
 
+    /** 前台切换唤醒信号：把「额度已耗尽却还能玩 15 秒」的窗口收掉（见 [GuardTickSignal]） */
+    @Inject
+    lateinit var tickSignal: GuardTickSignal
+
+    /** 前台切换后的"补一次唤醒"任务；新切换发生时取消旧的，避免任务堆叠 */
+    private var tickFollowUpJob: Job? = null
+
     /** 装机向导豁免：向导带家长去设置页办理授权期间，闸门对设置页暂时放行（见类文档）。 */
     @Inject
     lateinit var gateSuspension: GuardGateSuspension
@@ -129,6 +153,10 @@ class OperationGuardAccessibilityService : AccessibilityService() {
     @Inject
     lateinit var captureConsentStore: CaptureConsentStore
 
+    // 以下三个时间戳一律使用 SystemClock.elapsedRealtime()（单调轴，新增缺陷 I）。
+    // 用裸墙钟时孩子回拨系统时间会让 `now - last` 变负：去抖分支恒为"刚拦过"直接 return，
+    // 闸门不再顶回受管控应用；24h 告警闸与防卸载同样被永久压制。进程内内存态，重启归零无影响。
+
     /** 去抖：同一受保护窗口 1.5s 内只拦截一次，避免 performGlobalAction 导致事件风暴。 */
     private var lastTriggerAt = 0L
     private var lastTriggerPkg = ""
@@ -150,14 +178,23 @@ class OperationGuardAccessibilityService : AccessibilityService() {
      *  放实例字段会导致服务重建后旧循环永不退出。 */
 
     /**
-     * 当前默认桌面的包名与 HOME Activity 类名（用于识别「桌面长按弹出的卸载菜单」）。
+     * 设备上所有"能当桌面"的包 → 其 HOME Activity 类名（用于识别「桌面长按弹出的卸载菜单」）。
      *
      * 动态解析而不是硬编码包名：华为/小米/OPPO 的桌面包名各不相同，硬编码必然漏，
-     * 而漏一个就等于"这台机器上长按卸载可以绕过密码"（本次事故正是这条）。
-     * 解析不到时保持 null，[UninstallEntryDetector] 会退化为只按类名判，绝不误拦整个桌面。
+     * 而漏一个就等于"这台机器上长按卸载可以绕过密码"（2026-11-02 事故正是这条）。
+     *
+     * 为什么是**集合**而不是单个默认桌面（R-P2-8）：
+     * 装了多个桌面（系统桌面 + 第三方/儿童桌面）时，只 arm 默认那一个，
+     * 孩子把默认桌面切到另一个就能走通长按卸载；而且默认桌面在运行期被切换后，
+     * 服务里缓存的值会一直是旧的。现在把所有 CATEGORY_HOME 的包都 arm 进来，
+     * 并定期重解析（见 [maybeRefreshLauncherInfo]）。
+     *
+     * 解析不到时保持空集合，[UninstallEntryDetector] 会退化为只按类名判，绝不误拦整个桌面。
      */
-    private var launcherPackage: String? = null
-    private var launcherHomeClass: String? = null
+    private var launcherHomeClasses: Map<String, String> = emptyMap()
+
+    /** 上次解析桌面的单调时刻：用于定期重解析（默认桌面可能在运行期被切换） */
+    private var lastLauncherResolveElapsed = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -174,6 +211,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 服务已连接即代表无障碍采集能力已授权（系统级持久授权）：钉死标记，
         // 供启动/亮屏时主动静默重绑，落实"授权一次、除解绑外永不失效"。
         runCatching { captureConsentStore.markA11yGranted() }
+        // 服务重绑后，卸载软门的"活性"由假变真：常驻通知不能再挂着 10 分钟前
+        // "请开启无障碍服务"的快照，主动按实时状态刷新一次，并撤掉残留的采集引导通知。
+        runCatching { GuardService.refreshPermissionNotice(this) }
         // 能力缺失的唯一常见原因：用户在服务已启用之后才升级到带 canTakeScreenshot 的版本，
         // 系统不会重读元数据。此时如实留痕，便于排查"为什么截屏还在走投影弹窗"。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -190,6 +230,11 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             runCatching { GuardService.start(this, "a11yReconnect") }
                 .onFailure { Logger.w(TAG, it) { "guard restart from a11y failed" } }
         }
+        // 顺带重排「闹钟兜底」系统通道：清理工具可能把 JobScheduler 作业与旧闹钟一并清掉，
+        // 这里借系统重绑的时刻补排一次，确保即便上面那次 startForegroundService 被 ROM 吞掉、
+        // 哪怕本无障碍服务自身也一度失联，仍有系统计时器在 ~1~3s 内把守护拉回。
+        runCatching { GuardAlarmReceiver.schedule(this) }
+            .onFailure { Logger.w(TAG, it) { "re-arm guard alarm from a11y failed" } }
     }
 
     override fun onDestroy() {
@@ -205,6 +250,24 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         watchdogJob?.cancel()
         watchdogJob = null
         super.onDestroy()
+    }
+
+    /**
+     * EMUI「一键清理」的第一刀是清掉无障碍开关：系统随即**解绑**本服务（走到本回调），
+     * 紧接着整包杀进程（SIGKILL，onDestroy 都未必有机会跑）。
+     * 趁进程还活着，把「即时兜底闹钟」排上 —— 闹钟由 system_server 持有、与进程生死无关，
+     * 进程死后 ~1.2s 必然触发，把守护拉回；守护再经静默写入通道
+     * （WRITE_SECURE_SETTINGS，见 AccessibilityCapabilityHealer）把开关写回，
+     * 完成"清理 → 秒级拉起 → 自动重启用"的闭环，而不是等 60s 周期闹钟 + 家长到场。
+     *
+     * 正常解绑（家长端解绑设备）也会经过这里：此时立即闹钟 1.2s 后触发，
+     * [GuardAlarmReceiver.handleImmediate] 会按既有口径校验绑定态（未绑定不拉起），
+     * 不会与解绑流程打架。
+     */
+    override fun onUnbind(intent: Intent?): Boolean {
+        runCatching { GuardAlarmReceiver.scheduleImmediate(this) }
+            .onFailure { Logger.w(TAG, it) { "schedule immediate alarm from onUnbind failed" } }
+        return super.onUnbind(intent)
     }
 
     /**
@@ -231,64 +294,101 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         if (watchdogJob?.isActive == true) return
         watchdogJob = scope.launch {
             while (isActive) {
-                delay(LOCK_WATCH_INTERVAL_MS)
-                // 心跳续约（内部按 30s 节流，不产生额外磁盘压力）。
-                // 这里是"服务还活着"最稳定的证据来源：只要本循环在跑，
-                // GuardA11y.isAlive 就不该过期 —— 缺了这一行，服务连接满 2 分钟后
-                // 全端都会认为无障碍已死亡（2026-11-05 线上误判的根因）。
-                GuardA11y.markAliveTick(this@OperationGuardAccessibilityService)
-                // 整机管控暂停时不重拉锁屏、不续系统锁：设备应完全可用
-                if (!guardMasterSwitch.active.value) continue
-                // ---- 解锁自愈：App 侧已解锁，但系统锁还没撤成 ----
-                if (!lockController.state.value.locked && keyguardBridge.isUnlockPending()) {
-                    // 过渡页不在前台才追：它活着的时候自己会完成撤锁，避免重复拉起。
-                    // chaseUnlock 内部限频（5s）并自带点屏，不会每 500ms 亮一次屏。
-                    if (!LockScreenActivity.visible) {
-                        Logger.i(TAG) { "lock watchdog: chasing pending system-keyguard unlock" }
-                        // FSI 优先，失败降级直接 startActivity —— 无障碍上下文里
-                        // 这条降级路径同样豁免后台启动限制，是最不易被 ROM 吞掉的一环。
-                        runCatching { LockScreenActivity.chaseUnlock(this@OperationGuardAccessibilityService) }
-                            .onFailure { Logger.w(TAG, it) { "unlock chase via accessibility failed" } }
+                try {
+                    delay(LOCK_WATCH_INTERVAL_MS)
+                    // 心跳续约（内部按 30s 节流，不产生额外磁盘压力）。
+                    // 这里是"服务还活着"最稳定的证据来源：只要本循环在跑，
+                    // GuardA11y.isAlive 就不该过期 —— 缺了这一行，服务连接满 2 分钟后
+                    // 全端都会认为无障碍已死亡（2026-11-05 线上误判的根因）。
+                    GuardA11y.markAliveTick(this@OperationGuardAccessibilityService)
+                    // 守护进程自救：整包被杀后，本无障碍服务由系统重绑是唯一活路。
+                    // 若此时守护尚未拉起（onServiceConnected 那次 startForegroundService 被 ROM 吞掉，
+                    // 或守护自身崩溃后还没冷启完），这里每 5s 持续重试 GuardService.start，
+                    // 直到守护重新常驻 —— 闭合「清完内存 → 管控永久失联」的断链。
+                    // 仅已绑定设备重试（无管控依据不拉起，与全链路语义一致）。
+                    if (!GuardService.isRunning &&
+                        GuardHeartbeat.readGuardState(this@OperationGuardAccessibilityService)
+                    ) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (now - lastGuardRelaunchAtMs > GUARD_RELAUNCH_INTERVAL_MS) {
+                            lastGuardRelaunchAtMs = now
+                            Logger.w(TAG) { "lock watchdog: guard not running, relaunching" }
+                            runCatching {
+                                GuardService.start(this@OperationGuardAccessibilityService, "a11yWatchdogRelaunch")
+                            }.onFailure { Logger.w(TAG, it) { "guard relaunch from a11y watchdog failed" } }
+                        }
                     }
-                    continue
+                    // 整机管控暂停时不重拉锁屏、不续系统锁：设备应完全可用
+                    if (!guardMasterSwitch.active.value) continue
+                    // ---- 解锁自愈：App 侧已解锁，但系统锁还没撤成 ----
+                    if (!lockController.state.value.locked && keyguardBridge.isUnlockPending()) {
+                        // 过渡页不在前台才追：它活着的时候自己会完成撤锁，避免重复拉起。
+                        // chaseUnlock 内部限频（5s）并自带点屏，不会每 500ms 亮一次屏。
+                        if (!LockScreenActivity.visible) {
+                            Logger.i(TAG) { "lock watchdog: chasing pending system-keyguard unlock" }
+                            // FSI 优先，失败降级直接 startActivity —— 无障碍上下文里
+                            // 这条降级路径同样豁免后台启动限制，是最不易被 ROM 吞掉的一环。
+                            runCatching { LockScreenActivity.chaseUnlock(this@OperationGuardAccessibilityService) }
+                                .onFailure { Logger.w(TAG, it) { "unlock chase via accessibility failed" } }
+                        }
+                        continue
+                    }
+                    if (!lockController.state.value.locked) continue
+                    // 分屏 / 悬浮窗（自由窗口）形态：锁屏页此刻可能**就是**焦点窗口，
+                    // 但它只占半屏，另一半是桌面或别的应用，孩子照常能点开应用、能拖分隔条、
+                    // 能关掉锁屏那一格 —— 这同样是逃逸，绝不能因为前台包名是自己就放过。
+                    val windowed = LockScreenActivity.inMultiWindow
+                    // 判定口径：**只有锁屏流程自己的界面在前台**才算"没逃逸"。
+                    //
+                    // 旧实现是「前台包名 == 本包就放过」，漏洞在于本包不止锁屏一个页面：
+                    // 家长把本应用设为默认桌面后，孩子按 HOME 就回到 [KidHomeActivity]（儿童桌面），
+                    // 包名依旧是自己 —— 看门狗因此 continue，锁屏再也不重拉，孩子可以在桌面上
+                    // 自由活动（点白名单应用、翻列表），锁屏等于被按 HOME 一下撕掉。
+                    // 这是「锁屏后无法退出」这条保底的真实突破口（本类注释里"自家界面永远不拦"
+                    // 的初衷只是避免重复拉起锁屏页，被包名口径放大成了整类放行）。
+                    //
+                    // 现在只认两个页面：
+                    //   - [LockScreenActivity] 自己在前台：重复拉起无意义；
+                    //   - [GuardUnlockActivity] 在前台：家长正在输密码，重拉会把输入框踢掉，
+                    //     等于把解锁流程锁死（必须放过，否则家长永远解不开）。
+                    // 其余本包页面（儿童桌面 / 消息 / 授权引导）在前台 → 继续往下重拉锁屏。
+                    val onLockFlow = LockScreenActivity.visible || GuardUnlockActivity.visible
+                    if (!windowed && onLockFlow) continue
+                    // 已逃逸到非本应用（桌面/其它 app），或锁屏页被挤成了半屏：
+                    // 1) 无障碍服务可后台启动 Activity（豁免华为后台限制），把锁屏 Activity 顶回前台 ——
+                    //    这是非 DO 设备后台锁屏唯一可靠的前台化手段；硬锁设备同样受益。
+                    // 2) 设备管理员已激活时，借系统级 lockNow() 重新唤起系统锁屏（keyguard），
+                    //    物理封死手势导航/最近任务，是「非 DO 设备」上锁屏被划走后最可靠的兜底。
+                    //    仅当设备管理员可用时调用；LEGACY 设备无此能力，交由悬浮窗地板兜底。
+                    // 3) 委托 presenter.reenforce() 确保悬浮窗地板在位（非硬锁设备的真正锁定层）。
+                    // 不再 performGlobalAction(HOME)：它反复把用户顶回桌面、且在非硬锁设备上无效，
+                    // 只会和窗口切换事件叠加成日志风暴（这正是此前「锁屏崩 + 刷屏」的诱因之一）。
+                    if (windowed) {
+                        Logger.w(TAG) { "lock watchdog: lock screen windowed (split/freeform), re-arming fullscreen" }
+                    }
+                    if (!LockScreenActivity.visible || windowed) {
+                        runCatching {
+                            LockScreenActivity.show(
+                                this@OperationGuardAccessibilityService,
+                                lockController.state.value.primaryDetail
+                            )
+                        }.onFailure { Logger.w(TAG, it) { "lock watchdog re-show activity failed" } }
+                    }
+                    // 借系统级 lockNow() 重新唤起系统锁屏（keyguard）作为兜底，但必须经
+                    // SystemKeyguardBridge 记账与守卫：安全锁（PIN/图案/密码）设备一律不压，
+                    // 否则解锁会陷入「应用撤不掉系统锁」的永久死锁
+                    // （见 SystemKeyguardBridge.systemLockAllowed 说明）。直接调 admin.lockNow()
+                    // 会绕过守卫与记账，是此前死锁的旁路来源，必须收口到 bridge。
+                    if (admin.can(Capability.LOCK_NOW)) {
+                        keyguardBridge.pushSystemLock()
+                    }
+                    runCatching { lockScreenPresenter.reenforce() }
+                        .onFailure { Logger.w(TAG, it) { "lock watchdog reenforce failed" } }
+                } catch (t: Throwable) {
+                    // 单拍异常只丢一跳而非整轮死掉：否则看门狗静默死亡 → 解锁逃逸无法自愈、全端误判无障碍已失活。
+                    if (t is kotlinx.coroutines.CancellationException) throw t
+                    Logger.e(TAG, t) { "lock watchdog tick failed" }
                 }
-                if (!lockController.state.value.locked) continue
-                // 分屏 / 悬浮窗（自由窗口）形态：锁屏页此刻可能**就是**焦点窗口，
-                // 但它只占半屏，另一半是桌面或别的应用，孩子照常能点开应用、能拖分隔条、
-                // 能关掉锁屏那一格 —— 这同样是逃逸，绝不能因为前台包名是自己就放过。
-                val windowed = LockScreenActivity.inMultiWindow
-                val fg = lastForegroundPkg
-                if (!windowed && fg != null && fg.startsWith(OWN_PACKAGE_PREFIX)) continue
-                // 已逃逸到非本应用（桌面/其它 app），或锁屏页被挤成了半屏：
-                // 1) 无障碍服务可后台启动 Activity（豁免华为后台限制），把锁屏 Activity 顶回前台 ——
-                //    这是非 DO 设备后台锁屏唯一可靠的前台化手段；硬锁设备同样受益。
-                // 2) 设备管理员已激活时，借系统级 lockNow() 重新唤起系统锁屏（keyguard），
-                //    物理封死手势导航/最近任务，是「非 DO 设备」上锁屏被划走后最可靠的兜底。
-                //    仅当设备管理员可用时调用；LEGACY 设备无此能力，交由悬浮窗地板兜底。
-                // 3) 委托 presenter.reenforce() 确保悬浮窗地板在位（非硬锁设备的真正锁定层）。
-                // 不再 performGlobalAction(HOME)：它反复把用户顶回桌面、且在非硬锁设备上无效，
-                // 只会和窗口切换事件叠加成日志风暴（这正是此前「锁屏崩 + 刷屏」的诱因之一）。
-                if (windowed) {
-                    Logger.w(TAG) { "lock watchdog: lock screen windowed (split/freeform), re-arming fullscreen" }
-                }
-                if (!LockScreenActivity.visible || windowed) {
-                    runCatching {
-                        LockScreenActivity.show(
-                            this@OperationGuardAccessibilityService,
-                            lockController.state.value.primaryDetail
-                        )
-                    }.onFailure { Logger.w(TAG, it) { "lock watchdog re-show activity failed" } }
-                }
-                // 借系统级 lockNow() 重新唤起系统锁屏（keyguard）作为兜底，但必须经
-                // SystemKeyguardBridge 记账与守卫：安全锁（PIN/图案/密码）设备一律不压，
-                // 否则解锁会陷入「应用撤不掉系统锁」的永久死锁
-                // （见 SystemKeyguardBridge.systemLockAllowed 说明）。直接调 admin.lockNow()
-                // 会绕过守卫与记账，是此前死锁的旁路来源，必须收口到 bridge。
-                if (admin.can(Capability.LOCK_NOW)) {
-                    keyguardBridge.pushSystemLock()
-                }
-                runCatching { lockScreenPresenter.reenforce() }
-                    .onFailure { Logger.w(TAG, it) { "lock watchdog reenforce failed" } }
             }
         }
     }
@@ -318,11 +418,38 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
 
         val pkg = event.packageName?.toString() ?: return
-        // 维护最近前台包名（供锁屏看门狗判断锁屏是否已被滑走）；自家界面也不例外，
-        // 否则锁屏页自身在前台时 lastForegroundPkg 仍是旧值，看门狗会误以为已逃逸而反复重拉。
+        val previousPkg = lastForegroundPkg
+        // 维护最近前台包名（供应用管控采样与前台判定使用）。
+        // 注意：锁屏看门狗**已不再**用它对账 —— "本包在前台"这个口径会把儿童桌面
+        // 误当成锁屏页而放过，正是按 HOME 即可退出锁屏的根因。
         lastForegroundPkg = pkg
+        // 同步给对外只读出口：主数据源不可用时供前台判定兜底（见 AccessibilityForegroundSource）。
+        AccessibilityForegroundSource.lastForegroundPackage = pkg
         // 自家界面永远不拦（避免拦截解锁框/权限引导自身，造成死循环）
-        if (pkg.startsWith(OWN_PACKAGE_PREFIX)) return
+        if (isOwnPackage(pkg)) return
+
+        // 前台真的换了应用 → 立刻叫醒守护服务跑一轮采样。
+        //
+        // 为什么必须在这里叫：主循环是 15 秒定时采样，孩子点开一个「额度已用完」的应用时，
+        // 最多要等 15 秒才会被判定并顶回 —— 这 15 秒他能照玩，家长端却显示已限额。
+        // 弱网把主循环拖慢时窗口还会更长。这里在窗口切换的瞬间拿到前台包名，
+        // 交给 [GuardTickSignal]（自带 1 秒节流，避免连点图标触发风暴）。
+        //
+        // 判定本身仍由 GuardService 统一执行：本服务只负责「该醒了」，不复制一套限额逻辑，
+        // 否则两处口径迟早分叉（黑名单/Kiosk/限额的优先级只在 PolicyEngine.tick 里定义）。
+        if (pkg != previousPkg) {
+            tickSignal.request("foreground:$pkg")
+            // 再补一次：UsageStats（queryEvents）对「刚切过来的应用」有几秒写延迟，
+            // 立刻那一轮很可能还解析出**上一个**前台包名（ForegroundAppMonitor 在
+            // 窗口内无事件时沿用 lastKnown），于是判定落空。
+            // 1.5 秒后补一发即可覆盖绝大多数机型；每次切换只保留最新一个补发任务，
+            // 孩子连续切应用不会堆出几十个协程。
+            tickFollowUpJob?.cancel()
+            tickFollowUpJob = scope.launch {
+                delay(FOLLOW_UP_TICK_MS)
+                tickSignal.request("foreground:$pkg:followUp")
+            }
+        }
 
         // 应用访问放行到此为止：前台一旦不是被放行的那个包，上次授权即结束。
         // 这是"每次打开都要家长验证"的执行点，必须先于下方一切判定 —— 否则孩子
@@ -337,7 +464,7 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 锁屏被划走后的系统级兜底（lockNow / 悬浮窗地板）由 [startLockWatchdog] 周期负责。
         if (lockController.state.value.locked) {
             // 自家界面（锁屏页 / 桌面 / 管理页）永远安全：不拦不顶，否则会拦截自身造成死循环。
-            if (pkg.startsWith(OWN_PACKAGE_PREFIX)) return
+            if (isOwnPackage(pkg)) return
             // 系统关键包（输入法 / 拨号 / SystemUI / 默认 Launcher 等）永不顶回，防砖。
             if (appGuard.isSystemCritical(pkg)) return
             // 临时解锁窗口内的目标应用放行（孩子端申请、家长已批准的那个应用）。
@@ -350,6 +477,9 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 当前前台不在管控范围 → 放行。
         // S11：判定提前到密码闸状态检查之前 —— 拦不拦是「这个界面是否要保护」的问题，
         // 怎么拦是「密码闸处于什么状态」的问题，两者解耦后，密码未设置时设置页仍有兜底拦截。
+        // R-P2-8：顺手做一次"桌面列表"的定期重解析（默认为 10 分钟一次，开销一次时钟比较），
+        // 孩子运行期切换默认桌面后不会长期漏掉"长按图标 → 卸载"这条入口。
+        maybeRefreshLauncherInfo()
         val className = event.className?.toString().orEmpty()
         val reason = decide(pkg, className) ?: return
 
@@ -368,7 +498,7 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // DO 下由 DISALLOW_APPS_CONTROL 接管，不重复处理；应用详情页命中本分支（HOME 顶回，
         // 防止 BACK 后经最近任务回跳），其余设置页走下方 S11 密码未设降级拦截，两者互补。
         if (appGuard.selfProtectApplies() && isAppDetailsPage(event)) {
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             if (now - lastSelfProtectAt > SELF_PROTECT_DEBOUNCE_MS) {
                 lastSelfProtectAt = now
                 Logger.i(TAG) { "self-protect: blocking settings app-details page (uninstall entry)" }
@@ -394,7 +524,7 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             isDeviceAdminSettingsPage(event)
         ) {
             if (gateSuspension.isActive()) return
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             if (now - lastSelfProtectAt > SELF_PROTECT_DEBOUNCE_MS) {
                 lastSelfProtectAt = now
                 Logger.i(TAG) { "uninstall defense: blocking device-admin settings page (deactivation entry)" }
@@ -432,7 +562,7 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         // 一律顶回（设置页用 BACK、其余用 HOME），并提醒家长尽快补设密码（24h 至多一次）。
         // 取消授权的应用（REASON_HIDDEN_APP）在此之前的专属分支已先行处理，不会走到这里。
         if (!manager.isEnabledNow()) {
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             if (pkg == lastTriggerPkg && now - lastTriggerAt < DEBOUNCE_MS) return
             lastTriggerAt = now
             lastTriggerPkg = pkg
@@ -447,8 +577,13 @@ class OperationGuardAccessibilityService : AccessibilityService() {
             return
         }
 
-        // 处于解锁窗口内 → 放行
-        if (manager.isUnlockedNow()) return
+        // 处于解锁窗口内 → 放行**设备操作类**界面（安装/卸载/设置）。
+        //
+        // 但绝不能把"打开受管控应用"一起放行：家长刚才输密码是为了装软件 / 改设置，
+        // 若把 10 分钟窗口当整机开闸，孩子在窗口内就能随便打开任何被禁应用 ——
+        // 这正是"权限放大"型绕过。打开单个应用的授权由 isAppAccessGrantedNow
+        // 在 decide() 里按包名单独判定（见下方注释），与本窗口互不推导。
+        if (reason != REASON_CONTROLLED_APP && manager.isUnlockedNow()) return
         // 是否在「试错锁定」冷却期：锁定期间仍要顶回（否则等于开闸），
         // 但不再拉起密码框——孩子此刻无论如何验不过，弹框只会被狂点。
         val lockedOut = manager.isLockedOutNow()
@@ -498,7 +633,7 @@ class OperationGuardAccessibilityService : AccessibilityService() {
      * 孩子每次进设置页都报，只会把这条提醒刷成噪音。
      */
     private fun reportPasswordNotSet() {
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         if (now - lastPasswordNotSetReportedAt < PASSWORD_NOT_SET_INTERVAL_MS) return
         lastPasswordNotSetReportedAt = now
         scope.launch {
@@ -564,36 +699,46 @@ class OperationGuardAccessibilityService : AccessibilityService() {
         }
 
     /**
-     * 解析当前默认桌面（包名 + HOME Activity 类名）。
+     * 解析设备上**所有**能当桌面的包（包名 → HOME Activity 类名）。
      *
-     * 用 `resolveActivity(HOME)` 而不是 `getHomeActivities`（API 33 已移除）；
-     * 解析失败或桌面就是本应用（KidHome）时置 null —— 此时判定器只按类名识别卸载界面，
+     * 为什么不能用 `getHomeActivities`：API 33 已移除。改用 `queryIntentActivities(HOME, MATCH_ALL)`，
+     * 它能把系统桌面、第三方桌面、儿童桌面一并拿到（R-P2-8：只 arm 默认桌面时，
+     * 孩子把默认桌面切到另一个就能用"长按图标 → 卸载"绕过密码）。
+     *
+     * 解析失败或结果为空时置空集合 —— 此时判定器只按类名识别卸载界面，
      * 宁可少拦一层浮层，也绝不把整个桌面当成卸载入口反复弹密码框（那会让设备没法用）。
      */
     private fun refreshLauncherInfo() {
         runCatching {
             val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-            // 首选"默认桌面"：MATCH_DEFAULT_ONLY 在设置了默认桌面时必然命中。
-            var info = packageManager
-                .resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY)
-                ?.activityInfo
-            // 兜底：设备没设默认桌面时 resolve 返回 null（部分定制 ROM 装好后一直弹选择框），
-            // 此时取唯一候选桌面。仍解析不到就放弃识别（宁可不拦，也不能把桌面误判成卸载入口）。
-            if (info == null) {
-                info = packageManager
-                    .queryIntentActivities(homeIntent, PackageManager.MATCH_ALL)
-                    .mapNotNull { it.activityInfo }
-                    .firstOrNull { !it.packageName.startsWith(OWN_PACKAGE_PREFIX) }
-            }
-            if (info != null && !info.packageName.startsWith(OWN_PACKAGE_PREFIX)) {
-                launcherPackage = info.packageName
-                launcherHomeClass = info.name
-                Logger.i(TAG) { "uninstall-entry detection armed for launcher=${info.packageName}/${info.name}" }
+            val resolved = packageManager
+                .queryIntentActivities(homeIntent, PackageManager.MATCH_ALL)
+                .mapNotNull { it.activityInfo }
+                .filter { it.packageName.isNotBlank() && !isOwnPackage(it.packageName) }
+                .associate { it.packageName to it.name }
+            launcherHomeClasses = resolved
+            lastLauncherResolveElapsed = SystemClock.elapsedRealtime()
+            if (resolved.isEmpty()) {
+                Logger.w(TAG) { "no launcher resolved: uninstall-entry detection degrades to class-name only" }
             } else {
-                launcherPackage = null
-                launcherHomeClass = null
+                Logger.i(TAG) { "uninstall-entry detection armed for launchers=$resolved" }
             }
-        }.onFailure { Logger.w(TAG, it) { "resolve default launcher failed" } }
+        }.onFailure { Logger.w(TAG, it) { "resolve launchers failed" } }
+    }
+
+    /**
+     * 定期重解析桌面列表（R-P2-8）。
+     *
+     * 默认桌面可能在运行期被切换（孩子改设置即可，无需任何权限），
+     * 只在 `onServiceConnected` 解析一次会一直指向旧包名。
+     * 10 分钟一次足够：切换桌面后最多 10 分钟内补齐 arm 集合，
+     * 而每次窗口事件只多一次 `elapsedRealtime()` 比较，开销可忽略。
+     */
+    private fun maybeRefreshLauncherInfo() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastLauncherResolveElapsed < LAUNCHER_RESOLVE_INTERVAL_MS) return
+        lastLauncherResolveElapsed = now
+        refreshLauncherInfo()
     }
 
     /**
@@ -603,42 +748,56 @@ class OperationGuardAccessibilityService : AccessibilityService() {
      * @param className 前台窗口类名（仅用于识别「桌面弹出的卸载浮层」，不读取任何界面内容）
      * @return 拦截原因；`null` 表示放行。
      */
-    private fun decide(pkg: String, className: String): String? = runCatching {
-        // 1) 改系统设置 —— 不可关闭：这里能禁用本无障碍服务，放开等于管控自毁
-        if (pkg in GUARDED_SETTINGS_PACKAGES) return@runCatching REASON_SETTINGS
-        // 2) 安装 / 卸载确认 —— 家长可在控制端开关「安装/卸载确认需密码」；
-        //    安装或卸载任一开关开启时（默认都开启）拦截安装器/安全中心包，两者都关则放行。
-        if (AppGuardPolicyStore.isInstallerPackage(pkg) &&
-            (appGuard.installNeedsPassword() || appGuard.uninstallNeedsPassword())
-        ) return@runCatching REASON_INSTALLER
-        // 2b) 「桌面长按图标 → 卸载」—— 2026-11-02 事故的真实入口。
-        //     这条路径的窗口事件包名是**桌面启动器**，既不是设置也不是安装器，
-        //     旧判定直接放行 → 孩子长按一次就把管控删干净，全程没有密码框。
-        //     判定器只比对包名与窗口类名（见 UninstallEntryDetector 的类注释），
-        //     不读界面内容，因此不违反无障碍设置项里对外承诺的隐私口径。
-        if (appGuard.uninstallNeedsPassword() &&
-            UninstallEntryDetector.isUninstallSurface(pkg, className, launcherPackage, launcherHomeClass)
-        ) return@runCatching REASON_UNINSTALL_ENTRY
-        // 3) 应用访问放行：家长刚在门禁里针对**这个包**验证通过 → 放行。
-        //    这是"打开这一个应用"的授权，与设备操作解锁窗口（isUnlockedNow）无关：
-        //    它不放行安装/卸载/改设置，也不放行其它应用，到期即失效。
-        //    缺了这一步，应用会在启动瞬间被本服务再次顶回 —— 表现为"密码输对了却打不开"。
-        if (manager.isAppAccessGrantedNow(pkg)) return@runCatching null
-        // 3a) 取消授权的应用（hidden）：无论"打开应用也要密码"开关是否开启、无论是否已设家长密码，
-        //     打开都必须先经过门禁（输对家长密码才放行）。这是"授权已取消"的底线语义——
-        //     它不依赖全局启动闸门（默认关闭会完全失效），也不因未设密码而漏放（最严）。
-        //     isHiddenControlled 已排除系统关键包（防砖名单）。
-        if (appGuard.isHiddenControlled(pkg)) return@runCatching REASON_HIDDEN_APP
-        // 3b) 打开受管控应用 —— 家长开关控制
-        //    注意：isControlled 已保证「已授权应用一律放行」，此处不会误伤授权应用。
-        if (appGuard.launchBlockEnabled() &&
-            appGuard.isControlled(pkg) &&
-            !appGuard.isSystemCritical(pkg)
-        ) {
-            return@runCatching REASON_CONTROLLED_APP
+    private fun decide(pkg: String, className: String): String? {
+        // 不要再对整段判定做 runCatching{...}.getOrNull()：一旦任意分支抛异常，getOrNull 会把异常
+        // 吞成 null，而调用方把 null 当作「放行」—— 这是 fail-open 架构缺陷，会让最关键的
+        // 设置/安装器/卸载/取消授权分支在异常时静默失守。
+        // 改为 fail-closed：异常时宁可拦下当前前台应用（等状态读取恢复），也绝不静默放行。
+        return try {
+            // 1) 改系统设置 —— 不可关闭：这里能禁用本无障碍服务，放开等于管控自毁
+            if (pkg in GUARDED_SETTINGS_PACKAGES) return REASON_SETTINGS
+            // 2) 安装 / 卸载确认 —— 家长可在控制端开关「安装/卸载确认需密码」；
+            //    安装或卸载任一开关开启时（默认都开启）拦截安装器/安全中心包，两者都关则放行。
+            if (AppGuardPolicyStore.isInstallerPackage(pkg) &&
+                (appGuard.installNeedsPassword() || appGuard.uninstallNeedsPassword())
+            ) return REASON_INSTALLER
+            // 2b) 「桌面长按图标 → 卸载」—— 2026-11-02 事故的真实入口。
+            //     这条路径的窗口事件包名是**桌面启动器**，既不是设置也不是安装器，
+            //     旧判定直接放行 → 孩子长按一次就把管控删干净，全程没有密码框。
+            //     判定器只比对包名与窗口类名（见 UninstallEntryDetector 的类注释），
+            //     不读界面内容，因此不违反无障碍设置项里对外承诺的隐私口径。
+            if (appGuard.uninstallNeedsPassword() &&
+                UninstallEntryDetector.isUninstallSurface(pkg, className, launcherHomeClasses)
+            ) return REASON_UNINSTALL_ENTRY
+            // 3) 应用访问放行：家长刚在门禁里针对**这个包**验证通过 → 放行。
+            //    这是"打开这一个应用"的授权，与设备操作解锁窗口（isUnlockedNow）无关：
+            //    它不放行安装/卸载/改设置，也不放行其它应用，到期即失效。
+            //    缺了这一步，应用会在启动瞬间被本服务再次顶回 —— 表现为"密码输对了却打不开"。
+            if (manager.isAppAccessGrantedNow(pkg)) return null
+            // 3a) 取消授权的应用（hidden）：无论"打开应用也要密码"开关是否开启、无论是否已设家长密码，
+            //     打开都必须先经过门禁（输对家长密码才放行）。这是"授权已取消"的底线语义——
+            //     它不依赖全局启动闸门（默认关闭会完全失效），也不因未设密码而漏放（最严）。
+            //     isHiddenControlled 已排除系统关键包（防砖名单）。
+            if (appGuard.isHiddenControlled(pkg)) return REASON_HIDDEN_APP
+            // 3b) 「打开应用也要密码」全量启动闸门（非 DO 软拦截形态）。
+            //    非 DO 设备上打开任意非系统应用都要先输管理密码，否则默认黑名单模式下
+            //    新装应用天然"已授权"、完全不受闸门约束 → 非 DO "装完即玩"（R-P2-19）。
+            //    DO 设备由系统隐藏/挂起负责，此处仅对 isControlled 应用施加闸门（保留原口径）。
+            //    注意：解锁窗口（isUnlockedNow）对本分支不绕过——受控/全量闸门本就要求逐包授权，
+            //    与 R-P1-3「解锁窗口仅放行设备操作类」一致。
+            if (appGuard.launchBlockEnabled() && !appGuard.isSystemCritical(pkg)) {
+                val fullGate = !appGuard.isDeviceOwner()
+                if (fullGate || appGuard.isControlled(pkg)) {
+                    return REASON_CONTROLLED_APP
+                }
+            }
+            null
+        } catch (t: Throwable) {
+            // fail-closed：决策逻辑异常时默认拦下，绝不静默放行（闸门安全默认）。
+            Logger.e(TAG, t) { "decide() threw, fail-closed to intercept: $pkg" }
+            REASON_CONTROLLED_APP
         }
-        null
-    }.getOrNull()
+    }
 
     /**
      * 受控态期间的"应用使用拦截"统一处理：闪退（顶回桌面）+ 连点升级提示。
@@ -653,9 +812,11 @@ class OperationGuardAccessibilityService : AccessibilityService() {
      *   确保应用不会停留在前台被使用，随后复位计数，避免弹窗期间反复触发。
      */
     private fun handleControlledModeBounce(pkg: String) {
-        val hitThreshold = runCatching { blockCounter.record(pkg) }.getOrDefault(false)
+        // 连点计数窗口同样走单调轴：回拨墙钟会让"距上次点击"变负，计数永远清不掉（新增缺陷 I）。
+        val elapsedNow = SystemClock.elapsedRealtime()
+        val hitThreshold = runCatching { blockCounter.record(pkg, elapsedNow) }.getOrDefault(false)
         if (hitThreshold) {
-            blockCounter.reset(pkg)
+            blockCounter.reset(pkg, elapsedNow)
             runCatching { noPermissionOverlay.show() }
                 .onFailure { Logger.w(TAG, it) { "no-permission overlay show failed" } }
             Logger.i(TAG) { "controlled-mode: $pkg hit bounce threshold, showing no-permission overlay" }
@@ -676,7 +837,25 @@ class OperationGuardAccessibilityService : AccessibilityService() {
          * 每重建一次就多一条 500ms 循环，且旧循环持有已销毁的 Service 继续拉锁屏页。
          */
         private var watchdogJob: Job? = null
-        private const val OWN_PACKAGE_PREFIX = "com.padguard.child"
+
+        /**
+         * 看门狗内「重试拉起守护」的节流时间戳（单调轴）。
+         * 守护持续未起时才每 [GUARD_RELAUNCH_INTERVAL_MS] 重试一次，
+         * 避免 `startForegroundService` 被 ROM 持续拒绝时每 500ms 刷一次日志/IPC。
+         */
+        private var lastGuardRelaunchAtMs = 0L
+
+        /** 看门狗重试拉起守护的最小间隔：5s（守护起不来时不过度刷 IPC） */
+        private const val GUARD_RELAUNCH_INTERVAL_MS = 5_000L
+
+        /**
+         * 前台切换后的补唤醒延迟：1.5 秒。
+         *
+         * 取这个数的依据：`UsageStatsManager.queryEvents` 对刚发生的 ACTIVITY_RESUMED
+         * 普遍在 1 秒内可见，1.5 秒足够跨过写延迟，又远小于原来的 15 秒采样周期。
+         * 再长就会让"点开超额应用"的可玩窗口重新变大。
+         */
+        private const val FOLLOW_UP_TICK_MS = 1_500L
         private const val DEBOUNCE_MS = 1500L
 
         /** 锁屏看门狗轮询间隔：锁定态下每隔这么久核对一次前台，逃逸即拉回（快滑最多 500ms 内回锁屏）。 */
@@ -684,6 +863,15 @@ class OperationGuardAccessibilityService : AccessibilityService() {
 
         /** 自检保护(防卸载)去抖间隔 */
         private const val SELF_PROTECT_DEBOUNCE_MS = 1200L
+
+        /**
+         * 桌面列表重解析间隔（R-P2-8）。
+         *
+         * 默认桌面可在运行期被切换，只在服务连接时解析一次会长期指向旧包名，
+         * 等于"长按图标 → 卸载"这条入口在切换后重新敞开。10 分钟足够兜住，
+         * 且每次窗口事件只多一次时钟比较，没有性能代价。
+         */
+        private const val LAUNCHER_RESOLVE_INTERVAL_MS = 10 * 60 * 1000L
 
         private const val REASON_SETTINGS = "settings"
         private const val REASON_INSTALLER = "installer"

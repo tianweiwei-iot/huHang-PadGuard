@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import com.padguard.child.notify.NotificationDelivery
 import com.padguard.core.common.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -78,6 +79,11 @@ class LockScreenNotifier @Inject constructor(
         val mgr = manager ?: return false
         if (!canUseFullScreenIntent()) {
             Logger.w(TAG) { "full screen intent not permitted on this device, lock screen cannot be pulled by system" }
+            return false
+        }
+        // 通知被关时 notify() 静默丢弃却返回成功：上层会把"系统代拉"当成已发起（R34）。
+        if (!NotificationDelivery.canDeliver(context, CHANNEL_ID)) {
+            Logger.w(TAG) { "notifications disabled; lock screen full-screen intent withheld" }
             return false
         }
         ensureChannel(mgr)
@@ -159,6 +165,13 @@ class LockScreenNotifier @Inject constructor(
         @JvmStatic
         fun postUnlock(context: Context, detail: String, mode: Int): Boolean {
             val mgr = context.getSystemService(NotificationManager::class.java) ?: return false
+            // 通知被关时 notify() 静默丢弃却不抛异常，旧的 `isSuccess` 会返回 true，
+            // 调用方 LockScreenActivity.launchUnlockingPage 因此**跳过 startActivity 兜底**，
+            // 家长远程解锁后孩子端连过渡页都出不来（R34）。这里必须如实返回 false。
+            if (!NotificationDelivery.canDeliver(context, CHANNEL_ID)) {
+                Logger.w(TAG) { "notifications disabled; unlock transition falls back to startActivity" }
+                return false
+            }
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
                 runCatching { mgr.canUseFullScreenIntent() }.getOrDefault(false)
             ) {

@@ -52,7 +52,7 @@
             在此之前请勿把它当作已生效的安全控制。
           </p>
           <label class="row" style="gap:10px;align-items:center;cursor:pointer;margin-top:10px"><input type="checkbox" id="st-mock" ${s.mockPay ? "checked" : ""} style="width:18px"> 启用模拟支付（仅测试环境，生产必须关闭）</label>
-          <p class="muted" style="font-size:12px;margin:6px 0 0 28px">保存后即时生效于支付渠道与模拟支付接口，无需重启服务端。</p>
+          <p class="muted" style="font-size:12px;margin:6px 0 0 28px">部署配置为总闸：生产档位即使这里被勾选也不会生效（服务端启动时会拒绝开发开关）。联调档位保存后即时生效，无需重启。</p>
         </div>
       </div>
       <div class="card" style="margin-top:16px">

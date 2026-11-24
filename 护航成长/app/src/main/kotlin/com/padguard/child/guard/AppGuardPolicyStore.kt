@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.padguard.child.util.isOwnPackage
 import com.padguard.core.common.Logger
 import com.padguard.core.data.model.policy.AppListMode
 import com.padguard.core.data.model.policy.AppPolicy
@@ -19,9 +20,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
@@ -70,17 +74,6 @@ class AppGuardPolicyStore @Inject constructor(
      */
     private val policyScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    init {
-        // 一次订阅，终身生效：DataStore 每次写入都会重新发射，[cache] 始终是最新值。
-        // 首帧在进程刚启动、收集器尚未发射时可能为 null（等价于"尚未下发策略"），
-        // 属安全的放行态；收集器发射后即恢复正常。
-        store.data
-            .map { computeSnapshot(it) }
-            .catch { emit(null) }
-            .onEach { cache = it }
-            .launchIn(policyScope)
-    }
-
     private val KEY_MODE = stringPreferencesKey("guard_mode")
     private val KEY_WHITELIST = stringPreferencesKey("guard_whitelist")
     private val KEY_BLACKLIST = stringPreferencesKey("guard_blacklist")
@@ -95,29 +88,75 @@ class AppGuardPolicyStore @Inject constructor(
     private var cache: AppGuardDecisions.Snapshot? = null
 
     /**
+     * 常驻订阅 + 冷启动预热（R-P3-15）。
+     *
+     * ## 必须放在 `KEY_*` 之后
+     * 下面的预热是**同步**调用 [computeSnapshot]，而它要读 `KEY_*` 这些属性。
+     * Kotlin 的属性初始化与 init 块按声明顺序交错执行，若把 init 写在 `KEY_*` 之前，
+     * 那几个 key 此刻还是 null（NPE）。因此这个 init 块必须位于全部 key 声明之后。
+     *
+     * ## 为什么冷启动要同步预热
+     * 旧实现只靠协程订阅：进程刚起（无障碍服务被系统重新拉起是最常见场景）时，
+     * `store.data` 的首次读盘还没完成，[cache] 就是 null，而 [snapshot] 返回 null 的语义是
+     * 「从未下发过策略 → 不拦任何应用」。于是重启后的头几百毫秒内，孩子点开任何被禁应用
+     * 都能长驱直入 —— 这正是 R-P3-15 描述的 fail-open 空窗，且**每次进程重启都会重现**。
+     * 这里在构造期同步读一次上次镜像（≤ 几个 key 的小文件，一次性开销，不在热路径上），
+     * 保证「进程一起来就已是上次的策略」，空的只剩真正的首次安装。
+     */
+    init {
+        cache = runCatching {
+            // 冷启动同步预载（R-P3-15：避免进程重启后头几百毫秒 fail-open）。
+            // 用短超时封顶：极端慢盘/加密存储卡顿时，放弃同步预载、退回下方异步订阅路径，
+            // 由 store.data 首次发射补齐——宁可短暂 fail-open，也不无限阻塞构造线程（冷启动 ANR 风险）。
+            // 正常路径（≤ 几个 key 的小文件）远小于超时，行为与改造前一致。
+            runBlocking {
+                withTimeoutOrNull(PRELOAD_TIMEOUT_MS) { computeSnapshot(store.data.first()) }
+            }
+        }.onFailure {
+            Logger.w(TAG, it) { "cold-start policy preload failed, keep null until first emission" }
+        }.getOrNull()
+
+        // 一次订阅，终身生效：DataStore 每次写入都会重新发射，[cache] 始终是最新值。
+        store.data
+            .map { computeSnapshot(it) }
+            // 读盘异常时**绝不能** `emit(null)`：那等于把已生效的镜像抹成"未下发策略"，
+            // 管控瞬间全放行（fail-open）。保留上一次已知良好的快照，等下一次成功发射再覆盖。
+            .catch { Logger.w(TAG, it) { "policy stream failed, keep last known snapshot" } }
+            .onEach { cache = it }
+            .launchIn(policyScope)
+    }
+
+    /**
      * 把服务端下发的策略镜像到本地。
      *
      * 由 [com.padguard.child.service.GuardService] 在策略变化时调用。
      * DO 设备同样写：家长可能在设备还没拿到 DO 时就配好了策略，之后拿到 DO 也不该丢配置。
      */
     suspend fun mirror(policy: AppPolicy) {
-        val rules = policy.systemAppRules.mapValues { it.value.uppercase() }
+        // 先用刚下发的策略构造好新快照，落盘成功后原子换上去（见方法末尾说明）。
+        val next = snapshotOf(policy)
         store.edit {
             it[KEY_HAS_POLICY] = true
-            it[KEY_MODE] = policy.mode.name
+            it[KEY_MODE] = next.mode.name
             it[KEY_WHITELIST] = encodeList(policy.whitelist)
             it[KEY_BLACKLIST] = encodeList(policy.blacklist)
-            it[KEY_SYSTEM_RULES] = JSONObject(rules).toString()
-            it[KEY_LAUNCH_BLOCK] = policy.requirePasswordOnLaunch
-            it[KEY_REQUIRE_INSTALL] = policy.installPolicy.requirePasswordOnInstall
-            it[KEY_REQUIRE_UNINSTALL] = policy.installPolicy.requirePasswordOnUninstall
+            it[KEY_SYSTEM_RULES] = JSONObject(next.systemAppRules).toString()
+            it[KEY_LAUNCH_BLOCK] = next.requirePasswordOnLaunch
+            it[KEY_REQUIRE_INSTALL] = next.requirePasswordOnInstall
+            it[KEY_REQUIRE_UNINSTALL] = next.requirePasswordOnUninstall
         }
-        cache = null // 失效，下次同步读时重载
+        // R-P3-15：**不要**再 `cache = null`。
+        // 旧实现把内存镜像置空、等协程重新读盘再填回，中间存在一段"旧策略已抹掉、新策略没上来"的
+        // 空窗；而 [snapshot] 返回 null 的语义是「从未下发过策略 → 什么都不拦」，
+        // 空窗内的每一次 [isControlled]/[launchBlockEnabled]/[installNeedsPassword] 都会放行。
+        // 现在磁盘写完就地换成新快照：读取端永远看到「旧策略 → 新策略」的连续序列，
+        // 既没有 fail-open 空窗，也省掉一次多余的读盘。
+        cache = next
         Logger.i(TAG) {
-            "app policy mirrored: mode=${policy.mode}, white=${policy.whitelist.size}, " +
-                "black=${policy.blacklist.size}, launchBlock=${policy.requirePasswordOnLaunch}, " +
-                "installPwd=${policy.installPolicy.requirePasswordOnInstall}, " +
-                "uninstallPwd=${policy.installPolicy.requirePasswordOnUninstall}"
+            "app policy mirrored: mode=${next.mode}, white=${next.whitelist.size}, " +
+                "black=${next.blacklist.size}, launchBlock=${next.requirePasswordOnLaunch}, " +
+                "installPwd=${next.requirePasswordOnInstall}, " +
+                "uninstallPwd=${next.requirePasswordOnUninstall}"
         }
     }
 
@@ -152,6 +191,25 @@ class AppGuardPolicyStore @Inject constructor(
     fun decisions(): AppGuardDecisions? =
         cache?.let { AppGuardDecisions(it, ::isSystemCritical, admin::isHidden) }
 
+    /**
+     * 把一份**刚从服务端下发的** [AppPolicy] 直接换算成决策快照（不经过磁盘）。
+     *
+     * 与 [computeSnapshot] 必须保持同一口径 —— 两者分别服务"下发那一刻"与"进程重启后"，
+     * 若字段映射或默认值不一致，就会出现"刚下发时拦、重启后放"的诡异分裂。
+     * 因此这里的字段映射与默认值刻意与 [computeSnapshot] 逐项对齐。
+     */
+    private fun snapshotOf(policy: AppPolicy): AppGuardDecisions.Snapshot =
+        AppGuardDecisions.Snapshot(
+            mode = policy.mode,
+            whitelist = policy.whitelist.toSet(),
+            blacklist = policy.blacklist.toSet(),
+            systemAppRules = policy.systemAppRules.mapValues { it.value.uppercase() },
+            requirePasswordOnLaunch = policy.requirePasswordOnLaunch,
+            requirePasswordOnInstall = policy.installPolicy.requirePasswordOnInstall,
+            requirePasswordOnUninstall = policy.installPolicy.requirePasswordOnUninstall,
+            isDeviceOwner = admin.isDeviceOwner()
+        )
+
     /** 由后台收集器调用的纯函数：把一次 DataStore 快照换算成内存策略副本 */
     private fun computeSnapshot(prefs: Preferences): AppGuardDecisions.Snapshot? {
         if (!(prefs[KEY_HAS_POLICY] ?: false)) return null
@@ -165,9 +223,14 @@ class AppGuardPolicyStore @Inject constructor(
             whitelist = decodeList(prefs[KEY_WHITELIST]),
             blacklist = decodeList(prefs[KEY_BLACKLIST]),
             systemAppRules = rules,
-            requirePasswordOnLaunch = prefs[KEY_LAUNCH_BLOCK] ?: false,
+            // 新增缺陷 O：必须与 [AppPolicy.requirePasswordOnLaunch] 的出厂默认值 **true** 对齐
+            // （[snapshotOf] 直接取字段，key 缺失时读的就是模型默认值）。旧版读盘写死 `?: false`，
+            // 于是旧版盘 / DataStore 部分损坏缺 key 时出现「刚下发时拦、重启后放」的分裂 ——
+            // 正是 [snapshotOf] 注释声称要防的场景。缺 key 时取更严的默认值（fail-closed）。
+            requirePasswordOnLaunch = prefs[KEY_LAUNCH_BLOCK] ?: true,
             requirePasswordOnInstall = prefs[KEY_REQUIRE_INSTALL] ?: true,
-            requirePasswordOnUninstall = prefs[KEY_REQUIRE_UNINSTALL] ?: true
+            requirePasswordOnUninstall = prefs[KEY_REQUIRE_UNINSTALL] ?: true,
+            isDeviceOwner = admin.isDeviceOwner()
         )
     }
 
@@ -246,6 +309,9 @@ class AppGuardPolicyStore @Inject constructor(
 
     fun launchBlockEnabled(): Boolean = snapshot()?.requirePasswordOnLaunch ?: false
 
+    /** 当前设备是否为 Device Owner（决定"打开应用也要密码"闸门口径，见 [AppGuardDecisions.needsLaunchGuard]）。 */
+    fun isDeviceOwner(): Boolean = admin.isDeviceOwner()
+
     /**
      * 非 DO 设备的「防卸载兜底」是否应启用。
      *
@@ -279,9 +345,13 @@ class AppGuardPolicyStore @Inject constructor(
      * 硬编码必然漏（漏一个就是"打不了字"级别的事故）。
      */
     fun isSystemCritical(pkg: String): Boolean {
-        if (pkg.startsWith(OWN_PACKAGE_PREFIX)) return true
+        if (isOwnPackage(pkg)) return true
         if (pkg in SYSTEM_URGENT) return true
-        if ("systemui" in pkg.lowercase()) return true
+        // 注意：不能用子串 `"systemui" in pkg` 判定。系统 UI 标准包名恒为 `com.android.systemui`
+        // （已在 SYSTEM_URGENT 精确集合内）；子串匹配会让任意含 "systemui" 的第三方包名
+        // （如 `com.example.systemui.game`）被当成系统关键，从而绕过锁屏顶回 / 免密码门禁 / 隐藏名单，
+        // 与 `isOwnPackage` 确立的"精确相等"红线同源越权。OEM 不会重命名框架级 systemui 组件，
+        // 需要更广覆盖请往 SYSTEM_URGENT 加精确包名，而非放宽匹配。
         return isDefaultLauncher(pkg) || isDefaultInputMethod(pkg) || isDefaultDialer(pkg)
     }
 
@@ -319,7 +389,12 @@ class AppGuardPolicyStore @Inject constructor(
 
     companion object {
         private const val TAG = "AppGuardPolicyStore"
-        private const val OWN_PACKAGE_PREFIX = "com.padguard.child"
+
+        /**
+         * 冷启动同步预载的最坏阻塞上限（毫秒）。
+         * 仅用于封顶极端慢盘/加密存储卡顿的构造期阻塞，正常小文件读盘远小于此值。
+         */
+        private const val PRELOAD_TIMEOUT_MS = 300L
 
         /**
          * 绝不能拦的系统组件。
@@ -364,9 +439,10 @@ class AppGuardPolicyStore @Inject constructor(
          */
         fun isInstallerPackage(pkg: String): Boolean {
             val lower = pkg.lowercase()
+            // 第三个分支曾是 "packageinstaller" 的逐字复制（复制粘贴漏改），
+            // 白白占掉一个匹配位却没覆盖任何新 ROM，已删除。
             return "packageinstaller" in lower ||
                 "appinstall" in lower ||
-                "packageinstaller" in lower ||
                 pkg in SECURITY_CENTER_PACKAGES
         }
     }

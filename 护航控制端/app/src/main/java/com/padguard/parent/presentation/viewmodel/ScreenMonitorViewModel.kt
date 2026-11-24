@@ -14,6 +14,7 @@ import com.padguard.parent.domain.repository.PolicyRepository
 import com.padguard.parent.presentation.util.GallerySaver
 import com.padguard.parent.presentation.util.TimeFormat
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -125,6 +126,19 @@ class ScreenMonitorViewModel @Inject constructor(
     /** 独立于 viewModelScope：onCleared 时 viewModelScope 已取消，停流指令需要一个还活着的 scope。 */
     private val releaseScope = kotlinx.coroutines.CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * 页面是否处于前台（由 ON_START / ON_STOP 驱动，见 [setForegroundActive]）。
+     *
+     * 为什么要显式跟踪：ViewModel 的生命周期比"家长正在看这一页"长得多 ——
+     * 家长把 App 退到后台（或切到别的页面但没出栈）时，`onCleared` 根本不会触发，
+     * 拉流协程、2 分钟一次的开流续期、2 秒一次的带宽轮询全都在继续跑。
+     * 对孩子端来说更糟：推流还在持续采集屏幕、编码、上传 —— 家长根本没在看，
+     * 却让平板持续发热耗电、占满上行带宽。
+     *
+     * 默认 true：进页面即视为前台，`init { load() }` 会直接开流（与旧行为一致）。
+     */
+    private var foregroundActive = true
+
     init {
         load()
     }
@@ -180,6 +194,9 @@ class ScreenMonitorViewModel @Inject constructor(
      */
     private fun startLiveStream() {
         if (deviceId.isBlank()) return
+        // 后台一律不开流（R-P2-18）：唯一会走到这里的后台路径是"家长手动点重连"，
+        // 页面都不可见了还去开流只会让孩子端白白采集推流。
+        if (!foregroundActive) return
         liveJob?.cancel()
         liveJob = viewModelScope.launch {
             // 开流前先把"这台设备上必然会发生的那一次授权"讲清楚。
@@ -209,7 +226,16 @@ class ScreenMonitorViewModel @Inject constructor(
                 val keepAlive = launch {
                     while (coroutineContext.isActive) {
                         delay(LIVE_KEEPALIVE_MS)
-                        runCatching { monitorRepository.startLiveView(deviceId) }
+                        // 续期失败保持静默（首轮失败已有 toast），但取消必须原样上抛：
+                        // runCatching 会吞掉 CancellationException，令页面退出时的取消被当成普通失败，
+                        // 未来在此加日志/重试计数时极易演变成"取消被当成网络失败反复重试"。
+                        try {
+                            monitorRepository.startLiveView(deviceId)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            // 续期失败静默，由断流提示统一呈现
+                        }
                     }
                 }
 
@@ -342,11 +368,13 @@ class ScreenMonitorViewModel @Inject constructor(
                         toast = "截屏已保存到相册（Pictures/PadGuard）"
                     )
                 }
-                .onFailure { e ->
+                .onFailure {
+                    // 写相册是本地操作，失败原因（权限被拒 / 空间不足 / MediaStore 拒绝）
+                    // 在英文异常里对家长毫无意义，这里只说"该去查什么"。
                     _uiState.value = _uiState.value.copy(
                         screenshot = record,
                         screenshotHistory = history,
-                        toast = "保存到相册失败：${e.message}"
+                        toast = "保存到相册失败，请检查存储权限与剩余空间"
                     )
                 }
         }
@@ -392,14 +420,14 @@ class ScreenMonitorViewModel @Inject constructor(
                         toast = "截屏已保存到相册（Pictures/PadGuard）"
                     )
                 }
-                .onFailure { e ->
+                .onFailure {
                     _uiState.value = _uiState.value.copy(
                         screenshot = shot,
                         liveImage = bitmap,
                         liveUpdatedAt = System.currentTimeMillis(),
                         screenshotHistory = history,
                         fetchingFrame = false,
-                        toast = "画面已更新，保存到相册失败：${e.message}"
+                        toast = "画面已更新，但保存到相册失败，请检查存储权限与剩余空间"
                     )
                 }
         }
@@ -516,7 +544,11 @@ class ScreenMonitorViewModel @Inject constructor(
                             toast = "录像已保存到本机相册"
                         )
                     }
-                    .onFailure { _uiState.value = _uiState.value.copy(toast = "录像本机保存失败：${it.message}") }
+                    .onFailure {
+                        _uiState.value = _uiState.value.copy(
+                            toast = "录像本机保存失败，请检查存储权限与剩余空间"
+                        )
+                    }
             } finally {
                 // 临时文件只用于搬运，无论成功失败都要删；否则每录一次就多占一份磁盘
                 runCatching { temp.delete() }
@@ -613,6 +645,39 @@ class ScreenMonitorViewModel @Inject constructor(
     fun stopLive() {
         if (deviceId.isBlank()) return
         releaseScope.launch { runCatching { monitorRepository.stopLiveView(deviceId) } }
+    }
+
+    /**
+     * 前后台切换（R-P2-18）。
+     *
+     * 与 [stopLive] 的区别：那个是"离开这一页"，这个是"暂时看不见这一页"。
+     * 退到后台时**双端同时止血**——
+     * - 家长端：取消拉流协程（连带续期与带宽轮询），清零带宽读数；
+     * - 孩子端：下发 stopLiveView 让它停止采集编码推流（否则平板继续发热耗电）。
+     *
+     * 回前台自动续上：家长切回来不该看到一个必须手点"重连"的死画面。
+     * 只在状态真的变化时才动作，避免 ON_START/ON_STOP 抖动导致反复开关流。
+     */
+    fun setForegroundActive(active: Boolean) {
+        if (deviceId.isBlank()) return
+        if (active == foregroundActive) return
+        foregroundActive = active
+        if (active) {
+            _uiState.value = _uiState.value.copy(liveHint = null)
+            startLiveStream()
+            return
+        }
+        liveJob?.cancel()
+        liveJob = null
+        _uiState.value = _uiState.value.copy(
+            liveConnected = false,
+            fetchingFrame = false,
+            // 后台不再有帧，带宽读数必须归零，否则回来时先显示上一轮的旧数字
+            liveUpKbps = 0.0,
+            liveDownKbps = 0.0,
+            liveHint = "已暂停实时画面（App 在后台），回到本页自动继续"
+        )
+        stopLive()
     }
 
     override fun onCleared() {

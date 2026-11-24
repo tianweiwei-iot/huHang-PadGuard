@@ -163,4 +163,99 @@ class LockControllerTest {
         assertFalse("releaseLock(REMOTE) 后应为解锁态", lc.state.value.locked)
         assertFalse("releaseLock(REMOTE) 必须清除落盘标记", prefs.getBoolean("remote_locked", false))
     }
+
+    // ==================== AWAITING_START 等待页（2026-11-09：每日计时须孩子确认） ====================
+
+    /**
+     * 等待页由 PolicyEngine.tick 每轮经 syncAutoReasons 差集派生/释放：
+     * awaitingStart 成立 → 挂 AWAITING_START；孩子确认后会话转 active →
+     * 下一轮差集不再包含 → 自动释放。锁定原因本身不落盘（与 DAILY_LIMIT 同型）。
+     */
+    @Test
+    fun `AWAITING_START is raised and released by syncAutoReasons diff`() {
+        val ctx = contextWith(sharedPrefsBackedBy(mutableMapOf()))
+        val lc = LockController(fakeTimeProvider(), ctx)
+
+        // 日切后进入待确认：awaitingStart=true → 等待页
+        lc.syncAutoReasons(
+            mapOf(LockReason.AWAITING_START to LockDetail("今日使用计时尚未开始"))
+        )
+        assertTrue("等待页必须锁住（未确认期间不可自由使用）", lc.state.value.locked)
+        assertTrue(
+            "主原因应为 AWAITING_START（等待开始）",
+            lc.state.value.primaryReason == LockReason.AWAITING_START
+        )
+
+        // 孩子确认、会话转 active：下一轮差集不再包含 → 解锁
+        lc.syncAutoReasons(emptyMap())
+        assertFalse("确认后等待页必须解除", lc.state.value.locked)
+    }
+
+    /**
+     * 家长 UNLOCK（releaseAll）压不灭等待页：解锁指令清空原因集合，
+     * 但自动原因由下一轮自检重新派生 —— 等待开始不是故障态，
+     * 不能被"解锁"永久消掉（否则 UNLOCK 就成了绕过入口）。
+     */
+    @Test
+    fun `UNLOCK cannot permanently dismiss AWAITING_START`() {
+        val ctx = contextWith(sharedPrefsBackedBy(mutableMapOf()))
+        val lc = LockController(fakeTimeProvider(), ctx)
+
+        lc.syncAutoReasons(mapOf(LockReason.AWAITING_START to LockDetail("今日使用计时尚未开始")))
+        assertTrue(lc.state.value.locked)
+
+        // 家长下发 UNLOCK（releaseAll）
+        lc.releaseAll()
+        assertFalse("UNLOCK 后暂时解锁", lc.state.value.locked)
+
+        // 下一轮自检：awaitingStart 仍成立 → 等待页重新挂上
+        lc.syncAutoReasons(mapOf(LockReason.AWAITING_START to LockDetail("今日使用计时尚未开始")))
+        assertTrue("等待页必须经自检重新挂上（UNLOCK 不是绕过入口）", lc.state.value.locked)
+    }
+
+    /**
+     * 暂停计时期间设备不可操作是硬承诺：家长临时解锁/远程 UNLOCK 都不能留下可用态。
+     * 与 AWAITING_START 不同，TIMER_PAUSED 在 requestLock 层豁免临时解锁抑制。
+     */
+    @Test
+    fun `TIMER_PAUSED cannot be bypassed by temp unlock or UNLOCK`() {
+        val ctx = contextWith(sharedPrefsBackedBy(mutableMapOf()))
+        val lc = LockController(fakeTimeProvider(), ctx)
+        val paused = mapOf(LockReason.TIMER_PAUSED to LockDetail("计时已暂停"))
+
+        lc.syncAutoReasons(paused)
+        assertTrue(lc.state.value.reasons.contains(LockReason.TIMER_PAUSED))
+
+        // 家长误批一次解锁申请 → 清空锁定态，但自动原因下一轮必须重新派生
+        lc.tempUnlock(30)
+        assertFalse("tempUnlock 会先清空全部原因", lc.state.value.locked)
+        lc.syncAutoReasons(paused)
+        assertTrue("临时解锁不得压过暂停计时（否则孩子申请一次解锁即可绕过）",
+            lc.state.value.reasons.contains(LockReason.TIMER_PAUSED))
+
+        lc.releaseAll()
+        lc.syncAutoReasons(paused)
+        assertTrue("UNLOCK 后下一轮自检必须重新挂上暂停锁",
+            lc.state.value.reasons.contains(LockReason.TIMER_PAUSED))
+
+        // 孩子点「继续计时」→ 会话 resume，差集里不再有该原因 → 立即释放
+        lc.syncAutoReasons(emptyMap())
+        assertFalse("恢复计时后必须解锁", lc.state.value.locked)
+    }
+
+    /** AWAITING_START 不落盘：重启后由策略自检重新派生，不靠残留标记恢复 */
+    @Test
+    fun `AWAITING_START is not persisted`() {
+        val prefs = sharedPrefsBackedBy(mutableMapOf())
+        val ctx = contextWith(prefs)
+
+        val lc = LockController(TimeProvider(), ctx)
+        lc.syncAutoReasons(mapOf(LockReason.AWAITING_START to LockDetail("今日使用计时尚未开始")))
+        assertTrue(lc.state.value.locked)
+
+        // 模拟进程重启：无任何落盘残留，等待页由重启后的自检重新派生
+        val afterRestart = LockController(TimeProvider(), ctx)
+        assertFalse("重启后不应有残留锁定态（等待页走自检重新派生）", afterRestart.state.value.locked)
+        assertFalse("等待页绝不写 remote_lock 落盘文件", prefs.getBoolean("remote_locked", false))
+    }
 }

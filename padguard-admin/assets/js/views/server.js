@@ -68,6 +68,7 @@
           <div><div class="between" style="font-size:12px;margin-bottom:6px"><span>每分钟请求峰值</span><span>${qpm}</span></div><div class="progress"><i style="width:${Math.min(100, qpm / 6)}%"></i></div></div>
           <div class="row" style="margin-top:16px;gap:10px">
             <button class="btn btn-ghost" id="s-logs">↻ 刷新日志</button>
+            <button class="btn btn-ghost" id="s-sweep">清理孤儿文件</button>
           </div>
           <p class="muted" style="font-size:12px;margin-top:10px">
             本后台不提供「远程重启」：服务进程自重启不可靠，且会让当前在线设备集体掉线。
@@ -98,6 +99,51 @@
         box.innerHTML = renderLogs(lines);
         root.querySelector("#s-logcount").textContent = "最近 " + (lines ? lines.length : 0) + " 条";
         PG.ui.toast("ok", "日志已刷新", "来源：服务端运行日志缓冲");
+      };
+
+      // 磁盘孤儿清理：**先预演再确认**，不提供"一键删除"捷径。
+      // 这类文件（盘上有、库里没记录）保留期清理永远扫不到，而打包脚本会把整个
+      // uploads/ 复制进发布包 —— 测试样本就是这样随包发到家庭用户手里的。
+      // 删除不可逆，所以先用 dryRun 拿数量+样例，运营确认后才真删。
+      root.querySelector("#s-sweep").onclick = async (ev) => {
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        let dry;
+        try {
+          dry = await PG.api.sweepOrphans(7, true);
+        } catch (e) {
+          PG.ui.toast("err", "预演失败", (e && e.message) || "");
+          return;
+        } finally {
+          btn.disabled = false;
+        }
+        // 读库失败时后端一个都没删：必须单独提示，否则"deleted=0"会被读成"没有垃圾"
+        if (dry && dry.dbReadFailed) {
+          PG.ui.toast("err", "无法清理", "服务端读取文件记录失败，本轮未删除任何文件");
+          return;
+        }
+        if (!dry || !dry.deleted) {
+          PG.ui.toast("ok", "没有孤儿文件", "扫描 " + ((dry && dry.scanned) || 0) + " 个文件，全部都有对应记录");
+          return;
+        }
+        const kb = Math.round((dry.bytesFreed || 0) / 1024);
+        const sample = dry.samples && dry.samples.length ? "；样例：" + dry.samples.join("、") : "";
+        PG.ui.confirm(
+          "清理孤儿文件",
+          "扫描 " + dry.scanned + " 个文件，其中 " + dry.deleted + " 个在数据库里没有任何记录（约 " + kb + " KB）。" +
+            "这些文件既无法被下载、也不会被保留期清理扫到。删除后不可恢复，确认继续？" + sample,
+          async () => {
+            let r;
+            try {
+              r = await PG.api.sweepOrphans(7, false);
+            } catch (e) {
+              PG.ui.toast("err", "清理失败", (e && e.message) || "");
+              return;
+            }
+            PG.ui.toast("ok", "清理完成",
+              "删除 " + ((r && r.deleted) || 0) + " 个文件，释放约 " + Math.round(((r && r.bytesFreed) || 0) / 1024) + " KB");
+          }
+        );
       };
     },
   });

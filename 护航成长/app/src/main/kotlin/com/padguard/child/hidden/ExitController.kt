@@ -1,63 +1,96 @@
 package com.padguard.child.hidden
 
 import android.app.Activity
-import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import com.padguard.child.ui.lock.LockScreenPresenter
 import com.padguard.core.common.Logger
-import com.padguard.core.engine.admin.Capability
 import com.padguard.core.engine.admin.DeviceAdminBridge
+import com.padguard.core.engine.admin.OpResult
+import com.padguard.core.engine.lock.LockController
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
  * 家长密码验证通过后的「退出并卸载」。
  *
- * ## 设计：家长密码门 + 设备管理员 deterrent
- * 1. 先尝试撤销设备管理员（[DeviceAdminBridge.isAdminActive] 为真时 [DevicePolicyManager.removeActiveAdmin]）。
- *    设备管理员激活期间，系统设置里的"卸载"入口被禁用——这是阻止孩子随意卸载的第一道物理屏障。
- * 2. 再拉起系统 [Intent.ACTION_UNINSTALL_PACKAGE] 卸载页，由家长在系统界面确认卸载。
+ * ## 为什么必须走完整释放（2026-11-18 真机 bug 复盘）
+ * 旧实现只做两件事：`setUninstallBlocked(self, false)` + `removeActiveAdmin()`。
+ * 在 **Device Owner** 设备上这两步都不足以卸载：
+ * 1. DO 身份本身禁止系统卸载自身应用，`removeActiveAdmin()` 对 DO 无效（还会抛 SecurityException
+ *    被 runCatching 吞掉）——必须 `clearDeviceOwnerApp()`；
+ * 2. `SecurityEnforcer` / `AppPolicyEnforcer` / `SelfProtectionModule` 还压着
+ *    `DISALLOW_UNINSTALL_APPS`、`DISALLOW_APPS_CONTROL` 等用户限制，不清掉照样装不卸；
+ * 3. Kiosk 常驻桌面 / LockTask 白名单 / 锁屏浮层不撤，卸载确认页出不来或被盖住。
  *
- * ## 已知边界（如实标注，不谎报"已锁死"）
- * - 非 Device Owner 下，设备管理员**不能**阻止强制停止（Settings → 强制停止依然可用），
- *   也无法阻止在设置里"停用/删除设备管理员"后卸载。本能力是 deterrent，不是绝对锁。
- * - 强制停止会一并取消 JobScheduler 看门狗，守护在下次开机/解锁前失效；这是非 DO 设备的固有限制，
- *   真正防脱管需 Device Owner 出厂预装（见三件套重构计划 §7）。
- * - 撤销/卸载意图均包 [android.content.Intent.FLAG_ACTIVITY_NEW_TASK]，因其由后台/Activity 触发。
+ * 因此这里直接复用解绑时的权威释放入口 [DeviceAdminBridge.releaseControl]：
+ * 清桌面 → 清 LockTask → 放出被挂起/隐藏的应用 → 还原相机截屏与用户限制 →
+ * 解除自身卸载封锁 → 最后 relinquish DO/管理员。释放完立即重探权限模式，
+ * 避免策略主循环在「权限已摘除、缓存还是 DO」的几秒窗口里把封锁重新压回去。
+ *
+ * ## 与无障碍闸门的分工
+ * 密码验证时由 [FloatingActionActivity] 打开 10 分钟设备操作窗口
+ * （`GuardPasswordManager.unlock()`），否则 `OperationGuardAccessibilityService` 会把
+ * 系统卸载确认页当成 REASON_INSTALLER 顶回 —— 表现为"密码输对了却毫无反应"。
+ * 本类只负责把系统层的锁全部解开并把卸载页拉起来。
+ *
+ * ## 已知边界（如实标注）
+ * - 卸载最后一步必须由家长在**系统界面**确认；本应用不能静默卸载自身（Android 安全模型）。
+ * - 家长在系统弹窗点"取消"时应用仍在设备上，但 DO 与限制已被释放；下次策略刷新会重新武装。
  */
 @Singleton
 class ExitController @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val admin: DeviceAdminBridge
+    private val admin: DeviceAdminBridge,
+    private val lockController: LockController,
+    private val lockScreenPresenter: LockScreenPresenter
 ) {
-    fun requestUninstall(activity: Activity) {
-        // DO/PO 形态下自身卸载被系统级封死（setUninstallBlocked(true)），
-        // 必须先解封，否则即便家长密码门已通过，系统仍会驳回卸载，卸载流程卡死。
-        // 非 DO 设备 can(BLOCK_UNINSTALL)=false，此处为 no-op，幂等安全。
-        runCatching {
-            if (admin.can(Capability.BLOCK_UNINSTALL)) {
-                admin.setUninstallBlocked(admin.selfPackageName, false)
-                Logger.i(TAG) { "uninstall block released before uninstall" }
-            }
-        }.onFailure { Logger.e(TAG, it) { "release uninstall block failed" } }
+    /**
+     * 释放管控并拉起系统卸载页。调用前必须已通过家长密码验证。
+     *
+     * DPM / PMS 调用放在后台线程；锁屏收口与 startActivity 回到主线程。
+     */
+    suspend fun requestUninstall(activity: Activity) {
+        // 1) 先撤锁屏：否则系统卸载确认页会被我们的全屏锁屏盖住，家长根本点不到"确定"。
+        runCatching { lockController.releaseAll() }
+            .onFailure { Logger.e(TAG, it) { "release lock before uninstall failed" } }
+        withContext(Dispatchers.Main) {
+            runCatching { lockScreenPresenter.dismiss() }
+                .onFailure { Logger.e(TAG, it) { "dismiss lock screen before uninstall failed" } }
+        }
 
-        runCatching {
-            admin.adminComponent?.let { comp ->
-                val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-                if (dpm.isAdminActive(comp)) {
-                    dpm.removeActiveAdmin(comp)
-                    Logger.i(TAG) { "device admin removed before uninstall" }
-                }
-            }
-        }.onFailure { Logger.e(TAG, it) { "remove device admin failed" } }
+        // 2) 完整释放所有系统级管控（含 DO / 用户限制 / 卸载封锁 / Kiosk 桌面）。
+        //    旧版这里的"只解封 + removeActiveAdmin"是卸载失效的直接原因，不得回退。
+        val ops = withContext(Dispatchers.Default) {
+            val released = runCatching { admin.releaseControl() }
+                .onFailure { Logger.e(TAG, it) { "releaseControl failed before uninstall" } }
+                .getOrDefault(emptyList())
+            // 立刻重探：relinquish 后 _controlMode 仍是 DO 的话，15s 内的策略自检会再压一次封锁。
+            runCatching { admin.refreshControlMode() }
+            released
+        }
+        val failed = ops.filter { it.second is OpResult.Failed }.map { it.first }
+        Logger.i(TAG) {
+            "uninstall prepared: ${ops.size} release ops, failed=$failed, mode=${admin.controlMode.value}"
+        }
 
-        val uri = Uri.parse("package:${context.packageName}")
-        val intent = Intent(Intent.ACTION_UNINSTALL_PACKAGE, uri)
+        // 3) 拉起系统卸载确认页。DO 已清、卸载封锁已解、无障碍窗口已开，
+        //    这一步才真正能走到系统"确定卸载"。
+        val intent = Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:${context.packageName}"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        runCatching { activity.startActivity(intent) }
-            .onFailure { Logger.e(TAG, it) { "uninstall intent failed" } }
+        withContext(Dispatchers.Main) {
+            runCatching {
+                if (!activity.isFinishing && !activity.isDestroyed) {
+                    activity.startActivity(intent)
+                } else {
+                    Logger.w(TAG) { "activity gone before uninstall intent, aborted" }
+                }
+            }.onFailure { Logger.e(TAG, it) { "uninstall intent failed" } }
+        }
     }
 
     companion object {

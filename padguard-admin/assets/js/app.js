@@ -70,6 +70,18 @@
       PG.ui.toast("err", "请输入账号和密码", "账号与密码均为必填");
       return;
     }
+    // ?api= 可把后台指向任意内网 http 主机；地址栏仍是合法域名，页面看起来完全正常，
+    // 但登录会把管理员口令与后续 Bearer token 发给那台主机。发凭据前必须显式确认。
+    const override = PG.api.config.overrideTarget;
+    if (override && !PG.api.config.overrideConfirmed) {
+      const ok = window.confirm(
+        "安全确认：登录目标被 ?api= 参数覆盖为 " + override + "。\n" +
+        "你的账号和密码将发送到该地址，而不是当前页面所在服务器。\n" +
+        "请确认这是你信任的服务端；不确定请取消并联系管理员。"
+      );
+      if (!ok) return;
+      PG.api.config.overrideConfirmed = true;
+    }
     const btn = e.target.querySelector("button");
     btn.disabled = true; btn.textContent = "登录中…";
     try {
@@ -78,7 +90,9 @@
       PG.api.config.token = r.token;
       enterApp();
     } catch (err) {
-      PG.ui.toast("err", "登录失败", err.message);
+      // 统一走中文错误解析：服务端已给「密码错误 / 管理员不存在 / 账号已停用」等具体原因，
+      // 连不上服务端、超时等情况也要给中文，绝不把 fetch 的英文异常原文弹给管理员。
+      PG.ui.toast("err", "登录失败", PG.explainError(err));
     } finally { btn.disabled = false; btn.textContent = "登 录"; }
   };
 

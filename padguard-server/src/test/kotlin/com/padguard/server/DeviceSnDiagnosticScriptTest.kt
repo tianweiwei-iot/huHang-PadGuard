@@ -24,6 +24,9 @@ import java.io.File
 @SpringBootTest
 @ActiveProfiles("local")
 @TestPropertySource(properties = [
+    "padguard.storage.dir=build/test-uploads",
+    "padguard.initial-password-file=build/test-secrets/admin-pwd.txt",
+    "padguard.parent-initial-password-file=build/test-secrets/parent-pwd.txt",
     "spring.datasource.url=jdbc:h2:mem:sndiag;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE",
     "spring.jpa.hibernate.ddl-auto=create-drop",
     "padguard.jwt.secret=sn-diag-test-secret-key-32-bytes-min-ok"

@@ -126,7 +126,8 @@ class PolicyExtensionService(
                 isBlocked = p?.isBlocked ?: false, dailyLimitMinutes = p?.dailyLimitMinutes
             )
         }
-        for (p in appPolicyRepository.findByDeviceId(deviceId)) {
+        // 复用第 111 行已取出的策略集合，避免同一接口对同一张表重复查询。
+        for (p in policies.values) {
             if (p.packageName !in seen) {
                 result += AppPolicyDto(
                     id = p.id, deviceId = deviceId, packageName = p.packageName,
@@ -229,7 +230,7 @@ class PolicyExtensionService(
         val appPolicies = appPolicyRepository.findByDeviceId(deviceId)
         return AppListPolicyDto(
             mode = s.appListMode?.takeIf { it == "WHITELIST" } ?: "BLACKLIST",
-            requirePasswordOnLaunch = s.requirePasswordOnLaunch ?: false,
+            requirePasswordOnLaunch = s.requirePasswordOnLaunch ?: true,
             requirePasswordOnInstall = s.requirePasswordOnInstall ?: true,
             requirePasswordOnUninstall = s.requirePasswordOnUninstall ?: true,
             whitelist = appPolicies.filter { !it.isBlocked }.map { it.packageName },
@@ -439,6 +440,14 @@ class PolicyExtensionService(
      */
     fun ensureRebuilt(deviceId: String) {
         val latest = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId) ?: return
+        // 版本回滚产物是「历史快照」，按定义就与当前子表不一致。
+        // 这里若照常自愈，设备下一次拉策略就会把刚回滚的包重建回当前配置，
+        // 家长端却显示「回滚成功」——不留错误、只在客诉里出现的假功能。
+        // 回滚态由家长下一次主动改设置（rebuildPolicy 写 NORMAL 行）自然结束。
+        if (latest.source == PolicySource.ROLLBACK) {
+            log.debug("policy rollback active, skip ensureRebuilt for {} v{}", deviceId, latest.version)
+            return
+        }
         val expected = buildPolicyPackage(deviceId, latest.version) ?: return
         if (latest.packageJson != expected) {
             log.warn("policy drift detected for {} (v{}), rebuilding", deviceId, latest.version)
@@ -448,6 +457,9 @@ class PolicyExtensionService(
 
     fun rebuildPolicy(deviceId: String) {
         val device = deviceRepository.findById(deviceId).orElse(null) ?: return
+        // 定时生效窗口没有子表落点，必须从上一版本显式继承，否则家长改一次设置
+        // 就把窗口清空（表现为「设了明天生效，今天立刻生效了」）。
+        val previous = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)
         // 同一台设备可能同时被"设置保存"与"拉取前自愈"触发重建，同样必须走分配器
         val version = PolicyVersions.allocate(deviceId, deviceRepository, policyRepository, log)
         val packageJson = buildPolicyPackage(deviceId, version) ?: return
@@ -455,6 +467,9 @@ class PolicyExtensionService(
             Policy(
                 id = UUID.randomUUID().toString(), deviceId = deviceId, version = version,
                 packageJson = packageJson, scene = device.scene,
+                effectiveFrom = previous?.effectiveFrom, effectiveTo = previous?.effectiveTo,
+                // 写 NORMAL 行 = 退出回滚态：任何一次家长主动改设置都会解除版本回滚。
+                source = PolicySource.NORMAL,
                 updatedAt = System.currentTimeMillis()
             )
         )
@@ -567,8 +582,8 @@ class PolicyExtensionService(
                 "mode" to (settings.appListMode?.takeIf { it == "WHITELIST" } ?: "BLACKLIST"),
                 "whitelist" to whitelist,
                 "blacklist" to blacklist,
-                // 无 DO 降级：启动受管控应用时是否要密码（仅非 DO 设备生效）
-                "requirePasswordOnLaunch" to (settings.requirePasswordOnLaunch ?: false),
+                // 无 DO 降级：启动应用时是否要密码（非 DO 全量闸门，仅非 DO 设备生效；默认开杜绝"装完即玩"）
+                "requirePasswordOnLaunch" to (settings.requirePasswordOnLaunch ?: true),
                 // 无 DO 降级：安装 / 卸载确认页是否要密码（仅非 DO 设备生效，默认都要）
                 "installPolicy" to mapOf(
                     "requirePasswordOnInstall" to (settings.requirePasswordOnInstall ?: true),
@@ -612,7 +627,10 @@ class PolicyExtensionService(
                 "heartbeatIntervalSec" to settings.autoRefreshSeconds,
                 "logUploadIntervalSec" to 300,
                 // 与默认策略包保持一致地显式下发，避免重建策略后周期定位被静默关掉
-                "locationIntervalSec" to DEFAULT_LOCATION_INTERVAL_SEC
+                "locationIntervalSec" to DEFAULT_LOCATION_INTERVAL_SEC,
+                // PIPL 撤回同意的端上闸门：心跳保留（守卫不能掉线），但采集全部停掉。
+                // 走策略包而不是单独指令，才对离线设备与进程重启具备持久性。
+                "consentRevoked" to (device.consentRevoked ?: false)
             ),
             // 未成年人模式**必须原样继承**：它是合规强制项，不属于"由子表重建"的范畴。
             //
@@ -661,6 +679,14 @@ class PolicyExtensionService(
         if (!entitledForChild(device.userId)) {
             EntitlementGate.applyRelease(pkg)
         }
+        // 定时生效窗口：孩子端 `PolicyEngine.resolveEffectivePolicy` 读的是**包内**字段，
+        // 不是 policies 表的列。窗口写入下发包的唯一入口在这里，才能保证
+        // 「子表重建 / 权益翻转 / 模板应用」任何路径产出的包都带着窗口，
+        // 且与 ensureRebuilt 计算出的期望包逐字一致（否则会被判成 drift 再重建一次）。
+        // 0 / 缺省 = 不限制，与孩子端 `effectiveFrom > 0` 的判定口径一致。
+        val window = policyRepository.findFirstByDeviceIdOrderByVersionDesc(deviceId)
+        if (window?.effectiveFrom != null) pkg["effectiveFrom"] = window.effectiveFrom
+        if (window?.effectiveTo != null) pkg["effectiveTo"] = window.effectiveTo
         return objectMapper.writeValueAsString(pkg)
     }
 

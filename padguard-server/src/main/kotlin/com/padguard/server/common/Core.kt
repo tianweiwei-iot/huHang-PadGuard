@@ -18,6 +18,8 @@ import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException
 import org.springframework.web.multipart.MaxUploadSizeExceededException
+import org.springframework.web.context.request.async.AsyncRequestTimeoutException
+import org.springframework.web.multipart.support.MissingServletRequestPartException
 import org.springframework.web.servlet.resource.NoResourceFoundException
 
 /** 调用方：决定用哪套响应包装 / 错误码 */
@@ -185,8 +187,30 @@ class GlobalExceptionHandler {
                     e.code == ParentErr.POLICY_NOT_FOUND ||
                     e.code == ParentErr.ORDER_NOT_FOUND
                 ) -> HttpStatus.NOT_FOUND
+            // 订阅类业务拒绝（过期 / 设备数超限）：与上面 403 同源 —— 家长端 api.js 以 HTTP 2xx 判成败，
+            // 回 200 会让"订阅已过期 / 设备已满"被误判为操作成功（与已修的 2003/3003 同类 bug）。
+            // 归到 403：鉴权网关 / 前端拦截器统一按"被拒绝"处理，前端据 body.code(4001/4002) 给出付费引导。
+            e.audience == Audience.PARENT && (
+                e.code == ParentErr.SUBSCRIPTION_REQUIRED ||
+                    e.code == ParentErr.DEVICE_LIMIT_EXCEEDED
+                ) -> HttpStatus.FORBIDDEN
+            // 订单状态非法（超时关闭 / 验签未通过等）：属客户端或状态错误，必须落到 4xx 而非 200，
+            // 否则未验签的支付回调、超时被拒的订单会被网关/前端误判为"成功"。
+            e.audience == Audience.PARENT && e.code == ParentErr.ORDER_STATE_INVALID -> HttpStatus.BAD_REQUEST
+            // 服务端内部错误：绝不能落到 else -> 200，否则前端把"服务器炸了"当成"操作成功"。
+            e.audience == Audience.PARENT && e.code == ParentErr.SERVER_ERROR -> HttpStatus.INTERNAL_SERVER_ERROR
+            // 设备离线：指令无法下发，必须落到 4xx 让前端给出"设备不在线"提示而非"成功"。
+            e.audience == Audience.PARENT && e.code == ParentErr.DEVICE_OFFLINE -> HttpStatus.CONFLICT
+            // 直播观看/推流并发上限：与限流同源，必须是 429，前端据此提示"当前观看人数已满"。
+            e.audience == Audience.PARENT &&
+                (e.code == ParentErr.LIVE_VIEWERS_FULL || e.code == ParentErr.LIVE_DEVICES_FULL) ->
+                HttpStatus.TOO_MANY_REQUESTS
             e.audience == Audience.CHILD && e.code == ChildErr.TOKEN_INVALID -> HttpStatus.UNAUTHORIZED
             e.audience == Audience.CHILD && e.code == ChildErr.DEVICE_UNBOUND -> HttpStatus.FORBIDDEN
+            // 无效/过期绑定码本质是参数错误（家长端应据此提示"刷新接入码"），必须以 4xx 返回：
+            // 此前落到 else -> 200，HTTP 语义是"成功"，网关/监控/前端只看状态码时会误判绑定成功。
+            // 孩子端按 body.code 判失败（不受影响），这里只把 HTTP 语义纠正为正确的 4xx。
+            e.audience == Audience.CHILD && e.code == ChildErr.BIND_CODE_EXPIRED -> HttpStatus.BAD_REQUEST
             // 家长账号被冻结：孩子端是"已绑定设备想再绑/换绑"的场景，属终态拒绝（403），
             // 不能回 401 —— 401 会让孩子端清空凭据回到绑定页，把已绑定设备也一并踢掉。
             e.audience == Audience.CHILD && e.code == ChildErr.PARENT_ACCOUNT_SUSPENDED -> HttpStatus.FORBIDDEN
@@ -195,8 +219,19 @@ class GlobalExceptionHandler {
             // 回 200 时它会把 { code:1001, data:null } 当成成功返回，
             // 于是前端弹出"保存成功"，而事实上服务端拒绝写入 —— 用户改了半天权限，什么都没变。
             // 典型场景：RBAC 保存时"有写无读"的前置校验被拦，前台却提示保存成功。
-            e.code == ParentErr.PARAM_ERROR -> HttpStatus.BAD_REQUEST
-            else -> HttpStatus.OK
+            // 必须限定 audience：孩子端若误抛 ParentErr.PARAM_ERROR（历史上有过），
+            // 这条不限定会把家长码塞进 DeviceApiResponse；孩子端码表是 40xxx，1001 属未知码。
+            e.audience == Audience.PARENT && e.code == ParentErr.PARAM_ERROR -> HttpStatus.BAD_REQUEST
+            e.audience == Audience.CHILD && e.code == ChildErr.PARAM_ERROR -> HttpStatus.BAD_REQUEST
+            else -> {
+                // 系统性隐患兜底：任何"未在此 when 显式映射"的孩子端业务异常都会落到这里以 HTTP 200 返回
+                // （仅 body.code 非零）。一旦新增 ChildErr 码却漏配状态码，HTTP 会静默表现为"成功"，
+                // 只看状态码的网关/前端会误判。这里对未映射的 ChildErr 打 WARN，让遗漏可见、可追责。
+                if (e.audience == Audience.CHILD) {
+                    log.warn("child error code not explicitly mapped to HTTP status, returned 200: code={} msg={}", e.code, e.message)
+                }
+                HttpStatus.OK
+            }
         }
         return if (e.audience == Audience.CHILD) {
             ResponseEntity.status(status)
@@ -262,7 +297,7 @@ class GlobalExceptionHandler {
         log.debug("static resource not found: {}", e.message)
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
             .contentType(MediaType.APPLICATION_JSON)
-            .body(ApiResponse<Any>(ParentErr.PARAM_ERROR, "not found"))
+            .body(ApiResponse<Any>(ParentErr.PARAM_ERROR, "请求的资源不存在，请检查访问地址"))
     }
 
     /**
@@ -288,6 +323,7 @@ class GlobalExceptionHandler {
         HttpMessageNotReadableException::class,
         MethodArgumentNotValidException::class,
         MissingServletRequestParameterException::class,
+        MissingServletRequestPartException::class,
         MissingPathVariableException::class,
         MethodArgumentTypeMismatchException::class
     )
@@ -341,13 +377,48 @@ class GlobalExceptionHandler {
             else "请求参数校验未通过：${first.field} ${first.defaultMessage.orEmpty()}".trim()
         }
         is MissingServletRequestParameterException -> "缺少必需参数：${e.parameterName}"
+        is MissingServletRequestPartException -> "缺少必需的文件字段：${e.requestPartName}"
         is MissingPathVariableException -> "缺少路径参数：${e.variableName}"
         is MethodArgumentTypeMismatchException -> "参数 ${e.name} 的值类型不正确"
         else -> "请求参数有误"
     }
 
+    /**
+     * 异步请求超时：`StreamingResponseBody`（实时看屏上行流）与 `DeferredResult`
+     * （孩子端指令长轮询）都会在 `spring.mvc.async.request-timeout` 到点后抛这个异常。
+     *
+     * 它是**预期生命周期**，不是故障：
+     * - 看屏流到点后响应早已提交（帧一直在写），容器直接结束连接，家长端按重连策略续看；
+     * - 长轮询自带 `DeferredResult(capped)` 超时，永远先于全局超时返回。
+     *
+     * 此前它落到 [handleOther] 的"响应已提交"分支，每次打一条 ERROR + 整段
+     * `TimeoutCallableProcessingInterceptor` 堆栈（本机日志实测每 10 分钟一条），
+     * 既把错误率告警打成假阳性，也会把真正的异常埋掉。
+     * 这里按 DEBUG 记一行，并保持与 Spring 默认一致的 503（仅未提交时）。
+     */
+    @ExceptionHandler(AsyncRequestTimeoutException::class)
+    fun handleAsyncTimeout(
+        e: AsyncRequestTimeoutException,
+        request: HttpServletRequest,
+        response: HttpServletResponse
+    ): ResponseEntity<*>? {
+        if (!resetIfPossible(response)) {
+            log.debug(
+                "async timeout after response committed (normal for long-lived streams): {} {}",
+                request.method, request.requestURI
+            )
+            return null
+        }
+        log.warn("async timeout before response committed: {} {}", request.method, request.requestURI)
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build<Any>()
+    }
+
     @ExceptionHandler(Exception::class)
-    fun handleOther(e: Exception, response: HttpServletResponse): ResponseEntity<*>? {
+    fun handleOther(
+        e: Exception,
+        request: HttpServletRequest,
+        response: HttpServletResponse
+    ): ResponseEntity<*>? {
         // 客户端主动断开：正常业务中断，不记账、不改写响应
         if (isClientAbort(e)) {
             log.debug("client aborted the request: {}", e.message)
@@ -366,9 +437,19 @@ class GlobalExceptionHandler {
         // 用户报障时无任何可定位信息，因此用 ref 把两侧接上：日志里 grep 同一个 ref 即可。
         val ref = java.util.UUID.randomUUID().toString().take(8)
         log.error("unhandled exception ref={}", ref, e)
+        val message = "服务器内部错误，请稍后重试（错误编号 $ref）"
+        // 端区分口径必须与 handleProtocolError 一致（孩子端统一 /api/v1/**）：
+        // 否则孩子端任何未捕获异常（例如迁移缺列抛出的 SQLException）都会拿到家长版信封
+        // {timestamp} + 家长码 5001，而孩子端按 {serverTime} + 40xxx 解析，反序列化直接丢内容。
+        val audience = if (request.requestURI.startsWith("/api/")) Audience.CHILD else Audience.PARENT
+        val body: Any = if (audience == Audience.CHILD) {
+            DeviceApiResponse<Any>(ChildErr.SERVER_ERROR, message)
+        } else {
+            ApiResponse<Any>(ParentErr.SERVER_ERROR, message)
+        }
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
             .contentType(MediaType.APPLICATION_JSON)
-            .body(ApiResponse<Any>(ParentErr.SERVER_ERROR, "服务器内部错误，请稍后重试（错误编号 $ref）"))
+            .body(body)
     }
 
     /**
@@ -377,7 +458,13 @@ class GlobalExceptionHandler {
      */
     private fun resetIfPossible(response: HttpServletResponse): Boolean {
         if (response.isCommitted) return false
-        return runCatching { response.reset() }.isSuccess
+        val ok = runCatching { response.reset() }.isSuccess
+        // reset() 把状态码、Content-Type 与**全部响应头**一并清空，其中就包括过滤器
+        // 事先写好的 nosniff / X-Frame-Options / Referrer-Policy。若不补回，
+        // "全局安全头"只在 200 上成立，而错误响应（最容易被嗅探成 HTML、被 iframe 套）
+        // 恰恰是唯一没有它的那一类。这里按同一份定义补回，两层不各写一遍字符串。
+        if (ok) SecurityHeaders.apply(response)
+        return ok
     }
 
     private fun isClientAbort(e: Throwable): Boolean {

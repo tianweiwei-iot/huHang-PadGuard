@@ -24,6 +24,7 @@ import kotlinx.coroutines.launch
 import com.padguard.parent.domain.model.InstalledApp
 import com.padguard.parent.presentation.ui.components.AppIcon
 import com.padguard.parent.presentation.ui.components.SoftCard
+import com.padguard.parent.presentation.ui.components.StaleDataHint
 import com.padguard.parent.presentation.ui.theme.PadGuardColors
 import com.padguard.parent.presentation.viewmodel.AppManageUiState
 import com.padguard.parent.presentation.viewmodel.AppManageViewModel
@@ -62,14 +63,18 @@ fun AppManageScreen(
             ApkFileReader.read(context, uri)
                 .onSuccess { apk ->
                     viewModel.installLocalApk(
-                        bytes = apk.bytes,
-                        fileName = apk.fileName,
+                        // 流式来源：APK 已在 ApkFileReader 里落成 cache 临时文件，
+                        // 上传结束后由 ViewModel 负责 close（删掉这份副本），不再整份读进堆。
+                        apk = apk.asMediaSource(),
                         packageName = apk.packageName,
                         appName = apk.appName
                     )
                 }
-                .onFailure { e ->
-                    snackbarHostState.showSnackbar("读取安装包失败：${e.message}")
+                .onFailure {
+                    // 这里读的是本地文件（用户从系统文件选择器挑的 APK），异常多为
+                    // FileNotFoundException / SecurityException，message 是系统给的英文原文。
+                    // 对家长没有可执行信息，直接给"怎么做"。
+                    snackbarHostState.showSnackbar("读取安装包失败，请确认文件完整、可访问后重试")
                 }
         }
     }
@@ -150,6 +155,17 @@ fun AppManageScreen(
                 onRevokeAll = { viewModel.setAllAllowed(false) }
             )
 
+            // 刷新失败但台账还在：不能整页替换成错误页（家长手里那份台账仍可用），
+            // 也不能只闪一句 Snackbar 就继续展示（看起来像最新状态）。挂一条带时间的常驻角标。
+            if (uiState.error != null && uiState.apps.isNotEmpty()) {
+                StaleDataHint(
+                    message = uiState.error,
+                    lastSuccessAt = uiState.lastSuccessAt,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    onRetry = { viewModel.load() }
+                )
+            }
+
             // weight(1f)：列表固定拿走"剩余全部高度"。
             // 之前用 fillMaxSize() 时，上方卡片一旦变高，列表就被顶到可视区之外，
             // 表现为"进去只看得见开关、看不见应用"。
@@ -158,7 +174,7 @@ fun AppManageScreen(
                     uiState.isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
-                    uiState.error != null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    uiState.error != null && uiState.apps.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(uiState.error!!, color = PadGuardColors.WarningRed)
                             Spacer(Modifier.height(8.dp))

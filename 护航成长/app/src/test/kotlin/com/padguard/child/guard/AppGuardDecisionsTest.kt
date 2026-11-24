@@ -22,7 +22,8 @@ class AppGuardDecisionsTest {
         systemAppRules: Map<String, String> = emptyMap(),
         requirePasswordOnLaunch: Boolean = false,
         requirePasswordOnInstall: Boolean = true,
-        requirePasswordOnUninstall: Boolean = true
+        requirePasswordOnUninstall: Boolean = true,
+        isDeviceOwner: Boolean = false
     ) = AppGuardDecisions.Snapshot(
         mode = mode,
         whitelist = whitelist,
@@ -30,7 +31,8 @@ class AppGuardDecisionsTest {
         systemAppRules = systemAppRules,
         requirePasswordOnLaunch = requirePasswordOnLaunch,
         requirePasswordOnInstall = requirePasswordOnInstall,
-        requirePasswordOnUninstall = requirePasswordOnUninstall
+        requirePasswordOnUninstall = requirePasswordOnUninstall,
+        isDeviceOwner = isDeviceOwner
     )
 
     private fun decisions(
@@ -153,15 +155,118 @@ class AppGuardDecisionsTest {
     }
 
     @Test
-    fun `authorized app never needs guard even when launch-block is on`() {
+    fun `DO authorized app never needs guard even when launch-block is on`() {
+        // DO 设备由系统隐藏/挂起负责，已授权应用运行自由，闸门仅作用于受控应用（保留原口径）。
         val d = decisions(
             snapshot(
                 mode = AppListMode.WHITELIST,
                 whitelist = setOf("com.a"),
-                requirePasswordOnLaunch = true
+                requirePasswordOnLaunch = true,
+                isDeviceOwner = true
             )
         )
         assertFalse(d.needsLaunchGuard("com.a", appAccessGranted = false, unlocked = false))
+    }
+
+    @Test
+    fun `non-DO authorized app needs guard when launch-block is on (R-P2-19)`() {
+        // 非 DO 全量启动闸门：白名单内已授权应用（非系统）也要密码，杜绝"装完即玩"。
+        val d = decisions(
+            snapshot(
+                mode = AppListMode.WHITELIST,
+                whitelist = setOf("com.a"),
+                requirePasswordOnLaunch = true,
+                isDeviceOwner = false
+            )
+        )
+        assertTrue(d.needsLaunchGuard("com.a", appAccessGranted = false, unlocked = false))
+    }
+
+    @Test
+    fun `non-DO new app under default blacklist needs guard when launch-block is on (R-P2-19)`() {
+        // 默认黑名单模式下，未列入黑名单的新装应用"已授权"，非 DO 全量闸门仍拦它（治 APP-04）。
+        val d = decisions(
+            snapshot(
+                mode = AppListMode.BLACKLIST,
+                blacklist = setOf("com.b"),
+                requirePasswordOnLaunch = true,
+                isDeviceOwner = false
+            )
+        )
+        assertTrue(d.needsLaunchGuard("com.newgame", appAccessGranted = false, unlocked = false))
+        // 名单内受控应用同样拦。
+        assertTrue(d.needsLaunchGuard("com.b", appAccessGranted = false, unlocked = false))
+    }
+
+    @Test
+    fun `non-DO launch-block off still lets new app launch freely`() {
+        // 家长显式关闭闸门 → 非 DO 回落名单口径，新应用（已授权）免密（不强制、可回退）。
+        val d = decisions(
+            snapshot(
+                mode = AppListMode.BLACKLIST,
+                requirePasswordOnLaunch = false,
+                isDeviceOwner = false
+            )
+        )
+        assertFalse(d.needsLaunchGuard("com.newgame", appAccessGranted = false, unlocked = false))
+    }
+
+    // ==================== systemAppRules 优先于名单（新增缺陷 O） ====================
+
+    @Test
+    fun `explicit BLOCK controls an app that is NOT in the blacklist`() {
+        // 回归主线：旧实现 isAuthorized 只看名单，黑名单模式下"不在黑名单"即授权，
+        // isControlled 第一行直接 return false，显式 BLOCK 规则永远到不了 → 家长配了也白配。
+        val d = decisions(snapshot(systemAppRules = mapOf("com.sys" to "BLOCK")))
+        assertFalse(d.isAuthorized("com.sys"))
+        assertTrue(d.isControlled("com.sys"))
+        assertFalse(d.isLaunchableByChild("com.sys"))
+    }
+
+    @Test
+    fun `explicit BLOCK still needs launch guard on DO devices`() {
+        // DO 分支只对"受控应用"施加闸门；若 BLOCK 没被算进受控，DO 上就能免密打开。
+        // 开关关闭时 needsLaunchGuard 本就一律放行（DO 靠系统隐藏/挂起负责），故这里显式开启。
+        val d = decisions(
+            snapshot(
+                systemAppRules = mapOf("com.sys" to "BLOCK"),
+                isDeviceOwner = true,
+                requirePasswordOnLaunch = true
+            )
+        )
+        assertTrue(d.needsLaunchGuard("com.sys", appAccessGranted = false, unlocked = false))
+    }
+
+    @Test
+    fun `explicit ALLOW overrides blacklist membership on every entry point`() {
+        val d = decisions(snapshot(blacklist = setOf("com.b"), systemAppRules = mapOf("com.b" to "ALLOW")))
+        assertTrue(d.isAuthorized("com.b"))
+        assertFalse(d.isControlled("com.b"))
+        assertTrue(d.isLaunchableByChild("com.b"))
+    }
+
+    @Test
+    fun `systemAppRules values are case insensitive`() {
+        val d = decisions(snapshot(systemAppRules = mapOf("com.a" to "block", "com.b" to "allow")))
+        assertTrue(d.isControlled("com.a"))
+        assertFalse(d.isLaunchableByChild("com.a"))
+        assertFalse(d.isControlled("com.b"))
+    }
+
+    @Test
+    fun `whitelist mode keeps strict list semantics and ignores system rules`() {
+        // 与 PolicyEngine.decideBlacklistBlock 在白名单模式不做兜底保持同一取舍：
+        // 白名单 = 只允许名单内，不能用一条 ALLOW 规则把名单外的包放进来。
+        val d = decisions(
+            snapshot(
+                mode = AppListMode.WHITELIST,
+                whitelist = setOf("com.a"),
+                systemAppRules = mapOf("com.b" to "ALLOW")
+            )
+        )
+        assertFalse(d.isAuthorized("com.b"))
+        assertFalse(d.isLaunchableByChild("com.b"))
+        assertTrue(d.isLaunchableByChild("com.a"))
     }
 
     // ==================== isLaunchableByChild ====================

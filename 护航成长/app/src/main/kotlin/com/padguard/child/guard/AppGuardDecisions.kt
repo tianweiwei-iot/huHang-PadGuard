@@ -25,10 +25,27 @@ class AppGuardDecisions(
     private val isHidden: (String) -> Boolean
 ) {
 
-    /** 是否已授权（白名单内 / 黑名单外）。已授权应用一律放行，是"授权可用"的底线。 */
+    /**
+     * 是否已授权（白名单内 / 黑名单外）。已授权应用一律放行，是"授权可用"的底线。
+     *
+     * ## 黑名单模式下必须让 systemAppRules 优先于名单（新增缺陷 O）
+     * `PolicyEngine.decideBlacklistBlock` 明确：「ALLOW 优先于黑名单成员资格，
+     * BLOCK 强制纳入拦截（**即便不在黑名单列表里**）」。旧实现只按名单算授权，
+     * 于是 [isControlled] 第一行 `if (isAuthorized) return false` 会在黑名单模式下
+     * 让"不在黑名单 + 显式 BLOCK"的包直接放行 —— 家长显式 BLOCK 的系统应用既能在桌面显示，
+     * 又能免密启动，`systemAppRules[pkg]="BLOCK"` 这一支永远到不了。
+     * 桌面 [isLaunchableByChild] 直接复用本方法，因此在这里收敛即可让三处判定同时对齐引擎口径。
+     *
+     * 白名单模式刻意**不**套用精细规则：白名单的语义是"只允许名单内"，
+     * 与引擎在白名单模式下不做黑名单兜底（避免误拦桌面/输入法）保持同一取舍。
+     */
     fun isAuthorized(pkg: String): Boolean = when (snapshot.mode) {
         AppListMode.WHITELIST -> pkg in snapshot.whitelist
-        AppListMode.BLACKLIST -> pkg !in snapshot.blacklist
+        AppListMode.BLACKLIST -> when (snapshot.systemAppRules[pkg]?.uppercase()) {
+            "BLOCK" -> false
+            "ALLOW" -> true
+            else -> pkg !in snapshot.blacklist
+        }
     }
 
     /**
@@ -50,7 +67,7 @@ class AppGuardDecisions(
     fun isControlled(pkg: String): Boolean {
         if (isAuthorized(pkg)) return false
         if (isHiddenControlled(pkg)) return true
-        snapshot.systemAppRules[pkg]?.let { return it == "BLOCK" }
+        snapshot.systemAppRules[pkg]?.uppercase()?.let { return it == "BLOCK" }
         return when (snapshot.mode) {
             AppListMode.WHITELIST -> pkg !in snapshot.whitelist
             AppListMode.BLACKLIST -> pkg in snapshot.blacklist
@@ -78,7 +95,10 @@ class AppGuardDecisions(
         if (unlocked) return false
         if (isHiddenControlled(pkg)) return true
         if (!snapshot.requirePasswordOnLaunch) return false
-        return isControlled(pkg)
+        // 全量启动闸门（非 DO 软拦截形态）：打开任意非系统应用都要密码，否则默认黑名单模式下
+        // 新装应用天然"已授权"、完全不受闸门约束 → 非 DO "装完即玩"（R-P2-19）。
+        // DO 设备由系统隐藏/挂起负责，此处仅对受控应用施加闸门（保留原口径，避免已授权应用每次启动弹密）。
+        return if (snapshot.isDeviceOwner) isControlled(pkg) else true
     }
 
     /**
@@ -113,6 +133,12 @@ class AppGuardDecisions(
         /** 无 DO 降级：安装确认页是否要密码（家长端开关，默认 true = 要） */
         val requirePasswordOnInstall: Boolean,
         /** 无 DO 降级：卸载确认页是否要密码（家长端开关，默认 true = 要） */
-        val requirePasswordOnUninstall: Boolean
+        val requirePasswordOnUninstall: Boolean,
+        /**
+         * 当前设备是否为 Device Owner。决定"打开应用也要密码"闸门的口径：
+         * - true（DO）：由系统隐藏/挂起负责，闸门仅作用于受控应用（已授权应用运行自由）；
+         * - false（非 DO 存量平板）：全量闸门，打开任意非系统应用都要密码，杜绝"装完即玩"（R-P2-19）。
+         */
+        val isDeviceOwner: Boolean = false
     )
 }

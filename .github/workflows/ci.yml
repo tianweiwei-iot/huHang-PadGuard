@@ -1,0 +1,80 @@
+# PadGuard CI（2026-11-18 起，取代"纯人工门禁"）。
+#
+# 唯一入口原则：三端测试/lint/用例数下限与 admin 零依赖守卫一律走
+# padguard-server/scripts/launch-preflight.sh（与本地完全同一条命令）。
+# 出厂地址守卫单列一步跑正/负例：它不在 debug 套件里，但最贴近 release 安全。
+# 不要在这里另写一套并行逻辑，否则 CI 与本地门禁会漂移。
+#
+# 触发：push 到 main、全部 PR、以及每天 02:00 UTC 定时全量回归（防依赖漂移）。
+# 缓存：gradle wrapper + 依赖缓存；测试本身在 preflight 内强制 cleanTest/--rerun-tasks，
+# 不受缓存影响（UP-TO-DATE 假绿灯已在脚本内防死）。
+
+name: padguard-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  preflight:
+    name: 三端测试 + lint + admin 守卫
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 Node（preflight 内的 admin 守卫）
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', '**/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: 三端质量门禁（preflight，严格模式）
+        run: bash padguard-server/scripts/launch-preflight.sh
+
+      - name: release 出厂地址守卫（合法域名放行 + 占位域名拒绝）
+        run: |
+          set -e
+          cd "护航成长"
+          ./gradlew :app:verifyReleaseEndpoint -PBASE_URL=https://pad.example.cn/api/v1/ -PMQTT_BROKER=ssl://pad.example.cn:8883 --console=plain
+          if ./gradlew :app:verifyReleaseEndpoint -PBASE_URL=https://your.domain/api/v1/ -PMQTT_BROKER=ssl://your.domain:8883 --console=plain; then
+            echo "孩子端占位域名 your.domain 未被 release 守卫拒绝" >&2
+            exit 1
+          fi
+          cd "../护航控制端"
+          ./gradlew :app:verifyReleaseEndpoint -PBASE_URL=https://pad.example.cn/v1/ --console=plain
+          if ./gradlew :app:verifyReleaseEndpoint -PBASE_URL=https://your.domain/v1/ --console=plain; then
+            echo "家长端占位域名 your.domain 未被 release 守卫拒绝" >&2
+            exit 1
+          fi
+
+      - name: 上传测试报告（失败时排查用）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            padguard-server/build/reports/tests/
+            padguard-server/build/test-results/
+          retention-days: 14

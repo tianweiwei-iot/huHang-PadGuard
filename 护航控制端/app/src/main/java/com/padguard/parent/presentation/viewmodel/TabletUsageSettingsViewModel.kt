@@ -7,7 +7,10 @@ import com.padguard.parent.domain.model.TimeRange
 import com.padguard.parent.domain.model.UsageSession
 import com.padguard.parent.domain.repository.PolicyRepository
 import com.padguard.parent.domain.repository.UsageDelayTicket
+import com.padguard.parent.data.remote.ParentPushClient
+import com.padguard.parent.data.remote.ParentPushMessage
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,16 +48,37 @@ data class TabletUsageSettingsUiState(
      * 既没有成功提示也没有失败提示，孩子那边仍在倒计时，家长只能反复点
      * （每点一次就是一次真实的审批请求）。
      */
-    val actionMessage: String? = null
+    val actionMessage: String? = null,
+    /** 「开始计时」发起中：按钮置灰，避免连点重复下发（服务端幂等，这里只是 UI 反馈） */
+    val startRequestProcessing: Boolean = false
 )
 
 @HiltViewModel
 class TabletUsageSettingsViewModel @Inject constructor(
-    private val policyRepository: PolicyRepository
+    private val policyRepository: PolicyRepository,
+    private val parentPushClient: ParentPushClient
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(TabletUsageSettingsUiState())
     val uiState: StateFlow<TabletUsageSettingsUiState> = _uiState.asStateFlow()
+
+    /** 当前页面关注的设备（load/loadSession 时记下，推送按它过滤） */
+    private var activeDeviceId: String = ""
+
+    init {
+        // 「开始计时」工单状态推送（家长发起 / 孩子确认）：即时刷新计时卡，
+        // 家长正盯着"等待孩子确认"时，孩子点确认的翻转秒级可见，不必等 15s 轮询。
+        viewModelScope.launch {
+            parentPushClient.messages.collect { msg ->
+                if (msg is ParentPushMessage.UsageStartUpdated &&
+                    msg.deviceId == activeDeviceId &&
+                    activeDeviceId.isNotEmpty()
+                ) {
+                    loadSession(activeDeviceId)
+                }
+            }
+        }
+    }
 
     fun load(deviceId: String) {
         viewModelScope.launch {
@@ -135,6 +159,7 @@ class TabletUsageSettingsViewModel @Inject constructor(
      */
     fun loadSession(deviceId: String) {
         if (deviceId.isEmpty()) return
+        activeDeviceId = deviceId
         viewModelScope.launch {
             policyRepository.getUsageSession(deviceId)
                 .onSuccess { session ->
@@ -156,6 +181,39 @@ class TabletUsageSettingsViewModel @Inject constructor(
      */
     fun liveRemainingMs(now: Long): Long =
         _uiState.value.usageSession?.liveRemainingMs(now) ?: 0L
+
+    /**
+     * 家长发起「开始计时」：服务端落/复用当日 PENDING 工单并下发确认指令，
+     * 孩子端弹出确认框；孩子点「开始计时」后工单转 CONFIRMED（状态随 [loadSession] 轮询同步，
+     * 孩子确认动作本身也会经 WS `usage.start.confirmed` 推送加速）。
+     *
+     * 未确认则不开始计时（孩子端保持等待页）——本按钮只是"发起/催办"，不是"强制开始"。
+     * 设备离线时服务端照样落单：指令走 MQTT + 孩子端轮询双通道，上线后送达。
+     */
+    fun requestStart(deviceId: String) {
+        if (deviceId.isEmpty() || _uiState.value.startRequestProcessing) return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(startRequestProcessing = true)
+            val outcome = try {
+                policyRepository.requestUsageStart(deviceId)
+            } catch (t: Throwable) {
+                // 取消不是失败：放行后不写"发送失败"、不误刷新已取消的 scope。
+                if (t is CancellationException) throw t
+                Result.failure(t)
+            }
+            val message = outcome.fold(
+                onSuccess = { "已发送，等待孩子在平板上点「开始计时」确认" },
+                onFailure = { e -> "发送失败：${e.message ?: "请检查网络后重试"}" }
+            )
+            // 立即刷新一次会话：拿到新工单状态（PENDING）驱动按钮态切换，
+            // 不必等下一个 15s 轮询周期
+            loadSession(deviceId)
+            _uiState.value = _uiState.value.copy(
+                startRequestProcessing = false,
+                actionMessage = message
+            )
+        }
+    }
 
     /**
      * 拉取该设备的延时审批工单（含已处理），与 [loadSession] 解耦、可被 15 秒轮询刷新。
@@ -207,6 +265,8 @@ class TabletUsageSettingsViewModel @Inject constructor(
             val outcome = try {
                 block()
             } catch (t: Throwable) {
+                // 取消不是失败：放行后不写"发送失败"、不误刷新已取消的 scope。
+                if (t is CancellationException) throw t
                 Result.failure(t)
             }
             val message = outcome.fold(

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.annotation.TargetApi
 import android.os.Build
 import android.os.UserManager
 import android.provider.Settings
@@ -66,9 +67,20 @@ class AppPolicyEnforcer @Inject constructor(
         // 二者作用于两份互不相干的账本（见 reconcileAuthzIntent）。
         reconcileAuthzIntent(policy, launchable)
 
-        val target = when (policy.mode) {
-            AppListMode.BLACKLIST -> policy.blacklist.toSet() - protectedSet
-            AppListMode.WHITELIST -> (launchable - policy.whitelist.toSet()) - protectedSet
+        // 白名单模式但白名单为空 = 家长未配置。若按 (launchable - emptySet) 计算，target 会等于
+        // "除保护包外全部应用"，直接把孩子端桌面清空（变砖），且与 hiddenPackages 授权意图账本无关，
+        // 绝不能推导成"禁止一切"。短路：拒绝名单管控、保持现状，并提示家长修正（R-P1-4）。
+        val whitelistEmpty = policy.mode == AppListMode.WHITELIST && policy.whitelist.isEmpty()
+        val target = when {
+            whitelistEmpty -> {
+                report.markFailed(
+                    "app.list",
+                    "白名单模式但白名单为空：拒绝名单管控以避免隐藏全部应用（变砖），请在控制台为设备配置白名单"
+                )
+                emptySet()
+            }
+            policy.mode == AppListMode.BLACKLIST -> policy.blacklist.toSet() - protectedSet
+            else -> (launchable - policy.whitelist.toSet()) - protectedSet
         }.toMutableSet()
 
         // systemAppRules 做精细化覆盖：显式 BLOCK 的加入、显式 ALLOW 的移除
@@ -92,6 +104,10 @@ class AppPolicyEnforcer @Inject constructor(
         // 设备不具备隐藏能力（非 DO/PO）时退化为「挂起」（图标变灰、点击拦截），
         // 保证管控能力本身不因权限缺失而丢失。
         when {
+            whitelistEmpty -> {
+                // 白名单为空：保持设备现状，既不隐藏也不挂起，避免变砖；等待家长配置白名单。
+                Logger.w(TAG) { "whitelist empty in WHITELIST mode; skip hide/suspend to avoid bricking device" }
+            }
             admin.can(Capability.HIDE_PACKAGES) -> {
                 // 历史遗留：旧版本用挂起实现管控，升级后先清掉残留的挂起状态，
                 // 否则应用会同时"变灰"和"消失"，解除管控时也可能清理不干净。
@@ -279,6 +295,7 @@ class AppPolicyEnforcer @Inject constructor(
     }
 
     /** 拿到所有"桌面上能点开"的应用，白名单模式据此计算差集 */
+    @TargetApi(Build.VERSION_CODES.TIRAMISU)
     private fun launchablePackages(): Set<String> {
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

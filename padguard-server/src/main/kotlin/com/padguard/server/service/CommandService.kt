@@ -31,7 +31,9 @@ class CommandService(
     private val objectMapper: ObjectMapper,
     private val expiredCommandSweeper: ExpiredCommandSweeper,
     private val auditService: AuditService,
-    private val ownershipGuard: DeviceOwnershipGuard
+    private val ownershipGuard: DeviceOwnershipGuard,
+    /** W2：离线指令补发（白名单、保留期、原子刷新有效期窗口） */
+    private val commandRedelivery: CommandRedeliveryService
 ) {
     /**
      * 家长端下发指令：构造指令包(HMAC 签名) -> 落库 -> 经 MQ/M轮询下发。
@@ -50,7 +52,9 @@ class CommandService(
 
         val msgId = "cmd_" + UUID.randomUUID().toString().replace("-", "").take(24)
         val now = System.currentTimeMillis()
-        val expiresAt = now + 5 * 60_000
+        // W2：有效期改由配置给出（原为硬编码 5 * 60_000），补发成功时按同一 ttl 刷新窗口，
+        // 保证「新下发」与「补发」在终端 CommandGate 的时效判定上完全同构。
+        val expiresAt = now + commandRedelivery.ttlMs()
         // 字符串化 payload：① 让终端 Map<String,String> 反序列化无歧义；② canonicalJson 逐字符一致
         val strPayload: Map<String, String>? = payload?.mapValues { (_, v) -> v?.toString() ?: "null" }
         val canonical = canonicalPayload(strPayload)
@@ -61,7 +65,10 @@ class CommandService(
                 id = UUID.randomUUID().toString(), deviceId = deviceId, msgId = msgId,
                 type = type, priority = priority,
                 payloadJson = strPayload?.let { objectMapper.writeValueAsString(it) },
-                signature = signature, status = "PENDING", expiresAt = expiresAt, createdAt = now
+                signature = signature, status = "PENDING", expiresAt = expiresAt, createdAt = now,
+                // W2：只有白名单指令拿到非空补发截止时刻；其余为 null = 永不补发。
+                // 存量/一次性/采集类指令一律不进补发队列（fail-closed）。
+                redeliveryDeadlineAt = commandRedelivery.deadlineFor(type, now)
             )
         )
 
@@ -125,6 +132,12 @@ class CommandService(
         val now = System.currentTimeMillis()
         expiredCommandSweeper.sweepIfDue(deviceId, now)
 
+        // W2：抢占刷新「已过有效期、但仍在补发保留期内」的指令。
+        // 必须在 sweepIfDue 之后：清扫器现在会把可补发指令保留为 PENDING 而非收敛成终态。
+        // 也必须独立于常规查询：这些指令 createdAt 远早于终端游标，
+        // 走 `createdAt >= cursor` 会被整批过滤掉，补发就成了空转。
+        val redelivered = commandRedelivery.collectRedeliverable(deviceId, now)
+
         // 游标合法性校验（含**时钟偏移容错**）：
         // 终端时钟略快于服务端时，since 会落在「未来」——早期直接判非法归零，
         // 等于每次轮询都下发全部 PENDING 指令，叠加回执延迟就会重复执行
@@ -146,26 +159,40 @@ class CommandService(
         // 指令表只增不删，单次查询成本随使用时长线性增长，是全局响应变慢的主因之一。
         // 注：过期回收走 [ExpiredCommandSweeper.sweepIfDue]（按设备 30s 节流），
         // 既消除死代码，又把高频轮询路径上的维护成本降到 1/10。
-        return commandRepository.findPendingForPolling(
+        val fresh = commandRepository.findPendingForPolling(
             deviceId, STATUS_PENDING, now, cursor, PageRequest.of(0, MAX_POLLING_BATCH)
-        ).map { cmd ->
-                val payloadMap = cmd.payloadJson?.let { json ->
-                    runCatching { objectMapper.readValue(json, Map::class.java) as Map<String, Any?> }
-                        .getOrNull()
-                        ?: run {
-                            // payload 损坏静默变 null 会让端上执行"无参指令"（如解锁时长=0），
-                            // 后果隐蔽且难排查，必须留痕：msgId + type 让运维能定位脏数据来源。
-                            log.warn("command payload json corrupted, delivering null payload: msgId={} type={}", cmd.msgId, cmd.type)
-                            null
-                        }
-                }
-                CommandPacket(
-                    msgId = cmd.msgId, type = cmd.type,
-                    version = 1, timestamp = cmd.createdAt, expiresAt = cmd.expiresAt,
-                    priority = cmd.priority ?: "NORMAL", payload = payloadMap,
-                    signature = cmd.signature ?: ""
-                )
+        )
+
+        // W2 合并：补发指令一律用**刷新后的**新 expiresAt（实体快照里还是旧的过期值）。
+        // 补发条目放在前面 + distinctBy(msgId)：当 notifyWaiters 用 cursor=0 时，
+        // 常规查询也会把刚刷新的指令捞出来，去重后保留带确定新有效期的补发条目，
+        // 避免同一 msgId 在单批里出现两次（会污染 ack 与幂等统计）。
+        // sortedBy(createdAt) 保证 FIFO：补发的都是更早创建的指令，必须先执行，
+        // 否则「先解锁、再改黑名单」这类有序操作会被重放成相反顺序。
+        val merged = (redelivered.map { it.command to it.refreshedExpiresAt } +
+            fresh.map { it to it.expiresAt })
+            .distinctBy { it.first.msgId }
+            .sortedBy { it.first.createdAt }
+            .take(MAX_POLLING_BATCH)
+
+        return merged.map { (cmd, effectiveExpiresAt) ->
+            val payloadMap = cmd.payloadJson?.let { json ->
+                runCatching { objectMapper.readValue(json, Map::class.java) as Map<String, Any?> }
+                    .getOrNull()
+                    ?: run {
+                        // payload 损坏静默变 null 会让端上执行"无参指令"（如解锁时长=0），
+                        // 后果隐蔽且难排查，必须留痕：msgId + type 让运维能定位脏数据来源。
+                        log.warn("command payload json corrupted, delivering null payload: msgId={} type={}", cmd.msgId, cmd.type)
+                        null
+                    }
             }
+            CommandPacket(
+                msgId = cmd.msgId, type = cmd.type,
+                version = 1, timestamp = cmd.createdAt, expiresAt = effectiveExpiresAt,
+                priority = cmd.priority ?: "NORMAL", payload = payloadMap,
+                signature = cmd.signature ?: ""
+            )
+        }
     }
 
     // ==================== 长轮询（MQTT 缺失时的低延迟通道） ====================
@@ -213,7 +240,12 @@ class CommandService(
 
     /** 超时或连接断开时摘除回调，避免队列无限增长 */
     fun removeWaiter(deviceId: String, onReady: (List<CommandPacket>) -> Unit) {
-        waiters[deviceId]?.remove(onReady)
+        val queue = waiters[deviceId] ?: return
+        queue.remove(onReady)
+        // 队列空了就把 deviceId 这个 key 也从 Map 摘除，否则 waiters 会随历史设备数无界堆积
+        if (queue.isEmpty()) {
+            waiters.remove(deviceId, queue)
+        }
     }
 
     /** 唤醒该设备所有挂起的轮询请求。重复下发由终端 CommandGate 按 msgId 去重，安全。 */

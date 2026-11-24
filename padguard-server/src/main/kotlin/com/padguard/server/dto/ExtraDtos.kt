@@ -136,13 +136,14 @@ data class UpdateBlacklistRequest(val blockedPackages: List<String> = emptyList(
  * 应用管控模式设置（家长端「应用管理」页顶部）。
  *
  * @param mode BLACKLIST = 只管控名单内的应用；WHITELIST = 只放行名单内的（其余一律拦截）
- * @param requirePasswordOnLaunch 无 DO 设备上，打开受管控应用是否要求输入管理密码。
+ * @param requirePasswordOnLaunch 无 DO 设备上，打开应用是否要求输入管理密码（非 DO 全量启动闸门）。
  *   仅在设备**没有** Device Owner 时生效：有 DO 时管控由系统完成，不走这条路。
+ *   默认 true（R-P2-19）：杜绝默认黑名单模式下新装应用"装完即玩"；家长可显式关闭回落名单口径。
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class AppListPolicyRequest(
     val mode: String = "BLACKLIST",
-    val requirePasswordOnLaunch: Boolean = false,
+    val requirePasswordOnLaunch: Boolean = true,
     /** 非 DO 设备：安装确认页是否要求管理密码（默认 true） */
     val requirePasswordOnInstall: Boolean = true,
     /** 非 DO 设备：卸载确认页是否要求管理密码（默认 true） */
@@ -153,7 +154,7 @@ data class AppListPolicyRequest(
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class AppListPolicyDto(
     val mode: String = "BLACKLIST",
-    val requirePasswordOnLaunch: Boolean = false,
+    val requirePasswordOnLaunch: Boolean = true,
     val requirePasswordOnInstall: Boolean = true,
     val requirePasswordOnUninstall: Boolean = true,
     val whitelist: List<String> = emptyList(),
@@ -267,7 +268,26 @@ data class UsageSessionDto(
      * 家长把总开关关掉、平板照样锁，属于"关不掉的管控"。
      * false 时孩子端不得挂 DAILY_LIMIT，家长端应展示"时间管控已关闭"而不是倒计时。
      */
-    val timeControlEnabled: Boolean = true
+    val timeControlEnabled: Boolean = true,
+
+    /**
+     * 家长端发起的「开始计时」当日工单（null = 今日家长未发起）。
+     *
+     * 家长端据此渲染四态：未开始（startRequest==null && !active）、
+     * 已发送等待孩子确认（PENDING）、今日已开始（active）、今日已用完（active 且剩余 0）。
+     * 孩子端 Json 配了 ignoreUnknownKeys，此字段对老终端透明。
+     */
+    val startRequest: UsageStartRequestDto? = null
+)
+
+/** 家长端「开始计时」当日工单状态（随会话一起返回） */
+data class UsageStartRequestDto(
+    val requestId: String,
+    val deviceId: String = "",
+    val status: String,
+    /** PENDING / CONFIRMED / EXPIRED */
+    val createdAt: Long = 0L,
+    val confirmedAt: Long? = null
 )
 
 /** 延时申请请求：minutes 必须落在 delayOptions 内 */

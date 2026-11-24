@@ -59,6 +59,9 @@ class SchemaIndexInitializer(
             "CREATE INDEX IF NOT EXISTS idx_usage_logs_device_id ON usage_logs (device_id)",
             // 保留期清理：按事件时间戳范围删除，单 (timestamp) 索引让 DELETE 走范围扫描而非全表
             "CREATE INDEX IF NOT EXISTS idx_usage_logs_ts ON usage_logs (timestamp)",
+            // 保留期清理的实际判据是服务端 received_at（客户端 timestamp 可被改时间绕过/
+            // 置空后永不过期），少了这条索引 DELETE 会退化成全表扫
+            "CREATE INDEX IF NOT EXISTS idx_usage_logs_received_at ON usage_logs (received_at)",
 
             // 设备事件（违规统计）
             "CREATE INDEX IF NOT EXISTS idx_device_events_device_ts ON device_events (device_id, timestamp)",

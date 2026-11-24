@@ -38,11 +38,44 @@ class TransportSettings @Inject constructor(
         application.getSharedPreferences("padguard_child_transport", android.content.Context.MODE_PRIVATE)
 
     private val _baseUrl =
-        MutableStateFlow(normalizeBaseUrl(prefs.getString(KEY_BASE_URL, null) ?: BuildConfig.DEFAULT_BASE_URL))
+        MutableStateFlow(normalizeBaseUrl(initialSafeBaseUrl()))
     val baseUrl: StateFlow<String> = _baseUrl.asStateFlow()
 
-    private val _mqttBroker = MutableStateFlow(BuildConfig.DEFAULT_MQTT_BROKER)
+    /** 启动时从存储读出 baseUrl，但不信任旧值：过不了安全闸门的一律丢弃并回退到构建期默认值。 */
+    private fun initialSafeBaseUrl(): String {
+        val stored = prefs.getString(KEY_BASE_URL, null)
+        if (stored.isNullOrBlank()) return BuildConfig.DEFAULT_BASE_URL
+        val verdict = EndpointSafety.check(stored, BuildConfig.ALLOW_CLEARTEXT_PUBLIC)
+        return when (verdict) {
+            is Verdict.Allowed -> verdict.normalizedUrl
+            is Verdict.Rejected -> {
+                Logger.w(TAG) { "dropped unsafe stored baseUrl, fall back to default: ${verdict.reason}" }
+                BuildConfig.DEFAULT_BASE_URL
+            }
+        }
+    }
+
+    /**
+     * 启动时从存储读出 broker，与 [initialSafeBaseUrl] 同口径：
+     * 过不了 [EndpointSafety.checkMqtt] 闸门的旧值一律丢弃并回退到构建期默认值。
+     * 此前 [setMqttBroker] 只改内存不落盘，导致绑定响应下发的 broker 覆盖值在重启后丢失、
+     * 设备悄悄回连构建期默认 broker —— 与 baseUrl 的行为不一致，正是私有化部署"换服务器后重启即脱管"的根因。
+     */
+    private val _mqttBroker = MutableStateFlow(initialSafeMqttBroker())
     val mqttBroker: StateFlow<String> = _mqttBroker.asStateFlow()
+
+    private fun initialSafeMqttBroker(): String {
+        val stored = prefs.getString(KEY_MQTT_BROKER, null)
+        if (stored.isNullOrBlank()) return BuildConfig.DEFAULT_MQTT_BROKER
+        val verdict = EndpointSafety.checkMqtt(stored, BuildConfig.ALLOW_CLEARTEXT_PUBLIC)
+        return when (verdict) {
+            is Verdict.Allowed -> stored
+            is Verdict.Rejected -> {
+                Logger.w(TAG) { "dropped unsafe stored mqttBroker, fall back to default: ${verdict.reason}" }
+                BuildConfig.DEFAULT_MQTT_BROKER
+            }
+        }
+    }
 
     private val _useMock = MutableStateFlow(BuildConfig.USE_MOCK_SERVER)
 
@@ -77,18 +110,57 @@ class TransportSettings @Inject constructor(
         MutableStateFlow(prefs.getInt(KEY_REARM_DELAY_MS, DEFAULT_REARM_DELAY_MS))
     val rearmDelayMs: StateFlow<Int> = _rearmDelayMs.asStateFlow()
 
-    fun setBaseUrl(url: String) {
-        if (url.isBlank()) return
-        val normalized = normalizeBaseUrl(url)
-        _baseUrl.value = normalized
-        prefs.edit().putString(KEY_BASE_URL, normalized).apply()
-        Logger.i(TAG) { "baseUrl -> $normalized" }
+    /**
+     * 设置上行 HTTP 接入点。
+     *
+     * **硬性安全闸门**：任何写入都先过 [EndpointSafety.check]。
+     * 公网明文（http:// 公网 IP/域名）一律拒绝、且**不落盘** —— 孩子端平板没有键盘，
+     * 一旦被手填成公网 http，令牌与儿童数据就会明文过公网；这条闸门让"明文公网"在代码层面不可能发生，
+     * 同时不牺牲内网私有化部署（10/172.16~31/192.168/127/169.254 等仍放行）。
+     *
+     * 返回的 [Verdict] 让调用方（高级设置弹窗等）能就地把拒绝原因展示给用户；
+     * 调用方若忽略返回值，危险地址也绝不会真正生效（仅此一处写入）。
+     */
+    fun setBaseUrl(url: String): Verdict {
+        if (url.isBlank()) return Verdict.Rejected("服务器地址不能为空")
+        return when (val verdict = EndpointSafety.check(url, BuildConfig.ALLOW_CLEARTEXT_PUBLIC)) {
+            is Verdict.Rejected -> {
+                Logger.w(TAG) { "refuse baseUrl (unsafe): ${verdict.reason}" }
+                verdict
+            }
+            is Verdict.Allowed -> {
+                _baseUrl.value = verdict.normalizedUrl
+                prefs.edit().putString(KEY_BASE_URL, verdict.normalizedUrl).apply()
+                Logger.i(TAG) { "baseUrl -> ${verdict.normalizedUrl} (${verdict.level})" }
+                verdict
+            }
+        }
     }
 
-    fun setMqttBroker(uri: String) {
-        if (uri.isBlank()) return
-        _mqttBroker.value = uri
-        Logger.i(TAG) { "mqttBroker -> $uri" }
+    /**
+     * 设置 MQTT broker URI。
+     *
+     * 同样过 [EndpointSafety.checkMqtt]：明文 `tcp://`/`ws://` 仅放行内网，
+     * 公网一律拒绝且不落盘。注意 broker URI 也可能来自**服务端绑定响应下发**
+     * （[com.padguard.core.transport.RealRemoteDataSource]），因此这里是一道必要的纵深防御 ——
+     * 即便服务端被篡改指向公网明文 broker，孩子端也不会把设备令牌明文交出去。
+     */
+    fun setMqttBroker(uri: String): Verdict {
+        if (uri.isBlank()) return Verdict.Rejected("MQTT 服务器地址不能为空")
+        return when (val verdict = EndpointSafety.checkMqtt(uri, BuildConfig.ALLOW_CLEARTEXT_PUBLIC)) {
+            is Verdict.Rejected -> {
+                Logger.w(TAG) { "refuse mqttBroker (unsafe): ${verdict.reason}" }
+                verdict
+            }
+            is Verdict.Allowed -> {
+                _mqttBroker.value = uri
+                // 与 baseUrl 同口径落盘：broker 覆盖值（绑定响应下发 / 调试页手动覆盖）必须跨重启保留，
+                // 否则私有化部署"换服务器后重启"会悄悄回连构建期默认 broker 而脱管。
+                prefs.edit().putString(KEY_MQTT_BROKER, uri).apply()
+                Logger.i(TAG) { "mqttBroker -> $uri (${verdict.level})" }
+                verdict
+            }
+        }
     }
 
     fun setUseMock(enabled: Boolean) {
@@ -142,6 +214,7 @@ class TransportSettings @Inject constructor(
         private const val TAG = "TransportSettings"
 
         private const val KEY_BASE_URL = "base_url"
+        private const val KEY_MQTT_BROKER = "mqtt_broker"
         private const val KEY_REARM_DELAY_MS = "rearm_delay_ms"
 
         /** 上滑逃逸后重新抢占前台的默认延迟（毫秒）：接近 0，使孩子几乎无感 */

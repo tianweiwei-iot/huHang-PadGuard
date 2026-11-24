@@ -41,6 +41,9 @@
   let loadSeq = 0;
 
   async function load(root) {
+    // 搜索框 debounce(300ms) 可能在切页/登出后才到点：本页已换走则节点不存在，
+    // 直接放弃，避免发无用请求或对已移除节点写入抛 TypeError（登出后控制台噪声）。
+    if (!root.querySelector("#d-kw")) return;
     const seq = ++loadSeq;
     const q = { keyword: root.querySelector("#d-kw").value.trim(), online: root.querySelector("#d-on").value, page: curPage, size: PAGE_SIZE };
     let resp;
@@ -107,7 +110,7 @@
       PG.ui.toast("err", "设备详情加载失败", String((e && e.message) || e));
       return;
     }
-    if (!d) { PG.ui.toast("warn", "未找到设备", "设备 " + U.esc(id) + " 不在当前设备列表中（可能刚被解绑或删除）。"); return; }
+    if (!d) { PG.ui.toast("warn", "未找到设备", "设备 " + id + " 不在当前设备列表中（可能刚被解绑或删除）。"); return; }
     const dl = PG.ui.drawer({
       // 标题由 drawer() 内部统一 esc()，这里不能再转义一次：
       // 双重转义会把 "小米 & 平板" 显示成 "小米 &amp; 平板"
@@ -152,8 +155,15 @@
       PG.router.go("parents");
     });
     const dlUnbind = dl.el.querySelector("#dl-unbind");
-    if (dlUnbind) dlUnbind.onclick = () => PG.ui.confirm("解绑设备", "确认解绑 " + U.esc(d.deviceId) + "？解绑后设备归属清除、设备令牌作废，孩子端将失去管控，操作不可恢复。", async () => {
-      await PG.api.unbindDevice(d.deviceId);
+    // 与列表页同款：confirm() 内部已统一 esc(text)，这里必须传原始值 ——
+    // 先 esc 再传会被二次转义，设备名里的 "&" 在弹窗里显示成 "&amp;"
+    if (dlUnbind) dlUnbind.onclick = () => PG.ui.confirm("解绑设备", "确认解绑 " + d.deviceId + "？解绑后设备归属清除、设备令牌作废，孩子端将失去管控，操作不可恢复。", async () => {
+      try {
+        await PG.api.unbindDevice(d.deviceId);
+      } catch (e) {
+        PG.ui.toast("err", "解绑失败", (e && e.message) || "");
+        return;
+      }
       PG.ui.toast("ok", "已解绑", d.deviceId);
       dl.close();
       load(document.getElementById("view"));

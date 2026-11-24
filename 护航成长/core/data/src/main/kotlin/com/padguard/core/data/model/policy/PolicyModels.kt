@@ -232,17 +232,22 @@ data class AppPolicy(
     /**
      * 非 DO 降级模式下，打开任意应用是否要求输入管理密码（全量启动闸门，不仅限于受管控应用）。
      *
-     * ## 为什么单独一个开关
-     * 有 Device Owner 时管控由系统完成（隐藏/挂起），根本碰不到"打开"这一步；
-     * 只有在**没有 DO** 的存量平板上，本产品才退化为"无障碍服务 + 家长密码"来兜底。
-     * 而"拦安装/卸载"与"拦启动"的代价完全不同：
-     * - 拦安装/卸载：只在孩子主动改动系统时触发，拦截面小、几乎不打扰；
-     * - 拦启动：白名单模式下**每开一个不在名单里的应用都要输密码**，
-     *   对是"管控孩子平板"还是"只挡游戏"两种需求差别巨大。
+     * ## 为什么默认开启（R-P2-19 决策）
+     * 此前默认关闭，导致默认 BLACKLIST 模式下新装应用天然"已授权"、完全不受闸门约束，
+     * 非 DO 设备"装完即玩"——孩子装个游戏直接就能玩，全程无密码（APP-04）。
+     * 现已默认开启：非 DO 设备上**打开任意非系统应用都要先输管理密码**，杜绝"装完即玩"；
+     * 家长若只想拦特定应用，可显式关闭本开关回落到名单口径。
      *
-     * 因此默认关闭（只拦安装/卸载），由家长按需开启 —— 不能替家长决定使用强度。
+     * ## 与 DO 的关系
+     * 有 Device Owner 时管控由系统完成（隐藏/挂起），本开关在 [AppGuardDecisions] 中对
+     * DO 设备仍只作用于受控应用（避免已授权应用每次启动都弹密）；闸门的全量语义只针对
+     * 没有 DO 的存量平板（无障碍服务 + 家长密码兜底）。
+     *
+     * ## 为什么单独一个开关
+     * 拦安装/卸载只在孩子主动改动系统时触发，拦截面小；
+     * 拦启动则面向所有应用打开动作。二者代价不同，故分开，由家长按需调节强度。
      */
-    @SerialName("requirePasswordOnLaunch") val requirePasswordOnLaunch: Boolean = false,
+    @SerialName("requirePasswordOnLaunch") val requirePasswordOnLaunch: Boolean = true,
     /**
      * **服务端权威**的「已取消授权」包名集合（对应服务端 `InstalledApp.hidden = true`）。
      *
@@ -428,11 +433,18 @@ data class ScheduleRule(
     /** 规则时间是否可解析。畸形规则必须整条丢弃，绝不能拿 -1/0 参与区间运算（见 [toMinutes]）。 */
     fun isWellFormed(): Boolean = startMinutes() >= 0 && endMinutes() >= 0
 
-    /** 是否为跨零点区间（如 21:30–07:00 就寝时段）。畸形规则恒 false（调用方应先用 [isWellFormed] 过滤）。 */
+    /**
+     * 是否为跨零点区间（如 21:30–07:00 就寝时段）。
+     * 注意：start == end（退化区间，零长度）**不算**跨零点 —— 否则会被 [com.padguard.core.engine.schedule.ScheduleEvaluator]
+     * 误判为"全天锁定"，与 [com.padguard.core.engine.enforcer.SmartShutdownEnforcer] 对定时锁机
+     * start==end 视为"不锁"的语义相反（R-P2-5）。退化区间统一按"不锁"处理：跨零点分支不再命中后，
+     * 非跨零点分支的 `now>=start && now<end` 自然为空集。
+     * 畸形规则恒 false（调用方应先用 [isWellFormed] 过滤）。
+     */
     fun crossesMidnight(): Boolean {
         val s = startMinutes(); val e = endMinutes()
         if (s < 0 || e < 0) return false
-        return e <= s
+        return e < s
     }
 
     companion object {
@@ -542,7 +554,15 @@ data class MonitoringPolicy(
      * 而不是这里。家长端目前也没有"上网记录"页面，因此不存在"界面有、数据无"的欺骗性展示。
      */
     @SerialName("collectUrlHistory") val collectUrlHistory: Boolean = true,
-    @SerialName("collectHardware") val collectHardware: Boolean = true
+    @SerialName("collectHardware") val collectHardware: Boolean = true,
+    /**
+     * PIPL 撤回同意的端上闸门（服务端随策略包下发，默认 false 兼容旧包）。
+     *
+     * true 时 [com.padguard.core.engine.enforcer.MonitoringEnforcer] 把所有采集项收敛为关闭，
+     * 并让 GuardService 拒绝截图/录屏/看屏/录音/定位等指令。**心跳不下线**——
+     * 守卫必须继续保活，才能收到家长恢复同意后的新策略包。
+     */
+    @SerialName("consentRevoked") val consentRevoked: Boolean = false
 )
 
 // endregion

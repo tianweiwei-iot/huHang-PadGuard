@@ -80,7 +80,7 @@ class AccountPrefs @Inject constructor(
                     .put("ts", a.lastUsedAt)
             )
         }
-        prefs.edit().putString(KEY_ACCOUNTS, arr.toString()).apply()
+        prefs.edit().putString(KEY_ACCOUNTS, arr.toString()).commit()
     }
 
     private companion object {

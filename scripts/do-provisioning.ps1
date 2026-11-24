@@ -64,7 +64,7 @@ function Run-Adb {
     param([string[]]$Args)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:AdbPath
-    $psi.Arguments = ($Args -join " ")
+    $psi.Arguments = ($Args | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
@@ -107,7 +107,7 @@ Write-Host "✓ 目标设备: $deviceId" -ForegroundColor Green
 
 if ($Revert) {
     Write-Host ">> 撤销设备管理员（调试用，生产机请用恢复出厂彻底移除 DO）..." -ForegroundColor Yellow
-    $r = Run-Adb @("shell", "dpm", "remove-active-admin", "$Package/$Receiver", "-n")
+    $r = Run-Adb @("shell", "dpm", "remove-active-admin", "$Package/$Receiver")
     if ($r.ExitCode -eq 0) { Write-Host "✓ 已解除（仅调试态）。" -ForegroundColor Green }
     else { Write-Host "✗ 解除失败:`n$($r.StdErr)" -ForegroundColor Red }
     exit $r.ExitCode

@@ -13,6 +13,7 @@ import com.padguard.parent.presentation.util.RefreshGate
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -67,7 +68,14 @@ data class UnlockCenterUiState(
      * 页面会把"接口全挂"渲染成"暂无消息"——家长真的会以为孩子没有申请。
      * 置位后消息中心显示失败横幅 + 重试；下一次 refresh 成功即复位。
      */
-    val loadFailed: Boolean = false
+    val loadFailed: Boolean = false,
+    /**
+     * 最近一次**完整**加载成功的时刻（墙钟毫秒）。
+     *
+     * 与 [loadFailed] 互补：`loadFailed` 回答"这次有没有读到"，时间回答"读到的是哪一刻的"。
+     * 只有布尔值时，家长知道"加载失败"却不知道屏幕上这批工单有多旧。
+     */
+    val lastSuccessAt: Long? = null
 )
 
 @HiltViewModel
@@ -123,6 +131,22 @@ class UnlockRequestCenterViewModel @Inject constructor(
     init {
         startPolling()
         observePush()
+    }
+
+    /**
+     * 账号切换（登出 / 换账号登录）时清空本 VM 的全部会话态。
+     *
+     * 本 VM 是 Activity 作用域（导航根 Composable 的 hiltViewModel），Activity 不随账号切换
+     * 重建，因此 A 的工单记录、未读红点、待弹窗、已处理/已通知去重集合会原样留到 B 的会话，
+     * B 在首次轮询回来前（10 秒，弱网更久）会看到 A 的申请、甚至直接弹出 A 的工单。
+     * 由会话门控在 user 变化时统一调用；必须在下一轮轮询发起前清，否则旧响应会回填。
+     */
+    fun resetForSessionChange() {
+        handledInSession.clear()
+        failedPopupCooldown.clear()
+        notifiedTicketIds.clear()
+        refreshGate.reset()
+        _uiState.value = UnlockCenterUiState()
     }
 
     /**
@@ -214,7 +238,13 @@ class UnlockRequestCenterViewModel @Inject constructor(
                     records = entries,
                     unreadCount = entries.count { it.ticket.isPending },
                     popup = next,
-                    loadFailed = anyTicketFetchFailed
+                    loadFailed = anyTicketFetchFailed,
+                    // 有设备工单没读到时列表是残缺的，不更新"新鲜度"，避免角标夸大
+                    lastSuccessAt = if (anyTicketFetchFailed) {
+                        _uiState.value.lastSuccessAt
+                    } else {
+                        System.currentTimeMillis()
+                    }
                 )
             } finally {
                 // 期间被拒的刷新（处理工单后的刷新 / 下拉刷新）不能丢，放行一次
@@ -237,7 +267,14 @@ class UnlockRequestCenterViewModel @Inject constructor(
 
     /** 同意：按申请时长（家长未指定则用孩子申请值，再兜底 30 分钟）下发限时解锁 */
     fun approve(ticket: UnlockTicket, durationMinutes: Int? = null) {
-        val minutes = durationMinutes ?: ticket.durationMinutes ?: DEFAULT_UNLOCK_MINUTES
+        // 与服务端 UnlockService.approve 的 effectiveDuration 同口径：整机 1..120、带包名 >=1。
+        // 工单时长可能来自旧版本孩子端/历史数据，若不钳制，服务端实际放行时长与家长看到的成功文案不一致。
+        val requested = durationMinutes ?: ticket.durationMinutes ?: DEFAULT_UNLOCK_MINUTES
+        val minutes = if (ticket.packageName.isNullOrBlank()) {
+            requested.coerceIn(1, MAX_UNLOCK_MINUTES)
+        } else {
+            requested.coerceAtLeast(1)
+        }
         act(ticket, successMessage = "已同意放行 $minutes 分钟") {
             policyRepository.approveUnlockTicket(ticket.deviceId, ticket.id, minutes)
         }
@@ -289,6 +326,8 @@ class UnlockRequestCenterViewModel @Inject constructor(
         val outcome = try {
             block()
         } catch (t: Throwable) {
+            // 取消不是操作失败：放行后不写错误态、不把工单误记进失败冷却窗。
+            if (t is CancellationException) throw t
             Result.failure(t)
         }
         val message = outcome.fold(
@@ -320,6 +359,8 @@ class UnlockRequestCenterViewModel @Inject constructor(
     private companion object {
         const val POLL_INTERVAL_MS = 10_000L
         const val DEFAULT_UNLOCK_MINUTES = 30
+        /** 服务端 UsageSession.MAX_DAILY_EXTEND_MINUTES，整机解锁上界。 */
+        const val MAX_UNLOCK_MINUTES = 120
         /** 审批失败后，同一条工单重新弹窗前的冷却时长 */
         const val FAILED_POPUP_COOLDOWN_MS = 60_000L
     }

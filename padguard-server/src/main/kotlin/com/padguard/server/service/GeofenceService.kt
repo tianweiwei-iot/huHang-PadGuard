@@ -74,8 +74,25 @@ class GeofenceService(
         return geofenceZoneRepository.findByDeviceIdOrderByCreatedAtAsc(deviceId).map { it.toDto() }
     }
 
+    /**
+     * 围栏几何参数边界（家长端 slider 是 100..5000，服务端不能只信 UI）：
+     * 半径为负/极大或坐标越界会让 [detectTransitions] 的 haversine 比较永远不触发或永远误报，
+     * 安全功能被静默破坏。与解锁时长、时间策略一样在服务端入口 fail-closed。
+     */
+    private fun validateZone(req: GeofenceZoneDto) {
+        if (!req.centerLatitude.isFinite() || req.centerLatitude !in -90.0..90.0 ||
+            !req.centerLongitude.isFinite() || req.centerLongitude !in -180.0..180.0
+        ) {
+            throw BizException(ParentErr.PARAM_ERROR, "围栏中心坐标超出范围", Audience.PARENT)
+        }
+        if (req.radiusMeters !in 100..5000) {
+            throw BizException(ParentErr.PARAM_ERROR, "围栏半径必须在 100..5000 米之间", Audience.PARENT)
+        }
+    }
+
     fun createZone(userId: String, deviceId: String, req: GeofenceZoneDto): GeofenceZoneDto {
         ownershipGuard.requireOwned(userId, deviceId)
+        validateZone(req)
         val zone = GeofenceZone(
             id = UUID.randomUUID().toString(), deviceId = deviceId,
             enabled = req.enabled, name = req.name?.takeIf { it.isNotBlank() } ?: "安全区域",
@@ -89,6 +106,7 @@ class GeofenceService(
 
     fun updateZone(userId: String, deviceId: String, id: String, req: GeofenceZoneDto): GeofenceZoneDto {
         ownershipGuard.requireOwned(userId, deviceId)
+        validateZone(req)
         val zone = geofenceZoneRepository.findById(id).orElse(null)
             ?: throw BizException(ParentErr.GEOFENCE_NOT_FOUND, "围栏不存在")
         if (zone.deviceId != deviceId) {

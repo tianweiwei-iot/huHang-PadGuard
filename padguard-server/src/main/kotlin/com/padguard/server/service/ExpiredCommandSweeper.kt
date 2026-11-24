@@ -11,6 +11,10 @@ import java.util.concurrent.ConcurrentHashMap
  * 过期指令回收：把已超时却仍未被终端取走执行的指令标记为 EXPIRED，
  * 并联动把关联的截图记录收敛到终态。
  *
+ * W2 例外：符合补发条件（白名单 + 保留期内 + 次数未达上限）的指令**不收敛**，
+ * 保持 PENDING 由 [CommandRedeliveryService] 在设备上线后重放；一旦超保留期或超次数，
+ * 本清扫器仍会把它收敛成 EXPIRED，不会出现永久挂起的僵尸请求。
+ *
  * 背景：指令带 5 分钟有效期，但若终端一直未取走（例如终端停留在 MQTT 模式、App 未运行、
  * 或 Bind 后从未轮询），指令会连同其关联记录（如 REMOTE 截图的 PENDING 记录）
  * 永久停留在中间态，家长端看到的是“永远转圈”的僵尸请求。这里让状态有确定终点。
@@ -19,7 +23,9 @@ import java.util.concurrent.ConcurrentHashMap
 class ExpiredCommandSweeper(
     private val commandRepository: CommandRepository,
     private val screenshotRepository: ScreenshotRepository,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    /** W2：判定过期指令是否还要留在补发窗口内，而不是立刻收敛成终态 */
+    private val redelivery: CommandRedeliveryService
 ) {
     private val log = LoggerFactory.getLogger(ExpiredCommandSweeper::class.java)
 
@@ -38,12 +44,32 @@ class ExpiredCommandSweeper(
         val expired = commandRepository.findExpiredPending(deviceId, STATUS_PENDING, now)
         if (expired.isEmpty()) return
 
-        expired.forEach { cmd ->
-            cmd.status = STATUS_EXPIRED
-            convergeRelatedRecords(deviceId, cmd.type, cmd.payloadJson)
+        // W2：过期不再等于终态。仍在补发保留期、次数未达上限、且在白名单内的指令
+        // 必须保持 PENDING，等设备上线后由 CommandRedeliveryService 刷新窗口重放。
+        // 这里若仍一律改写 status 再 saveAll，扫描器会把自己的补发队列清空 ——
+        // 补发功能静默失效，且因为 30s 节流的存在，现象会比"完全没发"更难复现。
+        val (waitingRedelivery, terminal) = expired.partition { redelivery.isEligible(it, now) }
+        if (waitingRedelivery.isNotEmpty()) {
+            log.debug(
+                "保留待补发指令 {} 条不收敛终态: deviceId={}, msgIds={}",
+                waitingRedelivery.size, deviceId, waitingRedelivery.map { it.msgId }
+            )
         }
-        commandRepository.saveAll(expired)
-        log.info("回收过期指令 {} 条: deviceId={}, msgIds={}", expired.size, deviceId, expired.map { it.msgId })
+        if (terminal.isEmpty()) return
+
+        // F01：状态只能由带 WHERE status='PENDING' 的条件 UPDATE 决定。
+        // 旧写法改内存快照再 saveAll：两次查询之间若回执（MQTT / HTTP 双通道）已把指令
+        // 置为 SUCCESS，旧快照会把它覆盖回 EXPIRED，家长端看到「执行成功又变过期」。
+        // 逐条 CAS 而不是一条批量 UPDATE，是为了只对真正由本轮收敛的指令联动截图记录。
+        val converged = terminal.filter { cmd ->
+            commandRepository.markExpiredIfPending(cmd.id, STATUS_PENDING, STATUS_EXPIRED) > 0
+        }
+        converged.forEach { cmd -> convergeRelatedRecords(deviceId, cmd.type, cmd.payloadJson) }
+        if (converged.isEmpty()) return
+        log.info(
+            "回收过期指令 {} 条: deviceId={}, msgIds={}",
+            converged.size, deviceId, converged.map { it.msgId }
+        )
     }
 
     /**
@@ -77,11 +103,11 @@ class ExpiredCommandSweeper(
             ?.toString()
             ?.takeIf { it.isNotBlank() }
             ?: return
-        val shot = screenshotRepository.findFirstByDeviceIdAndShotId(deviceId, shotId) ?: return
-        if (shot.status == STATUS_PENDING) {
-            shot.status = STATUS_EXPIRED
-            screenshotRepository.save(shot)
-        }
+        // 与上面的主指令同一个坑（F01）：不能「读实体 → 判 PENDING → 改内存快照 → save 整行」。
+        // 查询之后孩子端可能刚好上传成功，把记录推到 READY 并填好 fileUrl；旧快照整行 merge
+        // 会把状态打回 EXPIRED、把 fileUrl 抹成 null，图片从此再也点不开。
+        // 交给带 WHERE status='PENDING' 的条件 UPDATE 决定，影响 0 行即说明已被别人收敛。
+        screenshotRepository.markExpiredIfPending(deviceId, shotId, STATUS_PENDING, STATUS_EXPIRED)
     }
 
     private fun readPayload(payloadJson: String?): Map<*, *> =

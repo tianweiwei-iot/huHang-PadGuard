@@ -108,10 +108,23 @@ REM  -Dlogging.register-bridge-handler=false
 REM      Required. Otherwise the JUL-to-SLF4J bridge throws
 REM      NoClassDefFoundError: ch/qos/logback/classic/spi/ThrowableProxy
 REM      inside request threads and takes down unlock / live-screen endpoints.
-REM --spring.mvc.async.request-timeout=600000
-REM      Fixes the live screen being cut every 30 seconds: the live stream is a
-REM      long-lived connection, and Spring MVC's default 30s async timeout kills
-REM      it even while frames are flowing normally.
+REM  -Dfile.encoding=UTF-8 (+ stdout/stderr)
+REM      日志是排障的第一现场。Windows 默认 file.encoding=GBK(cp936)，于是
+REM      server_restart.log 里所有中文都是 GBK 字节：用 grep/tail/VSCode/日志平台
+REM      按 UTF-8 读全是乱码，连"启动中止：xxx 配置项"这种关键报错都搜不到，
+REM      只能先 iconv 转码 —— 而排障时最缺的恰恰是耐心。
+REM      这里把三处编码都钉成 UTF-8。注意：重定向到文件时控制台不参与，所以
+REM      不会出现"窗口里中文乱码"；若哪天改成前台运行，cmd 窗口(cp936)会显示乱码，
+REM      届时用 chcp 65001 即可，不要为了窗口好看把日志改回 GBK。
+REM  --spring.mvc.async.request-timeout
+REM      ---- 刻意不在这里传 ----
+REM      The live screen is a long-lived streaming response; Spring MVC's 30s
+REM      default async timeout kills it mid-stream. The value now lives ONLY in
+REM      application.yml (1800000 = 30 min) so there is exactly one source of
+REM      truth. Do NOT re-add a command-line override: command-line beats yml,
+REM      and the two values WILL drift (this script previously said 600000 while
+REM      the running instance used 1800000, so every restart via this script
+REM      silently cut live screen back to 10 minutes).
 REM -Duser.timezone=Asia/Shanghai
 REM     家庭/本机部署时链路中的重要一环：不加的话 JVM 默认时区取 Windows 系统时区，
 REM     家长电脑时区一旦不是北京时间，后台时间显示、统计日切、cron 清理任务全部偏 8 小时。
@@ -127,10 +140,21 @@ if not defined PADGUARD_AMAP_WEB_KEY (
     for /f "usebackq delims=" %%k in (`powershell -NoProfile -Command "(Get-ItemProperty -Path 'HKCU:\Environment' -Name PADGUARD_AMAP_WEB_KEY -ErrorAction SilentlyContinue).PADGUARD_AMAP_WEB_KEY"`) do set "PADGUARD_AMAP_WEB_KEY=%%k"
 )
 REM ---------------------------------------------------------------------
-REM 安全基线：本启动器用于「家庭/私域发布包」，刻意不开启演示账号开关
-REM (padguard.demo-accounts-enabled 默认 false)。因此启动后不会播种任何弱口令账号
-REM （admin/admin123、演示家长、测试账号），而是：库里无账号时随机生成强口令并写入
-REM uploads/ 下的明文口令文件，存量弱口令账号每次启动强制重置。切勿在此处添加该开关，
-REM 否则等于把后门账号重新打回安装包。开发联调请用 start-local.bat（已开启该开关）。
+REM 安全基线：本启动器用于「家庭/私域发布包」，激活的是 **home** 档位，不是 local。
+REM
+REM 为什么必须是 home：old local 档位在 ProdConfigAssertion.DEV_PROFILES 里，
+REM 一旦用它跑发布包，下面四条生产红线闸门会全部失效（曾经就是如此）：
+REM   1) padguard.billing.mock-pay-enabled=true 不再中止启动 —— 等于放行所有支付回调；
+REM   2) 后台「系统设置」允许运营把 mockPay 打开（isDevProfile=true）—— 同上，可白嫖会员；
+REM   3) 短信免密登录闸门被当成开发环境放行（AuthService）；
+REM   4) 演示账号/测试账号的播种条件退化为"只要开关打开就播种"。
+REM home 档位与 local 的差别只有档位名（同样 H2 文件库、同样 8090、同样关 MQTT），
+REM 数据仍然落在 ./data/padguard，从 local 切过来不丢任何绑定关系。
+REM 需要联调请用 start-local.bat（显式 local + 演示账号），不要在这里改回 local。
+REM
+REM 另外：本脚本**不要**再传 --spring.mvc.async.request-timeout。看屏流的超时
+REM 唯一权威来源是 application.yml（30 分钟）；此前脚本里写着 600000（10 分钟），
+REM 而运行实例是手工用 1800000 起的 —— 谁用脚本重启一次，看屏就被悄悄砍回 10 分钟，
+REM 且没有任何提示。命令行参数优先级高于 yml，这类"两处各写一个值"的坑必须从源头删掉。
 REM ---------------------------------------------------------------------
-"%JAVA_EXE%" -Xmx512m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -Dlogging.register-bridge-handler=false -Duser.timezone=Asia/Shanghai -jar deploy/app.jar --spring.profiles.active=local --server.port=8090 --spring.datasource.url="jdbc:h2:file:./data/padguard;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE" --spring.mvc.async.request-timeout=600000 --padguard.amap.web-key=%PADGUARD_AMAP_WEB_KEY% > server_restart.log 2>&1
+"%JAVA_EXE%" -Xmx512m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -Dlogging.register-bridge-handler=false -Duser.timezone=Asia/Shanghai -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -jar deploy/app.jar --spring.profiles.active=home --padguard.amap.web-key=%PADGUARD_AMAP_WEB_KEY% > server_restart.log 2>&1

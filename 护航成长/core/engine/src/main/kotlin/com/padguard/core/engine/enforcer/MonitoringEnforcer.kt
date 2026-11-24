@@ -41,6 +41,25 @@ class MonitoringEnforcer @Inject constructor() {
 
         val heartbeat = policy.heartbeatIntervalSec.coerceIn(MIN_HEARTBEAT_SEC, MAX_HEARTBEAT_SEC)
         val logUpload = policy.logUploadIntervalSec.coerceIn(MIN_LOG_UPLOAD_SEC, MAX_LOG_UPLOAD_SEC)
+
+        // 撤回同意：所有个人数据采集闸门一次性关死，但心跳/回执通道保留。
+        // 这样设备离线期间也按本地策略停采，家长恢复同意后又能通过策略包自动恢复。
+        if (policy.consentRevoked) {
+            runtime = MonitoringRuntime(
+                heartbeatIntervalSec = heartbeat,
+                logUploadIntervalSec = logUpload,
+                screenshotIntervalSec = 0,
+                locationIntervalSec = 0,
+                collectAppUsage = false,
+                collectUrlHistory = false,
+                collectHardware = false,
+                consentRevoked = true
+            )
+            report.note("monitor.consentRevoked=true")
+            Logger.i(TAG) { "consent revoked: collection disabled, heartbeat kept: $runtime" }
+            return report
+        }
+
         val screenshot = policy.screenshotIntervalSec.let {
             if (it <= 0) 0 else it.coerceIn(MIN_SCREENSHOT_SEC, MAX_SCREENSHOT_SEC)
         }
@@ -135,7 +154,9 @@ data class MonitoringRuntime(
     val locationIntervalSec: Int = 0,
     val collectAppUsage: Boolean = true,
     val collectUrlHistory: Boolean = true,
-    val collectHardware: Boolean = true
+    val collectHardware: Boolean = true,
+    /** 撤回同意后的端上事实源；GuardService 的即时采集指令也读这里。 */
+    val consentRevoked: Boolean = false
 ) {
     val heartbeatIntervalMs: Long get() = heartbeatIntervalSec * 1000L
     val logUploadIntervalMs: Long get() = logUploadIntervalSec * 1000L

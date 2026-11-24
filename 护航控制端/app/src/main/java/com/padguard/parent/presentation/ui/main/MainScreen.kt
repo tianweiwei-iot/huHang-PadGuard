@@ -158,6 +158,7 @@ fun MainScreen(
                 val profileVm: ProfileViewModel = hiltViewModel()
                 val profileState by profileVm.uiState.collectAsState()
                 val serverUrl by profileVm.serverUrl.collectAsState()
+                val passwordChangeState by profileVm.passwordChange.collectAsState()
                 LaunchedEffect(profileState.loggedOut) {
                     if (profileState.loggedOut) {
                         rootNavController.navigate(Screen.Login.route) {
@@ -173,6 +174,9 @@ fun MainScreen(
                     onThemeChange = onThemeChange,
                     darkMode = darkMode,
                     onDarkModeChange = onDarkModeChange,
+                    passwordChangeState = passwordChangeState,
+                    onChangePassword = profileVm::changePassword,
+                    onClearPasswordChange = profileVm::clearPasswordChangeState,
                     onAction = { action ->
                         when (action) {
                             ProfileAction.Subscription ->
@@ -192,6 +196,9 @@ fun MainScreen(
                             ProfileAction.ServerAddress -> {
                                 // 服务器地址弹窗由 ProfileScreen 本地处理，无需在此导航
                             }
+                            ProfileAction.ChangePassword -> {
+                                // 修改密码同样是 ProfileScreen 内的弹窗，不走路由
+                            }
                             // 家庭成员 / 设置尚未实现，ProfileScreen 内已置灰禁用，
                             // 这里不再响应（避免"点了没反应"误导）。
                             ProfileAction.Members,
@@ -201,6 +208,10 @@ fun MainScreen(
                             ProfileAction.About -> {
                                 // 关于页已落地为真实路由，导航进入。
                                 rootNavController.navigate(Screen.About.route)
+                            }
+                            ProfileAction.DataRights -> {
+                                // 数据权利与合规页：服务端端点已就绪，这里接通路由。
+                                rootNavController.navigate(Screen.DataRights.route)
                             }
                         }
                     }

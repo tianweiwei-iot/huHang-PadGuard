@@ -13,6 +13,18 @@ import java.util.UUID
  */
 private const val STREAM_BUFFER_BYTES = 64 * 1024
 
+/**
+ * 单次孤儿清扫的删除上限。
+ *
+ * 存在的意义是"配置写错也别造成灾难"：`padguard.storage.dir` 若被误指向一个装了几十万张
+ * 图的老目录，没有上限就是一次 `rm -rf` 级别的操作。正常部署的孤儿文件是每天几条到几十条，
+ * 5000 足够；被上限截断时 `truncated=true`，第二天继续清。
+ */
+private const val ORPHAN_SWEEP_MAX_DELETE = 5000
+
+/** 结果里回报的文件名样例条数（够运维判断"删的是什么"，又不至于把响应撑爆）。 */
+private const val ORPHAN_SAMPLES = 10
+
 /** 本地文件存储（开发/单机可用）。生产可替换为 MinIO/OSS 对象存储，仅改本类实现。 */
 @Service
 class FileStorageService(
@@ -20,9 +32,26 @@ class FileStorageService(
     @Value("\${padguard.base-url:}") private val baseUrl: String,
     private val uploadedFileRepository: UploadedFileRepository,
     // 可选注入（默认 null 保证纯单测可直构）：存在时下发的文件 URL 自动附带短期签名
-    private val urlSigner: com.padguard.server.security.MediaUrlSigner? = null
+    private val urlSigner: com.padguard.server.security.MediaUrlSigner? = null,
+    /*
+     * 两个初始口令文件的路径，与 AdminDataInitializer / DataInitializer 用同一组配置键。
+     *
+     * 它们**就写在 uploads/ 根目录且不进数据库**，因此是孤儿清扫唯一会误伤的"有用文件"，
+     * 而它同时是登录锁死时唯一的恢复入口（本机踩过一次）。把保护名单收在存储层，
+     * 任何调用方都不会"忘了传保护名单"—— 这比在调用点传参可靠。
+     */
+    @Value("\${padguard.initial-password-file:uploads/管理员初始密码-请登录后修改.txt}")
+    private val adminPasswordFile: String = "uploads/管理员初始密码-请登录后修改.txt",
+    @Value("\${padguard.parent-initial-password-file:uploads/初始密码-请登录后修改.txt}")
+    private val parentPasswordFile: String = "uploads/初始密码-请登录后修改.txt"
 ) {
     private val dir = File(storageDir).apply { if (!exists()) mkdirs() }
+
+    /** 清扫时必须放过的文件名（只取文件名，因为清扫按文件名比对）。 */
+    private val passwordFileNames: Set<String> =
+        listOf(adminPasswordFile, parentPasswordFile)
+            .mapNotNull { it.takeIf(String::isNotBlank)?.let { p -> File(p).name } }
+            .toSet()
 
     /**
      * 保存字节，返回可访问的 URL（相对或绝对，取决于 base-url 配置）。
@@ -154,6 +183,93 @@ class FileStorageService(
     /** 存储根目录（磁盘检查用：磁盘用量告警盯着这个目录所在的文件系统）。 */
     fun storageRoot(): File = dir
 
+    /**
+     * 库里登记过的文件名集合（只取文件名，与 [resolve] 的历史兼容口径一致）。
+     *
+     * **读库失败必须抛/返回 null，绝不返回空集**：空集会让孤儿清扫认为"所有文件都没登记"，
+     * 一次数据库抖动就能把整个 `uploads/` 删空（与本项目离线队列 `readOrNull()==null`
+     * 那条约定的成因完全同类）。调用方在 [deleteOrphanFiles] 里显式兜住。
+     */
+    fun referencedFileNames(): Set<String> =
+        uploadedFileRepository.findAllStoredPaths().mapTo(HashSet()) { File(it).name }
+
+    /**
+     * 清扫磁盘孤儿：**盘上有、`uploaded_files` 里没有任何记录**的文件。
+     *
+     * ## 为什么保留期清理管不到
+     * `RetentionCleanup` 的三个清理步骤全部以 **DB 记录**为起点（按记录删文件）。
+     * 记录本身不存在时，磁盘文件永远扫不到，于是有三条稳定的产生路径：
+     * 1. [storeDetailed] 先写盘再 `save`：save 抛异常或进程被 kill → 文件留下、记录没有；
+     * 2. 早期版本把**绝对路径**写进 `storedPath`，目录搬家后 `resolve` 全部失效、记录被人工清掉；
+     * 3. 自动化测试/curl 直接把样本文件写进 `storageDir`（`shell.php.png`、`evil.png` 之类），从不进库。
+     *
+     * 后果不只是占磁盘：发布脚本会把整个 `uploads/` 复制进安装包，**测试载荷随包分发**。
+     *
+     * ## 安全边界（宁可不删，不可错删）
+     * - 只删修改时间早于 `graceDays` 天的文件：正在落盘（写盘 → save 之间）的文件、
+     *   以及"库从旧备份恢复、文件比记录新"的场景都在宽限期内，不会被误删；
+     * - 只比对**文件名**，不比对路径，与 [resolve] 的历史兼容口径保持同一套规则；
+     * - 只处理存储根目录下的普通文件：不递归、不碰子目录（子目录可能是别人挂进来的东西）；
+     * - 单次删除上限 [maxDelete]：配置写错 `storage.dir` 时最多也就能删这么多；
+     * - [protectedNames] 里的文件一律跳过：初始口令文件就落在 `uploads/` 根目录且**不入库**，
+     *   按"无记录即孤儿"会被清掉，而它是登录锁死时唯一的恢复入口；
+     * - [referencedFileNames] 读失败直接返回 `dbReadFailed=true` 的空结果，**一个都不删**。
+     *
+     * @param dryRun true 时只统计不删（后台默认值就是 true，先看数量再决定）
+     */
+    fun deleteOrphanFiles(
+        graceDays: Long,
+        maxDelete: Int = ORPHAN_SWEEP_MAX_DELETE,
+        dryRun: Boolean = false,
+        protectedNames: Set<String> = emptySet()
+    ): OrphanSweepResult {
+        val root = runCatching { dir.canonicalFile }.getOrNull()
+            ?: return OrphanSweepResult(0, 0, 0, emptyList(), truncated = false, dbReadFailed = true)
+        val referenced = runCatching { referencedFileNames() }.getOrNull()
+            ?: return OrphanSweepResult(0, 0, 0, emptyList(), truncated = false, dbReadFailed = true)
+        val files = runCatching { root.listFiles() }.getOrNull()
+            ?: return OrphanSweepResult(0, 0, 0, emptyList(), truncated = false, dbReadFailed = false)
+
+        // 宽限期至少留 1 天：graceDays=0 会让"刚写完还没 save"的文件也满足条件，
+        // 那是唯一能造成真实数据丢失的竞态，这里从入口堵死。
+        val effectiveGraceDays = graceDays.coerceAtLeast(1)
+        val threshold = System.currentTimeMillis() - effectiveGraceDays * 86_400_000L
+
+        var scanned = 0
+        var deleted = 0
+        var freed = 0L
+        var truncated = false
+        val samples = mutableListOf<String>()
+        for (f in files) {
+            if (!f.isFile) continue
+            scanned++
+            if (f.name in referenced) continue
+            // 保护名单：初始口令文件就放在 uploads/ 根目录且**不进数据库**
+            // （`uploads/管理员初始密码-请登录后修改.txt` 之类），照"无记录即孤儿"的规则
+            // 会被清掉 —— 那正是登录锁死时唯一的恢复入口，删了等于把运维关在门外。
+            if (f.name in passwordFileNames || f.name in protectedNames) continue
+            if (f.lastModified() > threshold) continue
+            if (deleted >= maxDelete) { truncated = true; break }
+            val size = f.length()
+            if (dryRun || runCatching { f.delete() }.getOrDefault(false)) {
+                deleted++
+                freed += size
+                if (samples.size < ORPHAN_SAMPLES) samples += f.name
+            }
+        }
+        return OrphanSweepResult(scanned, deleted, freed, samples, truncated, dbReadFailed = false)
+    }
+
+    /** [deleteOrphanFiles] 的结果。`dbReadFailed=true` 表示读库失败、本轮什么都没删。 */
+    data class OrphanSweepResult(
+        val scanned: Int,
+        val deleted: Int,
+        val bytesFreed: Long,
+        val samples: List<String>,
+        val truncated: Boolean,
+        val dbReadFailed: Boolean
+    )
+
     /** 从文件 URL 中解析 id；无法解析（历史脏数据/相对路径异常）时返回 null。 */
     fun idFromUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null
@@ -186,5 +302,62 @@ class FileStorageService(
     private fun sanitize(originalName: String?): String {
         val name = originalName?.substringAfterLast('/')?.substringAfterLast('\\') ?: "file"
         return name.replace(Regex("[^\\w.\\-]"), "_").ifBlank { "file" }
+    }
+
+    companion object {
+        /**
+         * 上传黑名单的单一来源：所有入口（家长素材、孩子头像/截图/媒体）共用。
+         *
+         * 之前只在家长上传入口校验，孩子端三条入口直接信任客户端声明的 contentType；
+         * 上传一个 `image/svg+xml` 后，下载侧按 image 通配类型会判为可 inline 渲染，
+         * 而该 URL 与 `/admin` 同源 —— 构成存储型 XSS。孩子端本就持有设备令牌，
+         * 因此这条路径不是理论风险。
+         */
+        private val BLOCKED_EXTENSIONS = setOf(
+            "html", "htm", "xhtml", "shtml", "svg", "js", "mjs", "css", "xml",
+            "json", "swf", "hta", "jsp", "asp", "aspx", "php", "exe", "bat", "cmd", "ps1", "sh"
+        )
+
+        private val BLOCKED_MIME_TYPES = setOf(
+            "text/html", "application/xhtml+xml", "image/svg+xml",
+            "text/javascript", "application/javascript", "application/x-javascript",
+            "text/xml", "application/xml", "application/x-shockwave-flash"
+        )
+
+        /** 客户端未声明可用类型时按扩展名推断，与下载侧渲染策略共用一份规则。 */
+        fun guessContentType(name: String?): String {
+            val ext = name?.substringAfterLast('.', "")?.lowercase() ?: return "application/octet-stream"
+            return when (ext) {
+                "apk" -> "application/vnd.android.package-archive"
+                "png" -> "image/png"
+                "jpg", "jpeg" -> "image/jpeg"
+                "gif" -> "image/gif"
+                "webp" -> "image/webp"
+                "mp3" -> "audio/mpeg"
+                "m4a", "aac" -> "audio/mp4"
+                "wav" -> "audio/wav"
+                "ogg" -> "audio/ogg"
+                "mp4" -> "video/mp4"
+                "3gp" -> "video/3gpp"
+                "webm" -> "video/webm"
+                else -> "application/octet-stream"
+            }
+        }
+
+        /** 解析最终落库的 MIME：声明优先，通配/缺失才按文件名兜底。 */
+        fun resolveMime(originalName: String?, declared: String?): String {
+            val usable = declared?.takeIf { it.isNotBlank() && it != "*/*" }
+            return usable?.substringBefore(";")?.trim()?.lowercase() ?: guessContentType(originalName)
+        }
+
+        /** @return 拒绝原因；null 表示允许上传。调用方按自身端别映射到对应错误码。 */
+        fun unsafeUploadReason(originalName: String?, mime: String): String? {
+            val ext = originalName?.substringAfterLast('.', "")?.lowercase().orEmpty()
+            if (ext in BLOCKED_EXTENSIONS) return "不支持上传 .$ext 类型的文件"
+            if (mime.substringBefore(';').trim().lowercase() in BLOCKED_MIME_TYPES) {
+                return "不支持上传该类型的文件"
+            }
+            return null
+        }
     }
 }

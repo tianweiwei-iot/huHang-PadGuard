@@ -59,7 +59,7 @@ class UsageSessionServiceTest {
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis()
         )
-        service = UsageSessionService(sessionRepo, deviceSettingRepo, deviceService, delayService)
+        service = UsageSessionService(sessionRepo, deviceSettingRepo, deviceService, delayService, mock(UsageStartRequestService::class.java))
     }
 
     @Test
@@ -189,10 +189,13 @@ class UsageSessionServiceTest {
 
 // ============ 内存假仓储 ============
 
-class FakeSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionRepository {
+open class FakeSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionRepository {
     override val table = LinkedHashMap<String, UsageSession>()
     override fun idOf(entity: UsageSession): String = entity.deviceId
     override fun findByDeviceId(deviceId: String): UsageSession? = table[deviceId]
+
+    /** 内存 fake 没有行锁语义，等价于普通读；并发串行化由具体用例覆写模拟。 */
+    override fun findByDeviceIdForUpdate(deviceId: String): UsageSession? = findByDeviceId(deviceId)
 
     override fun deleteByDeviceId(deviceId: String): Int {
         val before = table.size
@@ -208,6 +211,61 @@ class FakeSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSessionR
         if (s.extendedMinutes + minutes > maxExtendedMinutes) return 0
         s.extendedMinutes += minutes
         s.lastDelayEpoch = now
+        s.updatedAt = now
+        return 1
+    }
+
+    // 与 rebaseExpiredSession 的 JPQL 逐字对齐：只在「确实已耗尽」时重设起点。
+    override fun rebaseExpiredSession(
+        deviceId: String, dayKey: String, now: Long,
+        quotaMinutes: Int, minutes: Int, minuteMs: Long
+    ): Int {
+        val s = table[deviceId] ?: return 0
+        val start = s.startEpoch ?: return 0
+        if (s.dayKey != dayKey) return 0
+        val baseline = (quotaMinutes + s.extendedMinutes - minutes) * minuteMs
+        if (now - start - s.restAccumulatedMs <= baseline) return 0
+        s.startEpoch = now + s.restAccumulatedMs - baseline
+        s.updatedAt = now
+        return 1
+    }
+
+    // 与 SQL 的 CAS 逐字对齐：旧值不匹配 / 非当日会话一律影响 0 行。
+    @Synchronized
+    override fun appendRestIfUnchanged(
+        deviceId: String, dayKey: String, delta: Long, newRestIds: String,
+        now: Long, oldAccum: Long, oldRestIds: String
+    ): Int {
+        val s = table[deviceId] ?: return 0
+        if (s.dayKey != dayKey || s.restAccumulatedMs != oldAccum || s.restIds != oldRestIds) return 0
+        s.restAccumulatedMs = oldAccum + delta
+        s.restIds = newRestIds
+        s.updatedAt = now
+        return 1
+    }
+
+    @Synchronized
+    override fun insertIfAbsent(deviceId: String, dayKey: String, startEpoch: Long, quotaMinutes: Int, now: Long): Int {
+        if (table.containsKey(deviceId)) return 0
+        table[deviceId] = UsageSession(
+            deviceId = deviceId, dayKey = dayKey, startEpoch = startEpoch,
+            quotaMinutes = quotaMinutes, createdAt = now, updatedAt = now
+        )
+        return 1
+    }
+
+    @Synchronized
+    open override fun startFreshIfStale(deviceId: String, dayKey: String, startEpoch: Long, quotaMinutes: Int, now: Long): Int {
+        val s = table[deviceId] ?: return 0
+        if (s.dayKey == dayKey && s.startEpoch != null) return 0
+        s.dayKey = dayKey
+        s.startEpoch = startEpoch
+        s.quotaMinutes = quotaMinutes
+        s.extendedMinutes = 0
+        s.lastDelayEpoch = null
+        s.restAccumulatedMs = 0
+        s.restIds = ""
+        if (s.createdAt == 0L) s.createdAt = now
         s.updatedAt = now
         return 1
     }

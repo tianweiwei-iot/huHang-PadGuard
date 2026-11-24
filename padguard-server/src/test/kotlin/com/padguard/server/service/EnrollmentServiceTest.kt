@@ -15,6 +15,8 @@ import org.springframework.data.domain.Example
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
 import org.springframework.data.domain.Sort
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.util.Optional
 
 /**
@@ -99,7 +101,7 @@ class EnrollmentServiceTest {
     }
 
     /** 捕获推送：既要断言"推了什么"，也要断言"推给了谁"（推错家长等于没推） */
-    private class FakePush : WebSocketPushService(ObjectMapper()) {
+    private class FakePush : WebSocketPushService(ObjectMapper(), users = com.padguard.server.support.PushTestUsers.permissive()) {
         val recipients = mutableListOf<String?>()
         val events = mutableListOf<Map<String, Any?>>()
         override fun pushToUser(userId: String?, payload: Map<String, Any?>) {
@@ -221,6 +223,51 @@ class EnrollmentServiceTest {
         assertEquals("device.enrolled", event["type"])
         assertEquals(info.sessionId, event["sessionId"])
         assertEquals("device-9", event["deviceId"])
+    }
+
+    /**
+     * 绑定回写发生在 `DeviceService.bindChild` 的事务里：提交前还有建台账、发指令等步骤，
+     * 任一步抛异常整笔回滚。若 WS 在事务体内就推出去，家长端会收到"绑定成功"，
+     * 刷新后设备却不存在 —— 推送必须等提交。
+     */
+    @Test
+    fun `markBound defers the enrolled push until the transaction commits`() {
+        val (svc, _, push) = service()
+        val info = svc.open("parent-1")
+        svc.consume(info.pairingCode)
+
+        TransactionSynchronizationManager.initSynchronization()
+        try {
+            svc.markBound(info.sessionId, "device-9")
+            assertTrue(
+                push.events.isEmpty(),
+                "事务尚未提交就推送：后续步骤回滚时家长端会看到一条不存在的绑定成功"
+            )
+            TransactionSynchronizationManager.getSynchronizations().forEach { it.afterCommit() }
+            assertEquals(1, push.events.size, "提交后应恰好推送一次")
+            assertEquals("device-9", push.events.single()["deviceId"])
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization()
+        }
+    }
+
+    @Test
+    fun `markBound does not push when the transaction ends without a commit`() {
+        val (svc, _, push) = service()
+        val info = svc.open("parent-1")
+        svc.consume(info.pairingCode)
+
+        TransactionSynchronizationManager.initSynchronization()
+        try {
+            svc.markBound(info.sessionId, "device-9")
+            // 模拟回滚：容器只会触发 afterCompletion，不会触发 afterCommit。
+            TransactionSynchronizationManager.getSynchronizations().forEach {
+                it.afterCompletion(TransactionSynchronization.STATUS_ROLLED_BACK)
+            }
+            assertTrue(push.events.isEmpty(), "回滚的绑定不得向家长推送成功事件")
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization()
+        }
     }
 
     @Test

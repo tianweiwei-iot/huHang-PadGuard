@@ -11,9 +11,9 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -36,17 +36,31 @@ open class UsageRepository @Inject constructor(
     /**
      * 日切口径必须与服务端 [com.padguard.server.service.StatisticsService] 完全一致：
      * 服务端固定 ZoneId.of("Asia/Shanghai")，本端也必须显式锁定同一时区。
-     * Locale.getDefault() 只决定数字/语言，真正决定"算到哪一天"的是 TimeZone；
-     * 若设备时区非中国时区（或用户改过时区），用默认时区算日切会让"写 A 日、读 B 日"，
-     * 孩子端本地累计的"今日已用"与家长端服务端聚合（Asia/Shanghai）错位 ——
-     * 这正是"学生端与家长端不同步"的又一类成因，必须钉死时区。
+     *
+     * ## 为什么不能用 `SimpleDateFormat("yyyyMMdd", Locale.getDefault())`（历史缺陷）
+     * `SimpleDateFormat(String, Locale)` 除了取时区，还会按 **Locale 选择历法**：
+     * `Calendar.getInstance(TimeZone, locale)` 在 `th-TH` 下返回佛历（BuddhistCalendar）、
+     * 在 `ar-SA` 下返回伊斯兰历。于是 2026-11-07 会被格式化成 `25691107`，
+     * 而服务端 `dayKey` 是公历 ISO、`PolicyEngine.currentDayKey()` 是公历 ISO ——
+     * 三套口径永久对不上：
+     * - `UsageSessionManager.restorePersistedSession` 每次启动都判成"跨日"并清掉快照，
+     *   当日已用额度直接丢失（离线时等于当天无限制）；
+     * - `AppLimitEnforcer.parseDayKey` 把 `25691107` 解析成 2569-11-07，星期与真实日期不同，
+     *   `dayTypes` 为工作日/周末的单应用规则会在错误的星期边界生效或失效；
+     * - `-u-nu-arab` 数字变体下 `filter { it.isDigit() }` 归一化也会失配。
+     *
+     * 改用 `java.time`（minSdk 26 原生可用）：时区与历法都由 [DAY_KEY_ZONE] + 公历
+     * `LocalDate` 决定，不再受设备 Locale 影响；`DateTimeFormatter` 本身不可变、线程安全，
+     * 因此也不再需要 `@Synchronized`（原实现是为了护着非线程安全的 `SimpleDateFormat`）。
      */
-    private val dayKeyFormat = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).apply {
-        timeZone = TimeZone.getTimeZone("Asia/Shanghai")
-    }
-
-    @Synchronized
-    fun dayKey(timestamp: Long): String = dayKeyFormat.format(timestamp)
+    fun dayKey(timestamp: Long): String =
+        // ⚠️ 禁止改回 `LocalDate.ofInstant(instant, zone)`：它是 **Java 9+** 的静态方法，
+        // Android 上要 API 34 才有；minSdk=26 的设备运行时直接抛
+        // `NoSuchMethodError: No static method ofInstant(...) in class Ljava/time/LocalDate;`
+        // —— 这是 2026-11-07 孩子端启动即崩（GuardService 主循环 → dayKeyTicks → dayKey）的真因。
+        // 走 API 26 就有的 `Instant.atZone()` 再取日期，语义完全等价且全版本可用。
+        Instant.ofEpochMilli(timestamp).atZone(DAY_KEY_ZONE).toLocalDate()
+            .format(DateTimeFormatter.BASIC_ISO_DATE)
 
     /**
      * 无参版必须走服务端校准时间 [TimeProvider.now]，不能用设备墙钟。
@@ -56,31 +70,39 @@ open class UsageRepository @Inject constructor(
      * 首页"已用 / 剩余"直接归零，而服务端按 Asia/Shanghai 聚合又是另一个值 ——
      * 这正是"孩子端与家长端时间对不上"的一类成因，必须全程单一口径。
      *
-     * 配合 [dayKeyFormat] 已钉死的 Asia/Shanghai 时区：本函数只决定"用哪个时刻"
-     * （校准后的 now），[dayKeyFormat] 决定"按哪个时区切日"，两者齐备才能保证
+     * 配合 [dayKey] 已钉死的 Asia/Shanghai 时区：[dayKey] 决定"按哪个时区、哪套历法切日"，
+     * 本函数只决定"用哪个时刻"（校准后的 now），两者齐备才能保证
      * 本地日界 == 服务端日界，孩子端未激活分支的本地累计与家长端服务端统计不再错位。
      */
-    @Synchronized
     fun dayKey(): String = dayKey(timeProvider.now())
 
-    /** 累加某应用当日使用时长 */
+    /**
+     * 累加某应用当日使用时长。
+     *
+     * `lastUpdateAt / firstUsedAt / lastUsedAt` 必须与 [dayKey] **用同一个时刻**。
+     * 早期这三处写的是 `System.currentTimeMillis()`（裸墙钟），而分桶用的是校准后的
+     * [TimeProvider.now]：孩子把系统时间回拨一天后，用量仍计入正确的那一天，
+     * 但记录上的"最近使用时段"与上报给服务端的行为日志时间戳会跳到昨天 ——
+     * 家长端『今日使用 / 最近使用时段』凭空少一段或被塞进未来日期，属于
+     * "家长看到的证据可被孩子单方面改写"。统一走 [timestamp] 后两者天然同源。
+     */
     open suspend fun addAppUsage(packageName: String, deltaMs: Long, timestamp: Long = timeProvider.now()) {
         if (deltaMs <= 0) return
-        appUsageDao.addUsage(dayKey(timestamp), packageName, deltaMs, System.currentTimeMillis())
+        appUsageDao.addUsage(dayKey(timestamp), packageName, deltaMs, timestamp)
     }
 
-    /** 累加某应用当日启动次数 */
+    /** 累加某应用当日启动次数（时间戳口径同 [addAppUsage]） */
     open suspend fun addAppLaunch(packageName: String, timestamp: Long = timeProvider.now()) {
-        appUsageDao.addLaunch(dayKey(timestamp), packageName, System.currentTimeMillis())
+        appUsageDao.addLaunch(dayKey(timestamp), packageName, timestamp)
     }
 
-    /** 累加全局当日使用时长 */
+    /** 累加全局当日使用时长（时间戳口径同 [addAppUsage]） */
     open suspend fun addTotalUsage(deltaMs: Long, timestamp: Long = timeProvider.now()) {
         if (deltaMs <= 0) return
-        dailyUsageDao.addUsage(dayKey(timestamp), deltaMs, System.currentTimeMillis())
+        dailyUsageDao.addUsage(dayKey(timestamp), deltaMs, timestamp)
     }
 
-    suspend fun getAppUsage(packageName: String, key: String): AppUsageStat? =
+    open suspend fun getAppUsage(packageName: String, key: String): AppUsageStat? =
         appUsageDao.get(key, packageName)?.let {
             AppUsageStat(it.packageName, it.dayKey, it.usedMs, it.launchCount, it.lastUpdateAt, it.firstUsedAt, it.lastUsedAt)
         }
@@ -144,14 +166,20 @@ open class UsageRepository @Inject constructor(
     /**
      * 清理 N 天前的统计记录。
      * 统计类数据丢失不影响审计（原始行为日志另行留存），可安全清理。
+     *
+     * 基点必须是**受信时间**：用裸墙钟时，孩子把时间往前拨会让 cutoff 落到未来，
+     * `dayKey < cutoff` 把**今天**的 `app_usage / daily_usage` 一并删掉 ——
+     * 当日已用额度瞬间归零，等于一次免费重置。目前本方法尚无调用方（属"接线前先修"的防御）。
      */
     suspend fun purgeOlderThan(days: Int) {
-        val cutoff = dayKey(System.currentTimeMillis() - days * 24L * 60 * 60 * 1000)
+        val cutoff = dayKey(timeProvider.now() - days * 24L * 60 * 60 * 1000)
         appUsageDao.deleteBefore(cutoff)
         dailyUsageDao.deleteBefore(cutoff)
     }
 
     private companion object {
+        /** 业务日界时区：与 `PolicyEngine.BIZ_ZONE` / 服务端 `SERVER_ZONE_ID` 完全一致。 */
+        val DAY_KEY_ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
         /**
          * 日切轮询间隔：1 分钟。
          *

@@ -7,6 +7,7 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.padguard.child.MainActivity
+import com.padguard.child.notify.NotificationDelivery
 import com.padguard.core.common.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -61,6 +62,13 @@ class ConsentReturnNotifier @Inject constructor(
      */
     fun postReturnToConsent(label: String? = null): Boolean {
         val mgr = manager ?: return false
+        // 通知总开关被关 / 渠道被调成「不显示」时 notify() 静默丢弃却不抛异常：
+        // 上层 ConsentReturnPresenter 会把 notified 记成 true，整个等待窗口内不再补发，
+        // 家长被卡在系统设置页回不来（R34）。如实返回 false，权限恢复后下一拍即重试。
+        if (!NotificationDelivery.canDeliver(context, CHANNEL_ID)) {
+            Logger.w(TAG) { "notifications disabled; consent return notification withheld" }
+            return false
+        }
         ensureChannel(mgr)
 
         val pi = runCatching {

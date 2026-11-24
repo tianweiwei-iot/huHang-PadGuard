@@ -1,7 +1,7 @@
 package com.padguard.core.common
 
-import android.util.Base64
 import java.security.MessageDigest
+import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -61,11 +61,17 @@ object Crypto {
     fun sha256Hex(input: String): String =
         sha256(input.toByteArray()).joinToString("") { "%02x".format(it) }
 
+    /**
+     * 使用 [java.util.Base64]（标准 Base64、单行、含 `=` 填充），与服务端
+     * [com.padguard.server.service.CommandService.hmac] 完全一致的编码，
+     * 保证 HMAC 签名在两端逐字节相等；同时 `minSdk=26` 在设备上也可直接用 JDK 实现，
+     * 避免依赖 `android.util.Base64`（后者在纯 JVM 单元测试里是抛异常的桩）。
+     */
     fun base64(bytes: ByteArray): String =
-        Base64.encodeToString(bytes, Base64.NO_WRAP)
+        Base64.getEncoder().encodeToString(bytes)
 
     fun fromBase64(text: String): ByteArray =
-        Base64.decode(text, Base64.NO_WRAP)
+        Base64.getDecoder().decode(text)
 
     /**
      * 指令签名校验（对应说明书「数据传输安全规范」：指令签名校验通过后方可执行）。

@@ -1,6 +1,7 @@
 package com.padguard.core.data.repository
 
 import com.padguard.core.common.Logger
+import com.padguard.core.common.TimeProvider
 import com.padguard.core.data.db.BehaviorLogDao
 import com.padguard.core.data.db.BehaviorLogEntity
 import com.padguard.core.data.db.RiskEventDao
@@ -10,9 +11,13 @@ import com.padguard.core.data.model.LogType
 import com.padguard.core.data.model.RiskEvent
 import com.padguard.core.data.model.RiskLevel
 import com.padguard.core.data.model.RiskType
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.util.UUID
@@ -45,8 +50,14 @@ data class PendingBatch<T>(val items: List<T>, val entityIds: List<Long>) {
 @Singleton
 class LogRepository @Inject constructor(
     private val logDao: BehaviorLogDao,
-    private val riskDao: RiskEventDao
+    private val riskDao: RiskEventDao,
+    private val timeProvider: TimeProvider,
+    private val realtime: RealtimeAlertPublisher = NoopRealtimeAlertPublisher
 ) {
+
+    // B：HIGH 告警即时单发的 fire-and-forget 作用域。LogRepository 是 @Singleton（进程级生命周期），
+    // 故此处持有独立作用域是安全的；绝不把外部 CoroutineScope 注入进来（避免 Hilt 需要提供绑定）。
+    private val realtimeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -72,7 +83,14 @@ class LogRepository @Inject constructor(
         )
     }
 
-    suspend fun append(type: LogType, payload: Map<String, String>, timestamp: Long = System.currentTimeMillis()) {
+    /**
+     * 落一条行为日志。
+     *
+     * @param timestamp 证据时间戳，默认取受信时间（[TimeProvider.now]，经服务端 offset 校准且防篡改），
+     *   与 [com.padguard.core.data.repository.UsageRepository] 共用同一时间源——
+     *   孩子改系统时间无法重写"家长看到的证据"的时序。绝大多数调用方走默认即可。
+     */
+    suspend fun append(type: LogType, payload: Map<String, String>, timestamp: Long = timeProvider.now()) {
         logDao.insert(
             BehaviorLogEntity(
                 logId = newId("log"),
@@ -125,7 +143,7 @@ class LogRepository @Inject constructor(
             deviceId = deviceId,
             type = type,
             level = level,
-            timestamp = System.currentTimeMillis(),
+            timestamp = timeProvider.now(),
             detail = detail
         )
         riskDao.insert(
@@ -137,6 +155,12 @@ class LogRepository @Inject constructor(
                 detailJson = json.encodeToString(detail)
             )
         )
+        // B：HIGH 级告警在落库的同时即时单发（MQTT QoS1），让关键信号秒级到达家长端。
+        // 失败/未连接均静默回退到下面的批量 HTTPS 上报，绝不抛异常、绝不阻塞主流程、
+        // 绝不改 uploaded 标记（批量仍是无二义性的权威去重路径）。
+        if (level == RiskLevel.HIGH) {
+            realtimeScope.launch { runCatching { realtime.sendNow(event) } }
+        }
         return event
     }
 
@@ -262,6 +286,17 @@ class LogRepository @Inject constructor(
         RiskType.INVALID_SIGNATURE -> "指令签名校验失败"
         RiskType.HEARTBEAT_TIMEOUT -> "与服务端通信超时"
         RiskType.GUARD_PERMISSION_DROPPED -> "关键权限被系统撤销，请重新授予"
+        // 并行改造新增的"进程被一键清理"告警类型；此 when 无 else 分支，
+        // 漏补会直接让 core:data 编译失败（全量门禁阻塞）。纯文案，无副作用。
+        RiskType.GUARD_PROCESS_RECYCLED -> "管控进程被系统清理，正在自动恢复"
+        RiskType.GUARD_FOREGROUND_DOWN -> "守护服务已降级为后台运行，随时可能被系统回收"
+        RiskType.APP_INSTALLED -> "设备新装了应用"
+        RiskType.APP_UNINSTALLED -> "设备卸载了应用"
+        RiskType.DEBUG_BUILD_ACTIVE -> "调试版运行于已绑定设备（请用 release 部署）"
+        RiskType.PROXY_DETECTED -> "设备正通过代理/VPN 联网（请检查是否被中间人解密观测）"
+        RiskType.CONTROL_LOST -> "管控完整性丢失：设备曾绑定但凭据已空（疑似被清除应用数据，管控已失效）"
+        RiskType.HOME_CHANGED -> "默认桌面已被改为第三方，按 HOME 可跳出管控（请改回护航成长桌面）"
+        RiskType.WEB_GUARD_DOWN -> "网页过滤隧道已停止：域名拦截当前不生效（非 DO 设备下重启受限，请检查设备状态）"
     }
 
     // ==================== 清理 ====================

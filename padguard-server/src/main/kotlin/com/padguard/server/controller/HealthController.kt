@@ -1,12 +1,16 @@
 package com.padguard.server.controller
 
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.context.event.ApplicationReadyEvent
 import org.springframework.context.event.EventListener
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
+import java.io.File
+import java.io.IOException
+import java.nio.file.Files
 import java.sql.Connection
 import java.time.Instant
 import java.time.ZoneId
@@ -26,12 +30,16 @@ import javax.sql.DataSource
  * NoResourceFoundException 再被 GlobalExceptionHandler 兜成 500 ——
  * 历史上正因如此被反复误判成"服务端挂了"。这个端点是为了消除该类误判。
  *
- * 检查项只做**真正能反映"是否可用"**的那一项：数据库连通性。
- * 常见的故障形态是"进程还在、端口还监听、但请求全线 500"（类加载损坏 / 连接池耗尽 / 库文件锁），
- * 此时只探 TCP 端口是探不出来的，必须真的下一次查询。
+ * 检查项覆盖两个"进程活着但功能已废"的真实故障形态：
+ * 1. 数据库连通性：类加载损坏 / 连接池耗尽 / 库文件锁 —— 必须真下一次查询才能发现；
+ * 2. 文件存储可用性：磁盘满 / 只读挂载 / uploads 被误删或换成文件 ——
+ *    否则截图/录屏/素材上传会静默失败，运维却看到 /health=UP 而毫无察觉。
  */
 @RestController
-class HealthController(private val dataSource: DataSource) {
+class HealthController(
+    private val dataSource: DataSource,
+    @Value("\${padguard.storage.dir:./uploads}") private val storageDir: String
+) {
 
     private val log = LoggerFactory.getLogger(HealthController::class.java)
 
@@ -40,6 +48,13 @@ class HealthController(private val dataSource: DataSource) {
 
     @Volatile
     private var ready = false
+
+    /** 存储探针结果缓存（守护脚本探测频繁，避免每次都落盘）。0 表示从未探测。 */
+    @Volatile
+    private var storageProbeAt = 0L
+
+    @Volatile
+    private var storageOkCached = false
 
     @EventListener(ApplicationReadyEvent::class)
     fun onReady() {
@@ -50,15 +65,18 @@ class HealthController(private val dataSource: DataSource) {
     @GetMapping("/health")
     fun health(): ResponseEntity<Map<String, Any?>> {
         val dbOk = probeDatabase()
+        val storageOk = probeStorage()
         // 启动完成前也返回 200：守护脚本若在启动期就判死并重启，会与正在启动的实例抢
         // H2 文件锁，把一次正常启动打断成反复重启。启动期用 ready=false 表达，
         // 由守护脚本按"连续失败 N 次"来兜底，而不是一次探不到就立刻重启。
-        val status = if (dbOk) HttpStatus.OK else HttpStatus.SERVICE_UNAVAILABLE
+        val healthy = dbOk && storageOk
+        val status = if (healthy) HttpStatus.OK else HttpStatus.SERVICE_UNAVAILABLE
         return ResponseEntity.status(status).body(
             mapOf(
-                "status" to if (dbOk) "UP" else "DOWN",
+                "status" to if (healthy) "UP" else "DOWN",
                 "ready" to ready,
                 "db" to if (dbOk) "UP" else "DOWN",
+                "storage" to if (storageOk) "UP" else "DOWN",
                 "uptimeMs" to (System.currentTimeMillis() - startedAt),
                 "startedAt" to formatTime(startedAt)
             )
@@ -81,7 +99,42 @@ class HealthController(private val dataSource: DataSource) {
         log.warn("health check: database probe failed: {}", it.message)
     }.getOrDefault(false)
 
+    /**
+     * 文件存储可用性：写一个临时探针文件再删掉，真正验证"可写"而非只看权限位。
+     *
+     * 目录不存在时按 FileStorageService 的同款语义 mkdirs（它初始化时就会自动建目录，
+     * 目录缺失本身不算故障）；只有"建不出来 / 路径被换成普通文件 / 写不进去"才判 DOWN。
+     * 磁盘满时 createTempFile 或 write 会抛 IOException，如实反映为存储不可用。
+     * 探针文件用 finally 删除，不给媒体目录留垃圾。
+     */
+    private fun probeStorage(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - storageProbeAt < STORAGE_PROBE_TTL_MS) return storageOkCached
+        val ok = runCatching {
+            val dir = File(storageDir)
+            if (!dir.exists() && !dir.mkdirs()) throw IOException("cannot create storage dir: $storageDir")
+            if (!dir.isDirectory) throw IOException("storage path is not a directory: $storageDir")
+            val probe = Files.createTempFile(dir.toPath(), ".health-", ".probe")
+            try {
+                Files.write(probe, byteArrayOf(0x48)) // 真写一个字节，暴露只读/满盘
+            } finally {
+                Files.deleteIfExists(probe)
+            }
+            true
+        }.onFailure {
+            log.warn("health check: storage probe failed: {}", it.message)
+        }.getOrDefault(false)
+        storageProbeAt = now
+        storageOkCached = ok
+        return ok
+    }
+
     private fun formatTime(millis: Long): String =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             .format(Instant.ofEpochMilli(millis).atZone(SERVER_ZONE_ID))
+
+    companion object {
+        /** 存储探针结果缓存时长：守护脚本通常每几秒探一次，30s 内不重复落盘。 */
+        private const val STORAGE_PROBE_TTL_MS = 30_000L
+    }
 }

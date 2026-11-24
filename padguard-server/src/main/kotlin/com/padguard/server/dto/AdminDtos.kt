@@ -286,6 +286,12 @@ data class AdminSettingsDto(
 data class AdminLoginRequest(val username: String, val password: String)
 /** 自助修改自身密码：需当前密码；新密码至少 8 位（由服务端强制） */
 data class AdminChangePasswordRequest(val currentPassword: String, val newPassword: String)
+/**
+ * 注销家长账号的二次确认载荷。
+ * 服务端会逐字比对目标账号手机号，防止误点/脚本批量调用直接物理删除账号。
+ */
+data class AdminEraseParentRequest(val confirmPhone: String = "")
+
 data class AdminCreateParentRequest(
     val phone: String,
     val name: String? = null,

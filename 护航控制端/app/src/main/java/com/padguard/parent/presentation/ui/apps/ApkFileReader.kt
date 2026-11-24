@@ -2,12 +2,13 @@ package com.padguard.parent.presentation.ui.apps
 
 import android.content.Context
 import android.net.Uri
+import com.padguard.parent.domain.model.MediaSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * 从家长手机本地读取 APK：取出字节、包名与应用名。
+ * 从家长手机本地读取 APK：取出临时文件、包名与应用名。
  *
  * ## 为什么必须解出真实包名
  * 服务端要靠包名预置台账（否则家长端列表里凭空多一个"未知应用"），
@@ -18,25 +19,50 @@ import java.io.File
  * ## 为什么要先落盘再解析
  * `PackageManager.getPackageArchiveInfo` 只接受**文件路径**，不接受流式输入，
  * 而 [Uri] 可能来自网盘/文件管理器，未必能拿到真实路径。
- * 因此先复制到本应用 cache 目录再解析，用完立即删除，不留下 APK 副本。
+ * 因此先复制到本应用 cache 目录再解析。
+ *
+ * ## 落盘后不再整份读进内存
+ * 早期这里解析完还会 `readBytes()` 把整个 APK 读进堆，交给上传层再写一遍 ——
+ * 200MB 的安装包等于「2 倍峰值」，家长端在上传刚开始时就有被系统 OOM 杀掉的风险。
+ * 现在把临时文件本身作为[流式来源][MediaSource]交给上传层，
+ * 上传结束后由调用方 `close()` 删除（见 [ApkInfo.asMediaSource]）。
  */
 object ApkFileReader {
 
     data class ApkInfo(
-        val bytes: ByteArray,
+        /** cache 目录里的临时副本；由 [asMediaSource] 交给上传层，上传结束即删 */
+        val file: File,
         val fileName: String,
         val packageName: String,
         val appName: String?,
         val versionCode: Long,
         val versionName: String
-    )
+    ) {
+        /**
+         * 流式上传来源。**用完后必须 `close()`**（放 `finally`），否则 cache 里会留一份几十 MB 的副本。
+         * 即便漏了，[read] 每次调用都会顺手清掉超过 2 小时的孤儿副本。
+         */
+        fun asMediaSource(): MediaSource = MediaSource.ofFile(
+            file = file,
+            contentType = "application/vnd.android.package-archive",
+            fileName = fileName,
+            deleteWhenClosed = true
+        )
+    }
 
     /** 单文件体积上限（200MB，与服务端 multipart 上限一致，避免传一半被拒） */
-    private const val MAX_BYTES = 200 * 1024 * 1024
+    private const val MAX_BYTES = MediaSource.MAX_UPLOAD_BYTES
+
+    /** 孤儿临时文件的最短存活时间：小于此值视为"可能正在上传"，绝不删 */
+    private const val ORPHAN_TTL_MS = 2L * 60 * 60 * 1000
 
     suspend fun read(context: Context, uri: Uri): Result<ApkInfo> = withContext(Dispatchers.IO) {
         runCatching {
+            sweepOrphans(context)
             val tmp = File(context.cacheDir, "upload_${System.currentTimeMillis()}.apk")
+            // 解析失败（不是 APK / 超上限 / 权限被撤）必须删掉半截文件；
+            // 成功则把删除责任交给上传层（close 时删），所以这里用 keep 标记区分。
+            var keep = false
             try {
                 // 先把 Uri 落成本地文件：① 解析 APK 必须要真实路径；② 顺便完成大小校验
                 context.contentResolver.openInputStream(uri)?.use { input ->
@@ -53,8 +79,6 @@ object ApkFileReader {
                     }
                 } ?: error("无法读取所选文件")
 
-                val bytes = tmp.readBytes()
-
                 @Suppress("DEPRECATION")
                 val info = context.packageManager.getPackageArchiveInfo(tmp.absolutePath, 0)
                 val pkg = info?.packageName
@@ -66,8 +90,8 @@ object ApkFileReader {
                     if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
                 } ?: "$pkg.apk"
 
-                ApkInfo(
-                    bytes = bytes,
+                val result = ApkInfo(
+                    file = tmp,
                     fileName = name,
                     packageName = pkg,
                     appName = info.applicationInfo
@@ -81,8 +105,27 @@ object ApkFileReader {
                     },
                     versionName = info.versionName ?: ""
                 )
+                keep = true
+                result
             } finally {
-                tmp.delete()
+                if (!keep) runCatching { tmp.delete() }
+            }
+        }
+    }
+
+    /**
+     * 清理上次遗留的 APK 临时副本。
+     *
+     * 正常路径由上传层 `close()` 删除；但上传中被系统杀掉、或异常路径漏了 close 时，
+     * cache 里会积压几十 MB 的副本。每次选取安装包时顺手扫一遍，成本仅一个目录遍历。
+     */
+    private fun sweepOrphans(context: Context) {
+        runCatching {
+            val cutoff = System.currentTimeMillis() - ORPHAN_TTL_MS
+            context.cacheDir.listFiles()?.forEach { f ->
+                if (f.isFile && f.name.startsWith("upload_") && f.name.endsWith(".apk") && f.lastModified() < cutoff) {
+                    runCatching { f.delete() }
+                }
             }
         }
     }

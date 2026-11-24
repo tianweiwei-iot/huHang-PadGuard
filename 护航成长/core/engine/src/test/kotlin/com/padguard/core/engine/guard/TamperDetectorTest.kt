@@ -64,7 +64,7 @@ class TamperDetectorTest {
         val admin = Mockito.mock(DeviceAdminBridge::class.java)
         Mockito.`when`(admin.refreshControlMode()).thenReturn(ControlMode.LEGACY)
         Mockito.`when`(admin.controlMode).thenReturn(MutableStateFlow(ControlMode.LEGACY))
-        return TamperDetector(context, admin, probe, TimeProvider())
+        return TamperDetector(context, admin, probe, TimeProvider(), BindIntegrityStore(), EgressExposureDetector(context), HomeRoleDetector(context, admin))
     }
 
     /** 关掉与本测试无关的检测面，隔离守护基建断言 */
@@ -200,7 +200,7 @@ class TamperDetectorTest {
         Mockito.`when`(admin.refreshControlMode())
             .thenReturn(ControlMode.DEVICE_ADMIN, ControlMode.LEGACY, ControlMode.DEVICE_ADMIN)
         Mockito.`when`(admin.controlMode).thenReturn(MutableStateFlow(ControlMode.DEVICE_ADMIN))
-        val det = TamperDetector(context, admin, FakeProbe(a11y = true, usage = true), TimeProvider())
+        val det = TamperDetector(context, admin, FakeProbe(a11y = true, usage = true), TimeProvider(), BindIntegrityStore(), EgressExposureDetector(context), HomeRoleDetector(context, admin))
 
         repeat(3) { i ->
             assertTrue(
@@ -221,7 +221,7 @@ class TamperDetectorTest {
         Mockito.`when`(admin.refreshControlMode())
             .thenReturn(ControlMode.DEVICE_ADMIN, ControlMode.LEGACY, ControlMode.LEGACY)
         Mockito.`when`(admin.controlMode).thenReturn(MutableStateFlow(ControlMode.DEVICE_ADMIN))
-        val det = TamperDetector(context, admin, FakeProbe(a11y = true, usage = true), TimeProvider())
+        val det = TamperDetector(context, admin, FakeProbe(a11y = true, usage = true), TimeProvider(), BindIntegrityStore(), EgressExposureDetector(context), HomeRoleDetector(context, admin))
 
         assertTrue("第 1 轮仅建立基线，不应报告",
             det.detect(policy(), SystemLockPolicy()).none { it.type == RiskType.PERMISSION_REVOKED })

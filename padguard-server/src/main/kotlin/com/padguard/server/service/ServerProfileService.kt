@@ -41,7 +41,8 @@ class ServerProfileService(
 
         /**
          * 端口默认值只在"完全没配置"时用于展示，不再带任何主机名。
-         * 保留 8090 是因为它与 compose/nginx 的默认映射一致，属于协议约定而非环境信息。
+         * 8090 对应 home/发布包启动器；compose + nginx 的默认映射是 8080（对外 443），
+         * 两者不同源，生产部署务必在管理端显式配置 server.profile，别依赖这个兜底值。
          */
         const val DEFAULT_PORT = 8090
         const val DEFAULT_SCHEME = "http"

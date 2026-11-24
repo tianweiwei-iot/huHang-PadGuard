@@ -1,5 +1,6 @@
 package com.padguard.server.service
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.padguard.server.common.SERVER_ZONE_ID
 import com.padguard.server.domain.Device
 import com.padguard.server.domain.UsageDelayTicket
@@ -11,6 +12,8 @@ import com.padguard.server.repository.UsageDelayRepository
 import com.padguard.server.repository.UsageSessionRepository
 import com.padguard.server.ws.WebSocketPushService
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
@@ -21,6 +24,7 @@ import org.mockito.Mockito.verify
 import java.time.Instant
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
+import org.springframework.transaction.support.TransactionSynchronizationManager
 
 /**
  * 延时审批服务单元测试（根因修复：申请≠生效，必须家长审批）。
@@ -38,6 +42,7 @@ class UsageDelayServiceTest {
     private lateinit var webSocketPush: WebSocketPushService
     private lateinit var deviceService: DeviceService
     private lateinit var auditService: AuditService
+    private lateinit var expirer: UsageDelayExpirer
     private lateinit var service: UsageDelayService
 
     /** 今日 dayKey（与 SERVER_ZONE_ID 一致） */
@@ -52,6 +57,7 @@ class UsageDelayServiceTest {
         webSocketPush = mock(WebSocketPushService::class.java)
         deviceService = mock(DeviceService::class.java)
         auditService = mock(AuditService::class.java)
+        expirer = UsageDelayExpirer(delayRepo)
 
         // 设备归属：device-1 -> user-1
         deviceRepo.table["device-1"] = Device(id = "device-1", userId = "user-1")
@@ -70,7 +76,7 @@ class UsageDelayServiceTest {
 
         service = UsageDelayService(
             deviceRepo, delayRepo, sessionRepo,
-            commandService, webSocketPush, deviceService, auditService
+            commandService, webSocketPush, deviceService, auditService, expirer
         )
     }
 
@@ -158,6 +164,60 @@ class UsageDelayServiceTest {
         assertThat(approved.get("status")).isEqualTo("APPROVED")
     }
 
+    /**
+     * 审批/申请都在 @Transactional 里，推送后若还有写库步骤失败，整笔回滚，
+     * 但 WS 消息已经发出去了 —— 家长端会看到一条数据库里并不存在的状态变更。
+     * 这类对外副作用必须挂到 afterCommit。
+     */
+    @Test
+    @DisplayName("审批通过：提交后才通知，事务回滚时不通知")
+    fun `approve defers WS notification until commit`() {
+        val ticket = service.request("device-1", 30)
+        val push = CountingPush()
+        service = UsageDelayService(
+            deviceRepo, delayRepo, sessionRepo, commandService, push, deviceService, auditService, expirer
+        )
+
+        TransactionSynchronizationManager.initSynchronization()
+        try {
+            service.approve("user-1", "device-1", ticket.id, UsageDelayApproveRequest())
+            assertTrue(push.events.isEmpty(), "事务未提交就推送，回滚时家长端会看到并不存在的 APPROVED")
+            TransactionSynchronizationManager.getSynchronizations().forEach { it.afterCommit() }
+            assertEquals(1, push.events.size, "提交后应恰好推送一次")
+            assertEquals("APPROVED", push.events.single()["status"])
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization()
+        }
+    }
+
+    @Test
+    @DisplayName("发起申请：提交后才通知家长端")
+    fun `request defers WS notification until commit`() {
+        val push = CountingPush()
+        service = UsageDelayService(
+            deviceRepo, delayRepo, sessionRepo, commandService, push, deviceService, auditService, expirer
+        )
+
+        TransactionSynchronizationManager.initSynchronization()
+        try {
+            service.request("device-1", 30)
+            assertTrue(push.events.isEmpty(), "事务未提交就推送，回滚时家长端会看到并不存在的待审申请")
+            TransactionSynchronizationManager.getSynchronizations().forEach { it.afterCommit() }
+            assertEquals(1, push.events.size)
+            assertEquals("usage.delay.requested", push.events.single()["type"])
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization()
+        }
+    }
+
+    /** 捕获推送次数与内容：Mockito 对非空 Map 参数的空值守卫在这个用例里会误伤，改用假实现。 */
+    private class CountingPush : WebSocketPushService(ObjectMapper(), users = com.padguard.server.support.PushTestUsers.permissive()) {
+        val events = mutableListOf<Map<String, Any?>>()
+        override fun pushToUser(userId: String?, payload: Map<String, Any?>) {
+            events += payload
+        }
+    }
+
     @Test
     @DisplayName("审批通过累加后，pendingDelayMinutes 归零（会话 DTO 反映）")
     fun `approve clears pending in session dto`() {
@@ -213,6 +273,22 @@ class UsageDelayServiceTest {
     }
 
     @Test
+    @DisplayName("R40 IDOR：跨用户 listTickets 必须抛 DEVICE_NOT_OWNED，不得靠 filter 兜底返回空列表")
+    fun `listTickets rejects another users device`() {
+        service.request("device-1", 15) // device-1 归属 user-1
+        val ex = org.junit.jupiter.api.Assertions.assertThrows(
+            com.padguard.server.common.BizException::class.java
+        ) { service.listTickets("user-2", "device-1") }
+        assertEquals(
+            com.padguard.server.common.ParentErr.DEVICE_NOT_OWNED,
+            ex.code,
+            "跨用户读取他人设备工单必须报 DEVICE_NOT_OWNED，与全系统 403 口径一致"
+        )
+        // 归属者本人仍可正常读取（正向对照，确保守卫没误伤）
+        assertThat(service.listTickets("user-1", "device-1")).hasSize(1)
+    }
+
+    @Test
     @DisplayName("跨日工单：即使今天已起表，也不得把昨天的申请批到今天的额度上")
     fun `approve rejects a ticket created on a previous day even if today session is active`() {
         // 今天是激活的会话（孩子今天已经起过表 / 零点自动开始），这正是旧实现漏判的前提：
@@ -263,7 +339,7 @@ class UsageDelayServiceTest {
         val deviceSettingRepo = mock(com.padguard.server.repository.DeviceSettingRepository::class.java)
         `when`(deviceSettingRepo.findById(org.mockito.ArgumentMatchers.anyString()))
             .thenReturn(java.util.Optional.empty())
-        return UsageSessionService(sessionRepo, deviceSettingRepo, deviceService, service)
+        return UsageSessionService(sessionRepo, deviceSettingRepo, deviceService, service, mock(UsageStartRequestService::class.java))
     }
 }
 
@@ -317,7 +393,7 @@ class FakeDeviceRepo : FakeJpaRepository<Device, String>(), DeviceRepository {
         table.values.map { it.createdAt }.filter { it >= since }
 }
 
-class FakeUsageDelayRepo : FakeJpaRepository<UsageDelayTicket, String>(), UsageDelayRepository {
+open class FakeUsageDelayRepo : FakeJpaRepository<UsageDelayTicket, String>(), UsageDelayRepository {
     override val table = LinkedHashMap<String, UsageDelayTicket>()
     override fun idOf(entity: UsageDelayTicket): String = entity.id
     override fun findByIdAndDeviceId(id: String, deviceId: String): UsageDelayTicket? =
@@ -367,6 +443,9 @@ class FakeUsageSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSes
     override fun idOf(entity: UsageSession): String = entity.deviceId
     override fun findByDeviceId(deviceId: String): UsageSession? = table[deviceId]
 
+    /** 内存 fake 没有行锁语义，等价于普通读。 */
+    override fun findByDeviceIdForUpdate(deviceId: String): UsageSession? = findByDeviceId(deviceId)
+
     override fun deleteByDeviceId(deviceId: String): Int {
         val before = table.size
         table.remove(deviceId)
@@ -381,6 +460,60 @@ class FakeUsageSessionRepo : FakeJpaRepository<UsageSession, String>(), UsageSes
         if (s.extendedMinutes + minutes > maxExtendedMinutes) return 0
         s.extendedMinutes += minutes
         s.lastDelayEpoch = now
+        s.updatedAt = now
+        return 1
+    }
+
+    // 与 rebaseExpiredSession 的 JPQL 逐字对齐：只在「确实已耗尽」时重设起点。
+    override fun rebaseExpiredSession(
+        deviceId: String, dayKey: String, now: Long,
+        quotaMinutes: Int, minutes: Int, minuteMs: Long
+    ): Int {
+        val s = table[deviceId] ?: return 0
+        val start = s.startEpoch ?: return 0
+        if (s.dayKey != dayKey) return 0
+        val baseline = (quotaMinutes + s.extendedMinutes - minutes) * minuteMs
+        if (now - start - s.restAccumulatedMs <= baseline) return 0
+        s.startEpoch = now + s.restAccumulatedMs - baseline
+        s.updatedAt = now
+        return 1
+    }
+
+    @Synchronized
+    override fun appendRestIfUnchanged(
+        deviceId: String, dayKey: String, delta: Long, newRestIds: String,
+        now: Long, oldAccum: Long, oldRestIds: String
+    ): Int {
+        val s = table[deviceId] ?: return 0
+        if (s.dayKey != dayKey || s.restAccumulatedMs != oldAccum || s.restIds != oldRestIds) return 0
+        s.restAccumulatedMs = oldAccum + delta
+        s.restIds = newRestIds
+        s.updatedAt = now
+        return 1
+    }
+
+    @Synchronized
+    override fun insertIfAbsent(deviceId: String, dayKey: String, startEpoch: Long, quotaMinutes: Int, now: Long): Int {
+        if (table.containsKey(deviceId)) return 0
+        table[deviceId] = UsageSession(
+            deviceId = deviceId, dayKey = dayKey, startEpoch = startEpoch,
+            quotaMinutes = quotaMinutes, createdAt = now, updatedAt = now
+        )
+        return 1
+    }
+
+    @Synchronized
+    override fun startFreshIfStale(deviceId: String, dayKey: String, startEpoch: Long, quotaMinutes: Int, now: Long): Int {
+        val s = table[deviceId] ?: return 0
+        if (s.dayKey == dayKey && s.startEpoch != null) return 0
+        s.dayKey = dayKey
+        s.startEpoch = startEpoch
+        s.quotaMinutes = quotaMinutes
+        s.extendedMinutes = 0
+        s.lastDelayEpoch = null
+        s.restAccumulatedMs = 0
+        s.restIds = ""
+        if (s.createdAt == 0L) s.createdAt = now
         s.updatedAt = now
         return 1
     }

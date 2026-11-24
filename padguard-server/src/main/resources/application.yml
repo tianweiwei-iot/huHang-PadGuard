@@ -1,5 +1,40 @@
+# ---- 日志：把单次请求的 traceId 打进每一行 ----
+# TraceIdFilter 负责生成/透传 X-Request-Id 并写入 MDC；这里让 console appender 消费它。
+# 没有这一行，MDC 里即使有值也不会出现在日志里 —— 客户端报错截屏上的请求 ID 就查不到东西。
+# `:-` 是 logback 的默认值语法：MQTT 回调、定时任务等不经过 Filter 的线程没有 MDC，
+# 打成一个空方括号而不是 "traceId_IS_UNDEFINED"，避免污染检索。
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [%X{traceId:-}] %logger{36} - %msg%n"
+
 server:
   port: 8080
+  # ---- 优雅停机 ----
+  # 部署/重启时不再"拔电源"式地掐断在途请求与定时任务：
+  # 收到 SIGTERM 后先停止接收新请求，已建立的 HTTP 连接（含 30s 一次的 /v1/alerts 轮询、
+  # 看屏长连接）与 @Scheduled 任务在 timeout-per-shutdown-phase 内自然走完再退出。
+  # 否则滚动发布/单机重启瞬间会砸出一波 502 与"设备掉线误报"。
+  # 注意：看屏异步请求超时是 30 分钟，但这里把停机宽限期压到 30s —— 维护期家长端看屏被断开是预期，
+  # 不能为了等一条长流把整个停机卡 30 分钟；到时强行回收即可。
+  shutdown: graceful
+  # ---- 响应压缩 ----
+  # 家庭部署形态下客户端走的是 `http://<内网IP>:8090`，既没有 nginx 的 gzip，
+  # 也没有 CDN —— 不打开这里，每一个 JSON 响应、每一份后台 JS/CSS 都是明文原样传。
+  # 实测（本机 8090，未压缩）：`/admin/assets/js/api.js` 31,749 B、`app.css` 16,713 B，
+  # 后台首屏十余个资源加起来约 200 KB；家长端 15 秒一次的 `/v1/alerts` 单次 7.7 KB。
+  # OkHttp / 浏览器默认都带 `Accept-Encoding: gzip` 并透明解压，客户端零改动。
+  #
+  # 为什么不放进 nginx：压缩只在一层做。两层都开时 nginx 看到上游已带
+  # `Content-Encoding: gzip` 会跳过，等于白留一份可能与 Spring 漂移的配置；
+  # 而 LAN 直连 8090 的形态根本不过 nginx。
+  compression:
+    enabled: true
+    # 白名单只列文本类。`application/octet-stream`、`image/*`、`video/*` 必须**不列**：
+    # 截图/录屏/APK 本体已是压缩格式，再过一遍 gzip 只烧 CPU、体积反而不降。
+    # `text/event-stream` 同样不列 —— 压缩需要攒缓冲，会把实时流变成"憋一坨再发"。
+    mime-types: application/json,application/xml,text/html,text/plain,text/css,application/javascript,text/javascript
+    # 低于 1 KB 的响应（大量 `{"code":0}` 小回执）压缩后反而更大：gzip 头 + 字典本身就有几十字节。
+    min-response-size: 1024
   tomcat:
     # 必须显式固定 basedir：默认是系统临时目录下的 tomcat.<port>.<随机>，
     # 于是 accesslog 里写的相对路径 ./logs 会被解析到那个临时目录里去，
@@ -47,6 +82,8 @@ padguard:
     # 真正接入服务商后才可置为 true。
     sms-login-enabled: false
   device:
+    # 仅用于绑定响应里回传 expiresAt 提示；当前设备令牌不会自动轮换，服务端鉴权也不按此值拒绝。
+    # 不要把它当成安全防线：真要做过期必须同时实现续期/重绑闭环，否则到期当天孩子端会集体掉线。
     token-ttl-days: 30
   # 孩子端上下线检测（见 DevicePresenceRegistry / PresenceMonitorService）
   # 判定阈值不是写死的：实际阈值 = clamp(1.8 × 该设备实测信号间隔, [min, max])，
@@ -54,7 +91,9 @@ padguard:
   # 孩子端的信号节奏是 3s，阈值低于它会把正常请求抖动误判成离线。
   presence:
     min-timeout-ms: 5000
-    max-timeout-ms: 20000
+    # 上限提到 40s：高于心跳周期(30s)，作为安全余量——即便某设备短暂只剩心跳、长轮询空窗，
+    # 也不会被误判离线（"一会儿在线一会儿掉线"的次要诱因）。根因已在孩子端解耦 HTTP 长轮询与 MQTT 态。
+    max-timeout-ms: 40000
     scan-interval-ms: 1000
   billing:
     # ---- 免费试用 ----
@@ -91,15 +130,45 @@ padguard:
       api-v3-key:
       # 商户 API 私钥（apiclient_key.pem 全文，PKCS#8，-----BEGIN PRIVATE KEY-----）。
       # 注意：私钥属高敏感凭证，生产请改用环境变量/密钥管理注入，勿明文提交进仓库。
+      # 推荐改用下方 private-key-path 挂载密钥文件，避免私钥出现在配置文件/环境变量里。
       private-key-pem:
-      # 支付结果异步回调地址：需公网 HTTPS，且与商户平台配置一致。
+      # 商户 API 私钥文件路径（PKCS#8 .pem），生产推荐：由密钥管理/编排把文件挂进容器，
+      # 这里只填路径（如 /app/secrets/apiclient_key.pem），私钥不进环境变量、不进镜像层。
+      private-key-path:
+      # 支付结果异步回调地址：需公网 HTTPS，且与商户平台配置一致。建议用 PADGUARD_BILLING_WECHAT_NOTIFY_URL 注入。
       notify-url:
       base-url: https://api.mch.weixin.qq.com
       platform-cert-dir:
       cert-auto-refresh: true
+  # ---------- W2：离线指令补发（设备上线重放） ----------
+  # 说明：redelivery-retention-ms / max-attempts / redelivery-types 是业务口径
+  # （PRD 的 ⟦TBD-5⟧：离线指令保留多久、补发冲突如何裁决），当前取的是**保守默认假设**，
+  # 尚未经产品拍板。刻意做成配置项：拍板后改这里或环境变量即可，无需改代码。
+  # 全部可用 PADGUARD_COMMAND_* 环境变量覆盖（生产建议由编排注入）。
+  command:
+    # 总开关：false = 完全退回迭代前语义（过期即 EXPIRED，不补发）
+    redelivery-enabled: true
+    # 指令有效期（毫秒），同时是补发成功后的新窗口。原为代码内硬编码 5*60_000。
+    ttl-ms: 300000
+    # 补发保留期：从指令创建起算，超过即不再补发并由清扫器收敛为 EXPIRED。
+    # 默认 24h 是保守值（远小于终端 7 天幂等窗口，避免幂等记录过期后旧指令"复活"）。
+    redelivery-retention-ms: 86400000
+    # 同一条指令最多补发次数，防永远送不达的指令无限重放
+    redelivery-max-attempts: 3
+    # 单次轮询最多补发条数，防设备长期离线后上线瞬间被打爆
+    redelivery-max-batch: 10
+    # 可补发白名单（fail-closed）：只登记「状态型、可重复生效」的指令。
+    # 刻意排除：UNLOCK/TEMP_UNLOCK（补发等于白送解锁时长）、SHOW_MESSAGE（过期霸屏）、
+    # SCREENSHOT/LOCATE/PHOTO/RECORD/LIVE_VIEW_*（采集类，设备离线几小时后补采集既无意义，
+    # 又违反未成年人个人信息最小必要原则）、LOCK_SCREEN（离线后突然锁住正在使用的设备）。
+    # 未在名单内 = 不补发。新增指令类型时必须显式评估是否加入。
+    redelivery-types: REFRESH_POLICY,UPDATE_CONFIG,SET_APP_SUSPENDED,SET_APP_HIDDEN,SET_RUNTIME_PERMISSION,SET_FEATURE_POLICY,SET_WATERMARK,SET_MANAGEMENT_ACTIVE
   mqtt:
     # 本地免 Docker 运行时设为 false（见 local profile），避免强连 EMQX 导致启动失败
     enabled: true
+    # W2：策略版本通知使用 retained，设备上线订阅后立刻拿到最新版本，不必等下一次策略变更。
+    # 关闭则退回原语义（非 retained）。注意 retained 只承载 {version}，不含任何个人信息。
+    policy-retained: true
     broker-url: "tcp://emqx:1883"
     username: ""
     password: ""
@@ -150,11 +219,36 @@ padguard:
     child-simulator: false
 
 spring:
+  # 停机宽限期：与 server.shutdown=graceful 配合，所有 SmartLifecycle（含 Web 服务器、
+  # MQTT 客户端注销、定时任务调度器）在 30s 内自然收尾，超时强制回收。
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
   datasource:
-    url: jdbc:postgresql://postgres:5432/padguard
-    username: padguard
-    password: padguard
+    url: jdbc:postgresql://postgres:5432/padguard?reWriteBatchedInserts=true
+    # 数据库凭据必须经由环境变量注入，禁止把真实密码写进仓库/安装包。
+    # 默认值刻意留空（不留 `padguard/padguard` 弱口令占位）：容器/云端生产档（空 profile）
+    # 由 ProdConfigAssertion 启动时检测空凭据直接中止，杜绝"忘了注入就用弱口令裸奔"。
+    # docker-compose.prod.yml 通过 SPRING_DATASOURCE_USERNAME/PASSWORD 注入强凭据；
+    # home/local 档在各自 profile 段显式用 H2 sa/空口令，不受此处影响。
+    username: ${PADGUARD_DB_USERNAME:}
+    password: ${PADGUARD_DB_PASSWORD:}
     driver-class-name: org.postgresql.Driver
+    # ---- 连接池（HikariCP）显式调优 ----
+    # 不显式配置时取 Spring Boot 默认值（max-pool-size=10、无泄漏检测）。
+    # 本项目存在"在请求线程上做阻塞外部调用"的路径：逆地理编码（高德 3s）、微信下单/退款（15s）、
+    # SMTP（5s）、看屏长连接，叠加家长端 15s 一次的轮询，并发一上来 10 个连接很容易被占满，
+    # 此后所有需要查库的请求在 getConnection 上排队 → 雪崩。
+    # 这里把池放大到 20 并打开泄漏检测（30s 未归还即告警），在单机家庭部署与中小容器都留足余量；
+    # 同时把连接最大存活压到 30min，规避云数据库/NAT 把空闲长连接悄悄掐断后还当它是好的。
+    hikari:
+      pool-name: pg-hikari
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      leak-detection-threshold: 30000
+      connection-test-query: SELECT 1
   jpa:
     hibernate:
       ddl-auto: none
@@ -162,6 +256,13 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
         format_sql: false
+        # 批量上行（IngestService 每 10 秒 saveAll 数百~2000 条日志/轨迹）必须开 JDBC 批处理，
+        # 否则 saveAll 会退化成逐条 INSERT：1000 台设备 × 100 条/10s ≈ 1000 次 DB 往返/秒，
+        # 全部占用 Hikari 连接。order_inserts/updates 让同实体语句聚拢，批大小 50 是吞吐与
+        # 单批 SQL 包体的平衡。配合 PG URL 的 reWriteBatchedInserts=true 才真正合并 INSERT。
+        jdbc.batch_size: 50
+        order_inserts: true
+        order_updates: true
     open-in-view: false
   flyway:
     enabled: true
@@ -175,9 +276,28 @@ spring:
       # 实时看屏 /v1/stream/{deviceId}/live 是长时间挂起、持续推帧的流。
       # Spring MVC 异步请求默认 30s 超时，会在画面正常推送时把连接掐断，
       # 表现为家长端每 30 秒闪一次"连接中"、观感就是"实时屏幕总断开"。
-      # 调大到 10 分钟；流本身另有"设备 30s 无帧即收流"的自保护（见 ParentStreamController
-      # 的 MAX_IDLE_MS），因此不会导致连接永久悬挂。
-      request-timeout: 600000
+      #
+      # 取 30 分钟而不是无限大：这条超时同时是"半死连接"的兜底回收器
+      # （对端掉线但没有 FIN，心跳帧会一直写进内核缓冲）；流本身另有
+      # "设备 30s 无帧即收流"（ParentStreamController.MAX_IDLE_MS）与
+      # 客户端断开触发的写失败两条自保护，因此不会长期悬挂。
+      # 到点结束属预期生命周期：GlobalExceptionHandler.handleAsyncTimeout
+      # 只按 DEBUG 记一行，不再打 ERROR + 堆栈。
+      request-timeout: 1800000
+
+  task:
+    scheduling:
+      pool:
+        # 默认值是 1：所有 @Scheduled 共用一个线程、彼此串行。
+        # 04:00 的 usage_logs 清理是单事务、无批次的批量 DELETE（几十万～百万行），
+        # 04:30 的媒体保留期清理要逐条 file.delete() 同步磁盘 IO ——
+        # 它们会把唯一的调度线程独占数分钟，期间这些秒级任务全部排队：
+        #   · 1s 的在线态扫描 → 掉线设备在库里仍是 ONLINE，家长端收不到 device.offline；
+        #   · 3s 的看屏会话对账 → 家长关了看屏也不下发 LIVE_VIEW_STOP，孩子端持续上行占带宽；
+        #   · 30s 的离线兜底 → CONTROL_LOST 告警整体延后。
+        # 拆出独立线程后，慢任务只占自己的那一条，秒级任务照常跑。
+        size: 4
+      thread-name-prefix: pg-sched-
 
   # ---- 邮件（密码重置通知等）----
   # 默认关闭：未配置 SMTP 时，重置密码仍会生成新口令并在后台弹窗显示，由管理员安全转告。
@@ -209,13 +329,22 @@ spring:
           writetimeout: 5000
 
 ---
+# 容器编排部署（docker-compose.prod.yml / Dockerfile）。
+# 注意：这里的 `padguard:` 必须与 `spring:` **同级**。原先误缩进在 `spring:` 下面，
+# 于是生效的键变成 `spring.padguard.mqtt.broker-url`（Spring 根本不读这个键），
+# 配置静默失效、只是碰巧与 application.yml 的默认值相同才没暴露。
+# 一旦有人改默认值或换 broker 地址，docker 部署会"改了不生效"且没有任何报错。
+#
+# 另注：docker-compose*.yml 目前**不激活任何 profile**（生产形态 = activeProfiles 为空，
+# 各闸门按"非开发"处理）。本块只在显式 `--spring.profiles.active=docker` 时生效；
+# 保留它是为了有人这么部署时不至于 broker 地址落空。
 spring:
   config:
     activate:
       on-profile: docker
-  padguard:
-    mqtt:
-      broker-url: "tcp://emqx:1883"
+padguard:
+  mqtt:
+    broker-url: "tcp://emqx:1883"
 
 ---
 # 本地免 Docker 运行：H2 文件库 + 关闭 MQTT，仅依赖本机 JVM 即可启动联调。
@@ -254,8 +383,22 @@ padguard:
     child-simulator: false
 
 ---
-# 家庭/本地部署包（发布用）：H2 文件库（数据持久化，重启不丢）+ 关闭 MQTT + 固定 8090 端口
-# 配合发布包内的 start.bat 使用，双击即可在家长电脑上运行服务端
+# ============================================================================
+# home —— **发布包（家庭/私域单机）正式档位**，不是开发档位。
+#
+# 与 `local` 的差别只有两点：档位名不在 ProdConfigAssertion.DEV_PROFILES 里，
+# 因此所有"生产红线闸门"对本档位**全部生效**：
+#   · mockPay 打开 → 启动直接中止（而不是放行所有支付回调）
+#   · 后台「系统设置」不许把 mockPay 打开（isDevProfile=false）
+#   · 短信免密登录恒被拒绝（AuthService 按非开发处理）
+#   · 演示账号 / 测试账号不播种，且存量弱口令账号每次启动强制重置
+#
+# 曾经 start-server.bat 用的是 `local`，为了拿 H2 + 关 MQTT 的便利，
+# 结果把发布包整体降级成"开发环境"——上面四条闸门在真实安装包里全部失效。
+# 需要联调请用 start-local.bat（它会显式激活 local 并打开演示账号）。
+#
+# 数据仍落同一个 H2 文件库（./data/padguard），从 local 切到 home 不丢数据。
+# ============================================================================
 server:
   port: 8090
 
@@ -288,9 +431,16 @@ padguard:
     # 绝不在这里写死：密钥随安装包分发的话，任何人都能自己签发 token 冒充家长登录。
     secret: ""
   mqtt:
-    # 家庭部署包内置 Mosquitto Broker（随服务端启动脚本拉起，监听 0.0.0.0:1883）。
-    # 服务端本机回环连接；孩子端平板通过局域网 IP:1883 连接。
-    enabled: true
+    # 默认关闭 —— 与发布包的真实形态一致：start-server.bat **不拉起** Mosquitto，
+    # 本机 1883 没有监听。此时 MqttConfig 会重试 20 次 × 3s 才降级返回 null，
+    # 等于每次开机白等 60 秒，还会刷一条"无法连接 MQTT Broker"的 error
+    # （把真正的故障日志淹掉）。关闭后 MqttGateway 走 debug 分支，
+    # 指令由 HTTP 长轮询 + W2 补发兜底，功能不缺失、只少了实时推送的毫秒级延迟。
+    #
+    # 若确实想启用：随包安装 Mosquitto 并在启动脚本里拉起，然后用
+    #   setx PADGUARD_MQTT_ENABLED true
+    # 注入一次即可持久生效。
+    enabled: ${PADGUARD_MQTT_ENABLED:false}
     broker-url: "tcp://127.0.0.1:1883"
     username: ""
     password: ""

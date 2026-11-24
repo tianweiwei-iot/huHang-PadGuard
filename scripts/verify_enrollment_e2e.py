@@ -28,8 +28,10 @@ import urllib.error
 import urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8090"
-PHONE = os.environ.get("E2E_PHONE", "19371581808")
-PASSWORD = os.environ.get("E2E_PASSWORD", "201325")
+PHONE = os.environ.get("E2E_PHONE", "")
+PASSWORD = os.environ.get("E2E_PASSWORD", "")
+if not PHONE or not PASSWORD:
+    sys.exit("请通过环境变量 E2E_PHONE / E2E_PASSWORD 提供测试账号（勿将凭证硬编码进源码/版本库）")
 
 results = []
 
