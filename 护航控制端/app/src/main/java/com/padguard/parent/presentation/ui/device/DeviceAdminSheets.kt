@@ -124,14 +124,22 @@ fun DeviceAdminSheetHost(
 
 private data class PermItem(val perm: String, val label: String, val desc: String)
 
-/** 可被家长授予 / 收回的运行时权限（对应 Android 危险权限） */
+/**
+ * 可被家长授予 / 收回的运行时权限。
+ *
+ * 法务复核（2026-11-25 第二轮）：旧清单含电话状态与通讯录两项权限开关，
+ * 但孩子端 Manifest 从未声明这两项权限（合规瘦身时已移除），开关点开也不会生效；
+ * 同时《隐私政策》第三节明确"不申请通讯录、电话状态"。给用户一个无效开关，
+ * 既误导用户又与应用市场隐私标签审核冲突，故移除。
+ *
+ * READ_EXTERNAL_STORAGE 仅存在于 Android 12 及以下（孩子端 maxSdkVersion=32），
+ * 必须在文案中说明，否则在 Android 13+ 设备上同样是不可用开关。
+ */
 private val PERMISSION_ITEMS = listOf(
     PermItem("android.permission.CAMERA", "摄像头", "允许被控应用使用相机拍照"),
     PermItem("android.permission.RECORD_AUDIO", "麦克风", "允许被控应用使用麦克风录音"),
     PermItem("android.permission.ACCESS_FINE_LOCATION", "定位", "允许采集位置（定位 / 电子围栏依赖此项）"),
-    PermItem("android.permission.READ_PHONE_STATE", "电话", "读取手机状态（如设备标识）"),
-    PermItem("android.permission.READ_CONTACTS", "通讯录", "读取联系人信息"),
-    PermItem("android.permission.READ_EXTERNAL_STORAGE", "存储", "读取外部存储空间的文件")
+    PermItem("android.permission.READ_EXTERNAL_STORAGE", "存储", "读取外部存储文件（仅 Android 12 及以下系统需要）")
 )
 
 @OptIn(ExperimentalMaterial3Api::class)

@@ -90,4 +90,86 @@ class LegalTextContractTest {
         assertFalse("手册不得再说无退款 API", "无退款 API 实现" in manual)
         assertTrue("手册必须记载已实现的退款链路", "AdminBillingService.refund" in manual)
     }
+
+    @Test
+    fun `disclaimer clauses survive PRC contract and consumer law review`() {
+        val terms = read("用户协议.md")
+        assertFalse("不得保留英美法式'按现状'免责", "按现状提供服务" in terms)
+        assertTrue("必须写清按约定履行", "按照本协议约定" in terms)
+        assertTrue(
+            "必须写明民法典506条法定边界（故意/重大过失、人身损害不得免责）",
+            "因故意或重大过失" in terms && "人身损害" in terms
+        )
+        assertTrue("第三方原因不得概括免责", "第三方原因不免责" in terms)
+        assertTrue("必须载明定位非紧急救援依据", "110 / 120 / 119" in terms)
+        assertTrue("必须提示采集涉及在场第三人隐私", "在场第三人" in terms)
+        assertTrue("必须提示数据不永久保存", "我们不承诺数据永久保存" in terms)
+        assertTrue("必须写明服务整体终止的导出窗口", "服务整体终止" in terms)
+        for (clause in listOf("通知与送达", "完整协议与优先顺序", "可分性", "权利保留", "转让与承继")) {
+            assertTrue("缺少合同健壮性条款：$clause", clause in terms)
+        }
+    }
+
+    @Test
+    fun `in-app legal text is complete versioned and decidable`() {
+        val ui = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/auth/LoginScreen.kt")
+        assertTrue("必须提供用户协议全文入口", "查看《用户协议》完整全文" in ui)
+        assertTrue("必须提供隐私政策全文入口", "查看《隐私政策》完整全文" in ui)
+        assertTrue("必须展示两份文本的版本号", "v1.1" in ui && "v2.0" in ui)
+        assertTrue("必须展示生效日期", "2026-11-25 起生效" in ui)
+        assertTrue("必须提供不同意退路", "不同意" in ui)
+        assertFalse("不得再声称全文在'随包'却不可达", "完整条款见随包" in ui)
+        assertTrue("要点必须含保存期限", "30 天" in ui && "90 天" in ui)
+        assertTrue("要点必须提示单独同意入口", "不满 14 周岁" in ui)
+
+        val termsAsset = read("护航控制端/app/src/main/assets/legal/terms-of-service.md")
+        val policyAsset = read("护航控制端/app/src/main/assets/legal/privacy-policy.md")
+        assertTrue("随包《用户协议》必须与仓库原文一致", termsAsset.trim() == read("用户协议.md").trim())
+        assertTrue("随包《隐私政策》必须与仓库原文一致", policyAsset.trim() == read("隐私政策.md").trim())
+    }
+
+    @Test
+    fun `consent state tracks legal version and supports real withdrawal`() {
+        val prefs = read("护航控制端/app/src/main/java/com/padguard/parent/di/PrivacyConsentPrefs.kt")
+        assertTrue("同意版本必须能区分政策v2.0", "CURRENT_POLICY_VERSION = \"2.0.0\"" in prefs)
+        assertTrue("必须提供真实撤回实现", "fun revoke()" in prefs)
+
+        val vm = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/viewmodel/LoginViewModel.kt")
+        assertTrue("ViewModel 必须提供撤回入口", "fun declinePolicies()" in vm)
+
+        val ui = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/auth/LoginScreen.kt")
+        assertTrue("取消勾选必须真实撤回而非只改UI", "else viewModel.declinePolicies()" in ui)
+    }
+
+    @Test
+    fun `permission UI must only expose permissions the child app declares`() {
+        val ui = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/device/DeviceAdminSheets.kt")
+        assertTrue("电话权限开关必须移除", "READ_PHONE_STATE" !in ui)
+        assertTrue("通讯录权限开关必须移除", "READ_CONTACTS" !in ui)
+        assertTrue("存储权限必须标注系统版本限制", "仅 Android 12 及以下" in ui)
+
+        val manifest = read("护航成长/app/src/main/AndroidManifest.xml")
+        assertTrue(
+            "孩子端不得声明电话权限",
+            "android:name=\"android.permission.READ_PHONE_STATE\"" !in manifest
+        )
+        assertTrue(
+            "孩子端不得声明通讯录权限",
+            "android:name=\"android.permission.READ_CONTACTS\"" !in manifest
+        )
+    }
+
+    @Test
+    fun `deletion and correction wording match implemented rights`() {
+        val screen = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/profile/DataRightsScreen.kt")
+        assertFalse("不得再宣称账号被不可逆清除", "账号将被不可逆清除" in screen)
+        assertTrue("注销文案必须说明匿名化", "账号匿名化" in screen)
+        assertTrue("注销文案必须说明订单与审计保留", "支付订单与审计记录依法保留" in screen)
+        assertFalse("UI 文案不得残留 Markdown 星号", "**不是实名年龄核验**" in screen)
+
+        val policy = read("隐私政策.md")
+        assertTrue("更正路径必须指向真实可达的客服渠道", "邮件 support@padguard.com" in policy)
+        val deviceScreen = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/device/DeviceManageScreen.kt")
+        assertTrue("重命名设备入口必须真实存在", "renameDevice" in deviceScreen)
+    }
 }

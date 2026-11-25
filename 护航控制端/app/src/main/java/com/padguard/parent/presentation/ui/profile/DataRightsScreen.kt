@@ -224,7 +224,7 @@ fun DataRightsScreen(
                     SectionTitle("不满十四周岁监护人单独同意")
                     Text(
                         "请如实填写孩子出生日期（yyyy-MM-dd）并勾选单独同意；服务端只接受未满 14 周岁。" +
-                            "此处为家长申报留痕，**不是实名年龄核验**，法务要求实名核验时需另走核验通道。",
+                            "此处为家长申报留痕，不是实名年龄核验，法务要求实名核验时需另走核验通道。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -286,7 +286,8 @@ fun DataRightsScreen(
                 Column(Modifier.padding(16.dp)) {
                     SectionTitle("注销账号")
                     Text(
-                        "提交后进入冷静期，期内可取消；确认后设备数据与账号将被不可逆清除。",
+                        "提交后进入冷静期，期内可取消；确认后设备业务数据将被物理删除，" +
+                            "账号匿名化，支付订单与审计记录依法保留（详见《隐私政策》第五节）。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -388,7 +389,7 @@ fun DataRightsScreen(
         AlertDialog(
             onDismissRequest = { showConfirmDeletionDialog = false },
             title = { Text("确认注销？") },
-            text = { Text("此操作不可撤销：设备个人数据将被清除，账号将被匿名化。请在冷静期确认无误后继续。") },
+            text = { Text("确认后不可撤销：设备业务数据将被物理删除，账号匿名化，支付订单与审计记录依法保留。请在冷静期确认无误后继续。") },
             confirmButton = {
                 TextButton(onClick = {
                     showConfirmDeletionDialog = false

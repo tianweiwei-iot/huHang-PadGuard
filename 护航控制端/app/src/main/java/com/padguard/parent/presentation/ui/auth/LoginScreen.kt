@@ -332,8 +332,9 @@ fun LoginScreen(
                 Checkbox(
                     checked = uiState.consentAgreed,
                     onCheckedChange = { checked ->
-                        // 只允许勾选；取消勾选不清除已落盘的同意记录（合规留痕不可逆）。
-                        if (checked) viewModel.agreeToPolicies()
+                        // 允许取消勾选 = 撤回同意。撤回必须真实清掉本地同意留痕，
+                        // 否则 UI 显示已取消、状态仍是已同意，属于"假撤回"（PIPL 第 15 条）。
+                        if (checked) viewModel.agreeToPolicies() else viewModel.declinePolicies()
                     }
                 )
                 Text(
@@ -353,7 +354,8 @@ fun LoginScreen(
             if (showAgreement) {
                 AgreementDialog(
                     onDismiss = { showAgreement = false },
-                    onAgree = { viewModel.agreeToPolicies() }
+                    onAgree = { viewModel.agreeToPolicies() },
+                    onDecline = { viewModel.declinePolicies() }
                 )
             }
         }
@@ -992,30 +994,69 @@ fun ServerConfigDialog(
 }
 
 /**
- * 简易协议页。
- * 登录页协议文案点击后展示，承载《用户协议》与《隐私政策》要点。
- * 采用本地文本而非外链 URL：当前域名尚未完成 ICP 备案，外链不可达；
- * 后续备案完成后可替换为跳转正式协议页。
+ * 协议要点弹窗，并提供**随包全文**展开入口。
+ *
+ * 法务复核（2026-11-25 第二轮）：旧版只展示要点，并以"全文在随包文件中"的说法代替真实可达的全文，
+ * 但 APK 内并无全文，用户实际无法查阅完整条款 —— 这是 PIPL 第 17 条的告知瑕疵，
+ * 也是应用市场审核的高发驳回点。现把两份 md 原文内置到 assets/legal/，
+ * 点"查看完整全文"即可在 App 内滚动阅读，不依赖尚未备案的外链域名。
+ *
+ * [readOnly] 用于「关于」页：此时只提供关闭按钮，不触发同意/撤回状态变更。
  */
+@Composable
+private fun rememberLegalText(assetPath: String): String {
+    val context = LocalContext.current
+    return remember(assetPath) {
+        runCatching {
+            context.assets.open(assetPath).bufferedReader().use { it.readText() }
+        }.getOrElse {
+            "【条款文本加载失败】请通过客服邮箱 support@padguard.com 索取完整版本。"
+        }
+    }
+}
+
 @Composable
 internal fun AgreementDialog(
     onDismiss: () -> Unit,
-    onAgree: () -> Unit = {}
+    onAgree: () -> Unit = {},
+    onDecline: () -> Unit = {},
+    readOnly: Boolean = false
 ) {
+    var expandedTerms by remember { mutableStateOf(false) }
+    var expandedPrivacy by remember { mutableStateOf(false) }
+    val fullTerms = rememberLegalText("legal/terms-of-service.md")
+    val fullPrivacy = rememberLegalText("legal/privacy-policy.md")
+
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton(onClick = {
-                onAgree()
-                onDismiss()
-            }) { Text("同意并勾选") }
+            if (readOnly) {
+                TextButton(onClick = onDismiss) { Text("关闭") }
+            } else {
+                TextButton(onClick = {
+                    onAgree()
+                    onDismiss()
+                }) { Text("同意并勾选") }
+            }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
+            if (!readOnly) {
+                TextButton(onClick = {
+                    onDecline()
+                    onDismiss()
+                }) { Text("不同意") }
+            } else null
         },
         title = { Text("用户协议与隐私政策") },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    text = "版本：《用户协议》v1.1 /《隐私政策》v2.0，均自 2026-11-25 起生效。" +
+                        "勾选即表示您已阅读并同意两份完整条款。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(10.dp))
                 Text(
                     text = "《用户协议》",
                     style = MaterialTheme.typography.titleSmall,
@@ -1025,13 +1066,31 @@ internal fun AgreementDialog(
                 Text(
                     text = "1. 本软件为家长监护类工具，您应是年满 18 周岁的监护人，且仅用于监护目的。\n\n" +
                         "2. 家长与孩子设备需绑定后使用，绑定关系由家长端发起并建立；孩子端复用家长账号，" +
-                        "请妥善保管密码。\n\n" +
-                        "3. 远程锁屏、应用管理、位置查看等能力仅限监护目的；未启用设备所有者模式时，" +
-                        "卸载、强停等情形可能突破管控，能力边界已在 App 内如实展示。\n\n" +
-                        "4. 套餐为一次性购买、不自动续费，支付由微信完成；已扣款未到账或需退款，请邮件 " +
-                        "support@padguard.com。完整条款见随包《用户协议》。",
+                        "请妥善保管密码，勿与孩子共享。\n\n" +
+                        "3. 远程锁屏、应用管理、位置查看等能力仅限监护目的；我们不承诺绝对防绕过，" +
+                        "未启用设备所有者模式时卸载、强停等情形可能突破管控，能力边界已在 App 内如实展示。" +
+                        "但因产品缺陷或我们未履行已承诺的加固义务导致的失效，我们依法承担责任。\n\n" +
+                        "4. 位置信息受信号与省电策略影响存在误差与延迟，息屏期间不更新，不得作为紧急救援依据；" +
+                        "遇危险请立即拨打 110 / 120 / 119。\n\n" +
+                        "5. 截图、环境音等功能会一并采集在场第三人（老师、同学、家人）的对话或影像，" +
+                        "请事先告知并取得同意，不得传播或用于监护以外目的。\n\n" +
+                        "6. 套餐为一次性购买、不自动续费，支付由微信完成；已扣款未到账或需退款，请邮件 " +
+                        "support@padguard.com。",
                     style = MaterialTheme.typography.bodySmall
                 )
+                TextButton(
+                    onClick = { expandedTerms = !expandedTerms },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (expandedTerms) "收起《用户协议》完整全文" else "查看《用户协议》完整全文")
+                }
+                if (expandedTerms) {
+                    Text(
+                        text = fullTerms,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
                     text = "《隐私政策》",
@@ -1047,15 +1106,39 @@ internal fun AgreementDialog(
                         "截图/录屏/环境音；家长账号使用手机号，支付敏感信息由微信处理，我们不接触。\n\n" +
                         "3. 位置仅在孩子端前台使用时采集；官方托管强制 HTTPS，自建局域网若用 HTTP 存在" +
                         "被嗅探风险，请仅在可信网络部署。\n\n" +
-                        "4. 第三方 SDK：① 高德地图 SDK（地图展示与地址反查，可能收集设备标识与位置信息）；" +
+                        "4. 保存期限：用量日志默认 30 天，位置与截图/录屏/录音默认 90 天，到期自动删除；" +
+                        "订单与审计记录按法规保留。注销后业务数据物理删除、账号匿名化，并非所有记录均被抹除。\n\n" +
+                        "5. 第三方 SDK：① 高德地图 SDK（地图展示与地址反查，可能收集设备标识与位置信息）；" +
                         "② 微信开放平台 SDK（购买订阅时调起支付，可能收集设备标识与支付订单信息）。" +
                         "二者均由功能触发时才工作、不常驻采集，处理分别遵循高德与微信隐私政策；" +
                         "未集成广告、统计或崩溃上报类 SDK。\n\n" +
-                        "5. 您可在「数据权利与合规」页自助导出数据文件、撤回/恢复同意、申请注销或申诉；" +
-                        "查询、更正、删除请邮件 support@padguard.com，15 个工作日内答复。" +
-                        "完整条款见随包《隐私政策》。",
+                        "6. 您可在「数据权利与合规」页自助导出数据文件、撤回/恢复同意、申请注销或申诉；" +
+                        "不满 14 周岁的监护人单独同意亦在该页提交。查询、更正、删除请邮件 " +
+                        "support@padguard.com，15 个工作日内答复。",
                     style = MaterialTheme.typography.bodySmall
                 )
+                TextButton(
+                    onClick = { expandedPrivacy = !expandedPrivacy },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (expandedPrivacy) "收起《隐私政策》完整全文" else "查看《隐私政策》完整全文")
+                }
+                if (expandedPrivacy) {
+                    Text(
+                        text = fullPrivacy,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (!readOnly) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "如不同意，将无法使用本产品；您可在「关于」页随时查阅全文，" +
+                            "在「数据权利与合规」页撤回同意并注销账号。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
     )

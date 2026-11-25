@@ -127,6 +127,16 @@ class LoginViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(consentAgreed = true, error = null)
     }
 
+    /**
+     * 用户取消勾选或点击「不同意」：真实撤回本地同意留痕。
+     *
+     * 撤回后 consentGate 会拦截所有登录/注册入口，下次启动也不会回填为已同意。
+     */
+    fun declinePolicies() {
+        consentPrefs.revoke()
+        _uiState.value = _uiState.value.copy(consentAgreed = false, error = null)
+    }
+
     /** 所有登录/注册入口的统一合规门槛：未显式勾选同意则拒绝发起请求。 */
     private fun consentGate(state: LoginUiState): Boolean {
         if (state.consentAgreed) return true

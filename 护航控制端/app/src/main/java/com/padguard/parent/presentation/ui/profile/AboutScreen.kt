@@ -98,7 +98,7 @@ fun AboutScreen(onBack: () -> Unit) {
             )
         }
         if (showAgreement) {
-            AgreementDialog(onDismiss = { showAgreement = false })
+            AgreementDialog(onDismiss = { showAgreement = false }, readOnly = true)
         }
         if (showCapability) {
             CapabilityNoticeDialog(onDismiss = { showCapability = false })

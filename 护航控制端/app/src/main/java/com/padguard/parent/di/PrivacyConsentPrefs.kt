@@ -39,6 +39,19 @@ class PrivacyConsentPrefs @Inject constructor(
             .apply()
     }
 
+    /**
+     * 用户取消勾选或点击「不同意」时调用：真实清除同意留痕。
+     *
+     * 不能只改 UI 状态而保留落盘的同意记录——那样构成"假撤回"（PIPL 第 15 条）：
+     * 界面显示未勾选，下次启动却仍按已同意处理。
+     */
+    fun revoke() {
+        prefs.edit()
+            .remove(KEY_VERSION)
+            .remove(KEY_AGREED_AT)
+            .apply()
+    }
+
     /** 已同意的版本号（供「关于」页展示），未同意返回 null。 */
     fun agreedVersion(): String? =
         prefs.getString(KEY_VERSION, null)?.takeIf { isAgreed() }
@@ -49,9 +62,12 @@ class PrivacyConsentPrefs @Inject constructor(
         const val KEY_AGREED_AT = "agreed_at"
 
         /**
-         * 协议版本。正文（登录页《用户协议》《隐私政策》要点）实质变更时递增，
-         * 递增后所有用户需重新勾选——这是「变更告知并重新取得同意」的合规要求。
+         * 协议版本，与随包全文头部一致：《用户协议》v1.1 /《隐私政策》v2.0（均 2026-11-25 生效）。
+         *
+         * 旧值 "1.0" 无法区分政策 v1.0 与 v2.0，导致政策升版后老用户不被强制重新同意。
+         * 正文实质变更时必须同步递增本常量、更新两份 md 头部版本/日期、重新复制 assets/legal/，
+         * 否则同意留痕与展示版本脱节（契约测试会拦截）。
          */
-        const val CURRENT_POLICY_VERSION = "1.0"
+        const val CURRENT_POLICY_VERSION = "2.0.0"
     }
 }
