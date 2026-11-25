@@ -110,7 +110,8 @@ class ProdConfigAssertion(
             if (dbUser == WEAK_DB_CREDENTIAL || dbPassword == WEAK_DB_CREDENTIAL || dbPassword.isBlank()) {
                 throw IllegalStateException(
                     "启动中止：容器/云端生产档（profiles=$profiles）数据库仍是默认弱口令 " +
-                        "($dbUser/$dbPassword)。请用 PADGUARD_DB_USERNAME / PADGUARD_DB_PASSWORD 注入强凭据。"
+                        "($dbUser/$dbPassword)。裸机部署请用 PADGUARD_DB_USERNAME / PADGUARD_DB_PASSWORD 注入；" +
+                        "docker-compose 部署请在 .env 设置 PG_USER / PG_PASSWORD（不可沿用模板默认的 padguard 用户名）。"
                 )
             }
         } else if (jwtSecret.isBlank() && !isDevLike) {

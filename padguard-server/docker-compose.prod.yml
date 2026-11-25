@@ -26,12 +26,14 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${PG_DB:-padguard}
-      POSTGRES_USER: ${PG_USER:-padguard}
+      # PG_USER 不设默认：app 的 ProdConfigAssertion 把 "padguard" 判为弱口令并拒绝启动，
+      # 留默认值会导致只改密码、忘改用户名的部署启动即失败。强制显式设置自定义用户名。
+      POSTGRES_USER: ${PG_USER:?PG_USER 必须在 .env 中设置自定义用户名（不可用默认的 padguard）}
       POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD 必须在 .env 中设置强密码}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-padguard} -d ${PG_DB:-padguard}"]
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:?PG_USER 未设置} -d ${PG_DB:-padguard}"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -77,7 +79,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${PG_DB:-padguard}?reWriteBatchedInserts=true
-      SPRING_DATASOURCE_USERNAME: ${PG_USER:-padguard}
+      SPRING_DATASOURCE_USERNAME: ${PG_USER:?PG_USER 未设置（须为自定义用户名，不可用 padguard）}
       SPRING_DATASOURCE_PASSWORD: ${PG_PASSWORD}
       PADGUARD_JWT_SECRET: ${PADGUARD_JWT_SECRET:?PADGUARD_JWT_SECRET 必须在 .env 中设置强随机值}
       # app 连 mosquitto 走内网明文 1883（compose 内网，不暴露公网），避免服务端处理 TLS 信任
