@@ -164,8 +164,9 @@ fun SubscriptionScreen(
 
             Spacer(Modifier.height(8.dp))
             Text(
-                "支付渠道正在接入中。下单后请保留订单号，联系客服完成支付即可自动开通；" +
-                    "已付费未到账时客服也可凭订单号手动开通。",
+                "支付由微信完成，当前套餐为一次性购买、不自动续费，到期需手动续订。" +
+                    "如已扣款但权益未到账，请保留订单号并邮件 support@padguard.com，" +
+                    "我们核实后为您开通或按原渠道退款。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
             )
