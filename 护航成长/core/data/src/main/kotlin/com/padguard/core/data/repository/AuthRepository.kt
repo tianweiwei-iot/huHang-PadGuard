@@ -69,6 +69,30 @@ fun reauthRequiredOf(sources: Set<String>, legacyFlag: Boolean): Boolean =
 data class ManagementModeState(val mode: ManagementMode?)
 
 /**
+ * 协议硬闸门纯函数（法务 v2.0 整改，PIPL 第 17/14 条）。
+ *
+ * 「设备已绑定」只说明设备归属某个家长账号，**不等于**监护人已阅读并同意本协议：
+ * 装机流水线的权限清单可以因补授权/自愈而跑完，却从未有人对协议正文作出明示同意。
+ * 历史上 GuardService 只认 [isBound]，于是在"先授权、后看协议"的形态下，
+ * 采集链路在协议弹窗出现之前就已经跑起来 —— 与隐私政策"明示同意后方可启用"直接冲突。
+ *
+ * 两个条件必须同时成立才允许启动采集/管控；任一为假即 fail-closed。
+ * 抽成顶层纯函数供 JVM 单测锁定语义，服务侧只从 [AuthRepository.isBound] 与
+ * [AuthRepository.isAgreementAccepted] 取数，不新增第三份状态源。
+ */
+fun guardActive(bound: Boolean, agreementAccepted: Boolean): Boolean = bound && agreementAccepted
+
+/**
+ * 是否释放设备管理员 / Device Owner 身份：**只有真解绑才可以**。
+ *
+ * 协议升版后"暂未重新同意"同样会关闭 [guardActive] 总闸，但那不是解绑。
+ * DO/设备管理员一经 relinquish 通常必须恢复出厂才能重新预置，属于不可逆降级；
+ * 若把"未同意"照搬解绑清理路径，一次协议文案更新就会永久拆掉硬管控。
+ * 因此把判据抽成纯函数并钉进契约测试。
+ */
+fun shouldReleaseControl(bound: Boolean): Boolean = !bound
+
+/**
  * 设备绑定凭据仓库。
  *
  * [hmacSecret] 是指令签名校验的核心密钥，仅存于本地，永不参与任何上行请求。
@@ -395,8 +419,16 @@ class AuthRepository @Inject constructor(
          */
         private const val PREFS_READ_RETRY_MS = 5_000L
 
-        /** 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。 */
-        const val CURRENT_AGREEMENT_VERSION = "1.0.0"
+        /**
+         * 当前生效的授权协议版本（说明书 §5.4 / §4.6）。协议正文迭代时升版即可。
+         *
+         * v2.0.0（2026-11-25 法务整改）：协议与隐私政策正文改为如实口径
+         * （区分官方托管/家长自建、披露管理后台在 RBAC+审计下的客服运维访问、
+         * 30/90 天保存期限、撤回同意路径）。**升版即强制重新征求同意**：
+         * [isAgreementAccepted] 只认当前版本，老版本签署记录不再放行采集，
+         * GuardService 的总闸会同步收起，直到监护人重新明示确认。
+         */
+        const val CURRENT_AGREEMENT_VERSION = "2.0.0"
 
         /**
          * 当前装机引导版本号。

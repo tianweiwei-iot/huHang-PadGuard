@@ -25,6 +25,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -51,6 +52,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.padguard.child.agreement.AGREEMENT_TEXT
+import com.padguard.child.agreement.PRIVACY_POLICY_TEXT
 import com.padguard.child.capture.CapturePermissionActivity
 
 /**
@@ -90,6 +93,11 @@ fun OneTimeConsentScreen(
     val notice by viewModel.notice.collectAsStateWithLifecycle()
     val guide by viewModel.guide.collectAsStateWithLifecycle()
     val context = LocalContext.current
+
+    // 协议明示同意勾选（法务 v2.0 硬闸门）。
+    // 这里只是 UI 态，真正的合规凭证仍由 OneTimeConsentViewModel.consent() 落库；
+    // 勾选前按钮不可点，杜绝"先授权、后看协议"。
+    var agreementChecked by remember { mutableStateOf(false) }
 
     // 跳过确认弹窗：默认收起，避免误触直接退出授权流程
     var showSkipDialog by remember { mutableStateOf(false) }
@@ -206,6 +214,42 @@ fun OneTimeConsentScreen(
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
             )
 
+            // 法务 v2.0：协议与隐私政策全文随包内置，首次装机在此完整展示。
+            // 不放外链：绑定瞬间可能没有网络，打不开就等于没有告知；
+            // 不放摘要：政策承诺"明示同意后方可启用"，摘要不足以证明已读全文。
+            Spacer(modifier = Modifier.height(16.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "使用授权协议与隐私政策（v2.0）",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = AGREEMENT_TEXT.trimIndent() +
+                            "\n\n" + PRIVACY_POLICY_TEXT.trimIndent(),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = agreementChecked,
+                    onCheckedChange = { agreementChecked = it }
+                )
+                Text(
+                    text = "我已阅读并同意《使用授权协议》和《隐私政策》全文",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+
             Spacer(modifier = Modifier.height(16.dp))
 
             ProgressHeader(
@@ -300,7 +344,10 @@ fun OneTimeConsentScreen(
             Button(
                 onClick = viewModel::retryCurrent,
                 enabled = phase != OneTimeConsentViewModel.Phase.RUNNING &&
-                    phase != OneTimeConsentViewModel.Phase.DONE,
+                    phase != OneTimeConsentViewModel.Phase.DONE &&
+                    // 首次装机必须主动勾选后才落库；补授权/断点续跑场景此前已明示同意。
+                    (phase != OneTimeConsentViewModel.Phase.IDLE ||
+                        autoStart || agreementChecked || viewModel.hasStarted),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp),

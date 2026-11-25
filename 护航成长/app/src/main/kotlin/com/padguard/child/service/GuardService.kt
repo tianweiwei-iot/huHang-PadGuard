@@ -89,6 +89,8 @@ import com.padguard.core.data.model.RiskType
 import com.padguard.core.data.db.ParentMessageEntity
 import com.padguard.core.data.repository.AuthRepository
 import com.padguard.core.data.repository.CommandRepository
+import com.padguard.core.data.repository.guardActive
+import com.padguard.core.data.repository.shouldReleaseControl
 import com.padguard.core.data.repository.LogRepository
 import com.padguard.core.data.repository.MessageRepository
 import com.padguard.core.data.repository.PolicyRepository
@@ -121,6 +123,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -279,11 +282,14 @@ class GuardService : Service() {
     @Inject lateinit var captureConsentStore: CaptureConsentStore
 
     /**
-     * 当前是否"已绑定"（由 [observeBinding] 维护）。
+     * 当前是否处于**可管控态**（由 [observeBinding] 维护）：已绑定 **且** 监护人已明示同意当前版本协议。
      *
-     * 未绑定时必须停止一切管控执行：没有家长就没有管控依据。
-     * 若仍按本地陈旧缓存策略执行，会出现"家长端已看不到这台设备、孩子端却被锁死无法操作"的死锁；
-     * 而系统级 lockNow() 一旦落下，应用自身再也解不开，只能靠 adb 救援。
+     * 任一条件不成立都必须停止一切管控执行：
+     * - 未绑定：没有家长就没有管控依据。若仍按本地陈旧缓存策略执行，会出现
+     *   "家长端已看不到这台设备、孩子端却被锁死无法操作"的死锁；而系统级 lockNow()
+     *   一旦落下，应用自身再也解不开，只能靠 adb 救援。
+     * - 未同意协议：采集/管控缺少合法性基础（《隐私政策》承诺"明示同意后方可启用守护能力"）。
+     *   权限流水线可能因自愈而跑完，但那不等于有人对协议正文作过明示同意。
      */
     private val boundNow = AtomicBoolean(false)
 
@@ -952,13 +958,24 @@ class GuardService : Service() {
         // 周期性位置上报：策略里 locationIntervalSec 的落地执行者（策略为 0 时自动不采）。
         // 放在这里而不是某个界面：守护服务是唯一长期存活的宿主，
         // 放在界面里孩子一按 Home 就断，轨迹数据会大面积缺失。
-        scope.launch { runSafely("startLocationReporter") { locationAutoReporter.start() } }
+        scope.launch { runSafely("startLocationReporter") {
+            // 协议硬闸门：监护人未明示同意前不采位置。首帧读不到 DataStore 时按未同意处理；
+            // 之后由 observeBinding 的开闸分支补启（start 幂等），不会因首帧竞态永久漏采。
+            if (authRepository.isAgreementAccepted.first()) locationAutoReporter.start()
+        } }
         scope.launch {
             runSafely("applyCachedPolicy") {
                 // 未绑定时不落地本地缓存策略：没有家长就没有管控依据，
                 // 否则服务端清库后，孩子端会靠陈旧缓存继续锁屏，形成"家长看不到设备、平板锁死"的死锁。
-                if (!authRepository.isBound.first()) {
-                    Logger.w(TAG) { "not bound: skip cached policy, keep device unlocked" }
+                // 协议硬闸门：未绑定、或监护人未明示同意当前版本协议，都不落地缓存策略。
+                // 否则在协议弹窗尚未确认时就会按旧策略锁屏/限额，构成"先管控、后同意"。
+                val boundAtStart = authRepository.isBound.first()
+                val agreedAtStart = authRepository.isAgreementAccepted.first()
+                if (!boundAtStart || !agreedAtStart) {
+                    Logger.w(TAG) {
+                        "gate closed on startup (bound=$boundAtStart, agreement=$agreedAtStart): " +
+                            "skip cached policy, keep device unlocked"
+                    }
                     return@runSafely
                 }
                 if (reason == REASON_BOOT) {
@@ -1105,22 +1122,37 @@ class GuardService : Service() {
     }
 
     /**
-     * 绑定状态驱动通道启停。
+     * 绑定 + 协议同意双闸门驱动通道启停（法务 v2.0 硬闸门）。
      *
-     * 未绑定时不该去连 MQTT：没有 deviceId 与凭据，连上也只会被 Broker 反复踢，
-     * 徒增耗电和日志噪音。绑定完成的那一刻由这里自动接管，
-     * 绑定页不需要知道"还要记得启动通道"。
+     * 历史上这里只认 isBound：设备一绑上，MQTT、定位、策略落地、锁屏就全开，
+     * 哪怕监护人从未对协议正文点过"同意"——与《隐私政策》"明示同意后方可启用守护能力"直接冲突。
+     * 现在把 [AuthRepository.isAgreementAccepted] 并入同一个总闸，任一条件为假就走同一条
+     * 停机路径（与解绑同构），采集与管控一律不跑。
+     *
+     * 之所以收敛到这一处、而不是在 20+ 个 GuardService.start 调用点各加判断：
+     * 那些调用点多数由开机/闹钟/看门狗触发，进程刚起时 DataStore 还没读到，
+     * 用同步快照判断会把已同意设备误判成未同意，直接造成守卫掉线；
+     * 这里用 Flow 持续观察，数据恢复或监护人一旦确认就自动重新开闸。
      */
     private fun observeBinding() {
         bindingJob?.cancel()
         bindingJob = scope.launch {
-            authRepository.isBound.distinctUntilChanged().collect { bound ->
-                if (!bound) {
+            combine(
+                authRepository.isBound.distinctUntilChanged(),
+                authRepository.isAgreementAccepted.distinctUntilChanged()
+            ) { bound, agreed -> bound to agreed }.collect { (bound, agreed) ->
+                if (!guardActive(bound, agreed)) {
                     // 关键：没有绑定关系就绝不继续管控，并主动清空所有锁定原因。
                     // 绑定关系是服务端资产（除非家长手动解绑 / 服务端删除，否则一直存在），
                     // 但服务端清库或设备被解绑后，若本地仍按陈旧缓存策略执行，平板会陷入
                     // "家长端看不到设备、孩子端却锁死无法操作"的死锁 —— 而系统级 lockNow()
                     // 一旦落下，应用自身再也解不开（lockNow 只能锁、不能程序化解）。
+                    // 先停采集再清状态：避免 releaseControl 期间还有 MQTT/定位在途数据落库，
+                    // 那会让"未同意不采集"出现一段可见的尾巴。
+                    if (transportStarted.compareAndSet(true, false)) {
+                        runSafely("transportStopOnGateClosed") { remote.stop() }
+                    }
+                    locationAutoReporter.stop()
                     boundNow.set(false)
                     // 持久化绑定态：守护进程（:daemon）只在"已绑定"时才拉起主进程，
                     // 未绑定即停机不拉，防止解绑后反复重启打扰（与 boundNow 语义一致）。
@@ -1145,23 +1177,41 @@ class GuardService : Service() {
                     lockController.cancelTempUnlock()
                     // 解绑即清空会话状态，避免陈旧会话继续驱动 UI 与锁定
                     usageSessionManager.reset()
-                    // 解绑后彻底释放系统级管控（挂起/隐藏应用、相机/截屏、用户限制、
-                    // 自动对时、自身卸载封锁，最后 relinquish Device Owner / 设备管理员），
-                    // 让本机恢复为普通应用、可被家长端或用户在设置里正常卸载。
+                    // ⚠️ releaseControl 只能在**真解绑**时执行：它会 relinquish Device Owner /
+                    // 设备管理员，而 DO 一经 relinquish 通常必须恢复出厂才能重新预置。
+                    // 协议升版导致的"暂未重新同意"不是解绑；若照搬解绑路径，
+                    // 一次文案更新就会把硬管控设备永久降级、且再也无法静默自愈权限——
+                    // 这比暂时停止采集严重得多。未同意时只停数据面与锁屏，保留设备身份。
                     // 幂等：未持有对应权限的步骤被 guarded 静默收口为 Unsupported，不会抛异常。
-                    // 这一步同时兜底"历史上已解绑却仍残留 DO/策略"的设备 —— 新版本一启动
-                    // （或开机自启）即自动治愈，无需重新绑定再解绑。
-                    runCatching { admin.releaseControl() }
-                        .onSuccess { Logger.i(TAG) { "control released on unbound observe (${it.size} ops)" } }
-                        .onFailure { t -> Logger.e(TAG, t) { "releaseControl failed on unbound observe" } }
-                    Logger.w(TAG) { "device not bound: all app locks + DPM control released" }
-                    // 解绑后恢复管理控制台可见性，并将玻璃球收起：设备回到普通可用状态，
-                    // 便于家长重新绑定或在设置里正常卸载。
-                    runSafely("revealOnUnbind") { appHider.revealManagementUi() }
-                    runSafely("hideBallOnUnbind") { glassBall.hide() }
+                    if (shouldReleaseControl(bound)) {
+                        // 解绑后彻底释放系统级管控（挂起/隐藏应用、相机/截屏、用户限制、
+                        // 自动对时、自身卸载封锁，最后 relinquish Device Owner / 设备管理员），
+                        // 让本机恢复为普通应用、可被家长端或用户在设置里正常卸载。
+                        // 同时兜底"历史上已解绑却仍残留 DO/策略"的设备 —— 新版本一启动
+                        // （或开机自启）即自动治愈，无需重新绑定再解绑。
+                        runCatching { admin.releaseControl() }
+                            .onSuccess { Logger.i(TAG) { "control released on unbound observe (${it.size} ops)" } }
+                            .onFailure { t -> Logger.e(TAG, t) { "releaseControl failed on unbound observe" } }
+                        runSafely("hideBallOnUnbind") { glassBall.hide() }
+                    }
+                    Logger.w(TAG) {
+                        "guard gate closed (bound=$bound, agreementAccepted=$agreed): " +
+                            "collection + enforcement stopped; " +
+                            if (bound) "device control privileges kept for re-consent"
+                            else "device control released"
+                    }
+                    // 两种关闭原因都要恢复管理控制台入口：
+                    // - 解绑后便于重新绑定或正常卸载；
+                    // - 仅协议未同意时，玻璃球仍显示但必须能从桌面重新打开 App 完成明示同意，
+                    //   否则设备会永久脱管且家长没有重新确认的入口。
+                    runSafely("revealOnGateClosed") { appHider.revealManagementUi() }
                     return@collect
                 }
+                // 绑定与明示同意同时成立，才允许开闸。协议刚被确认/升版重新同意时，
+                // bootstrap 里的那次一次性启动早已跑完，这里必须补落地缓存策略，
+                // 否则家长端会看到"设备在线但管控规则还是空的"。
                 boundNow.set(true)
+                runSafely("policyOnGateOpen") { policyEngine.applyCurrent(force = true) }
                 // 持久化绑定态并排上闹钟兜底：守护进程据此决定"主进程死了要不要拉"，
                 // 闹钟通道与 JobScheduler 看门狗并行，互为 ROM 限制下的备份。
                 // 注意 this@GuardService：collect lambda 内 this 是 CoroutineScope。
@@ -1171,6 +1221,8 @@ class GuardService : Service() {
                 // 另一方都会在 binder 死亡回调里立即重绑并把对方进程创建回来。
                 GuardLink.ensureDaemonBound(this@GuardService)
                 startTransport()
+                // 周期定位同样归总闸管：同意前不采，重新同意后由这里补启（start 幂等）。
+                locationAutoReporter.start()
                 // 绑定成功即拉取会话：让「计时开始」确认弹窗尽快出现（若今日尚未确认）
                 runSafely("sessionSyncOnBind") { usageSessionManager.refresh() }
                 // 绑定完成：隐藏管理控制台图标（孩子端隐形），仅以玻璃球向孩子展示
