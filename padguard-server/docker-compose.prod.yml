@@ -106,6 +106,16 @@ services:
       # 独立 secrets 卷与业务文件物理隔离，且同样持久化（容器重建不丢）。
       PADGUARD_INITIAL_PASSWORD_FILE: /app/secrets/管理员初始密码-请登录后修改.txt
       PADGUARD_PARENT_INITIAL_PASSWORD_FILE: /app/secrets/初始密码-请登录后修改.txt
+      # ---- 高德 Web 服务 Key（逆地理编码）与邮件透传 ----
+      # application.yml 声明了这些注入点，但 compose 只透传显式声明的变量：
+      # 漏配时 .env 里即使填了也进不了容器，表现为定位无地址反查/邮箱静默不发信（无任何报错）。
+      PADGUARD_AMAP_WEB_KEY: ${PADGUARD_AMAP_WEB_KEY:-}
+      PADGUARD_MAIL_ENABLED: ${PADGUARD_MAIL_ENABLED:-false}
+      PADGUARD_MAIL_FROM: ${PADGUARD_MAIL_FROM:-no-reply@padguard.com}
+      PADGUARD_MAIL_HOST: ${PADGUARD_MAIL_HOST:-}
+      PADGUARD_MAIL_PORT: ${PADGUARD_MAIL_PORT:-465}
+      PADGUARD_MAIL_USERNAME: ${PADGUARD_MAIL_USERNAME:-}
+      PADGUARD_MAIL_PASSWORD: ${PADGUARD_MAIL_PASSWORD:-}
       # ---- 微信支付 v3（billing wechat）透传：缺省全空 = 不启用（fail-closed，收银台该渠道置灰）----
       # 注意：compose 只透传在此显式声明的变量，.env 里定义但不声明 = 不会进容器。
       # 空字符串绑定安全：WeChatPayProperties 全字段 isNullOrBlank() 判空，File("") 非目录被跳过。

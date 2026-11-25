@@ -69,6 +69,53 @@ jobs:
             exit 1
           fi
 
+      # release 构建演练：preflight 的 test/lint 只覆盖 debug，R8 混淆、release 签名守卫、
+      # 高德 Key 守卫全挂在 assembleRelease 的 doFirst 上，不真正打一次包就永远不知道能否上架。
+      # 这里用一次性 dummy keystore + 假 AMAP_KEY 注入，只验证构建链能跑通，产物绝不上传/发布。
+      - name: release 构建演练（dummy keystore，验证混淆与守卫链）
+        run: |
+          set -e
+          DUMMY_KS="$RUNNER_TEMP/padguard-ci-dummy.jks"
+          trap 'rm -f "$DUMMY_KS"' EXIT
+          keytool -genkeypair -v -keystore "$DUMMY_KS" -storetype JKS \
+            -storepass ci-dummy-pass -keypass ci-dummy-pass \
+            -keyalg RSA -keysize 2048 -validity 1 -alias padguard \
+            -dname "CN=CI Dummy, OU=CI, O=PadGuard, L=NA, ST=NA, C=CN" >/dev/null 2>&1
+          # 32 位十六进制假 Key：满足家长端格式守卫；非 Web Key（不撞其 SHA-256 黑名单指纹）。
+          FAKE_AMAP="0123456789abcdef0123456789abcdef"
+          cd "护航成长"
+          ./gradlew :app:assembleRelease --console=plain \
+            -PBASE_URL=https://pad.example.cn/api/v1/ \
+            -PMQTT_BROKER=ssl://pad.example.cn:8883 \
+            -PRELEASE_STORE_FILE="$DUMMY_KS" \
+            -PRELEASE_STORE_PASSWORD=ci-dummy-pass \
+            -PRELEASE_KEY_ALIAS=padguard \
+            -PRELEASE_KEY_PASSWORD=ci-dummy-pass
+          cd "../护航控制端"
+          ./gradlew :app:assembleRelease --console=plain \
+            -PBASE_URL=https://pad.example.cn/v1/ \
+            -PAMAP_KEY="$FAKE_AMAP" \
+            -PRELEASE_STORE_FILE="$DUMMY_KS" \
+            -PRELEASE_STORE_PASSWORD=ci-dummy-pass \
+            -PRELEASE_KEY_ALIAS=padguard \
+            -PRELEASE_KEY_PASSWORD=ci-dummy-pass
+
+          # 产物与 R8 keep 断言：只跑构建不够，必须确认关键序列化类没被裁掉。
+          # 孩子端 $$serializer 被裁 → 策略包静默解析失败；Paho 被裁 → MQTT 建连崩溃。
+          # CI 上产物可能被 padguard.build.root 重定向到任意位置，从工作区与临时目录全局找
+          APK=$(find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" -name 'app-release.apk' 2>/dev/null | head -1)
+          test -n "$APK" || { echo "release APK 未产出" >&2; exit 1; }
+          echo "release APK: $APK ($(stat -c%s "$APK") bytes)"
+          python3 - "$APK" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              blob = b"".join(z.read(n) for n in z.namelist() if n.endswith(".dex"))
+          for token in (b"$$serializer", b"PolicyPackage", b"paho"):
+              if token not in blob:
+                  sys.exit(f"R8 裁掉了关键类 {token.decode()}：检查 proguard-rules.pro")
+          print("R8 keep 断言通过：序列化器/策略模型/Paho 均在 dex 中")
+          PY
+
       - name: 上传测试报告（失败时排查用）
         if: failure()
         uses: actions/upload-artifact@v4
