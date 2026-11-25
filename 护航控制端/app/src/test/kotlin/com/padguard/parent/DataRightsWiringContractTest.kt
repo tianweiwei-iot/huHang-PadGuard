@@ -95,6 +95,39 @@ class DataRightsWiringContractTest {
     }
 
     @Test
+    fun `deletion confirmation clears local session and account history`() {
+        val vm = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/viewmodel/DataRightsViewModel.kt")
+        assertTrue("注销成功后必须清空 JWT", "tokenManager.clear()" in vm)
+        assertTrue("注销成功后必须清掉本地账号历史", "accountPrefs.remove(it)" in vm)
+        assertTrue(
+            "导出快照未加载时须从当前会话取手机号，否则账号历史清不掉",
+            "tokenManager.currentUserFlow().first()?.phone" in vm
+        )
+        val failureCheck = vm.indexOf("val failure = outcome.exceptionOrNull()")
+        val earlyReturn = vm.indexOf("return@launch", failureCheck)
+        val sessionClear = vm.indexOf("tokenManager.clear()")
+        assertTrue("失败分支必须先 return，不能误清会话", failureCheck >= 0 && earlyReturn > failureCheck)
+        assertTrue("清会话必须在失败分支之后（且不能在非挂起 fold 回调里）", sessionClear > earlyReturn)
+    }
+
+    @Test
+    fun `data export writes a real file instead of a toast summary`() {
+        val vm = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/viewmodel/DataRightsViewModel.kt")
+        assertTrue("VM 必须提供可序列化的导出文本", "fun exportJson()" in vm)
+        assertTrue("必须复用 DI 的 Moshi 而非 Gson", "moshi.adapter(DataExportDto::class.java)" in vm)
+        assertTrue("家长端不得引入 Gson", "com.google.gson" !in vm)
+
+        val screen = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/profile/DataRightsScreen.kt")
+        assertTrue("必须用系统文件选择器写文件，不能申请存储权限",
+            "ActivityResultContracts.CreateDocument(\"application/json\")" in screen)
+        assertTrue("必须真正打开输出流写盘", "openOutputStream(uri)" in screen)
+        assertTrue("必须写入完整 JSON（不是只看摘要）",
+            "out.write(json.toByteArray(Charsets.UTF_8))" in screen)
+        assertTrue("必须提示保存结果", "个人数据已保存到所选文件" in screen)
+        assertTrue("不得再用 Toast 摘要冒充导出功能", "查看导出摘要" !in screen)
+    }
+
+    @Test
     fun `under14 guardian consent is wired end to end`() {
         val api = read("护航控制端/app/src/main/java/com/padguard/parent/data/api/ComplianceApi.kt")
         assertTrue("缺少单独同意提交端点", "compliance/guardian-consent/under14" in api)

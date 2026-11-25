@@ -44,9 +44,10 @@ class CancellationPropagationContractTest {
                     }
                 }
         }
-        // 5 处审批类 catch + 1 处 DataRightsViewModel 合规写操作 + 1 处监护人单独同意提交（均放行取消）。
+        // 5 处审批类 catch + DataRightsViewModel 3 处（act 写操作 / 监护人单独同意 / 注销确认，均放行取消）。
+        // 注销确认改为独立 catch：清 token 是 suspend，不能塞进 fold 的非挂起回调，故多一处。
         // 钉死精确数量是为了防止有人删掉 catch 让扫描"假绿"，新增合法 catch 时同步更新此值。
-        assertTrue("应恰好覆盖已知的 7 处 catch，实际 $catchCount", catchCount == 7)
+        assertTrue("应恰好覆盖已知的 8 处 catch，实际 $catchCount", catchCount == 8)
         assertTrue(
             "以下 catch 吞掉了取消，会把退出页面当成操作失败:\n${offenders.joinToString("\n")}",
             offenders.isEmpty()

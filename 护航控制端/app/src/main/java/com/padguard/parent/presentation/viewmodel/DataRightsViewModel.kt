@@ -8,11 +8,13 @@ import com.padguard.parent.data.model.DeletionRequestDto
 import com.padguard.parent.data.model.GuardianConsentStatusDto
 import com.padguard.parent.data.remote.readableActionMessage
 import com.padguard.parent.domain.repository.ComplianceRepository
+import com.squareup.moshi.Moshi
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -47,7 +49,10 @@ data class DataRightsUiState(
  */
 @HiltViewModel
 class DataRightsViewModel @Inject constructor(
-    private val complianceRepository: ComplianceRepository
+    private val complianceRepository: ComplianceRepository,
+    private val tokenManager: com.padguard.parent.data.auth.TokenManager,
+    private val accountPrefs: com.padguard.parent.di.AccountPrefs,
+    private val moshi: Moshi
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DataRightsUiState())
@@ -79,6 +84,18 @@ class DataRightsViewModel @Inject constructor(
                     .firstOrNull()?.readableActionMessage("加载数据失败，请稍后重试")
             )
         }
+    }
+
+    /**
+     * 把当前导出快照序列化为 JSON 文本，供 UI 写入用户选择的文件。
+     *
+     * PIPL 第 45 条要求可「查阅、复制」：仅在屏幕上显示条数摘要不算复制权落地，
+     * 必须让家长拿到可离线保存、可转交的一份完整数据。序列化放在 VM 而非 Composable，
+     * 复用 DI 的 Moshi 实例（家长端无 Gson），Dtos.kt 中所有导出 DTO 均带 @JsonClass。
+     */
+    fun exportJson(): String? {
+        val snapshot = _uiState.value.export ?: return null
+        return moshi.adapter(DataExportDto::class.java).toJson(snapshot)
     }
 
     /** 撤回采集授权。deviceIds 为空 = 名下全部设备。 */
@@ -153,9 +170,40 @@ class DataRightsViewModel @Inject constructor(
         }
     }
 
-    /** 凭证确认注销（不可撤销，UI 必须先二次确认）。 */
-    fun confirmDeletion(ticket: String) = act("delete", "账号已注销") {
-        complianceRepository.confirmDeletion(ticket)
+    /**
+     * 凭证确认注销（不可撤销，UI 必须先二次确认）。
+     *
+     * 服务端匿名化账号后，本机必须同步清除会话与账号历史：否则账号已注销、App 却仍持有
+     * JWT 与手机号历史、停留在"已登录"态——既与注销结果矛盾，也不满足 PIPL 删除权
+     * （本地个人信息同样要清除）。token 清空后导航层监听 SessionViewModel.user 自动退回登录页。
+     * 注意：账号历史按手机号清理，注销请求中的手机号来自当前会话（此时尚未清 token）。
+     */
+    fun confirmDeletion(ticket: String) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(acting = "delete", error = null)
+            val outcome = try {
+                complianceRepository.confirmDeletion(ticket)
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                Result.failure(t)
+            }
+            val failure = outcome.exceptionOrNull()
+            if (failure != null) {
+                _uiState.value = _uiState.value.copy(
+                    acting = null,
+                    error = "操作失败：" + failure.readableActionMessage("请检查网络后重试")
+                )
+                return@launch
+            }
+            // 先记下手机号再清 token：清完后 currentUserFlow 立刻变 null，再读就晚了。
+            // 导出快照优先（refresh 已加载），网络异常导致快照缺失时退回当前会话用户，
+            // 否则「导出没加载成功」会连带让本地账号历史清不掉。
+            val phone = _uiState.value.export?.account?.phone
+                ?: tokenManager.currentUserFlow().first()?.phone?.takeIf { it.isNotBlank() }
+            phone?.let { accountPrefs.remove(it) }
+            tokenManager.clear()
+            _uiState.value = _uiState.value.copy(acting = null, message = "账号已注销")
+        }
     }
 
     /** 冷静期内取消注销。 */

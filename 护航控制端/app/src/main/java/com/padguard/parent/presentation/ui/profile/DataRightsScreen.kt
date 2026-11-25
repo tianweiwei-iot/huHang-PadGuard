@@ -1,6 +1,8 @@
 package com.padguard.parent.presentation.ui.profile
 
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +48,10 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.padguard.parent.presentation.viewmodel.DataRightsViewModel
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 数据权利与合规页。
@@ -62,6 +68,34 @@ fun DataRightsScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val context = LocalContext.current
+
+    // 查阅复制权（PIPL 第 45 条）：必须真写出一份文件交给家长， Toast 摘要不算"复制"。
+    // 用 SAF CreateDocument 而非 WRITE_EXTERNAL_STORAGE：不需要存储权限，也不碰应用市场
+    // 静态扫描红线；文件落在用户自己选的位置（含云盘），卸载 App 后仍可留存。
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val json = viewModel.exportJson()
+        if (json == null) {
+            Toast.makeText(context, "数据尚未加载完成", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        val saved = runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { out ->
+                out.write(json.toByteArray(Charsets.UTF_8))
+                out.flush()
+            } ?: throw IOException("系统未返回可写文件")
+        }
+        Toast.makeText(
+            context,
+            saved.fold(
+                onSuccess = { "个人数据已保存到所选文件" },
+                onFailure = { "保存失败：${it.message ?: "未知错误"}" }
+            ),
+            Toast.LENGTH_LONG
+        ).show()
+    }
 
     var showWithdrawDialog by remember { mutableStateOf(false) }
     var showDeletionDialog by remember { mutableStateOf(false) }
@@ -145,16 +179,18 @@ fun DataRightsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = {
-                        val e = state.export
-                        if (e == null) Toast.makeText(context, "数据尚未加载完成", Toast.LENGTH_SHORT).show()
-                        else Toast.makeText(
-                            context,
-                            "账号 ${e.account?.phone ?: "-"}｜设备 ${e.devices.size} 台｜导出时间 ${e.exportedAt}",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }) {
-                        Text("查看导出摘要")
+                    Button(
+                        onClick = {
+                            if (state.export == null) {
+                                Toast.makeText(context, "数据尚未加载完成", Toast.LENGTH_SHORT).show()
+                            } else {
+                                val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.CHINA).format(Date())
+                                exportLauncher.launch("padguard-personal-data-$stamp.json")
+                            }
+                        },
+                        enabled = state.export != null
+                    ) {
+                        Text("导出个人数据文件（JSON）")
                     }
                 }
             }
