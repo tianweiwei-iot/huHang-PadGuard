@@ -11,6 +11,7 @@ import com.padguard.server.dto.LocationsRequest
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
+import com.padguard.server.common.UplinkValidation
 import com.padguard.server.dto.UsageStatsDto
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UsageLogRepository
@@ -73,6 +74,15 @@ class IngestService(
         // 超过即拒绝，避免服务端在连接线程上长时间占住连接池。
         if (items.size > MAX_LOGS_PER_BATCH) {
             throw BizException(ParentErr.PARAM_ERROR, "日志批量过大（上限 $MAX_LOGS_PER_BATCH 条）", Audience.CHILD)
+        }
+        // 结构边界：任何一条超长 logId/type/payload 都会让后续 SQL 抛非业务异常（500），
+        // 而孩子端只丢弃 BizError 批次、会永远重试 500 —— 一条毒数据堵死整台设备的上行。
+        // 这里必须整批拒绝成 400，让端上"认栽丢弃"后继续流动。
+        items.forEach { item ->
+            val payloadBytes = item.payload?.let { objectMapper.writeValueAsBytes(it).size } ?: 0
+            UplinkValidation.logError(item, payloadBytes)?.let { reason ->
+                throw BizException(ParentErr.PARAM_ERROR, "日志项非法：$reason", Audience.CHILD)
+            }
         }
 
         // 撤回授权后停止采集（PIPL 撤回同意）：该设备的个人数据不再落库。

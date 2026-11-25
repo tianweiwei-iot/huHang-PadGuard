@@ -12,6 +12,7 @@ import com.padguard.server.security.UplinkSigning
 import com.padguard.server.common.BizException
 import com.padguard.server.common.ParentErr
 import com.padguard.server.common.Audience
+import com.padguard.server.common.UplinkValidation
 import com.padguard.server.service.AlertService
 import com.padguard.server.service.AppDistributionConverger
 import com.padguard.server.service.CommandType
@@ -371,6 +372,15 @@ class ChildUplinkHandler(
         // MQTT 通道抛出后由上行分发的外层 catch 记 warn（恶意批次被丢弃，属预期防护）。
         if (events.size > MAX_EVENTS_PER_BATCH) {
             throw BizException(ParentErr.PARAM_ERROR, "事件批量过大（上限 $MAX_EVENTS_PER_BATCH 条）", Audience.CHILD)
+        }
+        // 结构边界：`device_events.type` 是 VARCHAR(32)，detail 又是整段 JSON 落库。
+        // 超长类型会抛非业务异常（500），孩子端不会丢弃、会永久重试队头 ——
+        // 必须在校验阶段转成 BizError（400），端上才会认栽丢弃并继续上报后续事件。
+        events.forEach { ev ->
+            val detailBytes = objectMapper.writeValueAsBytes(ev.detail ?: emptyMap<String, Any?>()).size
+            UplinkValidation.eventError(ev, detailBytes)?.let { reason ->
+                throw BizException(ParentErr.PARAM_ERROR, "事件非法：$reason", Audience.CHILD)
+            }
         }
 
         // 批内先去重，再一次性查库：避免同一条事件在同批里被处理两次、

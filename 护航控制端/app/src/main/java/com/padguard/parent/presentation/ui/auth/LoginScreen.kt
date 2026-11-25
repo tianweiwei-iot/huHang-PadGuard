@@ -1051,7 +1051,7 @@ internal fun AgreementDialog(
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 Text(
-                    text = "版本：《用户协议》v1.1 /《隐私政策》v2.0，均自 2026-11-25 起生效。" +
+                    text = "版本：《用户协议》v1.1 /《隐私政策》v2.1，均自 2026-11-25 起生效。" +
                         "勾选即表示您已阅读并同意两份完整条款。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant

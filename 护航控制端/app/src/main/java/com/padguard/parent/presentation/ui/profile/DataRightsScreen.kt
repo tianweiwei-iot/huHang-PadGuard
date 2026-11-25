@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.padguard.parent.di.PrivacyConsentPrefs
 import com.padguard.parent.presentation.viewmodel.DataRightsViewModel
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -98,6 +99,7 @@ fun DataRightsScreen(
     }
 
     var showWithdrawDialog by remember { mutableStateOf(false) }
+    var showRevokePolicyDialog by remember { mutableStateOf(false) }
     var showDeletionDialog by remember { mutableStateOf(false) }
     var showConfirmDeletionDialog by remember { mutableStateOf(false) }
     var showAppealDialog by remember { mutableStateOf(false) }
@@ -218,6 +220,25 @@ fun DataRightsScreen(
                 }
             }
 
+            // ---- 隐私政策同意的撤回（区别于上面的设备采集授权） ----
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    SectionTitle("隐私政策同意")
+                    Text(
+                        "当前依据《隐私政策》v${PrivacyConsentPrefs.CURRENT_POLICY_VERSION} 与" +
+                            "《用户协议》v${PrivacyConsentPrefs.CURRENT_TERMS_VERSION} 的同意处理个人信息。" +
+                            "撤回将立即清除本地同意留痕与地图 SDK 授权并退出登录；再次使用需重新阅读并勾选。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { showRevokePolicyDialog = true },
+                        enabled = state.acting == null
+                    ) { Text("撤回隐私政策同意") }
+                }
+            }
+
             // ---- 不满十四周岁监护人单独同意（PIPL 第 29/31 条） ----
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
@@ -273,7 +294,8 @@ fun DataRightsScreen(
                     Button(
                         onClick = {
                             viewModel.submitUnder14GuardianConsent(
-                                guardianDeviceId, childBirthDate.trim(), "2026-11-23-v1"
+                                // 文案版本必须跟当前《隐私政策》版本走，否则服务端留痕与用户实际看到的文本对不上
+                                guardianDeviceId, childBirthDate.trim(), "2026-11-25-v2.1"
                             )
                         },
                         enabled = guardianDeviceId.isNotBlank() && childBirthDate.isNotBlank() && state.acting == null
@@ -353,6 +375,29 @@ fun DataRightsScreen(
                 }) { Text("确认撤回") }
             },
             dismissButton = { TextButton(onClick = { showWithdrawDialog = false }) { Text("取消") } }
+        )
+    }
+
+    // ---- 撤回隐私政策同意（会退出登录，必须二次确认）----
+    if (showRevokePolicyDialog) {
+        AlertDialog(
+            onDismissRequest = { showRevokePolicyDialog = false },
+            title = { Text("撤回《隐私政策》同意？") },
+            text = {
+                Text(
+                    "撤回后立即退出登录，地图与依赖同意状态的 SDK 停止工作；" +
+                        "如需继续使用须重新阅读并勾选同意。\n\n" +
+                        "本操作只撤回 App 层面的政策同意，不影响上一节「采集授权」；" +
+                        "若同时要求停止孩子端采集与落库，请先在「采集授权」中撤回。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRevokePolicyDialog = false
+                    viewModel.revokePolicyConsent()
+                }) { Text("确认撤回", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showRevokePolicyDialog = false }) { Text("取消") } }
         )
     }
 

@@ -115,7 +115,7 @@ class LegalTextContractTest {
         val ui = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/auth/LoginScreen.kt")
         assertTrue("必须提供用户协议全文入口", "查看《用户协议》完整全文" in ui)
         assertTrue("必须提供隐私政策全文入口", "查看《隐私政策》完整全文" in ui)
-        assertTrue("必须展示两份文本的版本号", "v1.1" in ui && "v2.0" in ui)
+        assertTrue("必须展示两份文本的版本号", "v1.1" in ui && "v2.1" in ui)
         assertTrue("必须展示生效日期", "2026-11-25 起生效" in ui)
         assertTrue("必须提供不同意退路", "不同意" in ui)
         assertFalse("不得再声称全文在'随包'却不可达", "完整条款见随包" in ui)
@@ -131,7 +131,8 @@ class LegalTextContractTest {
     @Test
     fun `consent state tracks legal version and supports real withdrawal`() {
         val prefs = read("护航控制端/app/src/main/java/com/padguard/parent/di/PrivacyConsentPrefs.kt")
-        assertTrue("同意版本必须能区分政策v2.0", "CURRENT_POLICY_VERSION = \"2.0.0\"" in prefs)
+        assertTrue("政策版本必须能区分 v2.1", "CURRENT_POLICY_VERSION = \"2.1.0\"" in prefs)
+        assertTrue("协议版本必须独立记录", "CURRENT_TERMS_VERSION = \"1.1.0\"" in prefs)
         assertTrue("必须提供真实撤回实现", "fun revoke()" in prefs)
 
         val vm = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/viewmodel/LoginViewModel.kt")
@@ -171,5 +172,18 @@ class LegalTextContractTest {
         assertTrue("更正路径必须指向真实可达的客服渠道", "邮件 support@padguard.com" in policy)
         val deviceScreen = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/device/DeviceManageScreen.kt")
         assertTrue("重命名设备入口必须真实存在", "renameDevice" in deviceScreen)
+    }
+
+    @Test
+    fun `legal assets are build synced and placeholders block release`() {
+        val gradle = read("护航控制端/app/build.gradle.kts")
+        assertTrue("随包文本必须由构建任务自动同步", "syncLegalAssets" in gradle)
+        assertTrue("preBuild 必须依赖同步任务", "preBuild" in gradle && "dependsOn(syncLegalAssets)" in gradle)
+        assertTrue("release 必须拦截占位符", "verifyLegalPlaceholders" in gradle)
+        assertTrue("占位符标识必须写入门禁", "【上架前填写" in gradle)
+        assertTrue(
+            "CI 演练必须有显式放行开关，正式发布不得带该参数",
+            "ALLOW_LEGAL_PLACEHOLDERS" in gradle
+        )
     }
 }

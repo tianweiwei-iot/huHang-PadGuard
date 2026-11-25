@@ -289,8 +289,8 @@ class GuardRestartContractTest {
             method.contains("refreshPolicy()")
         )
         assertTrue(
-            "未绑定设备不应自愈（无管控依据），缺 credentials.isBound 守卫",
-            method.contains("credentials.isBound")
+            "未绑定或未同意协议的设备都不应自愈（无管控依据），必须过 boundNow 执行面闸门",
+            method.contains("boundNow.get()")
         )
     }
 

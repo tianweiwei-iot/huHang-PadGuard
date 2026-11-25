@@ -3,12 +3,14 @@ package com.padguard.server.stream
 import com.padguard.server.common.ApiResponse
 import com.padguard.server.common.Audience
 import com.padguard.server.common.BizException
+import com.padguard.server.common.ChildErr
 import com.padguard.server.common.ParentErr
 import com.padguard.server.config.TraceIds
 import com.padguard.server.domain.UserStatus
 import com.padguard.server.repository.DeviceRepository
 import com.padguard.server.repository.UserRepository
 import jakarta.servlet.http.HttpServletRequest
+import org.springframework.beans.factory.annotation.Value
 import org.slf4j.LoggerFactory
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
@@ -39,7 +41,8 @@ import java.nio.ByteBuffer
 @RestController
 @RequestMapping("/api/v1/device/stream")
 class ChildStreamController(
-    private val hub: ScreenStreamHub
+    private val hub: ScreenStreamHub,
+    @Value("\${padguard.stream.max-live-devices:1000}") private val maxLiveDevices: Int
 ) {
 
     /**
@@ -56,8 +59,17 @@ class ChildStreamController(
         var frames = 0L
         var bytes = 0L
         val startedAt = System.currentTimeMillis()
-        // 标记该设备正在推流：供并发准入（MonitorService）与带宽聚合日志使用
-        hub.registerPublisher(deviceId)
+        // 上行也要做并发准入：MonitorService.startLiveView 只挡住"家长开流"，
+        // 但旧版家长端续期指令、残留会话仍可能让孩子端直接建连。缺了这道闸门，
+        // 每个上行长连接独占一个 Tomcat 工作线程，能把整个站点（含 /health 与轮询）拖垮。
+        // 用 429 而不是 200 + 错误码：HTTP 语义必须是"被拒绝"，与家长侧开流超限同口径。
+        if (!hub.tryRegisterPublisher(deviceId, maxLiveDevices)) {
+            throw BizException(
+                ChildErr.TOO_MANY_REQUESTS,
+                "当前实时推流设备数已达上限（$maxLiveDevices），请稍后再试",
+                Audience.CHILD
+            )
+        }
         try {
             request.inputStream.use { input ->
                 while (true) {

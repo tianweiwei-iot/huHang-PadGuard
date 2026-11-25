@@ -94,8 +94,13 @@ class TamperDetector @Inject constructor(
         detectGuardInfra(findings)
         detectSelfIntegrity(findings, isDeviceBound)
         detectControlLoss(findings, isDeviceBound)
-        findings += egress.detect()
-        findings += homeRole.detect()
+        // 代理/桌面检测只在已绑定时做：未绑定设备没有家长可通知，上报会落成本地记录，
+        // 等首次绑定后随队列带新 deviceId 上传 —— 家长一绑定就看到"默认桌面被改"的假告警。
+        // CONTROL_LOST 是唯一必须在未绑定态工作的检测（它就是用来发现"曾绑定但凭据没了"）。
+        if (isDeviceBound) {
+            findings += egress.detect()
+            findings += homeRole.detect()
+        }
 
         if (findings.isNotEmpty()) {
             Logger.w(TAG) { "tamper findings: ${findings.map { it.type }}" }

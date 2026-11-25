@@ -110,6 +110,66 @@ class DataRightsWiringContractTest {
         assertTrue("清会话必须在失败分支之后（且不能在非挂起 fold 回调里）", sessionClear > earlyReturn)
     }
 
+    /**
+     * 服务端删除 ≠ 端上删除。
+     *
+     * 注销只做 `tokenManager.clear()` 时，孩子截图（Coil 磁盘缓存）与按租户下发的静态配置
+     * 仍留在本机——账号已注销却还能在本地翻到孩子的画面，属于 PIPL 删除权未落实。
+     * 同时清理顺序也被钉住：清 token 会让导航弹栈、取消 viewModelScope，
+     * 放在其后的清理协程会被掐断。
+     */
+    @Test
+    fun `deletion also purges local personal data copies`() {
+        val vm = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/viewmodel/DataRightsViewModel.kt")
+        assertTrue("注销后必须清图片磁盘缓存（孩子截图本地副本）", "diskCache?.clear()" in vm)
+        assertTrue("注销后必须清图片内存缓存", "memoryCache?.clear()" in vm)
+        assertTrue("注销后必须失效按租户下发的静态配置", "staticConfigCache.invalidate()" in vm)
+        assertTrue("缓存清理必须在 IO 线程执行，不能阻塞主线程", "withContext(Dispatchers.IO)" in vm)
+
+        val cleanupCall = vm.indexOf("clearLocalPersonalData()")
+        val sessionClear = vm.indexOf("tokenManager.clear()")
+        assertTrue(
+            "本地清理必须在清 token 之前：清 token 会弹栈取消 viewModelScope，之后的清理被吞掉",
+            cleanupCall >= 0 && sessionClear > cleanupCall
+        )
+        assertTrue(
+            "服务器地址属部署配置，注销后保留（清掉会让自建服务器用户无法再改回地址）",
+            "resetToDefault()" !in vm
+        )
+    }
+
+    /**
+     * 应用级「撤回隐私政策同意」必须真实生效，而不是只改 UI。
+     *
+     * 设备采集授权撤回（withdrawConsent）与政策同意撤回（revokePolicyConsent）是两件事：
+     * 前者是采集范围，家长仍要管理其他设备；后者是处理个人信息的合法基础，撤回后必须退回同意闸门。
+     * 二者混用会造成"撤回了设备采集却被强制退出登录"或"撤回了政策却照旧处理数据"。
+     */
+    @Test
+    fun `policy consent revocation clears trace and forces re-consent`() {
+        val vm = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/viewmodel/DataRightsViewModel.kt")
+        assertTrue("VM 必须提供政策同意撤回入口", "fun revokePolicyConsent()" in vm)
+        assertTrue("撤回必须清除本地同意留痕与 SDK 状态", "consentPrefs.revoke()" in vm)
+        assertTrue(
+            "撤回后必须结束会话退回同意闸门，并带原因",
+            "tokenManager.clearWithReason(" in vm
+        )
+        // 设备采集撤回不得被连带清会话（否则家长撤回采集就被踢下线）
+        val withdrawBlock = vm.substringAfter("fun withdrawConsent")
+            .substringBefore("fun reinstateConsent")
+        assertTrue("撤回设备采集不得清会话", "tokenManager" !in withdrawBlock)
+
+        val screen = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/profile/DataRightsScreen.kt")
+        assertTrue("UI 缺少政策同意撤回入口", "撤回隐私政策同意" in screen)
+        assertTrue("危险操作必须二次确认", "showRevokePolicyDialog" in screen)
+        assertTrue("入口必须调用 VM 的撤回方法", "viewModel.revokePolicyConsent()" in screen)
+        assertTrue(
+            "界面展示的协议版本必须取自常量，不能硬编码（法务文本一升级就漂移）",
+            "PrivacyConsentPrefs.CURRENT_POLICY_VERSION" in screen &&
+                "PrivacyConsentPrefs.CURRENT_TERMS_VERSION" in screen
+        )
+    }
+
     @Test
     fun `data export writes a real file instead of a toast summary`() {
         val vm = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/viewmodel/DataRightsViewModel.kt")

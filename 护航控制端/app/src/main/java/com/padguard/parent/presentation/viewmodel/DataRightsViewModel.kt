@@ -1,21 +1,26 @@
 package com.padguard.parent.presentation.viewmodel
 
+import android.app.Application
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.padguard.parent.data.model.AppealDto
 import com.padguard.parent.data.model.DataExportDto
 import com.padguard.parent.data.model.DeletionRequestDto
 import com.padguard.parent.data.model.GuardianConsentStatusDto
+import com.padguard.parent.data.remote.StaticConfigCache
 import com.padguard.parent.data.remote.readableActionMessage
+import com.padguard.parent.di.PrivacyConsentPrefs
 import com.padguard.parent.domain.repository.ComplianceRepository
 import com.squareup.moshi.Moshi
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /**
@@ -52,6 +57,9 @@ class DataRightsViewModel @Inject constructor(
     private val complianceRepository: ComplianceRepository,
     private val tokenManager: com.padguard.parent.data.auth.TokenManager,
     private val accountPrefs: com.padguard.parent.di.AccountPrefs,
+    private val consentPrefs: PrivacyConsentPrefs,
+    private val staticConfigCache: StaticConfigCache,
+    private val application: Application,
     private val moshi: Moshi
 ) : ViewModel() {
 
@@ -106,6 +114,40 @@ class DataRightsViewModel @Inject constructor(
     /** 恢复采集授权。 */
     fun reinstateConsent(deviceIds: List<String>? = null) = act("reinstate", "已恢复采集授权") {
         complianceRepository.reinstateConsent(deviceIds).map { Unit }
+    }
+
+    /**
+     * 撤回**应用级**《隐私政策》同意（PIPL 第 15 条「撤回同意」）。
+     *
+     * ## 与上面 [withdrawConsent] 的区别（两者不能合并）
+     * - [withdrawConsent] 是**设备采集范围**的授权撤回：服务端按 deviceId 停落库、下发策略包让
+     *   孩子端停止本地采集。家长仍在正常使用 App 管理其他设备，不应被踢下线。
+     * - 本方法撤回的是**使用本 App 本身的法律依据**：留痕清除 + 高德 SDK 状态置 false +
+     *   结束会话。此后 App 不再具备处理个人信息的合法基础，必须退回同意闸门，
+     *   否则就是"界面说不处理、后台照旧上报"的假撤回。
+     *
+     * 因此这里**必须**连带清会话：`PadGuardNavigation` 以 `user != null && consentAgreed`
+     * 决定是否进主页，清 token 后导航必然退回登录页；原因经 `sessionNotice` 显示在登录页横幅，
+     * 避免用户只看到"被扔回登录页"却不知为何（与令牌失效链路同一出口）。
+     */
+    fun revokePolicyConsent() {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(acting = "revoke-policy", error = null)
+            try {
+                // revoke() 内部已同步把高德 SDK 置回未同意，二者必须同拍（见 PrivacyConsentPrefs）。
+                consentPrefs.revoke()
+                tokenManager.clearWithReason("已撤回《隐私政策》同意，需重新阅读并勾选后才能继续使用")
+                _uiState.value = _uiState.value.copy(acting = null, message = "已撤回隐私政策同意")
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                // 留痕已清、会话未清：导航层仍会因 consentAgreed=false 退回登录页，
+                // 所以这里只提示错误、不谎报成功，也不把 acting 卡死。
+                _uiState.value = _uiState.value.copy(
+                    acting = null,
+                    error = "已清除同意留痕，但退出登录失败：" + t.readableActionMessage("请手动退出后重试")
+                )
+            }
+        }
     }
 
     /** 回显某台设备是否已提交监护人单独同意。 */
@@ -201,8 +243,40 @@ class DataRightsViewModel @Inject constructor(
             val phone = _uiState.value.export?.account?.phone
                 ?: tokenManager.currentUserFlow().first()?.phone?.takeIf { it.isNotBlank() }
             phone?.let { accountPrefs.remove(it) }
+            // 清理顺序不能反：clearWithReason/clear 会让导航立刻退回登录页，当前页的
+            // back stack entry 被弹出即取消 viewModelScope —— 放在清 token 之后的清理
+            // 协程会被直接掐断，表现为"服务端删了、端上截图缓存还在"（PIPL 删除权未落地）。
+            clearLocalPersonalData()
             tokenManager.clear()
             _uiState.value = _uiState.value.copy(acting = null, message = "账号已注销")
+        }
+    }
+
+    /**
+     * 清除注销后残留在本机的个人信息副本。
+     *
+     * 服务端匿名化 + 物理删除业务数据只覆盖服务端；端上还有两类副本：
+     * ① Coil 磁盘/内存缓存里的孩子截图与头像（服务端已删，本地仍可打开 = 删除权未落实）；
+     * ② 分龄默认值等按租户下发的静态配置（进程内缓存，同一进程再登录别的账号会读到旧租户值）。
+     *
+     * **不清 `ServerPrefs`**：服务器地址是部署配置而非个人信息，清掉会把自建家庭服务器的家长
+     * 弄成"注销后连不上、又没有网络入口去改地址"的死锁；也不清 `PrivacyConsentPrefs`
+     * （协议版本留痕不是个人信息，保留可避免新注册被重复弹同意）。
+     */
+    private suspend fun clearLocalPersonalData() {
+        staticConfigCache.invalidate()
+        withContext(Dispatchers.IO) {
+            // 缓存清理失败不应阻断注销（服务端数据已删）；失败留给系统磁盘配额自然回收。
+            runCatching {
+                val loader = coil.Coil.imageLoader(application)
+                // Coil 2.7 把 ImageLoader.diskCache 标为实验 API：这里只用 clear()，
+                // 与其版本演进无关，显式 opt-in 而不是退回 @Suppress 掩盖其他警告。
+                @OptIn(coil.annotation.ExperimentalCoilApi::class)
+                run {
+                    loader.memoryCache?.clear()
+                    loader.diskCache?.clear()
+                }
+            }
         }
     }
 

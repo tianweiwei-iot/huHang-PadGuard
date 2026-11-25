@@ -50,15 +50,54 @@ class PrivacyConsentContractTest {
             val body = vm.substring(idx, minOf(idx + 160, vm.length))
             assertTrue("$entry 必须先过 consentGate", "if (!consentGate(state)) return" in body)
         }
+        // 发码同样会把手机号发给服务端，是第 4 个必须过闸门的入口（历史漏项）。
+        val smsIdx = vm.indexOf("fun sendSmsCode")
+        assertTrue("缺少入口 sendSmsCode", smsIdx >= 0)
+        val smsBody = vm.substring(smsIdx, minOf(smsIdx + 260, vm.length))
+        assertTrue(
+            "sendSmsCode 必须先过 consentGate，否则未勾选也能把手机号发给服务端",
+            "if (!consentGate(_uiState.value)) return" in smsBody
+        )
         assertTrue("同意状态持久化", "consentPrefs.agree()" in vm)
+    }
+
+    @Test
+    fun `logged in user with stale consent is forced back to login`() {
+        val nav = read("护航控制端/app/src/main/java/com/padguard/parent/presentation/ui/PadGuardNavigation.kt")
+        assertTrue("导航必须读取协议同意状态", "PrivacyConsentPrefs.isAgreed" in nav)
+        assertTrue(
+            "已登录但协议版本失效时必须落登录页，不能直接进主页",
+            "user != null && consentAgreed" in nav && "user == null || !consentAgreed" in nav
+        )
+    }
+
+    @Test
+    fun `amap sdk only declares consent after the user actually agrees`() {
+        val app = read("护航控制端/app/src/main/java/com/padguard/parent/PadGuardApplication.kt")
+        val codeOnly = app.lines().filterNot { it.trimStart().startsWith("//") }.joinToString("\n")
+        assertFalse(
+            "Application 不得无条件 updatePrivacyAgree(true)（未同意先处理）",
+            "updatePrivacyAgree(this, true)" in codeOnly
+        )
+        assertTrue(
+            "启动时按真实同意状态同步 SDK",
+            "AmapPrivacyCompliance.sync(this, consentPrefs.isAgreed())" in app
+        )
+        val amap = read("护航控制端/app/src/main/java/com/padguard/parent/compliance/AmapPrivacyCompliance.kt")
+        assertTrue("SDK 同意状态必须由入参决定", "updatePrivacyAgree(context, agreed)" in amap)
+        val prefs = read("护航控制端/app/src/main/java/com/padguard/parent/di/PrivacyConsentPrefs.kt")
+        assertTrue("同意时置 true", "sync(application, agreed = true)" in prefs)
+        assertTrue("撤回时置 false", "sync(application, agreed = false)" in prefs)
     }
 
     @Test
     fun `consent prefs stores version and timestamp only`() {
         val prefs = read("护航控制端/app/src/main/java/com/padguard/parent/di/PrivacyConsentPrefs.kt")
-        assertTrue("记录协议版本", "KEY_VERSION" in prefs)
+        assertTrue("记录隐私政策版本", "KEY_POLICY_VERSION" in prefs)
+        assertTrue("记录用户协议版本", "KEY_TERMS_VERSION" in prefs)
         assertTrue("记录同意时间", "KEY_AGREED_AT" in prefs)
         assertTrue("版本升级需重新同意", "CURRENT_POLICY_VERSION" in prefs)
+        assertTrue("协议版本独立比对", "CURRENT_TERMS_VERSION" in prefs)
         // 合规留痕不得夹带任何个人信息
         assertFalse("同意存储不得包含手机号", "phone" in prefs.lowercase())
         assertFalse("同意存储不得包含密码", "password" in prefs.lowercase())

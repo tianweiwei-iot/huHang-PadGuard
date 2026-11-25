@@ -20,7 +20,15 @@ class MqttConfig(
     @Value("\${padguard.mqtt.keep-alive-seconds:90}") private val keepAlive: Int,
     @Value("\${padguard.mqtt.uplink-pool-size:8}") private val uplinkPoolSize: Int,
     @Value("\${padguard.mqtt.uplink-queue-capacity:2048}") private val uplinkQueueCapacity: Int,
-    @Value("\${padguard.mqtt.max-inflight:200}") private val maxInflight: Int
+    @Value("\${padguard.mqtt.max-inflight:200}") private val maxInflight: Int,
+    /**
+     * MQTT 同步操作超时（毫秒）。
+     *
+     * Paho 的 timeToWait 默认是 **-1（无限等待）**：Broker 收包但不回 PUBACK 时，
+     * `client.publish()` 会让调用线程永久阻塞。该调用发生在业务请求线程与定时任务线程上，
+     * 200 次即可占满 Tomcat / 停掉全部 @Scheduled。必须显式设成有限值。
+     */
+    @Value("\${padguard.mqtt.operation-timeout-ms:5000}") private val operationTimeoutMs: Long
 ) {
 
     private val log = LoggerFactory.getLogger(MqttConfig::class.java)
@@ -57,10 +65,14 @@ class MqttConfig(
         val clientId = "padguard-server-" + UUID.randomUUID().toString().substring(0, 8)
         val persistence = MqttDefaultFilePersistence(System.getProperty("java.io.tmpdir") + "/padguard-mqtt")
         val client = MqttClient(brokerUrl, clientId, persistence)
+        // 关键：Paho 默认无限等待，半开连接会让发布线程永久挂住。
+        client.timeToWait = operationTimeoutMs.coerceAtLeast(1)
 
         val pwBytes = password.toByteArray()
         val opts = MqttConnectionOptions().apply {
             setCleanStart(false)
+            // 连接阶段同样不能无限等；下面 20 次重试每次最多 5s，总启动耗时有上界。
+            setConnectionTimeout((operationTimeoutMs / 1000).coerceAtLeast(1).toInt())
             keepAliveInterval = keepAlive
             setAutomaticReconnect(true)
             // MQTT 5 用 ReceiveMaximum 约束在途 QoS1/2 报文（v3 的 maxInflight）。

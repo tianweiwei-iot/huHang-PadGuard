@@ -115,6 +115,21 @@ class ScreenStreamHub {
     fun unregisterPublisher(deviceId: String) = publishers.remove(deviceId)
 
     /**
+     * 原子并发准入：达到 [limit] 时拒绝新推流；同一设备重连（幂等）始终放行。
+     *
+     * 不能让调用方先 `publisherCount()` 再 `registerPublisher()`：两个并发建流请求
+     * 会同时通过检查再各自注册，把准入上限顶穿。锁只包住集合的读-改-写，
+     * 不覆盖后续逐帧推流，正常路径没有额外开销。
+     */
+    fun tryRegisterPublisher(deviceId: String, limit: Int): Boolean = synchronized(publishers) {
+        if (publishers.size >= limit && !publishers.contains(deviceId)) false
+        else {
+            publishers.add(deviceId)
+            true
+        }
+    }
+
+    /**
      * 该设备当前是否存在活跃上行连接。注意：进程被杀但 TCP 未即时断开时会残留"僵尸连接"，
      * 调用方必须叠加 [lastFrameAt] 的新鲜度判定，才能真正区分"在推流"与"连接残骸"。
      */

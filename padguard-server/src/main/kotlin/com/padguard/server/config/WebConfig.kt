@@ -5,9 +5,12 @@ import com.padguard.server.security.ChildAuthInterceptor
 import com.padguard.server.security.FileAccessInterceptor
 import com.padguard.server.security.ParentAuthInterceptor
 import com.padguard.server.security.SubscriptionInterceptor
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Configuration
 import org.springframework.http.CacheControl
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor
+import org.springframework.web.servlet.config.annotation.AsyncSupportConfigurer
 import org.springframework.web.servlet.config.annotation.CorsRegistry
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry
@@ -27,8 +30,17 @@ class WebConfig(
      * 使 `http://<服务器>:8090/admin/` 与接口**同源**，彻底规避 file:// 的跨域限制。
      */
     @Value("\${padguard.admin.static-locations:classpath:/static/admin/,file:./padguard-admin/,file:../padguard-admin/}")
-    private val adminStaticLocations: String
+    private val adminStaticLocations: String,
+    @Qualifier("mvcAsyncTaskExecutor") private val mvcAsyncExecutor: ThreadPoolTaskExecutor
 ) : WebMvcConfigurer {
+
+    /**
+     * 看屏拉流等长连接必须走有界池，而不是框架默认的 SimpleAsyncTaskExecutor（无上限 new 线程）。
+     * 只在这里接线，池参数集中在 [MvcAsyncConfig]，便于运维按并发规模调整。
+     */
+    override fun configureAsyncSupport(configurer: AsyncSupportConfigurer) {
+        configurer.setTaskExecutor(mvcAsyncExecutor)
+    }
 
     /** 管控后台静态资源：/admin/index.html、/admin/assets/... —— 与 /v1/admin 接口同源，无跨域 */
     override fun addResourceHandlers(registry: ResourceHandlerRegistry) {

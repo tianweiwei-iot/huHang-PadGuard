@@ -290,6 +290,14 @@ class GuardService : Service() {
      *   一旦落下，应用自身再也解不开，只能靠 adb 救援。
      * - 未同意协议：采集/管控缺少合法性基础（《隐私政策》承诺"明示同意后方可启用守护能力"）。
      *   权限流水线可能因自愈而跑完，但那不等于有人对协议正文作过明示同意。
+     *
+     * ## 唯一执行面闸门
+     * 所有指令执行、策略落地、心跳与数据采集上报入口都必须读本字段，**不得直接读
+     * `credentials.isBound`**：绑定关系与协议同意是两个独立状态，升版未重新同意时
+     * 前者仍为 true，用它会造成"闸门已关但执行面仍在跑"的 fail-open。
+     * 仅两处例外可保留裸 `credentials.isBound`：
+     *   ① bootstrap 中写入"设备已绑定"事实镜像（与协议无关）；
+     *   ② handleRemoteUnbind 中防凭据未加载时误自残的防御判断。
      */
     private val boundNow = AtomicBoolean(false)
 
@@ -536,8 +544,8 @@ class GuardService : Service() {
      * - 与心跳/命令循环互不冲突：`startCommandLoop` 幂等重启，[remote.start] 仅重连不重复建流。
      */
     private fun onConnectivityRestored() {
-        if (!credentials.isBound) {
-            Logger.i(TAG) { "connectivity restored but device not bound, skip recovery" }
+        if (!boundNow.get()) {
+            Logger.i(TAG) { "connectivity restored but guard gate closed (unbound or agreement not accepted), skip recovery" }
             return
         }
         // ① HTTPS 骨干立即可达 → 指令拉取循环切回快路径
@@ -1276,7 +1284,10 @@ class GuardService : Service() {
         commandJob?.cancel()
         commandJob = scope.launch {
             while (isActive) {
-                if (credentials.isBound) {
+                // 必须走 boundNow（= guardActive(bound, agreementAccepted)），不能只判 credentials.isBound：
+                // 协议升版未重新同意时绑定关系仍在，若用裸 isBound 会继续 HTTP 拉指令并执行锁屏/策略，
+                // 造成"闸门关了但执行面没关"，与 fail-closed 承诺冲突。
+                if (boundNow.get()) {
                     // HTTP 长轮询=服务端在线判定的唯一存活信号，必须持续发送，与 MQTT 连接态解耦：
                     // 旧逻辑用 online(MQTT 态)门控，MQTT 一抖就停掉它，是"一会儿在线一会儿掉线"的根因。
                     // 仅当 HTTPS 确不可达时放慢节奏(原 offline 分支的退避意图)，绝不因 MQTT 抖动而停摆。
@@ -1715,7 +1726,7 @@ class GuardService : Service() {
      * 网络/解析失败保留待下次重试。入参均来自引擎侧已校验过的值，这里只做传输。
      */
     private suspend fun flushEyeCareRestReports() {
-        if (!credentials.isBound) return
+        if (!boundNow.get()) return
         if (authRepository.getDeviceId().isBlank()) return
         // R-P2-9：从磁盘队列取出待上报批次（不删除），逐条上报，
         // 成功 + 业务拒绝（无需重试）的条目上报后从磁盘移除；网络失败保留待下次重试。
@@ -1748,7 +1759,7 @@ class GuardService : Service() {
      */
     /** @return 是否上报成功，用于决定下一次重试的时间 */
     private suspend fun syncAppInventory(): Boolean {
-        if (!credentials.isBound) return false
+        if (!boundNow.get()) return false
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return false
         val apps = appInventory.collect()
@@ -1991,7 +2002,8 @@ class GuardService : Service() {
     private suspend fun sendHeartbeat() {
         // 凭据快照尚未从 DataStore 加载完成时绝不发鉴权请求：否则空令牌被服务端判
         // TOKEN_INVALID(40101)，触发自愈解绑把有效凭据清掉（启动竞态自残）。
-        if (!credentials.isBound) return
+        // 同时 boundNow 含协议同意态：未同意/升版未重新确认时不采集、不上报前台应用。
+        if (!boundNow.get()) return
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return
 
@@ -2106,7 +2118,7 @@ class GuardService : Service() {
 
     /** 日志与告警分开上报：告警是高危信号，不能被大批量普通日志的失败拖住 */
     private suspend fun uploadPending() {
-        if (!credentials.isBound) return
+        if (!boundNow.get()) return
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return
 
@@ -2187,7 +2199,7 @@ class GuardService : Service() {
      * 与日志节奏叠跑不会重复上报。
      */
     private suspend fun syncUsageNow() {
-        if (!credentials.isBound) return
+        if (!boundNow.get()) return
         runSafely("appUsageReport") { reportAppUsage() }
         runSafely("uploadPending") { uploadPending() }
     }
@@ -2282,7 +2294,7 @@ class GuardService : Service() {
     }.getOrDefault(packageName)
 
     private suspend fun refreshPolicy() {
-        if (!credentials.isBound) return
+        if (!boundNow.get()) return
         val current = policyRepository.currentVersion()
         when (val r = remote.fetchPolicy(current)) {
             is ApiResult.Success -> when (val body = r.value) {
@@ -3177,7 +3189,9 @@ class GuardService : Service() {
      * 现在与推送通道保持一致：执行 → 回执，让服务端把指令收敛为终态。
      */
     private suspend fun drainPendingCommands() {
-        if (!credentials.isBound) return
+        // 执行面闸门：与 observeBinding 的 boundNow 同源（含协议同意态）。
+        // 不能只判 credentials.isBound —— 未同意时仍会执行家长下发的锁屏/采集指令。
+        if (!boundNow.get()) return
         val deviceId = authRepository.getDeviceId()
         if (deviceId.isBlank()) return
         when (val r = remote.pullCommands(lastCommandPullAtMs)) {

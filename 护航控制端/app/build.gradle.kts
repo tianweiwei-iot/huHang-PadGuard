@@ -439,3 +439,76 @@ afterEvaluate {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 法务文本单一来源：根目录《用户协议》《隐私政策》→ app/src/main/assets/legal。
+//
+// 旧流程靠人工 cp，且契约测试只在 testDebugUnitTest 跑；assembleRelease 不依赖 test，
+// 一旦改完 md 忘了复制，用户点「查看完整全文」看到的仍是上一版（甚至带占位符的旧版）。
+// 这里把复制做成构建前置任务，从机制上消除"忘记同步"。
+// ---------------------------------------------------------------------------
+val legalAssetSources = mapOf(
+    "terms-of-service.md" to rootProject.file("../用户协议.md"),
+    "privacy-policy.md" to rootProject.file("../隐私政策.md")
+)
+val legalAssetsDir = file("src/main/assets/legal")
+
+val syncLegalAssets = tasks.register<Sync>("syncLegalAssets") {
+    group = "verification"
+    description = "把根目录法务文本同步进随包 assets/legal（单一来源，禁止手改随包副本）"
+    legalAssetSources.forEach { (target, source) ->
+        from(source) { rename { target } }
+    }
+    into(legalAssetsDir)
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(syncLegalAssets)
+}
+
+// 占位符门禁：正式 release 绝不能把【上架前填写】带给审核员/用户。
+// CI 的 release 演练用 -PALLOW_LEGAL_PLACEHOLDERS=true 显式放行（只验证构建链），
+// 正式发布命令禁止带该参数；本任务会把命中位置逐条打印，便于运营补齐。
+val allowLegalPlaceholders =
+    (findProperty("ALLOW_LEGAL_PLACEHOLDERS") as? String)?.equals("true", ignoreCase = true) == true ||
+        System.getenv("PADGUARD_ALLOW_LEGAL_PLACEHOLDERS")?.equals("true", ignoreCase = true) == true ||
+        // CI 的 release 演练只验证 R8/签名/注入链路，产物不上传不发布，且使用 dummy keystore；
+        // 因此允许占位符存在，但必须打 WARN 留痕。正式发布在发布机上执行，CI 变量不存在。
+        System.getenv("CI")?.equals("true", ignoreCase = true) == true
+
+val verifyLegalPlaceholders = tasks.register("verifyLegalPlaceholders") {
+    group = "verification"
+    description = "release 前拦截法务文本中的【上架前填写】占位符"
+    outputs.upToDateWhen { false }   // 只读文件，必须每次真跑，避免 UP-TO-DATE 假绿
+    dependsOn(syncLegalAssets)
+    doLast {
+        val hits = legalAssetSources.flatMap { (target, source) ->
+            if (!source.exists()) {
+                throw GradleException("法务文本缺失：${source.absolutePath}")
+            }
+            source.readLines().mapIndexedNotNull { index, line ->
+                // 文末「上架说明」引用占位符字样属正常说明，不算未填写项
+                if (line.trimStart().startsWith(">")) null
+                else if (line.contains("【上架前填写")) "$target:${index + 1}" else null
+            }
+        }
+        if (hits.isNotEmpty() && !allowLegalPlaceholders) {
+            throw GradleException(
+                "法务文本仍有 ${hits.size} 处【上架前填写】占位符，禁止出 release 包：\n" +
+                    hits.joinToString("\n") +
+                    "\n请运营方补齐主体信息后重跑；CI 构建演练可显式加 -PALLOW_LEGAL_PLACEHOLDERS=true。"
+            )
+        }
+        if (hits.isNotEmpty()) {
+            logger.warn("⚠ 法务占位符 ${hits.size} 处被 ALLOW_LEGAL_PLACEHOLDERS 显式放行（仅限 CI 构建演练）：$hits")
+        } else {
+            logger.lifecycle("法务文本占位符检查通过：无【上架前填写】")
+        }
+    }
+}
+
+afterEvaluate {
+    tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
+        dependsOn(verifyLegalPlaceholders)
+    }
+}

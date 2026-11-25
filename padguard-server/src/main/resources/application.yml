@@ -36,6 +36,14 @@ server:
     # 低于 1 KB 的响应（大量 `{"code":0}` 小回执）压缩后反而更大：gzip 头 + 字典本身就有几十字节。
     min-response-size: 1024
   tomcat:
+    # 显式固定工作线程上限。推流上行 `/api/v1/device/stream/up` 是同步端点，
+    # 每路长连接在整个推流生命周期独占 1 个 Tomcat 线程；必须与 max-live-devices 匹配，
+    # 否则看屏并发会先吃光请求线程，/health、家长轮询、指令下发与后台一起排队。
+    threads:
+      max: 200
+      min-spare: 20
+    accept-count: 100
+    max-connections: 8192
     # 必须显式固定 basedir：默认是系统临时目录下的 tomcat.<port>.<随机>，
     # 于是 accesslog 里写的相对路径 ./logs 会被解析到那个临时目录里去，
     # 结果日志"确实在写、但没人找得到"，排障时反而更困惑；临时目录还会被系统清理。
@@ -54,6 +62,9 @@ server:
       # buffered 默认为 true，日志会先攒在内存里不落盘 —— 排查线上问题时
       # 恰恰是"最新的几条请求"最关键，攒着看不到等于没有，必须关掉。
       buffered: false
+      # Paho/Tomcat 的 accesslog 默认 maxDays=-1（轮转后永不删除）。
+      # 实测开发目录已累积 90+MB；长期运行会写满日志分区，导致 PG 拒写、全站写入失败。
+      max-days: 14
 
 padguard:
   amap:
@@ -66,10 +77,18 @@ padguard:
     from: ${PADGUARD_MAIL_FROM:no-reply@padguard.com}
   stream:
     # 实时看屏并发准入上限：同时推流的设备数达到此值后，新的开流请求被拒绝（已开的不受影响）。
-    # 服务端中转架构下每路都是"上行+下行"带宽，不限制时出口带宽会随并发线性打满。
-    # 按服务器出口带宽估算：单路高清约 1.5MB/s（上+下），1000 路约 1.5GB/s 出口，
-    # 请结合实际带宽与机器规格调整；家庭/小批量部署保持默认即可。
-    max-live-devices: 1000
+    #
+    # 为什么从 1000 降到 120：推流上行是同步 Servlet 端点，每路长连接独占 1 个 Tomcat 工作线程，
+    # 而 Tomcat 工作线程上限为 200。若准入是 1000，约 200 台设备同时推流就会吃光全部请求线程，
+    # /health、家长轮询、指令下发与后台全部排队 —— 配置上限成了"全站拒绝服务"的触发器。
+    # 120 路同时看屏对家庭/小批量场景绰绰有余，且给非推流请求留 80 个线程余量。
+    # 本值只限制"同时看屏"，不限制可绑定/可管控设备总数。
+    # 调整前必须同步核对 server.tomcat.threads.max，并由 ServerCapacityContractTest 锁定关系。
+    max-live-devices: 120
+  mvc:
+    # 看屏拉流等 MVC 长连接的异步线程池上限。必须 >= max-live-devices，
+    # 否则"允许开流"的家长在拉流阶段反而拿不到线程。与准入同值即可，避免闲置线程。
+    async-pool-size: 120
   jwt:
     # 留空 = 首次启动自动生成随机密钥并写入 config/jwt-secret.txt（不进安装包，每次部署不同）。
     # 多实例部署时必须显式指定（建议用环境变量 PADGUARD_JWT_SECRET 注入），
@@ -174,6 +193,10 @@ padguard:
     password: ""
     tenant: "default"
     keep-alive-seconds: 90
+    # MQTT 同步发布/连接的超时上限（毫秒）。Paho 默认 -1 = 无限等待：
+    # broker 半开（收包不回 PUBACK）时会让发布线程永久阻塞，累积即可占满 Tomcat。
+    # 超时后 MqttGateway 按既有失败路径告警并抛出，指令仍为 PENDING 由轮询补发。
+    operation-timeout-ms: 5000
   storage:
     # 本地文件存储目录（生产可换 MinIO/OSS，仅改 FileStorageService）
     dir: "./uploads"
@@ -296,7 +319,10 @@ spring:
         #   · 3s 的看屏会话对账 → 家长关了看屏也不下发 LIVE_VIEW_STOP，孩子端持续上行占带宽；
         #   · 30s 的离线兜底 → CONTROL_LOST 告警整体延后。
         # 拆出独立线程后，慢任务只占自己的那一条，秒级任务照常跑。
-        size: 4
+        # 现仓已有 9 个 @Scheduled（含 ScreenStreamHub 带宽日志与 retention 多任务），
+        # 4 条线程会让慢清理与秒级巡检重新互相排队；留 3 条余量供新增任务与瞬时重叠。
+        # 改动时须同步 ServerCapacityContractTest 的扫描断言。
+        size: 12
       thread-name-prefix: pg-sched-
 
   # ---- 邮件（密码重置通知等）----

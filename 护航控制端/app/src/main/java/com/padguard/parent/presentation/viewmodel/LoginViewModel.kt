@@ -270,6 +270,9 @@ class LoginViewModel @Inject constructor(
     }
 
     fun sendSmsCode(phone: String) {
+        // 发码同样会把手机号发给服务端，属于个人信息处理，必须先取得协议同意。
+        // 它是唯一没走 consentGate 的登录入口（历史漏项），未勾选也能触发短信 —— 必须在最前面拦。
+        if (!consentGate(_uiState.value)) return
         if (phone.length < 11) return
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSendingCode = true)

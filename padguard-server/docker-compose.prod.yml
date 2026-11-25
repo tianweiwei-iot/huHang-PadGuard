@@ -86,8 +86,11 @@ services:
       PADGUARD_MQTT_BROKER_URL: tcp://mosquitto:1883
       PADGUARD_MQTT_USERNAME: ${PADGUARD_MQTT_USERNAME:?PADGUARD_MQTT_USERNAME 必须在 .env 中设置}
       PADGUARD_MQTT_PASSWORD: ${PADGUARD_MQTT_PASSWORD:?PADGUARD_MQTT_PASSWORD 必须在 .env 中设置}
-      PADGUARD_MQTT_DEVICE_USERNAME: ${PADGUARD_MQTT_DEVICE_USERNAME:?PADGUARD_MQTT_DEVICE_USERNAME 必须在 .env 中设置}
-      PADGUARD_MQTT_DEVICE_PASSWORD: ${PADGUARD_MQTT_DEVICE_PASSWORD:?PADGUARD_MQTT_DEVICE_PASSWORD 必须在 .env 中设置}
+      # 设备凭据必须留空走每设备 username=deviceId + mk_<uuid>（见 .env.prod.example）。
+      # 这里用 :- 允许空值；旧的 :? 强制填写会逼运维填共享 pgdevice，
+      # 而生产 aclfile 无此用户 → 设备 MQTT 全部握手失败、静默退化轮询。
+      PADGUARD_MQTT_DEVICE_USERNAME: ${PADGUARD_MQTT_DEVICE_USERNAME:-}
+      PADGUARD_MQTT_DEVICE_PASSWORD: ${PADGUARD_MQTT_DEVICE_PASSWORD:-}
       PADGUARD_DEV_CHILDSIMULATOR: "false"
       # 限流 IP 维度必须采信代理写入的 X-Real-IP：
       # 生产流量全部经 nginx 反代，remoteAddr 恒为 nginx 容器地址 —— 不开这个开关时

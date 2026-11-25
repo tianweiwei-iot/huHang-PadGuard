@@ -21,11 +21,11 @@ import javax.inject.Singleton
  * 不主动阻断连接（避免误伤正常企业 / VPN 网络）。
  */
 @Singleton
-class EgressExposureDetector @Inject constructor(
+open class EgressExposureDetector @Inject constructor(
     @ApplicationContext private val context: Context,
     private val selfVpn: SelfVpnProbe = NoopSelfVpnProbe
 ) {
-    fun detect(): List<TamperFinding> {
+    open fun detect(): List<TamperFinding> {
         val detail = mutableMapOf<String, String>()
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             ?: return emptyList()

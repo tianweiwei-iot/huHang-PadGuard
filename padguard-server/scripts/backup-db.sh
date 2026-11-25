@@ -12,9 +12,8 @@
 #      uploads 里的媒体文件可另行用 rsync 同步（见文件尾部注释）
 #
 # 恢复（务必先演练一次再上线！）：
-#   docker compose -f docker-compose.prod.yml exec -T postgres \
-#     psql -U <PG_USER> -d <PG_DB> < <(gunzip -c backups/padguard-xxx.sql.gz)
-#   注意：恢复会覆盖现有数据，先停 app 容器避免写入竞争。
+#   CONFIRM_DB_RESTORE=YES bash scripts/restore-db.sh backups/padguard-xxx.sql.gz
+#   脚本会先停 app、失败也自动拉起；直接 psql 回灌容易忘记停服造成写入竞争。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -27,8 +26,10 @@ if [ -f .env ]; then
     set -a; . ./.env; set +a
 fi
 
+# --clean --if-exists：让快照自带 DROP/CREATE，可直接回灌到同名库。
+# 没有这两个参数时 restore-db.sh 会因对象已存在而失败，必须手工清库 —— 演练时才发现就来不及了。
 docker compose -f docker-compose.prod.yml exec -T postgres \
-    pg_dump -U "${PG_USER:-padguard}" "${PG_DB:-padguard}" \
+    pg_dump --clean --if-exists -U "${PG_USER:-padguard}" "${PG_DB:-padguard}" \
     | gzip > "backups/padguard-${STAMP}.sql.gz"
 
 SIZE=$(du -h "backups/padguard-${STAMP}.sql.gz" | cut -f1)

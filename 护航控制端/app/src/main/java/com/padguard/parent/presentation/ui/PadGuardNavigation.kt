@@ -27,6 +27,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.padguard.parent.di.PrivacyConsentPrefs
 import com.padguard.parent.domain.model.ReportPeriod
 import com.padguard.parent.notification.NotificationHelper
 import com.padguard.parent.presentation.MainActivity
@@ -167,11 +168,17 @@ fun PadGuardNavHost(
     // 只取一次快照（remember 住），避免登录页在用户开始输入后又被重组刷新提示。
     val sessionNotice by sessionViewModel.sessionNotice.collectAsState()
 
+    // 协议同意是登录态的前置条件：政策升版后老用户本地 token 仍在，但留痕版本已不匹配。
+    // 若只看 user != null 就直接进主页，升版强制重勾会完全失效（合规硬伤）。
+    val appContext = LocalContext.current.applicationContext
+    val consentAgreed = PrivacyConsentPrefs.isAgreed(appContext)
+
     // 会话在运行中被清空（如令牌刷新失败、退出登录）时，全局退回登录页。
+    // 协议版本失效同样退回登录页重新勾选，不能带着旧同意继续用。
     // 用「目标页不是登录页」做防重入，退出登录自身的导航不会被二次叠加。
-    LaunchedEffect(user, bootResolved) {
+    LaunchedEffect(user, bootResolved, consentAgreed) {
         val onLogin = navController.currentDestination?.route == Screen.Login.route
-        if (bootResolved && user == null && !onLogin) {
+        if (bootResolved && (user == null || !consentAgreed) && !onLogin) {
             navController.navigate(Screen.Login.route) {
                 popUpTo(0) { inclusive = true }
             }
@@ -278,7 +285,8 @@ fun PadGuardNavHost(
         }
 
         val startDestination =
-            if (user != null) SessionViewModel.MEMBER_START else SessionViewModel.GUEST_START
+            if (user != null && consentAgreed) SessionViewModel.MEMBER_START
+            else SessionViewModel.GUEST_START
 
         NavHost(
             navController = navController,

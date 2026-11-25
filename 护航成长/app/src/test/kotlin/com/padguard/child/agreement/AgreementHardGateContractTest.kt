@@ -101,6 +101,44 @@ class AgreementHardGateContractTest {
         )
     }
 
+    @Test
+    fun `指令执行与采集上报也必须过闸门不能只判绑定`() {
+        val src = read("app/src/main/kotlin/com/padguard/child/service/GuardService.kt")
+        // 执行面（拉指令、执行指令、心跳、日志/应用清单/用量上报、策略落地、网络恢复）
+        // 都必须读 boundNow；只判 credentials.isBound 会在"已绑定但协议升版未重新同意"时 fail-open。
+        val executionSurfaces = listOf(
+            "private fun startCommandLoop()",
+            "private suspend fun drainPendingCommands()",
+            "private suspend fun sendHeartbeat()",
+            "private suspend fun flushEyeCareRestReports()",
+            "private suspend fun syncAppInventory(): Boolean",
+            "private suspend fun uploadPending()",
+            "private suspend fun syncUsageNow()",
+            "private suspend fun refreshPolicy()",
+            "private fun onConnectivityRestored()"
+        )
+        executionSurfaces.forEach { signature ->
+            val body = functionBody(src, signature).stripComments()
+            assertTrue(
+                "执行面必须过 boundNow 闸门：$signature",
+                "boundNow.get()" in body
+            )
+            assertFalse(
+                "执行面不得只判绑定关系（协议态会被绕过）：$signature",
+                "credentials.isBound" in body
+            )
+        }
+        // 两处允许保留裸绑定判据：写"设备已绑定"事实镜像、防凭据未加载时误自残的解绑防御。
+        assertTrue(
+            "bootstrap 的绑定事实镜像与协议状态无关",
+            "credentials.isBound" in functionBody(src, "private fun bootstrap(reason: String)").stripComments()
+        )
+        assertTrue(
+            "解绑自愈必须防凭据未加载时误清有效凭据",
+            "credentials.isBound" in functionBody(src, "private suspend fun handleRemoteUnbind()").stripComments()
+        )
+    }
+
     // ==================== 法律文本 ====================
 
     @Test
@@ -134,6 +172,22 @@ class AgreementHardGateContractTest {
     }
 
     // ==================== helpers ====================
+
+    /** 取函数签名到下一个私有成员之间的源码体，避免依赖脆弱的行号。 */
+    private fun functionBody(src: String, signature: String): String {
+        val start = src.indexOf(signature)
+        assertTrue("找不到函数：$signature", start >= 0)
+        val next = src.indexOf("\n    private ", start + signature.length)
+        return if (next < 0) src.substring(start) else src.substring(start, next)
+    }
+
+    /** 去掉整行注释，避免断言命中注释里作为反例引用的旧判据。 */
+    private fun String.stripComments(): String = lines()
+        .filterNot { line ->
+            val t = line.trimStart()
+            t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")
+        }
+        .joinToString("\n")
 
     private fun guardServiceSection(): String {
         val src = read("app/src/main/kotlin/com/padguard/child/service/GuardService.kt")

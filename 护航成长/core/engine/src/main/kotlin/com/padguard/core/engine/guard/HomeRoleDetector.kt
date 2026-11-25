@@ -44,7 +44,7 @@ open class HomeRoleDetector @Inject constructor(
     @Volatile
     private var lastReclaimAt: Long = 0L
 
-    fun detect(): List<TamperFinding> {
+    open fun detect(): List<TamperFinding> {
         val own = context.packageName
         // 仅在能拿到 PackageManager 时才构造查询 Intent：packageManager 为 null（受限/mock 环境）直接静默，
         // 同时避免 android.jar 在 JVM 单测下 Intent.addCategory 抛 "not mocked"。
