@@ -17,9 +17,12 @@
     <!-- Push notification permissions -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Location (for parent app - optional) -->
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!--
+      定位权限已移除（应用市场合规）：家长端的地图只展示孩子设备上报的坐标（由服务端下发），
+      不读取本机位置、不开启高德 myLocation、无 requestPermissions 调用。
+      声明却不使用的定位权限会被小米/OPPO 判为「过度申请敏感权限」而拒绝上架。
+      若将来新增「定位到家长自己」功能，须补前置用途说明 + 运行时申请 + 隐私政策权限表条目后再加回。
+    -->
 
     <!--
       明文传输开关保持 true —— 与孩子端同一决策，不是遗漏：

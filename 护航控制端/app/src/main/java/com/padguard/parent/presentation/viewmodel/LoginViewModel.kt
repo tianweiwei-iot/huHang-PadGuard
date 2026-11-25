@@ -88,14 +88,20 @@ data class LoginUiState(
     /** 历史登录账号（最近使用在前），供账号框下拉选择 */
     val history: List<AccountPrefs.SavedAccount> = emptyList(),
     /** 忘记密码引导弹窗开关（端 + 服务端均无自动重置端点，引导走客服人工重置） */
-    val showForgotPassword: Boolean = false
+    val showForgotPassword: Boolean = false,
+    /**
+     * 是否已显式勾选同意《用户协议》和《隐私政策》（应用市场审核硬指标）。
+     * 默示同意（"登录即表示同意"）不被国内应用市场接受，尤其未成年人相关产品。
+     */
+    val consentAgreed: Boolean = false
 )
 
 @HiltViewModel
 class LoginViewModel @Inject constructor(
     private val authRepository: AuthRepository,
     private val serverPrefs: ServerPrefs,
-    private val accountPrefs: AccountPrefs
+    private val accountPrefs: AccountPrefs,
+    private val consentPrefs: com.padguard.parent.di.PrivacyConsentPrefs
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(LoginUiState())
@@ -107,8 +113,25 @@ class LoginViewModel @Inject constructor(
         val history = accountPrefs.history()
         _uiState.value = _uiState.value.copy(
             history = history,
-            phone = history.firstOrNull()?.phone.orEmpty()
+            phone = history.firstOrNull()?.phone.orEmpty(),
+            consentAgreed = consentPrefs.isAgreed()
         )
+    }
+
+    /**
+     * 用户主动勾选同意协议时调用。落盘版本+时间，重启后免重复勾选；
+     * 协议版本升级后 [PrivacyConsentPrefs.isAgreed] 返回 false，会强制重新勾选。
+     */
+    fun agreeToPolicies() {
+        consentPrefs.agree()
+        _uiState.value = _uiState.value.copy(consentAgreed = true, error = null)
+    }
+
+    /** 所有登录/注册入口的统一合规门槛：未显式勾选同意则拒绝发起请求。 */
+    private fun consentGate(state: LoginUiState): Boolean {
+        if (state.consentAgreed) return true
+        _uiState.value = state.copy(error = "请先阅读并勾选同意《用户协议》和《隐私政策》")
+        return false
     }
 
     /** 当前生效的服务器地址（登录页「高级设置」可修改，改完立即生效） */
@@ -192,6 +215,7 @@ class LoginViewModel @Inject constructor(
      */
     fun register() {
         val state = _uiState.value
+        if (!consentGate(state)) return
         val phone = state.phone.trim()
         val pwd = state.password
         when {
@@ -260,6 +284,7 @@ class LoginViewModel @Inject constructor(
 
     fun loginWithPassword() {
         val state = _uiState.value
+        if (!consentGate(state)) return
         if (state.phone.isBlank() || state.password.isBlank()) return
         viewModelScope.launch {
             _uiState.value = state.copy(isLoading = true, error = null)
@@ -284,6 +309,7 @@ class LoginViewModel @Inject constructor(
 
     fun loginWithSms() {
         val state = _uiState.value
+        if (!consentGate(state)) return
         if (state.phone.isBlank() || state.smsCode.length != 6) return
         viewModelScope.launch {
             _uiState.value = state.copy(isLoading = true, error = null)

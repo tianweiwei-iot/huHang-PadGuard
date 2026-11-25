@@ -315,22 +315,46 @@ fun LoginScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // 协议改为可点击，点击跳「简易协议页」（下方 AgreementDialog 承载）。
-            // 早期是纯文本、点击无任何反应，商店隐私审核硬伤（未成年人产品更敏感）。
+            // 协议：必须**主动勾选**同意（应用市场审核硬指标，未成年人产品尤甚）。
+            // 「登录即表示同意」是默示同意，会被判定为未取得有效同意而拒绝上架。
+            // 协议正文仍可点击查看；勾选状态由 ViewModel 持久化，协议改版后需重新勾选。
             var showAgreement by remember { mutableStateOf(false) }
-            Text(
-                text = "登录即表示同意《用户协议》和《隐私政策》",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
-                textAlign = TextAlign.Center,
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { showAgreement = true }
-            )
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { viewModel.agreeToPolicies() },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Checkbox(
+                    checked = uiState.consentAgreed,
+                    onCheckedChange = { checked ->
+                        // 只允许勾选；取消勾选不清除已落盘的同意记录（合规留痕不可逆）。
+                        if (checked) viewModel.agreeToPolicies()
+                    }
+                )
+                Text(
+                    text = "我已阅读并同意",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+                Text(
+                    text = "《用户协议》和《隐私政策》",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable { showAgreement = true }
+                )
+            }
 
             // 简易协议页（本地承载，避免依赖未备案的域名/URL）。
             if (showAgreement) {
-                AgreementDialog(onDismiss = { showAgreement = false })
+                AgreementDialog(
+                    onDismiss = { showAgreement = false },
+                    onAgree = { viewModel.agreeToPolicies() }
+                )
             }
         }
     }
@@ -974,11 +998,20 @@ fun ServerConfigDialog(
  * 后续备案完成后可替换为跳转正式协议页。
  */
 @Composable
-internal fun AgreementDialog(onDismiss: () -> Unit) {
+internal fun AgreementDialog(
+    onDismiss: () -> Unit,
+    onAgree: () -> Unit = {}
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("我已阅读") }
+            TextButton(onClick = {
+                onAgree()
+                onDismiss()
+            }) { Text("同意并勾选") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
         },
         title = { Text("用户协议与隐私政策") },
         text = {
@@ -1008,7 +1041,12 @@ internal fun AgreementDialog(onDismiss: () -> Unit) {
                         "且均经家长授权后采集。\n\n" +
                         "2. 位置等敏感信息在设备后台不读取，仅在响应家长指令或回到前台时补传。\n\n" +
                         "3. 我们不会向第三方出售或非法提供您的个人信息；数据存储与传输遵循相关安全规范。\n\n" +
-                        "4. 您可通过客服申请查询、更正或删除您的个人信息。",
+                        "4. 第三方 SDK：① 高德地图 SDK（用于地图展示与地址反查，" +
+                        "可能收集设备标识与位置信息）；② 微信开放平台 SDK（仅在购买订阅时调起支付，" +
+                        "可能收集设备标识与支付订单信息）。二者均由功能触发时才工作、不常驻采集，" +
+                        "处理分别遵循高德与微信隐私政策；未集成广告、统计或崩溃上报类 SDK。\n\n" +
+                        "5. 您可通过设置页「数据权利」自助导出、撤回同意或申请注销账号，" +
+                        "也可通过客服申请查询、更正或删除您的个人信息。",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
